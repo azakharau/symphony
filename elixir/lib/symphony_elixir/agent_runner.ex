@@ -5,6 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
+  alias SymphonyElixir.OpenCode.Runner, as: OpenCodeRunner
   alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
@@ -35,7 +36,7 @@ defmodule SymphonyElixir.AgentRunner do
 
         try do
           with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+            run_issue_with_configured_runner(workspace, issue, codex_update_recipient, opts, worker_host)
           end
         after
           Workspace.run_after_run_hook(workspace, issue, worker_host)
@@ -75,6 +76,29 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
+
+  defp run_issue_with_configured_runner(workspace, issue, codex_update_recipient, opts, worker_host) do
+    case runner_kind_for_issue(issue) do
+      "codex" ->
+        run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+
+      "opencode" ->
+        run_opencode_once(workspace, issue, opts)
+
+      other ->
+        {:error, {:unsupported_runner_kind, other}}
+    end
+  end
+
+  defp run_opencode_once(workspace, issue, opts) do
+    prompt = PromptBuilder.build_prompt(issue, opts)
+
+    with {:ok, result} <- OpenCodeRunner.run(workspace, issue, prompt),
+         :ok <- Tracker.create_comment(issue.id, OpenCodeRunner.handoff_comment(issue, result)),
+         :ok <- Tracker.update_issue_state(issue.id, Config.settings!().opencode.result_state) do
+      :ok
+    end
+  end
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
@@ -171,6 +195,18 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp active_issue_state?(_state_name), do: false
+
+  defp runner_kind_for_issue(%Issue{state: state_name}) when is_binary(state_name) do
+    settings = Config.settings!()
+
+    Map.get(
+      settings.runner.routes,
+      normalize_issue_state(state_name),
+      settings.runner.default
+    )
+  end
+
+  defp runner_kind_for_issue(_issue), do: Config.settings!().runner.default
 
   defp selected_worker_host(nil, []), do: nil
 

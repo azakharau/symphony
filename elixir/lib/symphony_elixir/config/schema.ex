@@ -150,6 +150,30 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Runner do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema
+
+    @primary_key false
+    embedded_schema do
+      field(:default, :string, default: "codex")
+      field(:routes, :map, default: %{})
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:default, :routes], empty_values: [])
+      |> validate_required([:default])
+      |> validate_inclusion(:default, ["codex", "opencode"])
+      |> update_change(:routes, &Schema.normalize_runner_routes/1)
+      |> Schema.validate_runner_routes(:routes)
+    end
+  end
+
   defmodule Codex do
     @moduledoc false
     use Ecto.Schema
@@ -196,6 +220,29 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+    end
+  end
+
+  defmodule OpenCode do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:command, :string, default: "opencode")
+      field(:agent, :string, default: "build")
+      field(:format, :string, default: "json")
+      field(:result_state, :string, default: "In Review")
+      field(:timeout_ms, :integer, default: 3_600_000)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:command, :agent, :format, :result_state, :timeout_ms], empty_values: [])
+      |> validate_required([:command, :agent, :format, :result_state])
+      |> validate_number(:timeout_ms, greater_than: 0)
     end
   end
 
@@ -267,7 +314,9 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:runner, Runner, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:opencode, OpenCode, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
@@ -333,6 +382,16 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   @doc false
+  @spec normalize_runner_routes(nil | map()) :: map()
+  def normalize_runner_routes(nil), do: %{}
+
+  def normalize_runner_routes(routes) when is_map(routes) do
+    Enum.reduce(routes, %{}, fn {state_name, runner_kind}, acc ->
+      Map.put(acc, normalize_issue_state(to_string(state_name)), to_string(runner_kind))
+    end)
+  end
+
+  @doc false
   @spec validate_state_limits(Ecto.Changeset.t(), atom()) :: Ecto.Changeset.t()
   def validate_state_limits(changeset, field) do
     validate_change(changeset, field, fn ^field, limits ->
@@ -351,6 +410,25 @@ defmodule SymphonyElixir.Config.Schema do
     end)
   end
 
+  @doc false
+  @spec validate_runner_routes(Ecto.Changeset.t(), atom()) :: Ecto.Changeset.t()
+  def validate_runner_routes(changeset, field) do
+    validate_change(changeset, field, fn ^field, routes ->
+      Enum.flat_map(routes, fn {state_name, runner_kind} ->
+        cond do
+          to_string(state_name) == "" ->
+            [{field, "state names must not be blank"}]
+
+          runner_kind not in ["codex", "opencode"] ->
+            [{field, "runner kinds must be codex or opencode"}]
+
+          true ->
+            []
+        end
+      end)
+    end)
+  end
+
   defp changeset(attrs) do
     %__MODULE__{}
     |> cast(attrs, [])
@@ -359,7 +437,9 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
+    |> cast_embed(:runner, with: &Runner.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
+    |> cast_embed(:opencode, with: &OpenCode.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)

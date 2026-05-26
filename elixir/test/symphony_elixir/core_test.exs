@@ -17,6 +17,10 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
+    assert config.runner.default == "codex"
+    assert config.runner.routes == %{}
+    assert config.opencode.agent == "build"
+    assert config.opencode.result_state == "In Review"
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
 
@@ -86,6 +90,18 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "123")
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(), runner_default: "unknown")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "runner.default"
+
+    write_workflow_file!(Workflow.workflow_file_path(), runner_default: "codex", runner_routes: %{"In Progress" => "opencode"})
+    assert :ok = Config.validate!()
+    assert Config.settings!().runner.routes == %{"in progress" => "opencode"}
+
+    write_workflow_file!(Workflow.workflow_file_path(), runner_routes: %{"In Progress" => "unknown"})
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "runner.routes"
   end
 
   test "current WORKFLOW.md file is valid and complete" do

@@ -214,6 +214,11 @@ defmodule SymphonyElixir.AgentRunner do
           not active_issue_state?(refreshed_issue.state) ->
             {:done, refreshed_issue}
 
+          owner_input_issue_state?(refreshed_issue.state) ->
+            Logger.info("Stopping Codex run for #{issue_context(refreshed_issue)} because Need Owner Input is a parked owner-review state")
+
+            {:done, refreshed_issue}
+
           runner_kind_for_issue(refreshed_issue) == "codex" ->
             {:continue, refreshed_issue}
 
@@ -239,6 +244,12 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp active_issue_state?(_state_name), do: false
+
+  defp owner_input_issue_state?(state_name) when is_binary(state_name) do
+    normalize_issue_state(state_name) == "need owner input"
+  end
+
+  defp owner_input_issue_state?(_state_name), do: false
 
   defp runner_kind_for_issue(%Issue{state: state_name}) when is_binary(state_name) do
     settings = Config.settings!()

@@ -1074,6 +1074,7 @@ defmodule SymphonyElixir.Orchestrator do
          terminal_states
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
+      !owner_input_issue_state?(issue.state) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
@@ -1122,6 +1123,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp candidate_issue?(_issue, _active_states, _terminal_states), do: false
+
+  defp owner_input_issue_state?(state_name) when is_binary(state_name) do
+    normalize_issue_state(state_name) == "need owner input"
+  end
+
+  defp owner_input_issue_state?(_state_name), do: false
 
   defp issue_routable_to_worker?(%Issue{assigned_to_worker: assigned_to_worker})
        when is_boolean(assigned_to_worker),

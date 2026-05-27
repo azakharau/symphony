@@ -6,6 +6,8 @@ defmodule SymphonyElixir.Linear.Adapter do
   @behaviour SymphonyElixir.Tracker
 
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.ReviewDecision
+  alias SymphonyElixir.OpenCode.TaskPrompt
 
   @create_comment_mutation """
   mutation SymphonyCreateComment($issueId: String!, $body: String!) {
@@ -19,6 +21,19 @@ defmodule SymphonyElixir.Linear.Adapter do
   mutation SymphonyUpdateIssueState($issueId: String!, $stateId: String!) {
     issueUpdate(id: $issueId, input: {stateId: $stateId}) {
       success
+    }
+  }
+  """
+
+  @latest_comments_query """
+  query SymphonyLatestOpenCodeTaskPromptComments($issueId: String!, $first: Int!) {
+    issue(id: $issueId) {
+      comments(first: $first) {
+        nodes {
+          body
+          createdAt
+        }
+      }
     }
   }
   """
@@ -70,6 +85,51 @@ defmodule SymphonyElixir.Linear.Adapter do
       false -> {:error, :issue_update_failed}
       {:error, reason} -> {:error, reason}
       _ -> {:error, :issue_update_failed}
+    end
+  end
+
+  @spec latest_opencode_task_prompt(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def latest_opencode_task_prompt(issue_id) when is_binary(issue_id) do
+    with {:ok, packet} <- latest_opencode_task_packet(issue_id) do
+      {:ok, packet.prompt}
+    end
+  end
+
+  @spec latest_opencode_task_packet(String.t()) :: {:ok, TaskPrompt.Packet.t()} | {:error, term()}
+  def latest_opencode_task_packet(issue_id) when is_binary(issue_id) do
+    with {:ok, response} <-
+           client_module().graphql(@latest_comments_query, %{issueId: issue_id, first: 50}),
+         comments when is_list(comments) <-
+           get_in(response, ["data", "issue", "comments", "nodes"]) do
+      comments
+      |> Enum.sort_by(&Map.get(&1, "createdAt", ""), :desc)
+      |> Enum.find_value(fn %{"body" => body} ->
+        case TaskPrompt.extract_packet(body) do
+          {:ok, packet} -> {:ok, packet}
+          {:error, _reason} -> nil
+        end
+      end)
+      |> case do
+        {:ok, packet} -> {:ok, packet}
+        nil -> {:error, :opencode_task_prompt_not_found}
+      end
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :opencode_task_prompt_not_found}
+    end
+  end
+
+  @spec review_decisions(String.t()) :: {:ok, [ReviewDecision.t()]} | {:error, term()}
+  def review_decisions(issue_id) when is_binary(issue_id) do
+    with {:ok, response} <-
+           client_module().graphql(@latest_comments_query, %{issueId: issue_id, first: 100}),
+         comments when is_list(comments) <-
+           get_in(response, ["data", "issue", "comments", "nodes"]) do
+      bodies = Enum.map(comments, &Map.get(&1, "body", ""))
+      {:ok, ReviewDecision.extract_many(bodies)}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :review_decisions_not_found}
     end
   end
 

@@ -85,7 +85,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert File.read!(Path.join(second_workspace, "README.md")) == "changed\n"
       assert File.read!(Path.join(second_workspace, "local-progress.txt")) == "in progress\n"
       assert File.read!(Path.join([second_workspace, "deps", "cache.txt"])) == "cached deps\n"
-      assert File.read!(Path.join([second_workspace, "_build", "artifact.txt"])) == "compiled artifact\n"
+
+      assert File.read!(Path.join([second_workspace, "_build", "artifact.txt"])) ==
+               "compiled artifact\n"
+
       assert File.read!(Path.join([second_workspace, "tmp", "scratch.txt"])) == "remove me\n"
     after
       File.rm_rf(workspace_root)
@@ -134,7 +137,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
       assert {:ok, canonical_outside_root} = SymphonyElixir.PathSafety.canonicalize(outside_root)
-      assert {:ok, canonical_workspace_root} = SymphonyElixir.PathSafety.canonicalize(workspace_root)
+
+      assert {:ok, canonical_workspace_root} =
+               SymphonyElixir.PathSafety.canonicalize(workspace_root)
 
       assert {:error, {:workspace_outside_root, ^canonical_outside_root, ^canonical_workspace_root}} =
                Workspace.create_for_issue("MT-SYM")
@@ -262,7 +267,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     try do
       target_workspace = Path.join(workspace_root, "S_1")
-      untouched_workspace = Path.join(workspace_root, "OTHER-#{System.unique_integer([:positive])}")
+
+      untouched_workspace =
+        Path.join(workspace_root, "OTHER-#{System.unique_integer([:positive])}")
 
       File.mkdir_p!(target_workspace)
       File.mkdir_p!(untouched_workspace)
@@ -341,6 +348,20 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
           }
         ]
       },
+      "comments" => %{
+        "nodes" => [
+          %{
+            "body" => "first owner note",
+            "createdAt" => "2026-01-01T01:00:00Z",
+            "user" => %{"name" => "Alex"}
+          },
+          %{
+            "body" => "latest owner answer",
+            "createdAt" => "2026-01-03T01:00:00Z",
+            "user" => %{"name" => "Owner"}
+          }
+        ]
+      },
       "createdAt" => "2026-01-01T00:00:00Z",
       "updatedAt" => "2026-01-02T00:00:00Z"
     }
@@ -353,6 +374,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.state == "Todo"
     assert issue.assignee_id == "user-1"
     assert issue.assigned_to_worker
+    assert issue.latest_comment_at == ~U[2026-01-03 01:00:00Z]
+
+    assert issue.comments == [
+             %{body: "first owner note", created_at: ~U[2026-01-01 01:00:00Z], author: "Alex"},
+             %{body: "latest owner answer", created_at: ~U[2026-01-03 01:00:00Z], author: "Owner"}
+           ]
   end
 
   test "linear client marks explicitly unassigned issues as not routed to worker" do
@@ -424,6 +451,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Enum.map(issues, & &1.id) == issue_ids
 
     assert_receive {:fetch_issue_states_page, query, %{ids: ^first_batch_ids, first: 50, relationFirst: 50}}
+
     assert query =~ "SymphonyLinearIssuesById"
 
     assert_receive {:fetch_issue_states_page, ^query, %{ids: ^second_batch_ids, first: 5, relationFirst: 50}}
@@ -494,6 +522,46 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       ])
 
     assert Enum.map(sorted, & &1.identifier) == ["MT-200", "MT-201", "MT-199"]
+  end
+
+  test "owner-input pulse selects the latest unhandled owner question update" do
+    older = %Issue{
+      id: "owner-old",
+      identifier: "MT-300",
+      title: "Older owner question",
+      state: "Need Owner Input",
+      updated_at: ~U[2026-01-01 00:00:00Z],
+      latest_comment_at: ~U[2026-01-03 00:00:00Z]
+    }
+
+    latest = %Issue{
+      id: "owner-latest",
+      identifier: "MT-301",
+      title: "Latest owner answer",
+      state: "Need Owner Input",
+      updated_at: ~U[2026-01-02 00:00:00Z],
+      latest_comment_at: ~U[2026-01-04 00:00:00Z]
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      owner_input_pulsed: MapSet.new(["owner-old:2026-01-03T00:00:00Z"])
+    }
+
+    assert %Issue{id: "owner-latest"} =
+             Orchestrator.latest_owner_input_issue_for_pulse_for_test([older, latest], state)
+
+    handled_state = %{
+      state
+      | owner_input_pulsed: MapSet.put(state.owner_input_pulsed, "owner-latest:2026-01-04T00:00:00Z")
+    }
+
+    assert Orchestrator.latest_owner_input_issue_for_pulse_for_test(
+             [older, latest],
+             handled_state
+           ) == nil
   end
 
   test "todo issue with non-terminal blocker is not dispatch-eligible" do
@@ -581,7 +649,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              Orchestrator.revalidate_issue_for_dispatch_for_test(stale_issue, fetcher)
 
     assert skipped_issue.identifier == "MT-1005"
-    assert skipped_issue.blocked_by == [%{id: "blocker-3", identifier: "MT-1006", state: "In Progress"}]
+
+    assert skipped_issue.blocked_by == [
+             %{id: "blocker-3", identifier: "MT-1006", state: "In Progress"}
+           ]
   end
 
   test "workspace remove returns error information for missing directory" do
@@ -1205,7 +1276,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       read_only_settings = %{
         settings
-        | codex: %{settings.codex | turn_sandbox_policy: %{"type" => "readOnly", "networkAccess" => true}}
+        | codex: %{
+            settings.codex
+            | turn_sandbox_policy: %{"type" => "readOnly", "networkAccess" => true}
+          }
       }
 
       assert {:ok, %{"type" => "readOnly", "networkAccess" => true}} =
@@ -1213,7 +1287,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       future_settings = %{
         settings
-        | codex: %{settings.codex | turn_sandbox_policy: %{"type" => "futureSandbox", "nested" => %{"flag" => true}}}
+        | codex: %{
+            settings.codex
+            | turn_sandbox_policy: %{"type" => "futureSandbox", "nested" => %{"flag" => true}}
+          }
       }
 
       assert {:ok, %{"type" => "futureSandbox", "nested" => %{"flag" => true}}} =

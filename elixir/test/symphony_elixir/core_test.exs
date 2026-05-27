@@ -13,6 +13,8 @@ defmodule SymphonyElixir.CoreTest do
 
     config = Config.settings!()
     assert config.polling.interval_ms == 30_000
+    assert config.polling.full_interval_ms == 60_000
+    assert config.polling.fast_states == ["Todo", "Need Owner Input"]
     assert config.tracker.active_states == ["Todo", "In Progress"]
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
@@ -31,8 +33,13 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "polling.interval_ms"
 
-    write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: 45_000)
+    write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: 45_000, poll_full_interval_ms: 120_000)
     assert Config.settings!().polling.interval_ms == 45_000
+    assert Config.settings!().polling.full_interval_ms == 120_000
+
+    write_workflow_file!(Workflow.workflow_file_path(), poll_fast_states: "Todo,Need Owner Input")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "polling.fast_states"
 
     write_workflow_file!(Workflow.workflow_file_path(), max_turns: 0)
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
@@ -428,6 +435,7 @@ defmodule SymphonyElixir.CoreTest do
         |> Map.put(:running, %{issue_id => running_entry})
         |> Map.put(:claimed, MapSet.new([issue_id]))
         |> Map.put(:retry_attempts, %{})
+        |> Map.put(:last_full_poll_at_ms, nil)
       end)
 
       send(pid, :tick)
@@ -481,6 +489,54 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.has_key?(updated_state.running, issue_id)
     assert MapSet.member?(updated_state.claimed, issue_id)
     assert updated_entry.issue.state == "In Progress"
+  end
+
+  test "reconcile keeps Codex pulse runs alive while the source issue stays in pulse state" do
+    done_issue_id = "issue-done-pulse"
+    owner_issue_id = "issue-owner-pulse"
+
+    state = %Orchestrator.State{
+      running: %{
+        done_issue_id => %{
+          pid: self(),
+          ref: nil,
+          identifier: "NER-1",
+          issue: %Issue{id: done_issue_id, identifier: "NER-1", state: "Done"},
+          pulse_kind: :done_continuation,
+          started_at: DateTime.utc_now()
+        },
+        owner_issue_id => %{
+          pid: self(),
+          ref: nil,
+          identifier: "NER-2",
+          issue: %Issue{id: owner_issue_id, identifier: "NER-2", state: "Need Owner Input"},
+          pulse_kind: :owner_input,
+          started_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([done_issue_id, owner_issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    updated_state =
+      Orchestrator.reconcile_issue_states_for_test(
+        [
+          %Issue{id: done_issue_id, identifier: "NER-1", state: "Done", title: "Done pulse"},
+          %Issue{
+            id: owner_issue_id,
+            identifier: "NER-2",
+            state: "Need Owner Input",
+            title: "Owner pulse"
+          }
+        ],
+        state
+      )
+
+    assert Map.has_key?(updated_state.running, done_issue_id)
+    assert Map.has_key?(updated_state.running, owner_issue_id)
+    assert MapSet.member?(updated_state.claimed, done_issue_id)
+    assert MapSet.member?(updated_state.claimed, owner_issue_id)
   end
 
   test "reconcile stops running issue when it is reassigned away from this worker" do
@@ -649,6 +705,49 @@ defmodule SymphonyElixir.CoreTest do
     assert_due_in_range(due_at_ms, 9_000, 10_500)
   end
 
+  test "opencode running entries are not restarted by codex stall detection" do
+    write_workflow_file!(Workflow.workflow_file_path(), codex_stall_timeout_ms: 1)
+
+    issue_id = "issue-opencode-stall-skip"
+    agent_pid = spawn(fn -> Process.sleep(:infinity) end)
+    ref = Process.monitor(agent_pid)
+
+    on_exit(fn ->
+      Process.demonitor(ref, [:flush])
+
+      if Process.alive?(agent_pid) do
+        Process.exit(agent_pid, :kill)
+      end
+    end)
+
+    started_at = DateTime.add(DateTime.utc_now(), -60, :second)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: agent_pid,
+          ref: ref,
+          identifier: "NER-4",
+          issue: %Issue{id: issue_id, identifier: "NER-4", state: "In Progress"},
+          runner_kind: "opencode",
+          started_at: started_at
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      blocked: %{},
+      retry_attempts: %{},
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    updated_state = Orchestrator.reconcile_stalled_running_issues_for_test(state)
+
+    assert Map.has_key?(updated_state.running, issue_id)
+    assert MapSet.member?(updated_state.claimed, issue_id)
+    assert updated_state.retry_attempts == %{}
+    assert Process.alive?(agent_pid)
+  end
+
   test "stale retry timer messages do not consume newer retry entries" do
     issue_id = "issue-stale-retry"
     orchestrator_name = Module.concat(__MODULE__, :StaleRetryOrchestrator)
@@ -687,6 +786,32 @@ defmodule SymphonyElixir.CoreTest do
              identifier: "MT-561",
              error: "agent exited: :boom"
            } = :sys.get_state(pid).retry_attempts[issue_id]
+  end
+
+  test "orchestrator separates fast and full polling state sets" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_active_states: ["Todo", "In Progress", "In Review", "Need Owner Input"],
+      poll_fast_states: ["Todo", "Need Owner Input", "Done"]
+    )
+
+    state = %Orchestrator.State{
+      full_poll_interval_ms: 60_000,
+      last_full_poll_at_ms: 1_000,
+      fast_poll_states: ["Todo", "Need Owner Input", "Done"]
+    }
+
+    assert Orchestrator.poll_states_for_test(state, false) == ["Todo", "Need Owner Input"]
+
+    assert Orchestrator.poll_states_for_test(state, true) == [
+             "Todo",
+             "In Progress",
+             "In Review",
+             "Need Owner Input"
+           ]
+
+    refute Orchestrator.full_poll_due_for_test(state, 30_000)
+    assert Orchestrator.full_poll_due_for_test(state, 61_000)
+    assert Orchestrator.full_poll_due_for_test(%{state | last_full_poll_at_ms: nil}, 1_000)
   end
 
   test "manual refresh coalesces repeated requests and ignores superseded ticks" do
@@ -782,7 +907,7 @@ defmodule SymphonyElixir.CoreTest do
 
   test "prompt builder renders issue and attempt values from workflow template" do
     workflow_prompt =
-      "Ticket {{ issue.identifier }} {{ issue.title }} labels={{ issue.labels }} attempt={{ attempt }}"
+      "Ticket {{ issue.identifier }} {{ issue.title }} labels={{ issue.labels }} attempt={{ attempt }} {% for comment in issue.comments %}comment={{ comment.author }}:{{ comment.body }}{% endfor %}"
 
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
 
@@ -792,7 +917,8 @@ defmodule SymphonyElixir.CoreTest do
       description: "Replace transport layer",
       state: "Todo",
       url: "https://example.org/issues/S-1",
-      labels: ["backend"]
+      labels: ["backend"],
+      comments: [%{author: "Alex", body: "owner answer", created_at: ~U[2026-01-03 01:00:00Z]}]
     }
 
     prompt = PromptBuilder.build_prompt(issue, attempt: 3)
@@ -800,6 +926,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Ticket S-1 Refactor backend request path"
     assert prompt =~ "labels=backend"
     assert prompt =~ "attempt=3"
+    assert prompt =~ "comment=Alex:owner answer"
   end
 
   test "prompt builder renders issue datetime fields without crashing" do

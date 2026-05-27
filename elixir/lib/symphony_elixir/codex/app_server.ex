@@ -18,9 +18,9 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata: map(),
           approval_policy: String.t() | map(),
           auto_approve_requests: boolean(),
+          thread_id: String.t(),
           thread_sandbox: String.t(),
           turn_sandbox_policy: map(),
-          thread_id: String.t(),
           workspace: Path.t(),
           worker_host: String.t() | nil
         }
@@ -160,6 +160,9 @@ defmodule SymphonyElixir.Codex.AppServer do
         String.starts_with?(canonical_workspace <> "/", canonical_root_prefix) ->
           {:ok, canonical_workspace}
 
+        codex_project_root_cwd?(canonical_workspace) ->
+          {:ok, canonical_workspace}
+
         String.starts_with?(expanded_workspace <> "/", expanded_root_prefix) ->
           {:error, {:invalid_workspace_cwd, :symlink_escape, expanded_workspace, canonical_root}}
 
@@ -183,6 +186,26 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       true ->
         {:ok, workspace}
+    end
+  end
+
+  defp codex_project_root_cwd?(canonical_workspace) when is_binary(canonical_workspace) do
+    case Config.settings!().codex.project_root do
+      project_root when is_binary(project_root) and project_root != "" ->
+        project_root
+        |> Path.expand()
+        |> PathSafety.canonicalize()
+        |> case do
+          {:ok, canonical_project_root} ->
+            canonical_workspace == canonical_project_root or
+              String.starts_with?(canonical_workspace <> "/", canonical_project_root <> "/")
+
+          _ ->
+            false
+        end
+
+      _ ->
+        false
     end
   end
 
@@ -277,6 +300,11 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
+  defp start_thread(port, workspace, %{thread_id: thread_id} = policies)
+       when is_binary(thread_id) and thread_id != "" do
+    resume_thread(port, workspace, policies)
+  end
+
   defp start_thread(port, workspace, %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}) do
     send_message(port, %{
       "method" => "thread/start",
@@ -293,6 +321,35 @@ defmodule SymphonyElixir.Codex.AppServer do
       {:ok, %{"thread" => thread_payload}} ->
         case thread_payload do
           %{"id" => thread_id} -> {:ok, thread_id}
+          _ -> {:error, {:invalid_thread_payload, thread_payload}}
+        end
+
+      other ->
+        other
+    end
+  end
+
+  defp resume_thread(port, workspace, %{
+         approval_policy: approval_policy,
+         thread_id: thread_id,
+         thread_sandbox: thread_sandbox
+       }) do
+    send_message(port, %{
+      "method" => "thread/resume",
+      "id" => @thread_start_id,
+      "params" => %{
+        "threadId" => thread_id,
+        "approvalPolicy" => approval_policy,
+        "sandbox" => thread_sandbox,
+        "cwd" => workspace,
+        "dynamicTools" => DynamicTool.tool_specs()
+      }
+    })
+
+    case await_response(port, @thread_start_id) do
+      {:ok, %{"thread" => thread_payload}} ->
+        case thread_payload do
+          %{"id" => resumed_thread_id} -> {:ok, resumed_thread_id}
           _ -> {:error, {:invalid_thread_payload, thread_payload}}
         end
 

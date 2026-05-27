@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.OpenCodeRunnerTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.OpenCode.Runner
+  alias SymphonyElixir.OpenCode.{Runner, TaskPrompt}
 
   test "opencode runner invokes configured command with Symphony task context" do
     issue = %Issue{
@@ -17,15 +17,367 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
     assert {:ok, %{output: "done\n", command: ["opencode" | _args]}} =
              Runner.run("/tmp/workspace", issue, "prompt body",
                runner: fn command, args, opts ->
-                 send(test_pid, {:opencode_called, command, args, opts})
+                 prompt = File.read!(Enum.at(args, 3))
+                 send(test_pid, {:opencode_called, command, args, opts, prompt})
                  {"done\n", 0}
                end
              )
 
-    assert_received {:opencode_called, "opencode", received_args, opts}
-    assert ["run", "--dir", "/tmp/workspace", "--agent", "build", "--format", "json", "--title", "NER-1 Implement scoped change", "prompt body"] = received_args
+    assert_received {:opencode_called, "bash", received_args, opts, "prompt body"}
+
+    assert [
+             "-lc",
+             "prompt_file=$1; shift; exec \"$@\" < \"$prompt_file\"",
+             "symphony-opencode",
+             prompt_path,
+             "opencode",
+             "run",
+             "--dir",
+             "/tmp/workspace",
+             "--agent",
+             "build",
+             "--format",
+             "json",
+             "--title",
+             "NER-1 Implement scoped change"
+           ] = received_args
+
+    assert prompt_path =~ "symphony-opencode-prompt-"
+    refute Enum.member?(received_args, "prompt body")
     assert opts[:cd] == "/tmp/workspace"
     assert opts[:stderr_to_stdout] == true
+  end
+
+  test "opencode runner attaches to configured OpenCode server" do
+    issue = %Issue{
+      id: "issue-1",
+      identifier: "NER-1",
+      title: "Implement scoped change",
+      description: "Task packet from Codex Architect",
+      state: "In Progress"
+    }
+
+    test_pid = self()
+
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      opencode_server_url: "http://127.0.0.1:3000",
+      prompt: "OpenCode prompt for {{ issue.identifier }}"
+    )
+
+    assert {:ok, %{output: "done\n"}} =
+             Runner.run("/tmp/workspace", issue, "prompt body",
+               runner: fn command, args, opts ->
+                 prompt = File.read!(Enum.at(args, 3))
+                 send(test_pid, {:opencode_called, command, args, opts, prompt})
+                 {"done\n", 0}
+               end
+             )
+
+    assert_received {:opencode_called, "bash", received_args, opts, "prompt body"}
+
+    assert received_args == [
+             "-lc",
+             "prompt_file=$1; shift; exec \"$@\" < \"$prompt_file\"",
+             "symphony-opencode",
+             Enum.at(received_args, 3),
+             "opencode",
+             "run",
+             "--dir",
+             "/tmp/workspace",
+             "--agent",
+             "build",
+             "--format",
+             "json",
+             "--title",
+             "NER-1 Implement scoped change",
+             "--attach",
+             "http://127.0.0.1:3000"
+           ]
+
+    refute Enum.member?(received_args, "prompt body")
+    assert opts[:cd] == "/tmp/workspace"
+  end
+
+  test "opencode runner resumes completed visible session from OpenCode state without replaying prompt" do
+    issue = %Issue{
+      id: "issue-1",
+      identifier: "NER-13",
+      title: "Repair WCB target-closure executable readiness",
+      description: "Task packet from Codex Architect",
+      state: "In Progress"
+    }
+
+    test_pid = self()
+
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      opencode_project_root: "/root/proj/mnemesh",
+      opencode_server_url: "http://127.0.0.1:3000",
+      prompt: "OpenCode prompt for {{ issue.identifier }}"
+    )
+
+    assert {:ok, %{output: "completed handoff", command: ["opencode", "session", "resume-result", "ses_newest"]}} =
+             Runner.run("/tmp/symphony/workspaces/mnemesh/NER-13", issue, "prompt body",
+               session_lister: fn command, execution_dir, title ->
+                 send(test_pid, {:session_lister_called, command, execution_dir, title})
+
+                 {:ok,
+                  [
+                    %{
+                      "id" => "ses_older",
+                      "title" => "NER-13 Repair WCB target-closure executable readiness",
+                      "directory" => "/root/proj/mnemesh",
+                      "updated" => 10
+                    },
+                    %{
+                      "id" => "ses_newest",
+                      "title" => "NER-13 Repair WCB target-closure executable readiness",
+                      "directory" => "/root/proj/mnemesh",
+                      "updated" => 20
+                    },
+                    %{
+                      "id" => "ses_other_project",
+                      "title" => "NER-13 Repair WCB target-closure executable readiness",
+                      "directory" => "/root/proj/other",
+                      "updated" => 30
+                    }
+                  ]}
+               end,
+               session_result_reader: fn execution_dir, session_id ->
+                 send(test_pid, {:session_result_reader_called, execution_dir, session_id})
+                 {:ok, "completed handoff"}
+               end
+             )
+
+    assert_received {:session_lister_called, "opencode", "/root/proj/mnemesh", "NER-13 Repair WCB target-closure executable readiness"}
+    assert_received {:session_result_reader_called, "/root/proj/mnemesh", "ses_newest"}
+    refute_received {:opencode_called, _command, _args, _opts, _prompt}
+  end
+
+  test "opencode runner uses configured project root for visible shared sessions" do
+    issue = %Issue{
+      id: "issue-1",
+      identifier: "NER-1",
+      title: "Implement scoped change",
+      description: "Task packet from Codex Architect",
+      state: "In Progress"
+    }
+
+    test_pid = self()
+
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      opencode_project_root: "/root/proj/nervure",
+      opencode_server_url: "http://127.0.0.1:3000",
+      prompt: "OpenCode prompt for {{ issue.identifier }}"
+    )
+
+    assert {:ok, %{output: "done\n"}} =
+             Runner.run("/tmp/symphony/workspaces/nervure/NER-1", issue, "prompt body",
+               runner: fn command, args, opts ->
+                 prompt = File.read!(Enum.at(args, 3))
+                 send(test_pid, {:opencode_called, command, args, opts, prompt})
+                 {"done\n", 0}
+               end
+             )
+
+    assert_received {:opencode_called, "bash", received_args, opts, "prompt body"}
+
+    assert received_args == [
+             "-lc",
+             "prompt_file=$1; shift; exec \"$@\" < \"$prompt_file\"",
+             "symphony-opencode",
+             Enum.at(received_args, 3),
+             "opencode",
+             "run",
+             "--dir",
+             "/root/proj/nervure",
+             "--agent",
+             "build",
+             "--format",
+             "json",
+             "--title",
+             "NER-1 Implement scoped change",
+             "--attach",
+             "http://127.0.0.1:3000"
+           ]
+
+    refute Enum.member?(received_args, "prompt body")
+    assert opts[:cd] == "/root/proj/nervure"
+  end
+
+  test "task prompt extracts architect-authored OpenCode packet from marked comment" do
+    body = """
+    Codex notes before the handoff.
+
+    <!-- symphony:opencode-task-prompt:v1 slice_id=cli-test-boundary -->
+    ```text
+    Task: implement the exact scoped repair
+
+    Validation:
+    - cargo check
+    ```
+    """
+
+    assert {:ok, prompt} = TaskPrompt.extract(body)
+    assert prompt =~ "Task: implement the exact scoped repair"
+    assert prompt =~ "Validation:"
+    refute prompt =~ "symphony:opencode-task-prompt"
+
+    assert {:ok, packet} = TaskPrompt.extract_packet(body)
+    assert packet.slice_id == "cli-test-boundary"
+    assert is_binary(packet.fingerprint)
+  end
+
+  test "task prompt requires an explicit architect marker" do
+    assert {:error, :opencode_task_prompt_not_found} =
+             TaskPrompt.extract("Task: this should not be picked up implicitly")
+  end
+
+  test "agent runner blocks third same-slice OpenCode dispatch and moves issue to RCA Required" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-opencode-loop-breaker-#{System.unique_integer([:positive])}"
+      )
+
+    command = Path.join(workspace_root, "fake-opencode")
+    File.mkdir_p!(workspace_root)
+
+    File.write!(command, """
+    #!/usr/bin/env bash
+    printf 'this should not run\\n'
+    exit 7
+    """)
+
+    File.chmod!(command, 0o755)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.join(workspace_root, "workspaces"),
+      runner_routes: %{"In Progress" => "opencode", "RCA Required" => "codex"},
+      opencode_command: command,
+      opencode_result_state: "In Review",
+      process_policy_rca_required_state: "RCA Required",
+      process_policy_max_rejections_per_slice: 2,
+      prompt: "OpenCode prompt for {{ issue.identifier }}: {{ issue.description }}"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_opencode_comments, %{
+      "issue-1" => [
+        """
+        <!-- symphony:review-decision:v1 -->
+        ```text
+        status: rejected
+        slice_id: cli-test-boundary
+        reason: first miss
+        ```
+        """,
+        """
+        <!-- symphony:review-decision:v1 -->
+        ```text
+        status: rejected
+        slice_id: cli-test-boundary
+        reason: second miss
+        ```
+        """,
+        """
+        <!-- symphony:opencode-task-prompt:v1 slice_id=cli-test-boundary -->
+        ```text
+        Architect-authored full OpenCode prompt
+        ```
+        """
+      ]
+    })
+
+    issue = %Issue{
+      id: "issue-1",
+      identifier: "NER-43",
+      title: "Run OpenCode after repeated reject",
+      description: "Implement via OpenCode",
+      state: "In Progress"
+    }
+
+    assert :ok = AgentRunner.run(issue, nil)
+
+    assert_receive {:memory_tracker_comment, "issue-1", comment}
+    assert comment =~ "Symphony Stop Rule"
+    assert comment =~ "repair loop breaker"
+    assert comment =~ "cli-test-boundary"
+    refute comment =~ "this should not run"
+
+    assert_receive {:memory_tracker_state_update, "issue-1", "RCA Required"}
+    refute_received {:memory_tracker_state_update, "issue-1", "In Review"}
+  end
+
+  test "codex runner stops when refreshed issue routes to OpenCode" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-codex-to-opencode-handoff-#{System.unique_integer([:positive])}"
+      )
+
+    codex_binary = Path.join(workspace_root, "fake-codex")
+    trace_file = Path.join(workspace_root, "codex.trace")
+
+    File.mkdir_p!(workspace_root)
+
+    File.write!(codex_binary, """
+    #!/usr/bin/env bash
+    trace_file="#{trace_file}"
+    count=0
+
+    while IFS= read -r line; do
+      count=$((count + 1))
+      echo "$line" >> "$trace_file"
+
+      case "$count" in
+        1) printf '%s\n' '{"id":1,"result":{}}' ;;
+        2) printf '%s\n' '{"id":2,"result":{"thread":{"id":"architect-thread"}}}' ;;
+        3) printf '%s\n' '{"id":3,"result":{"turn":{"id":"architect-turn"}}}' ;;
+        4) printf '%s\n' '{"method":"turn/completed"}'; exit 0 ;;
+        *) printf '%s\n' '{"id":999,"error":{"message":"unexpected continuation"}}'; exit 2 ;;
+      esac
+    done
+    """)
+
+    File.chmod!(codex_binary, 0o755)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.join(workspace_root, "workspaces"),
+      runner_routes: %{"Todo" => "codex", "In Progress" => "opencode"},
+      codex_command: codex_binary,
+      max_turns: 2,
+      prompt: "Architect prompt for {{ issue.identifier }}"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{
+        id: "issue-1",
+        identifier: "NER-8",
+        title: "Implementation handoff",
+        description: "Ready for OpenCode",
+        state: "In Progress"
+      }
+    ])
+
+    issue = %Issue{
+      id: "issue-1",
+      identifier: "NER-8",
+      title: "Owner input pulse",
+      description: "Owner answered",
+      state: "Todo"
+    }
+
+    assert :ok = AgentRunner.run(issue, nil)
+
+    trace = File.read!(trace_file)
+    assert trace =~ "turn/start"
+    assert length(Regex.scan(~r/turn\/start/, trace)) == 1
   end
 
   test "agent runner routes In Progress issues to OpenCode and returns to In Review" do
@@ -41,6 +393,8 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
     File.write!(command, """
     #!/usr/bin/env bash
     printf 'opencode completed for %s\\n' "$*"
+    printf 'stdin:\\n'
+    cat
     """)
 
     File.chmod!(command, 0o755)
@@ -56,6 +410,20 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
 
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
+    Application.put_env(:symphony_elixir, :memory_tracker_opencode_comments, %{
+      "issue-1" => [
+        """
+        <!-- symphony:opencode-task-prompt:v1 -->
+        ```text
+        Architect-authored full OpenCode prompt
+
+        Repo: /tmp/workspace
+        Validation: exact command list
+        ```
+        """
+      ]
+    })
+
     issue = %Issue{
       id: "issue-1",
       identifier: "NER-42",
@@ -69,6 +437,8 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
     assert_receive {:memory_tracker_comment, "issue-1", comment}
     assert comment =~ "## OpenCode Handoff"
     assert comment =~ "opencode completed"
+    assert comment =~ "Architect-authored full OpenCode prompt"
+    refute comment =~ "OpenCode prompt for NER-42"
 
     assert_receive {:memory_tracker_state_update, "issue-1", "In Review"}
   end

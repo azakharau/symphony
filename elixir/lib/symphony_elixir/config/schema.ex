@@ -73,13 +73,16 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:interval_ms, :integer, default: 30_000)
+      field(:full_interval_ms, :integer, default: 60_000)
+      field(:fast_states, {:array, :string}, default: ["Todo", "Need Owner Input"])
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:interval_ms], empty_values: [])
+      |> cast(attrs, [:interval_ms, :full_interval_ms, :fast_states], empty_values: [])
       |> validate_number(:interval_ms, greater_than: 0)
+      |> validate_number(:full_interval_ms, greater_than: 0)
     end
   end
 
@@ -182,6 +185,7 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:command, :string, default: "codex app-server")
+      field(:project_root, :string)
 
       field(:approval_policy, StringOrMap,
         default: %{
@@ -193,6 +197,7 @@ defmodule SymphonyElixir.Config.Schema do
         }
       )
 
+      field(:thread_id, :string)
       field(:thread_sandbox, :string, default: "workspace-write")
       field(:turn_sandbox_policy, :map)
       field(:turn_timeout_ms, :integer, default: 3_600_000)
@@ -207,7 +212,9 @@ defmodule SymphonyElixir.Config.Schema do
         attrs,
         [
           :command,
+          :project_root,
           :approval_policy,
+          :thread_id,
           :thread_sandbox,
           :turn_sandbox_policy,
           :turn_timeout_ms,
@@ -231,6 +238,8 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:command, :string, default: "opencode")
+      field(:project_root, :string)
+      field(:server_url, :string)
       field(:agent, :string, default: "build")
       field(:format, :string, default: "json")
       field(:result_state, :string, default: "In Review")
@@ -240,9 +249,29 @@ defmodule SymphonyElixir.Config.Schema do
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:command, :agent, :format, :result_state, :timeout_ms], empty_values: [])
+      |> cast(attrs, [:command, :project_root, :server_url, :agent, :format, :result_state, :timeout_ms], empty_values: [])
       |> validate_required([:command, :agent, :format, :result_state])
       |> validate_number(:timeout_ms, greater_than: 0)
+    end
+  end
+
+  defmodule ProcessPolicy do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:rca_required_state, :string, default: "RCA Required")
+      field(:max_rejections_per_slice, :integer, default: 2)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:rca_required_state, :max_rejections_per_slice], empty_values: [])
+      |> validate_required([:rca_required_state])
+      |> validate_number(:max_rejections_per_slice, greater_than: 0)
     end
   end
 
@@ -317,6 +346,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:runner, Runner, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:opencode, OpenCode, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:process_policy, ProcessPolicy, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
@@ -440,6 +470,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:runner, with: &Runner.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:opencode, with: &OpenCode.changeset/2)
+    |> cast_embed(:process_policy, with: &ProcessPolicy.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
@@ -460,10 +491,16 @@ defmodule SymphonyElixir.Config.Schema do
     codex = %{
       settings.codex
       | approval_policy: normalize_keys(settings.codex.approval_policy),
+        project_root: resolve_optional_path_value(settings.codex.project_root),
         turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
     }
 
-    %{settings | tracker: tracker, workspace: workspace, codex: codex}
+    opencode = %{
+      settings.opencode
+      | project_root: resolve_optional_path_value(settings.opencode.project_root)
+    }
+
+    %{settings | tracker: tracker, workspace: workspace, codex: codex, opencode: opencode}
   end
 
   defp normalize_keys(value) when is_map(value) do
@@ -514,6 +551,16 @@ defmodule SymphonyElixir.Config.Schema do
         path
     end
   end
+
+  defp resolve_optional_path_value(value) when is_binary(value) do
+    case normalize_path_token(value) do
+      :missing -> nil
+      "" -> nil
+      path -> Path.expand(path)
+    end
+  end
+
+  defp resolve_optional_path_value(_value), do: nil
 
   defp resolve_env_value(value, fallback) when is_binary(value) do
     case env_reference_name(value) do

@@ -28,6 +28,9 @@ defmodule SymphonyElixir.Orchestrator do
 
     defstruct [
       :poll_interval_ms,
+      :full_poll_interval_ms,
+      :last_full_poll_at_ms,
+      :fast_poll_states,
       :max_concurrent_agents,
       :next_poll_due_at_ms,
       :poll_check_in_progress,
@@ -38,6 +41,8 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       blocked: %{},
       retry_attempts: %{},
+      continuation_pulsed: MapSet.new(),
+      owner_input_pulsed: MapSet.new(),
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -56,6 +61,9 @@ defmodule SymphonyElixir.Orchestrator do
 
     state = %State{
       poll_interval_ms: config.polling.interval_ms,
+      full_poll_interval_ms: config.polling.full_interval_ms,
+      last_full_poll_at_ms: nil,
+      fast_poll_states: config.polling.fast_states,
       max_concurrent_agents: config.agent.max_concurrent_agents,
       next_poll_due_at_ms: now_ms,
       poll_check_in_progress: false,
@@ -244,15 +252,23 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_dispatch(%State{} = state) do
+    {full_poll?, state} = maybe_mark_full_poll(state)
+
     state =
-      state
-      |> reconcile_running_issues()
-      |> reconcile_blocked_issues()
+      if full_poll? do
+        state
+        |> reconcile_running_issues()
+        |> reconcile_blocked_issues()
+      else
+        state
+      end
 
     with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
+         {:ok, issues} <- fetch_poll_candidate_issues(state, full_poll?),
          true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
+      issues
+      |> choose_issues(state)
+      |> maybe_dispatch_idle_pulse(issues, full_poll?)
     else
       {:error, :missing_linear_api_token} ->
         Logger.error("Linear API token missing in WORKFLOW.md")
@@ -295,6 +311,58 @@ defmodule SymphonyElixir.Orchestrator do
       false ->
         state
     end
+  end
+
+  @doc false
+  @spec poll_states_for_test(State.t(), boolean()) :: [String.t()]
+  def poll_states_for_test(%State{} = state, full_poll?) when is_boolean(full_poll?) do
+    poll_states(state, full_poll?)
+  end
+
+  @doc false
+  @spec full_poll_due_for_test(State.t(), integer()) :: boolean()
+  def full_poll_due_for_test(%State{} = state, now_ms) when is_integer(now_ms) do
+    full_poll_due?(state, now_ms)
+  end
+
+  defp maybe_mark_full_poll(%State{} = state) do
+    now_ms = System.monotonic_time(:millisecond)
+
+    if full_poll_due?(state, now_ms) do
+      {true, %{state | last_full_poll_at_ms: now_ms}}
+    else
+      {false, state}
+    end
+  end
+
+  defp full_poll_due?(%State{last_full_poll_at_ms: nil}, _now_ms), do: true
+
+  defp full_poll_due?(%State{full_poll_interval_ms: interval_ms, last_full_poll_at_ms: last_ms}, now_ms)
+       when is_integer(interval_ms) and interval_ms > 0 and is_integer(last_ms) and is_integer(now_ms) do
+    now_ms - last_ms >= interval_ms
+  end
+
+  defp full_poll_due?(_state, _now_ms), do: true
+
+  defp fetch_poll_candidate_issues(%State{} = state, full_poll?) when is_boolean(full_poll?) do
+    case poll_states(state, full_poll?) do
+      [] -> {:ok, []}
+      states -> Tracker.fetch_issues_by_states(states)
+    end
+  end
+
+  defp poll_states(%State{} = _state, true), do: Config.settings!().tracker.active_states
+
+  defp poll_states(%State{} = state, false) do
+    active_states = active_state_set()
+
+    state.fast_poll_states
+    |> List.wrap()
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.filter(fn state_name -> MapSet.member?(active_states, normalize_issue_state(state_name)) end)
+    |> Enum.uniq_by(&normalize_issue_state/1)
   end
 
   defp reconcile_running_issues(%State{} = state) do
@@ -371,15 +439,29 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec latest_owner_input_issue_for_pulse_for_test([Issue.t()], term()) :: Issue.t() | nil
+  def latest_owner_input_issue_for_pulse_for_test(issues, %State{} = state)
+      when is_list(issues) do
+    latest_owner_input_issue_for_pulse(issues, state)
+  end
+
+  @doc false
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
     sort_issues_for_dispatch(issues)
   end
 
   @doc false
-  @spec select_worker_host_for_test(term(), String.t() | nil) :: String.t() | nil | :no_worker_capacity
+  @spec select_worker_host_for_test(term(), String.t() | nil) ::
+          String.t() | nil | :no_worker_capacity
   def select_worker_host_for_test(%State{} = state, preferred_worker_host) do
     select_worker_host(state, preferred_worker_host)
+  end
+
+  @doc false
+  @spec reconcile_stalled_running_issues_for_test(term()) :: term()
+  def reconcile_stalled_running_issues_for_test(%State{} = state) do
+    reconcile_stalled_running_issues(state)
   end
 
   defp reconcile_running_issue_states([], state, _active_states, _terminal_states), do: state
@@ -395,6 +477,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp reconcile_issue_state(%Issue{} = issue, state, active_states, terminal_states) do
     cond do
+      pulse_issue_state_allowed?(issue, state) ->
+        Logger.debug("Keeping pulse agent running for #{issue_context(issue)} state=#{issue.state}")
+
+        refresh_running_issue_state(state, issue)
+
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
@@ -432,11 +519,13 @@ defmodule SymphonyElixir.Orchestrator do
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Blocked issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; releasing block")
+
         cleanup_issue_workspace(issue.identifier, blocked_issue_worker_host(state, issue.id))
         release_issue_claim(state, issue.id)
 
       !issue_routable_to_worker?(issue) ->
         Logger.info("Blocked issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; releasing block")
+
         release_issue_claim(state, issue.id)
 
       active_issue_state?(issue.state, active_states) ->
@@ -444,6 +533,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       true ->
         Logger.info("Blocked issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; releasing block")
+
         release_issue_claim(state, issue.id)
     end
   end
@@ -487,6 +577,7 @@ defmodule SymphonyElixir.Orchestrator do
         state_acc
       else
         Logger.info("Blocked issue no longer visible during state refresh: issue_id=#{issue_id}; releasing block")
+
         release_issue_claim(state_acc, issue_id)
       end
     end)
@@ -515,6 +606,19 @@ defmodule SymphonyElixir.Orchestrator do
         state
     end
   end
+
+  defp pulse_issue_state_allowed?(%Issue{id: issue_id, state: state_name}, %State{} = state)
+       when is_binary(issue_id) and is_binary(state_name) do
+    normalized_state = normalize_issue_state(state_name)
+
+    case Map.get(state.running, issue_id) do
+      %{pulse_kind: :done_continuation} -> normalized_state == "done"
+      %{pulse_kind: :owner_input} -> normalized_state == "need owner input"
+      _ -> false
+    end
+  end
+
+  defp pulse_issue_state_allowed?(_issue, _state), do: false
 
   defp refresh_blocked_issue_state(%State{} = state, %Issue{} = issue) do
     case Map.get(state.blocked, issue.id) do
@@ -573,6 +677,17 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp maybe_restart_stalled_issue(
+         state,
+         _issue_id,
+         %{runner_kind: runner_kind},
+         _now,
+         _timeout_ms
+       )
+       when runner_kind != "codex" do
+    state
+  end
+
   defp maybe_restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
     if Map.has_key?(state.blocked, issue_id) do
       state
@@ -589,7 +704,11 @@ defmodule SymphonyElixir.Orchestrator do
       session_id = running_entry_session_id(running_entry)
 
       if input_required_blocker?(running_entry) do
-        error = blocker_error(running_entry, "stalled for #{elapsed_ms}ms after Codex requested operator input")
+        error =
+          blocker_error(
+            running_entry,
+            "stalled for #{elapsed_ms}ms after Codex requested operator input"
+          )
 
         Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; #{error}")
 
@@ -677,9 +796,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp completion_blocker_error(completion) do
     case input_required_completion_outcome(completion) do
-      outcome when outcome in [:input_required, :needs_input] -> "codex turn requires operator input"
-      :approval_required -> "codex turn requires approval"
-      nil -> nil
+      outcome when outcome in [:input_required, :needs_input] ->
+        "codex turn requires operator input"
+
+      :approval_required ->
+        "codex turn requires approval"
+
+      nil ->
+        nil
     end
   end
 
@@ -762,6 +886,166 @@ defmodule SymphonyElixir.Orchestrator do
       end
     end)
   end
+
+  defp maybe_dispatch_idle_pulse(%State{} = state, active_issues, full_poll?) when is_list(active_issues) do
+    cond do
+      active_issues != [] ->
+        state
+
+      map_size(state.running) > 0 or map_size(state.retry_attempts) > 0 ->
+        state
+
+      available_slots(state) <= 0 ->
+        state
+
+      not pulse_dispatch_enabled?() ->
+        state
+
+      true ->
+        case dispatch_latest_owner_input_pulse(state) do
+          {:dispatched, state} -> state
+          {:none, state} when full_poll? -> dispatch_latest_done_continuation_pulse(state)
+          {:none, state} -> state
+          {:error, state} -> state
+        end
+    end
+  end
+
+  defp maybe_dispatch_idle_pulse(state, _active_issues, _full_poll?), do: state
+
+  defp pulse_dispatch_enabled? do
+    active_state_set()
+    |> Enum.any?(fn state_name -> not String.starts_with?(state_name, "__") end)
+  end
+
+  defp dispatch_latest_owner_input_pulse(%State{} = state) do
+    if not MapSet.member?(active_state_set(), "need owner input") do
+      {:none, state}
+    else
+      case Tracker.fetch_issues_by_states(["Need Owner Input"]) do
+        {:ok, issues} ->
+          issues
+          |> latest_owner_input_issue_for_pulse(state)
+          |> case do
+            %Issue{} = issue ->
+              fingerprint = owner_input_pulse_fingerprint(issue)
+
+              Logger.info("Dispatching Codex owner-input pulse from updated issue: #{issue_context(issue)}")
+
+              {:dispatched,
+               state
+               |> mark_owner_input_pulsed(fingerprint)
+               |> do_dispatch_issue(issue, nil, nil, :owner_input)}
+
+            nil ->
+              {:none, state}
+          end
+
+        {:error, reason} ->
+          Logger.warning("Skipping Codex owner-input pulse; failed to fetch Need Owner Input issues: #{inspect(reason)}")
+
+          {:error, state}
+      end
+    end
+  end
+
+  defp dispatch_latest_done_continuation_pulse(%State{} = state) do
+    case Tracker.fetch_issues_by_states(["Done"]) do
+      {:ok, issues} ->
+        issues
+        |> latest_done_issue_for_continuation(state)
+        |> case do
+          %Issue{} = issue ->
+            Logger.info("Dispatching Codex continuation pulse from latest Done issue: #{issue_context(issue)}")
+
+            state
+            |> mark_continuation_pulsed(issue.id)
+            |> do_dispatch_issue(issue, nil, nil, :done_continuation)
+
+          nil ->
+            state
+        end
+
+      {:error, reason} ->
+        Logger.warning("Skipping Codex continuation pulse; failed to fetch Done issues: #{inspect(reason)}")
+
+        state
+    end
+  end
+
+  defp latest_owner_input_issue_for_pulse(issues, %State{} = state) when is_list(issues) do
+    issues
+    |> Enum.filter(fn
+      %Issue{id: id, state: state_name} = issue when is_binary(id) and is_binary(state_name) ->
+        normalize_issue_state(state_name) == "need owner input" and
+          !MapSet.member?(state.owner_input_pulsed, owner_input_pulse_fingerprint(issue)) and
+          !MapSet.member?(state.claimed, id) and
+          !Map.has_key?(state.running, id) and
+          !Map.has_key?(state.blocked, id)
+
+      _ ->
+        false
+    end)
+    |> Enum.sort_by(&owner_input_activity_sort_key/1, :desc)
+    |> List.first()
+  end
+
+  defp latest_owner_input_issue_for_pulse(_issues, _state), do: nil
+
+  defp latest_done_issue_for_continuation(issues, %State{} = state) when is_list(issues) do
+    issues
+    |> Enum.filter(fn
+      %Issue{id: id, state: state_name} when is_binary(id) and is_binary(state_name) ->
+        normalize_issue_state(state_name) == "done" and
+          !MapSet.member?(state.continuation_pulsed, id) and
+          !MapSet.member?(state.claimed, id) and
+          !Map.has_key?(state.running, id) and
+          !Map.has_key?(state.blocked, id)
+
+      _ ->
+        false
+    end)
+    |> Enum.sort_by(&issue_updated_at_sort_key/1, :desc)
+    |> List.first()
+  end
+
+  defp latest_done_issue_for_continuation(_issues, _state), do: nil
+
+  defp owner_input_activity_sort_key(%Issue{} = issue) do
+    issue
+    |> owner_input_activity_at()
+    |> datetime_sort_key()
+  end
+
+  defp issue_updated_at_sort_key(%Issue{updated_at: %DateTime{} = updated_at}) do
+    datetime_sort_key(updated_at)
+  end
+
+  defp issue_updated_at_sort_key(%Issue{}), do: 0
+
+  defp datetime_sort_key(%DateTime{} = datetime), do: DateTime.to_unix(datetime, :microsecond)
+  defp datetime_sort_key(_datetime), do: 0
+
+  defp mark_continuation_pulsed(%State{} = state, issue_id) when is_binary(issue_id) do
+    %{state | continuation_pulsed: MapSet.put(state.continuation_pulsed, issue_id)}
+  end
+
+  defp mark_owner_input_pulsed(%State{} = state, fingerprint) when is_binary(fingerprint) do
+    %{state | owner_input_pulsed: MapSet.put(state.owner_input_pulsed, fingerprint)}
+  end
+
+  defp owner_input_pulse_fingerprint(%Issue{id: id} = issue) when is_binary(id) do
+    case owner_input_activity_at(issue) do
+      %DateTime{} = activity_at -> id <> ":" <> DateTime.to_iso8601(activity_at)
+      _ -> id <> ":unknown"
+    end
+  end
+
+  defp owner_input_activity_at(%Issue{latest_comment_at: %DateTime{} = latest_comment_at}),
+    do: latest_comment_at
+
+  defp owner_input_activity_at(%Issue{updated_at: %DateTime{} = updated_at}), do: updated_at
+  defp owner_input_activity_at(%Issue{}), do: nil
 
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
     Enum.sort_by(issues, fn
@@ -872,6 +1156,18 @@ defmodule SymphonyElixir.Orchestrator do
     MapSet.member?(active_states, normalize_issue_state(state_name))
   end
 
+  defp runner_kind_for_issue(%Issue{state: state_name}) when is_binary(state_name) do
+    settings = Config.settings!()
+
+    Map.get(
+      settings.runner.routes,
+      normalize_issue_state(state_name),
+      settings.runner.default
+    )
+  end
+
+  defp runner_kind_for_issue(_issue), do: Config.settings!().runner.default
+
   defp normalize_issue_state(state_name) when is_binary(state_name) do
     String.downcase(String.trim(state_name))
   end
@@ -891,12 +1187,17 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
-    case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
+    case revalidate_issue_for_dispatch(
+           issue,
+           &Tracker.fetch_issue_states_by_ids/1,
+           terminal_state_set()
+         ) do
       {:ok, %Issue{} = refreshed_issue} ->
         do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
 
       {:skip, :missing} ->
         Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
+
         state
 
       {:skip, %Issue{} = refreshed_issue} ->
@@ -906,24 +1207,41 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
+
         state
     end
   end
 
-  defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
+  defp do_dispatch_issue(
+         %State{} = state,
+         issue,
+         attempt,
+         preferred_worker_host,
+         pulse_kind \\ nil
+       ) do
     recipient = self()
 
     case select_worker_host(state, preferred_worker_host) do
       :no_worker_capacity ->
         Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
+
         state
 
       worker_host ->
-        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
+        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, pulse_kind)
     end
   end
 
-  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
+  defp spawn_issue_on_worker_host(
+         %State{} = state,
+         issue,
+         attempt,
+         recipient,
+         worker_host,
+         pulse_kind
+       ) do
+    runner_kind = runner_kind_for_issue(issue)
+
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
            AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
          end) do
@@ -938,6 +1256,7 @@ defmodule SymphonyElixir.Orchestrator do
             ref: ref,
             identifier: issue.identifier,
             issue: issue,
+            runner_kind: runner_kind,
             worker_host: worker_host,
             workspace_path: nil,
             session_id: nil,
@@ -952,6 +1271,7 @@ defmodule SymphonyElixir.Orchestrator do
             codex_last_reported_output_tokens: 0,
             codex_last_reported_total_tokens: 0,
             turn_count: 0,
+            pulse_kind: pulse_kind,
             retry_attempt: normalize_retry_attempt(attempt),
             started_at: DateTime.utc_now()
           })
@@ -1042,7 +1362,8 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
+  defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token)
+       when is_reference(retry_token) do
     case Map.get(state.retry_attempts, issue_id) do
       %{attempt: attempt, retry_token: ^retry_token} = retry_entry ->
         metadata = %{
@@ -1169,7 +1490,8 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
+  defp retry_delay(attempt, metadata)
+       when is_integer(attempt) and attempt > 0 and is_map(metadata) do
     if metadata[:delay_type] == :continuation and attempt == 1 do
       @continuation_retry_delay_ms
     else
@@ -1179,7 +1501,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp failure_retry_delay(attempt) do
     max_delay_power = min(attempt - 1, 10)
-    min(@failure_retry_base_ms * (1 <<< max_delay_power), Config.settings!().agent.max_retry_backoff_ms)
+
+    min(
+      @failure_retry_base_ms * (1 <<< max_delay_power),
+      Config.settings!().agent.max_retry_backoff_ms
+    )
   end
 
   defp normalize_retry_attempt(attempt) when is_integer(attempt) and attempt > 0, do: attempt
@@ -1251,7 +1577,8 @@ defmodule SymphonyElixir.Orchestrator do
     |> elem(0)
   end
 
-  defp running_worker_host_count(running, worker_host) when is_map(running) and is_binary(worker_host) do
+  defp running_worker_host_count(running, worker_host)
+       when is_map(running) and is_binary(worker_host) do
     Enum.count(running, fn
       {_issue_id, %{worker_host: ^worker_host}} -> true
       _ -> false
@@ -1317,7 +1644,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec request_refresh(GenServer.server()) :: map() | :unavailable
   def request_refresh(server) do
-    if Process.whereis(server) do
+    if server_available?(server) do
       GenServer.call(server, :request_refresh)
     else
       :unavailable
@@ -1329,7 +1656,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec snapshot(GenServer.server(), timeout()) :: map() | :timeout | :unavailable
   def snapshot(server, timeout) do
-    if Process.whereis(server) do
+    if server_available?(server) do
       try do
         GenServer.call(server, :snapshot, timeout)
       catch
@@ -1340,6 +1667,9 @@ defmodule SymphonyElixir.Orchestrator do
       :unavailable
     end
   end
+
+  defp server_available?(pid) when is_pid(pid), do: Process.alive?(pid)
+  defp server_available?(server), do: Process.whereis(server) != nil
 
   @impl true
   def handle_call(:snapshot, _from, state) do
@@ -1421,6 +1751,7 @@ defmodule SymphonyElixir.Orchestrator do
     now_ms = System.monotonic_time(:millisecond)
     already_due? = is_integer(state.next_poll_due_at_ms) and state.next_poll_due_at_ms <= now_ms
     coalesced = state.poll_check_in_progress == true or already_due?
+    state = %{state | last_full_poll_at_ms: nil}
     state = if coalesced, do: state, else: schedule_tick(state, 0)
 
     {:reply,
@@ -1565,6 +1896,8 @@ defmodule SymphonyElixir.Orchestrator do
     %{
       state
       | poll_interval_ms: config.polling.interval_ms,
+        full_poll_interval_ms: config.polling.full_interval_ms,
+        fast_poll_states: config.polling.fast_states,
         max_concurrent_agents: config.agent.max_concurrent_agents
     }
   end

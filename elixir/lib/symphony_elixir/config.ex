@@ -18,10 +18,19 @@ defmodule SymphonyElixir.Config do
   {% else %}
   No description provided.
   {% endif %}
+
+  Comments:
+  {% for comment in issue.comments %}
+  - {% if comment.created_at %}{{ comment.created_at }} {% endif %}{% if comment.author %}{{ comment.author }}: {% endif %}{{ comment.body }}
+  {% else %}
+  No comments provided.
+  {% endfor %}
   """
 
   @type codex_runtime_settings :: %{
           approval_policy: String.t() | map(),
+          project_root: String.t() | nil,
+          thread_id: String.t() | nil,
           thread_sandbox: String.t(),
           turn_sandbox_policy: map()
         }
@@ -107,6 +116,8 @@ defmodule SymphonyElixir.Config do
         {:ok,
          %{
            approval_policy: settings.codex.approval_policy,
+           project_root: settings.codex.project_root,
+           thread_id: settings.codex.thread_id,
            thread_sandbox: settings.codex.thread_sandbox,
            turn_sandbox_policy: turn_sandbox_policy
          }}

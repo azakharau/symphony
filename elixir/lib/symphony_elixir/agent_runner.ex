@@ -6,7 +6,7 @@ defmodule SymphonyElixir.AgentRunner do
   require Logger
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.OpenCode.Runner, as: OpenCodeRunner
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, Linear.Issue, ProcessPolicy, PromptBuilder, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
 
@@ -90,26 +90,46 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp run_opencode_once(workspace, issue, opts) do
-    prompt = PromptBuilder.build_prompt(issue, opts)
+  defp run_opencode_once(workspace, issue, _opts) do
+    with {:ok, packet} <- Tracker.latest_opencode_task_packet(issue.id),
+         {:ok, decisions} <- Tracker.review_decisions(issue.id) do
+      case ProcessPolicy.opencode_dispatch_decision(packet, decisions) do
+        :allow ->
+          with {:ok, result} <- OpenCodeRunner.run(workspace, issue, packet.prompt),
+               :ok <- Tracker.create_comment(issue.id, OpenCodeRunner.handoff_comment(issue, result)),
+               :ok <- Tracker.update_issue_state(issue.id, Config.settings!().opencode.result_state) do
+            :ok
+          end
 
-    with {:ok, result} <- OpenCodeRunner.run(workspace, issue, prompt),
-         :ok <- Tracker.create_comment(issue.id, OpenCodeRunner.handoff_comment(issue, result)),
-         :ok <- Tracker.update_issue_state(issue.id, Config.settings!().opencode.result_state) do
-      :ok
+        {:block, block} ->
+          Logger.warning("OpenCode dispatch blocked for #{issue_context(issue)} reason=#{inspect(block[:reason])} slice_id=#{block[:slice_id]} rejection_count=#{block[:rejection_count]}")
+
+          with :ok <- Tracker.create_comment(issue.id, ProcessPolicy.loop_breaker_comment(block)),
+               :ok <- Tracker.update_issue_state(issue.id, block.rca_required_state) do
+            :ok
+          end
+      end
     end
   end
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+    codex_workspace = codex_project_root(workspace)
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+    with {:ok, session} <- AppServer.start_session(codex_workspace, worker_host: worker_host) do
       try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        do_run_codex_turns(session, codex_workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
       after
         AppServer.stop_session(session)
       end
+    end
+  end
+
+  defp codex_project_root(default_workspace) do
+    case Config.settings!().codex.project_root do
+      project_root when is_binary(project_root) and project_root != "" -> project_root
+      _ -> default_workspace
     end
   end
 
@@ -145,6 +165,11 @@ defmodule SymphonyElixir.AgentRunner do
 
           :ok
 
+        {:handoff, refreshed_issue, runner_kind} ->
+          Logger.info("Stopping Codex run for #{issue_context(refreshed_issue)} because refreshed issue now routes to #{runner_kind}")
+
+          :ok
+
         {:done, _refreshed_issue} ->
           :ok
 
@@ -155,6 +180,20 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
+
+  defp build_turn_prompt(%Issue{state: "Need Owner Input"} = issue, opts, turn_number, max_turns) do
+    """
+    Owner input refresh:
+
+    - The previous Codex turn completed, but the Linear issue is still in Need Owner Input.
+    - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
+    - Re-read the refreshed Linear issue below, including latest owner comments; comments may have arrived after the previous turn started.
+    - If the owner answer resolves the blocker, update this same issue with the OpenCode handoff and move it to In Progress.
+    - If it does not resolve the blocker, ask exactly one sharper follow-up question on this same issue.
+
+    #{PromptBuilder.build_prompt(issue, opts)}
+    """
+  end
 
   defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
     """
@@ -171,10 +210,15 @@ defmodule SymphonyElixir.AgentRunner do
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
-        if active_issue_state?(refreshed_issue.state) do
-          {:continue, refreshed_issue}
-        else
-          {:done, refreshed_issue}
+        cond do
+          not active_issue_state?(refreshed_issue.state) ->
+            {:done, refreshed_issue}
+
+          runner_kind_for_issue(refreshed_issue) == "codex" ->
+            {:continue, refreshed_issue}
+
+          true ->
+            {:handoff, refreshed_issue, runner_kind_for_issue(refreshed_issue)}
         end
 
       {:ok, []} ->

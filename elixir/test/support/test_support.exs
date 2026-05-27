@@ -43,6 +43,7 @@ defmodule SymphonyElixir.TestSupport do
           Application.delete_env(:symphony_elixir, :server_port_override)
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+          Application.delete_env(:symphony_elixir, :memory_tracker_opencode_comments)
           File.rm_rf(workflow_root)
         end)
 
@@ -100,6 +101,8 @@ defmodule SymphonyElixir.TestSupport do
           tracker_active_states: ["Todo", "In Progress"],
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
           poll_interval_ms: 30_000,
+          poll_full_interval_ms: 60_000,
+          poll_fast_states: ["Todo", "Need Owner Input"],
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           worker_ssh_hosts: [],
           worker_max_concurrent_agents_per_host: nil,
@@ -110,6 +113,8 @@ defmodule SymphonyElixir.TestSupport do
           runner_default: "codex",
           runner_routes: %{},
           codex_command: "codex app-server",
+          codex_project_root: nil,
+          codex_thread_id: nil,
           codex_approval_policy: %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}},
           codex_thread_sandbox: "workspace-write",
           codex_turn_sandbox_policy: nil,
@@ -117,10 +122,13 @@ defmodule SymphonyElixir.TestSupport do
           codex_read_timeout_ms: 5_000,
           codex_stall_timeout_ms: 300_000,
           opencode_command: "opencode",
+          opencode_project_root: nil,
           opencode_agent: "build",
           opencode_format: "json",
           opencode_result_state: "In Review",
           opencode_timeout_ms: 3_600_000,
+          process_policy_rca_required_state: "RCA Required",
+          process_policy_max_rejections_per_slice: 2,
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
@@ -144,6 +152,8 @@ defmodule SymphonyElixir.TestSupport do
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
+    poll_full_interval_ms = Keyword.get(config, :poll_full_interval_ms)
+    poll_fast_states = Keyword.get(config, :poll_fast_states)
     workspace_root = Keyword.get(config, :workspace_root)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
     worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
@@ -154,6 +164,8 @@ defmodule SymphonyElixir.TestSupport do
     runner_default = Keyword.get(config, :runner_default)
     runner_routes = Keyword.get(config, :runner_routes)
     codex_command = Keyword.get(config, :codex_command)
+    codex_project_root = Keyword.get(config, :codex_project_root)
+    codex_thread_id = Keyword.get(config, :codex_thread_id)
     codex_approval_policy = Keyword.get(config, :codex_approval_policy)
     codex_thread_sandbox = Keyword.get(config, :codex_thread_sandbox)
     codex_turn_sandbox_policy = Keyword.get(config, :codex_turn_sandbox_policy)
@@ -161,10 +173,14 @@ defmodule SymphonyElixir.TestSupport do
     codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
     opencode_command = Keyword.get(config, :opencode_command)
+    opencode_project_root = Keyword.get(config, :opencode_project_root)
+    opencode_server_url = Keyword.get(config, :opencode_server_url)
     opencode_agent = Keyword.get(config, :opencode_agent)
     opencode_format = Keyword.get(config, :opencode_format)
     opencode_result_state = Keyword.get(config, :opencode_result_state)
     opencode_timeout_ms = Keyword.get(config, :opencode_timeout_ms)
+    process_policy_rca_required_state = Keyword.get(config, :process_policy_rca_required_state)
+    process_policy_max_rejections_per_slice = Keyword.get(config, :process_policy_max_rejections_per_slice)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
@@ -190,6 +206,8 @@ defmodule SymphonyElixir.TestSupport do
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",
         "polling:",
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
+        "  full_interval_ms: #{yaml_value(poll_full_interval_ms)}",
+        "  fast_states: #{yaml_value(poll_fast_states)}",
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
         worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
@@ -203,6 +221,8 @@ defmodule SymphonyElixir.TestSupport do
         "  routes: #{yaml_value(runner_routes)}",
         "codex:",
         "  command: #{yaml_value(codex_command)}",
+        "  project_root: #{yaml_value(codex_project_root)}",
+        "  thread_id: #{yaml_value(codex_thread_id)}",
         "  approval_policy: #{yaml_value(codex_approval_policy)}",
         "  thread_sandbox: #{yaml_value(codex_thread_sandbox)}",
         "  turn_sandbox_policy: #{yaml_value(codex_turn_sandbox_policy)}",
@@ -211,10 +231,15 @@ defmodule SymphonyElixir.TestSupport do
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
         "opencode:",
         "  command: #{yaml_value(opencode_command)}",
+        "  project_root: #{yaml_value(opencode_project_root)}",
+        "  server_url: #{yaml_value(opencode_server_url)}",
         "  agent: #{yaml_value(opencode_agent)}",
         "  format: #{yaml_value(opencode_format)}",
         "  result_state: #{yaml_value(opencode_result_state)}",
         "  timeout_ms: #{yaml_value(opencode_timeout_ms)}",
+        "process_policy:",
+        "  rca_required_state: #{yaml_value(process_policy_rca_required_state)}",
+        "  max_rejections_per_slice: #{yaml_value(process_policy_max_rejections_per_slice)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),

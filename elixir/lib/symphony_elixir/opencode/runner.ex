@@ -46,7 +46,21 @@ defmodule SymphonyElixir.OpenCode.Runner do
       Task.async(fn ->
         if is_binary(session_id) and session_id != "" do
           session_result_reader = Keyword.get(opts, :session_result_reader, &read_completed_session_result/2)
-          session_result_reader.(execution_dir, session_id)
+
+          case session_result_reader.(execution_dir, session_id) do
+            {:error, {:opencode_session_handoff_incomplete, _session_id}} ->
+              run_opencode_command(
+                runner,
+                command,
+                args,
+                incomplete_session_continuation_prompt(),
+                execution_dir,
+                session_id
+              )
+
+            other ->
+              other
+          end
         else
           run_opencode_command(runner, command, args, prompt, execution_dir, session_id)
         end
@@ -173,7 +187,8 @@ defmodule SymphonyElixir.OpenCode.Runner do
     with true <- File.exists?(db_path) || {:error, {:opencode_db_not_found, db_path}},
          {:ok, session} <- read_session_row(db_path, session_id),
          :ok <- ensure_session_directory(session, execution_dir),
-         {:ok, text} <- read_latest_completed_assistant_text(db_path, session_id) do
+         {:ok, text} <- read_latest_completed_assistant_text(db_path, session_id),
+         :ok <- ensure_completed_handoff_text(text, session_id) do
       {:ok, format_existing_session_output(session, text)}
     end
   end
@@ -273,6 +288,84 @@ defmodule SymphonyElixir.OpenCode.Runner do
   end
 
   defp decode_part_text(_row), do: ""
+
+  defp ensure_completed_handoff_text(text, session_id) when is_binary(text) do
+    if incomplete_handoff_text?(text) do
+      {:error, {:opencode_session_handoff_incomplete, session_id}}
+    else
+      :ok
+    end
+  end
+
+  defp incomplete_handoff_text?(text) when is_binary(text) do
+    incomplete_section_present?(text, "In Progress") or incomplete_section_present?(text, "Blocked") or
+      owner_input_requested?(text)
+  end
+
+  defp owner_input_requested?(text) when is_binary(text) do
+    normalized = String.downcase(text)
+
+    Enum.any?(
+      [
+        "нужно уточнение",
+        "требуется уточнение",
+        "нужен ответ",
+        "нужна авторизация",
+        "нужно подтверждение",
+        "можно откатить",
+        "есть блокер перед финальным",
+        "owner input",
+        "need owner input",
+        "needs owner input",
+        "needs clarification",
+        "requires clarification",
+        "needs confirmation",
+        "requires confirmation",
+        "needs authorization",
+        "requires authorization",
+        "blocked before final",
+        "evaluator returned `revise`",
+        "evaluator returned revise",
+        "evaluator вернул `revise`",
+        "evaluator вернул revise"
+      ],
+      &String.contains?(normalized, &1)
+    )
+  end
+
+  defp incomplete_section_present?(text, section_title) do
+    case Regex.run(
+           ~r/(?ims)^###\s+#{Regex.escape(section_title)}\s*$(.*?)(?:^###\s+|^##\s+|\z)/,
+           text,
+           capture: :all_but_first
+         ) do
+      [body | _] -> substantive_section_body?(body)
+      _ -> false
+    end
+  end
+
+  defp substantive_section_body?(body) do
+    body
+    |> String.split("\n")
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.reject(&(&1 in ["- `(none)`", "- (none)", "(none)", "`(none)`", "none", "None"]))
+    |> Enum.any?()
+  end
+
+  defp incomplete_session_continuation_prompt do
+    """
+    Continue the existing OpenCode task from the current session context.
+
+    Do not restate or replay the original task prompt. Use the session history as authority.
+    The previous assistant handoff reported remaining In Progress/Blocked work or asked for owner clarification, so the task is not ready for Symphony handoff yet.
+
+    If the previous handoff asked whether to edit, revert, stage, commit, push, tag, release, or otherwise mutate a forbidden/out-of-scope file, do not do that. Leave unrelated dirty files untouched, report them as unrelated, and complete only the scoped OpenCode task.
+
+    Finish the remaining work, run the required validation, then return a final handoff only when there is no remaining In Progress or Blocked section except `(none)` and no unresolved question for the owner/controller.
+    Confirm nothing was staged, committed, pushed, tagged, or released.
+    """
+  end
 
   defp format_existing_session_output(session, text) do
     """

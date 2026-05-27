@@ -155,6 +155,174 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
     refute_received {:opencode_called, _command, _args, _opts, _prompt}
   end
 
+  test "opencode runner continues an existing session when latest handoff is incomplete" do
+    issue = %Issue{
+      id: "issue-1",
+      identifier: "NER-13",
+      title: "Repair WCB target-closure executable readiness",
+      description: "Task packet from Codex Architect",
+      state: "In Progress"
+    }
+
+    test_pid = self()
+
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      opencode_project_root: "/root/proj/mnemesh",
+      opencode_server_url: "http://127.0.0.1:3000",
+      prompt: "OpenCode prompt for {{ issue.identifier }}"
+    )
+
+    assert {:ok, %{output: "continued\n", command: ["opencode" | args]}} =
+             Runner.run("/tmp/symphony/workspaces/mnemesh/NER-13", issue, "original full prompt",
+               session_lister: fn _command, _execution_dir, _title ->
+                 {:ok,
+                  [
+                    %{
+                      "id" => "ses_incomplete",
+                      "title" => "NER-13 Repair WCB target-closure executable readiness",
+                      "directory" => "/root/proj/mnemesh",
+                      "updated" => 20
+                    }
+                  ]}
+               end,
+               session_result_reader: fn _execution_dir, session_id ->
+                 {:error, {:opencode_session_handoff_incomplete, session_id}}
+               end,
+               runner: fn command, received_args, opts ->
+                 prompt_file = Enum.at(received_args, 3)
+                 prompt = File.read!(prompt_file)
+                 send(test_pid, {:opencode_called, command, received_args, opts, prompt})
+                 {"continued\n", 0}
+               end
+             )
+
+    assert "--session" in args
+    assert "ses_incomplete" in args
+    assert_received {:opencode_called, "bash", received_args, opts, prompt}
+    assert "--session" in received_args
+    assert "ses_incomplete" in received_args
+    assert opts[:cd] == "/root/proj/mnemesh"
+    assert prompt =~ "Continue the existing OpenCode task"
+    refute prompt =~ "original full prompt"
+  end
+
+  test "opencode runner continues existing session when latest completed text asks for owner clarification" do
+    issue = %Issue{
+      id: "issue-1",
+      identifier: "NER-13",
+      title: "Repair WCB target-closure executable readiness",
+      description: "Task packet from Codex Architect",
+      state: "In Progress"
+    }
+
+    test_pid = self()
+    data_home = Path.join(System.tmp_dir!(), "opencode-runner-xdg-#{System.unique_integer([:positive, :monotonic])}")
+    db_dir = Path.join([data_home, "opencode"])
+    db_path = Path.join(db_dir, "opencode.db")
+    File.mkdir_p!(db_dir)
+
+    previous_xdg_data_home = System.get_env("XDG_DATA_HOME")
+    System.put_env("XDG_DATA_HOME", data_home)
+
+    on_exit(fn ->
+      if previous_xdg_data_home do
+        System.put_env("XDG_DATA_HOME", previous_xdg_data_home)
+      else
+        System.delete_env("XDG_DATA_HOME")
+      end
+
+      File.rm_rf(data_home)
+    end)
+
+    assistant_text =
+      "Есть блокер перед финальным принятием: evaluator вернул `revise`.\n\n" <>
+        "Нужно уточнение: можно откатить `WORKFLOW.md` к HEAD?"
+
+    message_data = Jason.encode!(%{"role" => "assistant", "finish" => "stop"})
+    part_data = Jason.encode!(%{"type" => "text", "text" => assistant_text})
+
+    sql = """
+    create table session (
+      id text primary key,
+      title text,
+      directory text,
+      time_created integer,
+      time_updated integer,
+      summary_files integer,
+      summary_additions integer,
+      summary_deletions integer,
+      tokens_input integer,
+      tokens_output integer
+    );
+
+    create table message (
+      id text primary key,
+      session_id text,
+      time_created integer,
+      data text
+    );
+
+    create table part (
+      id text primary key,
+      message_id text,
+      time_created integer,
+      data text
+    );
+
+    insert into session
+      (id,title,directory,time_created,time_updated,summary_files,summary_additions,summary_deletions,tokens_input,tokens_output)
+      values
+      ('ses_owner_question','NER-13 Repair WCB target-closure executable readiness','/root/proj/mnemesh',1,2,4,10,2,100,20);
+
+    insert into message (id,session_id,time_created,data)
+      values ('msg_owner_question','ses_owner_question',2,#{sql_quote(message_data)});
+
+    insert into part (id,message_id,time_created,data)
+      values ('part_owner_question','msg_owner_question',3,#{sql_quote(part_data)});
+    """
+
+    assert {"", 0} = System.cmd("sqlite3", [db_path, sql], stderr_to_stdout: true)
+
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      opencode_project_root: "/root/proj/mnemesh",
+      opencode_server_url: "http://127.0.0.1:3000",
+      prompt: "OpenCode prompt for {{ issue.identifier }}"
+    )
+
+    assert {:ok, %{output: "continued\n", command: ["opencode" | args]}} =
+             Runner.run("/tmp/symphony/workspaces/mnemesh/NER-13", issue, "original full prompt",
+               session_lister: fn _command, _execution_dir, _title ->
+                 {:ok,
+                  [
+                    %{
+                      "id" => "ses_owner_question",
+                      "title" => "NER-13 Repair WCB target-closure executable readiness",
+                      "directory" => "/root/proj/mnemesh",
+                      "updated" => 20
+                    }
+                  ]}
+               end,
+               runner: fn command, received_args, opts ->
+                 prompt_file = Enum.at(received_args, 3)
+                 prompt = File.read!(prompt_file)
+                 send(test_pid, {:opencode_called, command, received_args, opts, prompt})
+                 {"continued\n", 0}
+               end
+             )
+
+    assert "--session" in args
+    assert "ses_owner_question" in args
+    assert_received {:opencode_called, "bash", received_args, opts, prompt}
+    assert "--session" in received_args
+    assert "ses_owner_question" in received_args
+    assert opts[:cd] == "/root/proj/mnemesh"
+    assert prompt =~ "asked for owner clarification"
+    assert prompt =~ "Leave unrelated dirty files untouched"
+    refute prompt =~ "original full prompt"
+  end
+
   test "opencode runner uses configured project root for visible shared sessions" do
     issue = %Issue{
       id: "issue-1",
@@ -442,4 +610,6 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
 
     assert_receive {:memory_tracker_state_update, "issue-1", "In Review"}
   end
+
+  defp sql_quote(value), do: "'" <> String.replace(value, "'", "''") <> "'"
 end

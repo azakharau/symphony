@@ -353,12 +353,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
           %{
             "body" => "first owner note",
             "createdAt" => "2026-01-01T01:00:00Z",
-            "user" => %{"name" => "Alex"}
+            "user" => %{"name" => "Alex"},
+            "parent" => nil
           },
           %{
             "body" => "latest owner answer",
             "createdAt" => "2026-01-03T01:00:00Z",
-            "user" => %{"name" => "Owner"}
+            "user" => %{"name" => "Owner"},
+            "parent" => %{"id" => "comment-question-1"}
           }
         ]
       },
@@ -377,8 +379,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.latest_comment_at == ~U[2026-01-03 01:00:00Z]
 
     assert issue.comments == [
-             %{body: "first owner note", created_at: ~U[2026-01-01 01:00:00Z], author: "Alex"},
-             %{body: "latest owner answer", created_at: ~U[2026-01-03 01:00:00Z], author: "Owner"}
+             %{body: "first owner note", created_at: ~U[2026-01-01 01:00:00Z], author: "Alex", parent_id: nil},
+             %{
+               body: "latest owner answer",
+               created_at: ~U[2026-01-03 01:00:00Z],
+               author: "Owner",
+               parent_id: "comment-question-1"
+             }
            ]
   end
 
@@ -531,7 +538,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       title: "Older owner question",
       state: "Need Owner Input",
       updated_at: ~U[2026-01-01 00:00:00Z],
-      latest_comment_at: ~U[2026-01-03 00:00:00Z]
+      latest_comment_at: ~U[2026-01-03 00:00:00Z],
+      comments: [%{body: "old reply", created_at: ~U[2026-01-03 00:00:00Z], parent_id: "question-old"}]
     }
 
     latest = %Issue{
@@ -540,7 +548,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       title: "Latest owner answer",
       state: "Need Owner Input",
       updated_at: ~U[2026-01-02 00:00:00Z],
-      latest_comment_at: ~U[2026-01-04 00:00:00Z]
+      latest_comment_at: ~U[2026-01-04 00:00:00Z],
+      comments: [%{body: "latest reply", created_at: ~U[2026-01-04 00:00:00Z], parent_id: "question-latest"}]
     }
 
     state = %Orchestrator.State{
@@ -562,6 +571,49 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              [older, latest],
              handled_state
            ) == nil
+  end
+
+  test "owner-input pulse ignores agent top-level comments newer than owner replies" do
+    issue = %Issue{
+      id: "owner-report-after-reply",
+      identifier: "NER-26",
+      title: "Agent report left for owner review",
+      state: "Need Owner Input",
+      latest_comment_at: ~U[2026-01-05 00:00:00Z],
+      comments: [
+        %{body: "owner reply", created_at: ~U[2026-01-04 00:00:00Z], parent_id: "question-1"},
+        %{body: "test report", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
+      ]
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      owner_input_pulsed: MapSet.new()
+    }
+
+    assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([issue], state) == nil
+  end
+
+  test "owner-input pulse ignores agent top-level comments without owner reply parent" do
+    agent_report = %Issue{
+      id: "owner-report",
+      identifier: "NER-26",
+      title: "Agent report left for owner review",
+      state: "Need Owner Input",
+      latest_comment_at: ~U[2026-01-04 00:00:00Z],
+      comments: [%{body: "test report", created_at: ~U[2026-01-04 00:00:00Z], parent_id: nil}]
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      owner_input_pulsed: MapSet.new()
+    }
+
+    assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([agent_report], state) == nil
   end
 
   test "owner-input issues do not block idle owner pulse dispatch" do

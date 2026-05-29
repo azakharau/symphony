@@ -50,6 +50,9 @@ defmodule SymphonyElixir.Linear.Client do
             user {
               name
             }
+            parent {
+              id
+            }
           }
         }
         createdAt
@@ -103,6 +106,9 @@ defmodule SymphonyElixir.Linear.Client do
             createdAt
             user {
               name
+            }
+            parent {
+              id
             }
           }
         }
@@ -549,7 +555,8 @@ defmodule SymphonyElixir.Linear.Client do
     %{
       body: body,
       created_at: parse_datetime(comment["createdAt"]),
-      author: get_in(comment, ["user", "name"])
+      author: get_in(comment, ["user", "name"]),
+      parent_id: get_in(comment, ["parent", "id"])
     }
   end
 

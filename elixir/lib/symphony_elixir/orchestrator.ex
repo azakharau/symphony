@@ -993,6 +993,7 @@ defmodule SymphonyElixir.Orchestrator do
     |> Enum.filter(fn
       %Issue{id: id, state: state_name} = issue when is_binary(id) and is_binary(state_name) ->
         normalize_issue_state(state_name) == "need owner input" and
+          not is_nil(owner_input_activity_at(issue)) and
           !MapSet.member?(state.owner_input_pulsed, owner_input_pulse_fingerprint(issue)) and
           !MapSet.member?(state.claimed, id) and
           !Map.has_key?(state.running, id) and
@@ -1056,11 +1057,23 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp owner_input_activity_at(%Issue{latest_comment_at: %DateTime{} = latest_comment_at}),
-    do: latest_comment_at
+  defp owner_input_activity_at(%Issue{comments: comments}) when is_list(comments) do
+    comments
+    |> Enum.sort_by(&comment_activity_sort_key/1)
+    |> List.last()
+    |> case do
+      %{parent_id: parent_id, created_at: %DateTime{} = created_at} when is_binary(parent_id) and parent_id != "" ->
+        created_at
 
-  defp owner_input_activity_at(%Issue{updated_at: %DateTime{} = updated_at}), do: updated_at
+      _ ->
+        nil
+    end
+  end
+
   defp owner_input_activity_at(%Issue{}), do: nil
+
+  defp comment_activity_sort_key(%{created_at: %DateTime{} = created_at}), do: DateTime.to_unix(created_at, :microsecond)
+  defp comment_activity_sort_key(_comment), do: 0
 
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
     Enum.sort_by(issues, fn

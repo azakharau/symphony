@@ -446,6 +446,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec active_issues_blocking_idle_pulse_for_test([Issue.t()]) :: [Issue.t()]
+  def active_issues_blocking_idle_pulse_for_test(issues) when is_list(issues) do
+    active_issues_blocking_idle_pulse(issues)
+  end
+
+  @doc false
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
     sort_issues_for_dispatch(issues)
@@ -888,8 +894,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_dispatch_idle_pulse(%State{} = state, active_issues, full_poll?) when is_list(active_issues) do
+    pulse_blocking_active_issues = active_issues_blocking_idle_pulse(active_issues)
+
     cond do
-      active_issues != [] ->
+      pulse_blocking_active_issues != [] ->
         state
 
       map_size(state.running) > 0 or map_size(state.retry_attempts) > 0 ->
@@ -912,6 +920,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_dispatch_idle_pulse(state, _active_issues, _full_poll?), do: state
+
+  defp active_issues_blocking_idle_pulse(issues) when is_list(issues) do
+    Enum.reject(issues, fn
+      %Issue{state: state_name} -> owner_input_issue_state?(state_name)
+      _issue -> false
+    end)
+  end
 
   defp pulse_dispatch_enabled? do
     active_state_set()

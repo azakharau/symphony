@@ -564,6 +564,25 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            ) == nil
   end
 
+  test "owner-input issues do not block idle owner pulse dispatch" do
+    owner_input = %Issue{
+      id: "owner-input-1",
+      identifier: "NER-28",
+      title: "Owner answer",
+      state: "Need Owner Input"
+    }
+
+    normal_work = %Issue{
+      id: "normal-work-1",
+      identifier: "NER-29",
+      title: "Normal work",
+      state: "Todo"
+    }
+
+    assert Orchestrator.active_issues_blocking_idle_pulse_for_test([owner_input]) == []
+    assert Orchestrator.active_issues_blocking_idle_pulse_for_test([owner_input, normal_work]) == [normal_work]
+  end
+
   test "todo issue with non-terminal blocker is not dispatch-eligible" do
     state = %Orchestrator.State{
       max_concurrent_agents: 3,

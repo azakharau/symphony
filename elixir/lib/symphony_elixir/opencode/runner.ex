@@ -58,8 +58,15 @@ defmodule SymphonyElixir.OpenCode.Runner do
                 session_id
               )
 
-            {:error, {:opencode_session_not_completed, _session_id}} = error ->
-              error
+            {:error, {:opencode_session_not_completed, _session_id}} ->
+              run_opencode_command(
+                runner,
+                command,
+                args,
+                incomplete_session_continuation_prompt(),
+                execution_dir,
+                session_id
+              )
 
             other ->
               other

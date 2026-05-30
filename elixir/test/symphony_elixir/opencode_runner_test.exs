@@ -207,7 +207,7 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
     assert "ses_manual_newest" in received_args
   end
 
-  test "opencode runner treats blank sqlite json output as not completed yet" do
+  test "opencode runner continues when existing session has no completed assistant text yet" do
     issue = %Issue{
       id: "issue-1",
       identifier: "NER-27",
@@ -277,7 +277,9 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
       prompt: "OpenCode prompt for {{ issue.identifier }}"
     )
 
-    assert {:error, {:opencode_session_not_completed, "ses_running"}} =
+    test_pid = self()
+
+    assert {:ok, %{output: "continued\n", command: command}} =
              Runner.run("/tmp/symphony/workspaces/mnemesh/NER-27", issue, "prompt body",
                session_lister: fn _command, _execution_dir, _title ->
                  {:ok,
@@ -289,8 +291,36 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
                       "updated" => 20
                     }
                   ]}
+               end,
+               runner: fn command, received_args, opts ->
+                 prompt_file = Enum.at(received_args, 3)
+                 prompt = File.read!(prompt_file)
+                 send(test_pid, {:opencode_called, command, received_args, opts, prompt})
+                 {"continued\n", 0}
                end
              )
+
+    assert command == [
+             "opencode",
+             "run",
+             "--dir",
+             "/home/agent/proj/mnemesh",
+             "--agent",
+             "build",
+             "--format",
+             "json",
+             "--title",
+             "NER-27 Implement WCB target acquisition after NER-27 benchmark",
+             "--session",
+             "ses_running",
+             "--attach",
+             "http://127.0.0.1:3000"
+           ]
+
+    assert_receive {:opencode_called, "bash", _received_args, opts, prompt}
+    assert opts[:cd] == "/home/agent/proj/mnemesh"
+    assert prompt =~ "Continue the existing OpenCode task"
+    refute prompt =~ "prompt body"
   end
 
   test "opencode runner waits for an existing session when latest handoff is incomplete" do

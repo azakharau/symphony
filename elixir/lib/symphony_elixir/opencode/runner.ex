@@ -58,6 +58,9 @@ defmodule SymphonyElixir.OpenCode.Runner do
                 session_id
               )
 
+            {:error, {:opencode_session_not_completed, _session_id}} = error ->
+              error
+
             other ->
               other
           end
@@ -165,11 +168,30 @@ defmodule SymphonyElixir.OpenCode.Runner do
     end
   end
 
-  defp matching_session?(%{"title" => title, "directory" => directory}, execution_dir, title) do
-    directory == execution_dir
+  defp matching_session?(%{"title" => session_title, "directory" => directory}, execution_dir, issue_title) do
+    directory == execution_dir and
+      (session_title == issue_title or same_issue_identifier?(session_title, issue_title))
   end
 
   defp matching_session?(_session, _execution_dir, _title), do: false
+
+  defp same_issue_identifier?(session_title, issue_title)
+       when is_binary(session_title) and is_binary(issue_title) do
+    with {:ok, issue_identifier} <- issue_identifier_prefix(issue_title) do
+      String.starts_with?(session_title, issue_identifier <> " ")
+    else
+      _ -> false
+    end
+  end
+
+  defp same_issue_identifier?(_session_title, _issue_title), do: false
+
+  defp issue_identifier_prefix(title) when is_binary(title) do
+    case Regex.run(~r/^[A-Z][A-Z0-9]*-\d+/, title) do
+      [identifier] -> {:ok, identifier}
+      _ -> :error
+    end
+  end
 
   defp session_updated_sort_key(%{"updated" => updated}) when is_integer(updated), do: updated
   defp session_updated_sort_key(%{"created" => created}) when is_integer(created), do: created
@@ -266,10 +288,12 @@ defmodule SymphonyElixir.OpenCode.Runner do
   defp sqlite_json(db_path, sql) do
     case System.cmd("sqlite3", ["-json", db_path, sql], stderr_to_stdout: true) do
       {output, 0} ->
-        case Jason.decode(output) do
-          {:ok, rows} when is_list(rows) -> {:ok, rows}
-          {:ok, other} -> {:error, {:opencode_sqlite_unexpected_payload, other}}
-          {:error, reason} -> {:error, {:opencode_sqlite_json_decode_failed, Exception.message(reason), trim_output(output)}}
+        case String.trim(output) do
+          "" ->
+            {:ok, []}
+
+          output ->
+            decode_sqlite_json(output)
         end
 
       {output, status} ->
@@ -278,6 +302,14 @@ defmodule SymphonyElixir.OpenCode.Runner do
   rescue
     error in [ErlangError, RuntimeError, ArgumentError, File.Error] ->
       {:error, {:opencode_sqlite_failed, Exception.message(error)}}
+  end
+
+  defp decode_sqlite_json(output) do
+    case Jason.decode(output) do
+      {:ok, rows} when is_list(rows) -> {:ok, rows}
+      {:ok, other} -> {:error, {:opencode_sqlite_unexpected_payload, other}}
+      {:error, reason} -> {:error, {:opencode_sqlite_json_decode_failed, Exception.message(reason), trim_output(output)}}
+    end
   end
 
   defp decode_part_text(%{"data" => data}) when is_binary(data) do

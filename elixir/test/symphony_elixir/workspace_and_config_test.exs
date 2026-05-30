@@ -3,6 +3,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias Ecto.Changeset
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
+  alias SymphonyElixir.PromptBuilder
   alias SymphonyElixir.Linear.Client
 
   test "workspace bootstrap can be implemented in after_create hook" do
@@ -327,6 +328,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       "assignee" => %{
         "id" => "user-1"
       },
+      "projectMilestone" => %{
+        "id" => "milestone-1",
+        "name" => "P1 hardening",
+        "description" => "Owner-approved phase",
+        "status" => "started",
+        "targetDate" => "2026-06-15"
+      },
       "labels" => %{"nodes" => [%{"name" => "Backend"}]},
       "inverseRelations" => %{
         "nodes" => [
@@ -375,6 +383,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.priority == 2
     assert issue.state == "Todo"
     assert issue.assignee_id == "user-1"
+
+    assert issue.project_milestone == %{
+             id: "milestone-1",
+             name: "P1 hardening",
+             description: "Owner-approved phase",
+             status: "started",
+             target_date: "2026-06-15"
+           }
+
     assert issue.assigned_to_worker
     assert issue.latest_comment_at == ~U[2026-01-03 01:00:00Z]
 
@@ -549,6 +566,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       state: "Need Owner Input",
       updated_at: ~U[2026-01-02 00:00:00Z],
       latest_comment_at: ~U[2026-01-04 00:00:00Z],
+      project_milestone: %{
+        id: "milestone-1",
+        name: "Approved phase",
+        description: "phase_state: todo"
+      },
       comments: [%{body: "latest reply", created_at: ~U[2026-01-04 00:00:00Z], parent_id: "question-latest"}]
     }
 
@@ -580,6 +602,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       title: "Agent report left for owner review",
       state: "Need Owner Input",
       latest_comment_at: ~U[2026-01-05 00:00:00Z],
+      project_milestone: %{
+        id: "milestone-1",
+        name: "Approved phase",
+        description: "phase_state: todo"
+      },
       comments: [
         %{body: "owner reply", created_at: ~U[2026-01-04 00:00:00Z], parent_id: "question-1"},
         %{body: "test report", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
@@ -603,6 +630,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       title: "Agent report left for owner review",
       state: "Need Owner Input",
       latest_comment_at: ~U[2026-01-04 00:00:00Z],
+      project_milestone: %{
+        id: "milestone-1",
+        name: "Approved phase",
+        description: "phase_state: todo"
+      },
       comments: [%{body: "test report", created_at: ~U[2026-01-04 00:00:00Z], parent_id: nil}]
     }
 
@@ -614,6 +646,69 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     }
 
     assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([agent_report], state) == nil
+  end
+
+  test "owner-input pulse ignores issue without todo project milestone" do
+    issue = %Issue{
+      id: "owner-unscoped",
+      identifier: "NER-30",
+      title: "Owner question",
+      state: "Need Owner Input",
+      latest_comment_at: ~U[2026-01-04 00:00:00Z],
+      comments: [%{body: "owner reply", created_at: ~U[2026-01-04 00:00:00Z], parent_id: "question-1"}]
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      owner_input_pulsed: MapSet.new()
+    }
+
+    assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([issue], state) == nil
+  end
+
+  test "done continuation pulse ignores issue without todo project milestone" do
+    done_issue = %Issue{
+      id: "done-without-milestone",
+      identifier: "NER-17",
+      title: "Closed work",
+      state: "Done",
+      updated_at: ~U[2026-01-04 00:00:00Z]
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      continuation_pulsed: MapSet.new()
+    }
+
+    assert Orchestrator.latest_done_issue_for_continuation_for_test([done_issue], state) == nil
+  end
+
+  test "done continuation pulse accepts issue inside todo project milestone" do
+    done_issue = %Issue{
+      id: "done-with-todo-milestone",
+      identifier: "NER-18",
+      title: "Closed work",
+      state: "Done",
+      updated_at: ~U[2026-01-04 00:00:00Z],
+      project_milestone: %{
+        id: "milestone-1",
+        name: "Approved phase",
+        description: "phase_state: todo"
+      }
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      continuation_pulsed: MapSet.new()
+    }
+
+    assert Orchestrator.latest_done_issue_for_continuation_for_test([done_issue], state) == done_issue
   end
 
   test "owner-input issues do not block idle owner pulse dispatch" do
@@ -691,10 +786,305 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       identifier: "MT-1003",
       title: "Ready work",
       state: "Todo",
+      project_milestone: %{
+        id: "milestone-ready-1",
+        name: "Ready milestone",
+        description: "phase_state: todo"
+      },
       blocked_by: [%{id: "blocker-2", identifier: "MT-1004", state: "Closed"}]
     }
 
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "issue without project milestone is not dispatch-eligible" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "no-milestone-1",
+      identifier: "MT-1009",
+      title: "Unscoped work",
+      state: "Todo"
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "issue inside unmarked project milestone is not dispatch-eligible" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-unmarked-1",
+      identifier: "MT-1010",
+      title: "Milestone work",
+      state: "Todo",
+      project_milestone: %{
+        id: "milestone-1",
+        name: "Unmarked milestone",
+        description: "Product direction draft"
+      }
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "issue inside todo project milestone is dispatch-eligible" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-todo-1",
+      identifier: "MT-1011",
+      title: "Milestone work",
+      state: "Todo",
+      project_milestone: %{
+        id: "milestone-2",
+        name: "todo milestone",
+        description: "phase_state: todo\n\nProduct direction"
+      }
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "issue outside active project milestone is not dispatch-eligible" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      active_project_milestone_id: "milestone-active",
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-other-1",
+      identifier: "MT-1013",
+      title: "Other milestone work",
+      state: "Todo",
+      project_milestone: %{
+        id: "milestone-other",
+        name: "Other milestone",
+        description: "phase_state: todo"
+      }
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "issue inside active project milestone remains dispatch-eligible" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      active_project_milestone_id: "milestone-active",
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-active-1",
+      identifier: "MT-1014",
+      title: "Active milestone work",
+      state: "Todo",
+      project_milestone: %{
+        id: "milestone-active",
+        name: "Active milestone",
+        description: "phase_state: todo"
+      }
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "issue inside paused project milestone is not dispatch-eligible" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-paused-1",
+      identifier: "MT-1012",
+      title: "Milestone work",
+      state: "Todo",
+      project_milestone: %{
+        id: "milestone-3",
+        name: "Paused milestone",
+        description: "phase_state: paused\n\nProduct direction"
+      }
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "todo project milestone without active issues produces synthetic planning issue" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    milestone = %{
+      id: "milestone-agentforge-1",
+      name: "Single-file agent authoring cutover",
+      description: "phase_state: todo\n\n## Intent\n\nMake source authoring compact.",
+      status: "next"
+    }
+
+    assert [planning_issue] =
+             Orchestrator.milestone_planning_issues_for_test([milestone], [], state)
+
+    assert planning_issue.synthetic_kind == :project_milestone_planning
+    assert planning_issue.id == "project-milestone:milestone-agentforge-1:planning"
+    assert planning_issue.identifier == "MILESTONE-milestone-agentforge-1"
+    assert planning_issue.title == "Plan milestone: Single-file agent authoring cutover"
+    assert planning_issue.state == "Todo"
+
+    assert planning_issue.project_milestone == %{
+             id: "milestone-agentforge-1",
+             name: "Single-file agent authoring cutover",
+             description: "phase_state: todo\n\n## Intent\n\nMake source authoring compact.",
+             status: "next",
+             target_date: nil
+           }
+
+    assert planning_issue.description =~ "Synthetic milestone planning task"
+    assert planning_issue.description =~ "Make source authoring compact."
+  end
+
+  test "synthetic project milestone planning issue renders optional milestone fields for strict templates" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      prompt: "Milestone {{ issue.project_milestone.name }} target={{ issue.project_milestone.target_date }} url={{ issue.url }}"
+    )
+
+    state = %Orchestrator.State{max_concurrent_agents: 3, running: %{}, claimed: MapSet.new(), retry_attempts: %{}}
+
+    milestone = %{
+      id: "milestone-no-date",
+      name: "No target date",
+      description: "phase_state: todo"
+    }
+
+    assert [planning_issue] = Orchestrator.milestone_planning_issues_for_test([milestone], [], state)
+    assert PromptBuilder.build_prompt(planning_issue) =~ "Milestone No target date target= url="
+  end
+
+  test "project milestone planning ignores paused needs-decision and unmarked milestones" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    milestones = [
+      %{id: "paused", name: "Paused", description: "phase_state: paused"},
+      %{id: "needs", name: "Needs", description: "phase_state: needs-decision"},
+      %{id: "draft", name: "Draft", description: "Owner notes only"}
+    ]
+
+    assert [] = Orchestrator.milestone_planning_issues_for_test(milestones, [], state)
+  end
+
+  test "project milestone planning does not duplicate active milestone work" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    milestone = %{
+      id: "milestone-active",
+      name: "Active milestone",
+      description: "phase_state: todo"
+    }
+
+    active_issue = %Issue{
+      id: "issue-active",
+      identifier: "NER-123",
+      title: "Existing active issue",
+      state: "Todo",
+      project_milestone: milestone
+    }
+
+    assert [] = Orchestrator.milestone_planning_issues_for_test([milestone], [active_issue], state)
+
+    planning_issue = %Issue{
+      id: "project-milestone:milestone-active:planning",
+      identifier: "MILESTONE-milestone-active",
+      title: "Plan milestone: Active milestone",
+      state: "Todo",
+      synthetic_kind: :project_milestone_planning,
+      project_milestone: milestone
+    }
+
+    running_state = %{
+      state
+      | running: %{"project-milestone:milestone-active:planning" => %{issue: planning_issue}}
+    }
+
+    assert [] = Orchestrator.milestone_planning_issues_for_test([milestone], [], running_state)
+  end
+
+  test "active project milestone prevents planning issue from another milestone" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      active_project_milestone_id: "milestone-current",
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    other_milestone = %{
+      id: "milestone-other",
+      name: "Other milestone",
+      description: "phase_state: todo"
+    }
+
+    assert [] = Orchestrator.milestone_planning_issues_for_test([other_milestone], [], state)
+  end
+
+  test "synthetic project milestone planning issue skips Linear issue revalidation" do
+    issue = %Issue{
+      id: "project-milestone:milestone-1:planning",
+      identifier: "MILESTONE-milestone-1",
+      title: "Plan milestone: milestone 1",
+      state: "Todo",
+      synthetic_kind: :project_milestone_planning,
+      project_milestone: %{id: "milestone-1", name: "Milestone", description: "phase_state: todo"}
+    }
+
+    assert {:ok, ^issue} =
+             Orchestrator.revalidate_issue_for_dispatch_for_test(issue, fn _ids ->
+               flunk("synthetic milestone planning issue must not be fetched as a Linear issue")
+             end)
   end
 
   test "need owner input issue is parked instead of normal dispatch-eligible" do

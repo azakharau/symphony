@@ -26,6 +26,13 @@ defmodule SymphonyElixir.Linear.Client do
         assignee {
           id
         }
+        projectMilestone {
+          id
+          name
+          description
+          status
+          targetDate
+        }
         labels {
           nodes {
             name
@@ -83,6 +90,13 @@ defmodule SymphonyElixir.Linear.Client do
         assignee {
           id
         }
+        projectMilestone {
+          id
+          name
+          description
+          status
+          targetDate
+        }
         labels {
           nodes {
             name
@@ -126,6 +140,41 @@ defmodule SymphonyElixir.Linear.Client do
     }
   }
   """
+
+  @project_milestones_query """
+  query SymphonyLinearProjectMilestones($projectSlug: String!, $first: Int!) {
+    projects(filter: {slugId: {eq: $projectSlug}}, first: 1) {
+      nodes {
+        projectMilestones(first: $first) {
+          nodes {
+            id
+            name
+            description
+            status
+            targetDate
+          }
+        }
+      }
+    }
+  }
+  """
+
+  @spec fetch_project_milestones() :: {:ok, [map()]} | {:error, term()}
+  def fetch_project_milestones do
+    tracker = Config.settings!().tracker
+    project_slug = tracker.project_slug
+
+    cond do
+      is_nil(tracker.api_key) ->
+        {:error, :missing_linear_api_token}
+
+      is_nil(project_slug) ->
+        {:error, :missing_linear_project_slug}
+
+      true ->
+        do_fetch_project_milestones(project_slug)
+    end
+  end
 
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues do
@@ -258,6 +307,22 @@ defmodule SymphonyElixir.Linear.Client do
 
       ids ->
         do_fetch_issue_states(ids, nil, graphql_fun)
+    end
+  end
+
+  defp do_fetch_project_milestones(project_slug) when is_binary(project_slug) do
+    with {:ok, response} <- graphql(@project_milestones_query, %{projectSlug: project_slug, first: 50}) do
+      milestones =
+        response
+        |> get_in(["data", "projects", "nodes"])
+        |> List.wrap()
+        |> List.first()
+        |> case do
+          %{"projectMilestones" => %{"nodes" => nodes}} when is_list(nodes) -> nodes
+          _ -> []
+        end
+
+      {:ok, Enum.map(milestones, &normalize_project_milestone/1)}
     end
   end
 
@@ -520,6 +585,7 @@ defmodule SymphonyElixir.Linear.Client do
       branch_name: issue["branchName"],
       url: issue["url"],
       assignee_id: assignee_field(assignee, "id"),
+      project_milestone: normalize_project_milestone(issue["projectMilestone"]),
       latest_comment_at: latest_comment_at(issue),
       comments: extract_comments(issue),
       blocked_by: extract_blockers(issue),
@@ -531,6 +597,18 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp normalize_issue(_issue, _assignee_filter), do: nil
+
+  defp normalize_project_milestone(%{} = milestone) do
+    %{
+      id: milestone["id"],
+      name: milestone["name"],
+      description: milestone["description"],
+      status: milestone["status"],
+      target_date: milestone["targetDate"]
+    }
+  end
+
+  defp normalize_project_milestone(_milestone), do: nil
 
   defp latest_comment_at(issue) when is_map(issue) do
     issue

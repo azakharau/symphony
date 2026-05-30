@@ -907,7 +907,7 @@ defmodule SymphonyElixir.CoreTest do
 
   test "prompt builder renders issue and attempt values from workflow template" do
     workflow_prompt =
-      "Ticket {{ issue.identifier }} {{ issue.title }} labels={{ issue.labels }} attempt={{ attempt }} {% for comment in issue.comments %}comment={{ comment.author }}:{{ comment.body }}{% endfor %}"
+      "Ticket {{ issue.identifier }} {{ issue.title }} milestone={{ issue.project_milestone.name }} status={{ issue.project_milestone.status }} labels={{ issue.labels }} attempt={{ attempt }} {% for comment in issue.comments %}comment={{ comment.author }}:{{ comment.body }}{% endfor %}"
 
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
 
@@ -917,6 +917,7 @@ defmodule SymphonyElixir.CoreTest do
       description: "Replace transport layer",
       state: "Todo",
       url: "https://example.org/issues/S-1",
+      project_milestone: %{id: "milestone-1", name: "P1 hardening", status: "started"},
       labels: ["backend"],
       comments: [%{author: "Alex", body: "owner answer", created_at: ~U[2026-01-03 01:00:00Z]}]
     }
@@ -924,6 +925,8 @@ defmodule SymphonyElixir.CoreTest do
     prompt = PromptBuilder.build_prompt(issue, attempt: 3)
 
     assert prompt =~ "Ticket S-1 Refactor backend request path"
+    assert prompt =~ "milestone=P1 hardening"
+    assert prompt =~ "status=started"
     assert prompt =~ "labels=backend"
     assert prompt =~ "attempt=3"
     assert prompt =~ "comment=Alex:owner answer"

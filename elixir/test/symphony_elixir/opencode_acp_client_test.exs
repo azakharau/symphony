@@ -83,7 +83,7 @@ defmodule SymphonyElixir.OpenCodeACPClientTest do
     {:ok, client} = start_client("permission", handler: self(), permission_policy: "reject")
     assert {:ok, _} = ACPClient.initialize(client)
 
-    assert_received {:acp_request, "session/request_permission", %{"reason" => "edit"}}
+    assert_receive {:acp_request, "session/request_permission", %{"reason" => "edit"}}, 1_000
     assert_receive {:acp_notification, "permission_observed", %{"outcome" => "reject"}}
   end
 

@@ -913,68 +913,72 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_dispatch_milestone_planning(%State{} = state, _issues, false), do: state
 
   defp maybe_dispatch_milestone_planning(%State{} = state, issues, true) when is_list(issues) do
-    cond do
-      map_size(state.running) > 0 or map_size(state.retry_attempts) > 0 ->
-        state
-
-      available_slots(state) <= 0 ->
-        state
-
-      not pulse_dispatch_enabled?() ->
-        state
-
-      true ->
-        case Tracker.fetch_project_milestones() do
-          {:ok, milestones} ->
-            milestones
-            |> milestone_planning_issues(issues, state, active_state_set(), terminal_state_set())
-            |> List.first()
-            |> case do
-              %Issue{} = planning_issue ->
-                Logger.info("Dispatching Codex project-milestone planning: #{issue_context(planning_issue)} milestone_id=#{issue_project_milestone_id(planning_issue)}")
-
-                dispatch_issue(state, planning_issue)
-
-              nil ->
-                state
-            end
-
-          {:error, reason} ->
-            Logger.warning("Skipping project-milestone planning dispatch; failed to fetch milestones: #{inspect(reason)}")
-            state
-        end
+    if milestone_planning_dispatch_ready?(state) do
+      dispatch_milestone_planning_candidate(state, issues)
+    else
+      state
     end
   end
 
   defp maybe_dispatch_milestone_planning(state, _issues, _full_poll?), do: state
 
+  defp milestone_planning_dispatch_ready?(%State{} = state) do
+    map_size(state.running) == 0 and
+      map_size(state.retry_attempts) == 0 and
+      available_slots(state) > 0 and
+      pulse_dispatch_enabled?()
+  end
+
+  defp dispatch_milestone_planning_candidate(%State{} = state, issues) do
+    case Tracker.fetch_project_milestones() do
+      {:ok, milestones} ->
+        milestones
+        |> milestone_planning_issues(issues, state, active_state_set(), terminal_state_set())
+        |> List.first()
+        |> dispatch_milestone_planning_issue(state)
+
+      {:error, reason} ->
+        Logger.warning("Skipping project-milestone planning dispatch; failed to fetch milestones: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp dispatch_milestone_planning_issue(%Issue{} = planning_issue, %State{} = state) do
+    Logger.info("Dispatching Codex project-milestone planning: #{issue_context(planning_issue)} milestone_id=#{issue_project_milestone_id(planning_issue)}")
+
+    dispatch_issue(state, planning_issue)
+  end
+
+  defp dispatch_milestone_planning_issue(nil, %State{} = state), do: state
+
   defp maybe_dispatch_idle_pulse(%State{} = state, active_issues, full_poll?) when is_list(active_issues) do
     pulse_blocking_active_issues = active_issues_blocking_idle_pulse(active_issues)
 
-    cond do
-      pulse_blocking_active_issues != [] ->
-        state
-
-      map_size(state.running) > 0 or map_size(state.retry_attempts) > 0 ->
-        state
-
-      available_slots(state) <= 0 ->
-        state
-
-      not pulse_dispatch_enabled?() ->
-        state
-
-      true ->
-        case dispatch_latest_owner_input_pulse(state) do
-          {:dispatched, state} -> state
-          {:none, state} when full_poll? -> dispatch_latest_done_continuation_pulse(state)
-          {:none, state} -> state
-          {:error, state} -> state
-        end
+    if idle_pulse_dispatch_ready?(state, pulse_blocking_active_issues) do
+      dispatch_idle_pulse(state, full_poll?)
+    else
+      state
     end
   end
 
   defp maybe_dispatch_idle_pulse(state, _active_issues, _full_poll?), do: state
+
+  defp idle_pulse_dispatch_ready?(%State{} = state, pulse_blocking_active_issues) do
+    pulse_blocking_active_issues == [] and
+      map_size(state.running) == 0 and
+      map_size(state.retry_attempts) == 0 and
+      available_slots(state) > 0 and
+      pulse_dispatch_enabled?()
+  end
+
+  defp dispatch_idle_pulse(%State{} = state, full_poll?) do
+    case dispatch_latest_owner_input_pulse(state) do
+      {:dispatched, state} -> state
+      {:none, state} when full_poll? -> dispatch_latest_done_continuation_pulse(state)
+      {:none, state} -> state
+      {:error, state} -> state
+    end
+  end
 
   defp active_issues_blocking_idle_pulse(issues) when is_list(issues) do
     Enum.reject(issues, fn
@@ -989,35 +993,39 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_latest_owner_input_pulse(%State{} = state) do
-    if not MapSet.member?(active_state_set(), "need owner input") do
-      {:none, state}
+    if MapSet.member?(active_state_set(), "need owner input") do
+      fetch_latest_owner_input_pulse(state)
     else
-      case Tracker.fetch_issues_by_states(["Need Owner Input"]) do
-        {:ok, issues} ->
-          issues
-          |> latest_owner_input_issue_for_pulse(state)
-          |> case do
-            %Issue{} = issue ->
-              fingerprint = owner_input_pulse_fingerprint(issue)
-
-              Logger.info("Dispatching Codex owner-input pulse from updated issue: #{issue_context(issue)}")
-
-              {:dispatched,
-               state
-               |> mark_owner_input_pulsed(fingerprint)
-               |> do_dispatch_issue(issue, nil, nil, :owner_input)}
-
-            nil ->
-              {:none, state}
-          end
-
-        {:error, reason} ->
-          Logger.warning("Skipping Codex owner-input pulse; failed to fetch Need Owner Input issues: #{inspect(reason)}")
-
-          {:error, state}
-      end
+      {:none, state}
     end
   end
+
+  defp fetch_latest_owner_input_pulse(%State{} = state) do
+    case Tracker.fetch_issues_by_states(["Need Owner Input"]) do
+      {:ok, issues} ->
+        issues
+        |> latest_owner_input_issue_for_pulse(state)
+        |> dispatch_owner_input_pulse_issue(state)
+
+      {:error, reason} ->
+        Logger.warning("Skipping Codex owner-input pulse; failed to fetch Need Owner Input issues: #{inspect(reason)}")
+
+        {:error, state}
+    end
+  end
+
+  defp dispatch_owner_input_pulse_issue(%Issue{} = issue, %State{} = state) do
+    fingerprint = owner_input_pulse_fingerprint(issue)
+
+    Logger.info("Dispatching Codex owner-input pulse from updated issue: #{issue_context(issue)}")
+
+    {:dispatched,
+     state
+     |> mark_owner_input_pulsed(fingerprint)
+     |> do_dispatch_issue(issue, nil, nil, :owner_input)}
+  end
+
+  defp dispatch_owner_input_pulse_issue(nil, %State{} = state), do: {:none, state}
 
   defp dispatch_latest_done_continuation_pulse(%State{} = state) do
     case Tracker.fetch_issues_by_states(["Done"]) do
@@ -1165,22 +1173,38 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp milestone_planning_allowed?(milestone, issues, %State{} = state, active_states, terminal_states)
        when is_map(milestone) and is_list(issues) do
-    milestone_id = milestone_id(milestone)
-    planning_issue_id = synthetic_milestone_planning_issue_id(milestone_id)
+    case milestone_id(milestone) do
+      milestone_id when is_binary(milestone_id) ->
+        milestone_plan_metadata_allowed?(milestone, milestone_id, state) and
+          milestone_plan_issues_available?(issues, milestone_id, active_states, terminal_states) and
+          milestone_plan_runtime_available?(state, milestone_id)
 
-    not is_nil(milestone_id) and
-      milestone_phase_state?(milestone_description(milestone), "todo") and
-      milestone_planning_batch_allowed?(milestone_id, state) and
-      !any_active_issue_in_other_milestone?(issues, milestone_id, active_states, terminal_states) and
-      !milestone_has_active_issue?(issues, milestone_id, active_states, terminal_states) and
-      !MapSet.member?(state.claimed, planning_issue_id) and
-      !Map.has_key?(state.running, planning_issue_id) and
-      !Map.has_key?(state.blocked, planning_issue_id) and
-      !Map.has_key?(state.retry_attempts, planning_issue_id) and
-      !active_project_milestone_has_runtime_state?(state, milestone_id)
+      _missing ->
+        false
+    end
   end
 
   defp milestone_planning_allowed?(_milestone, _issues, _state, _active_states, _terminal_states), do: false
+
+  defp milestone_plan_metadata_allowed?(milestone, milestone_id, %State{} = state) do
+    milestone_phase_state?(milestone_description(milestone), "todo") and
+      milestone_planning_batch_allowed?(milestone_id, state)
+  end
+
+  defp milestone_plan_issues_available?(issues, milestone_id, active_states, terminal_states) do
+    not any_active_issue_in_other_milestone?(issues, milestone_id, active_states, terminal_states) and
+      not milestone_has_active_issue?(issues, milestone_id, active_states, terminal_states)
+  end
+
+  defp milestone_plan_runtime_available?(%State{} = state, milestone_id) do
+    planning_issue_id = synthetic_milestone_planning_issue_id(milestone_id)
+
+    not MapSet.member?(state.claimed, planning_issue_id) and
+      not Map.has_key?(state.running, planning_issue_id) and
+      not Map.has_key?(state.blocked, planning_issue_id) and
+      not Map.has_key?(state.retry_attempts, planning_issue_id) and
+      not active_project_milestone_has_runtime_state?(state, milestone_id)
+  end
 
   defp milestone_planning_batch_allowed?(milestone_id, %State{active_project_milestone_id: nil})
        when is_binary(milestone_id),
@@ -1298,17 +1322,21 @@ defmodule SymphonyElixir.Orchestrator do
     candidate_issue?(issue, active_states, terminal_states) and
       milestone_dispatch_allowed?(issue) and
       milestone_batch_allowed?(issue, state) and
-      !owner_input_issue_state?(issue.state) and
-      !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
-      !MapSet.member?(claimed, issue.id) and
-      !Map.has_key?(running, issue.id) and
-      !Map.has_key?(blocked, issue.id) and
+      issue_dispatch_state_available?(issue, terminal_states, claimed, running, blocked) and
       available_slots(state) > 0 and
       state_slots_available?(issue, running) and
       worker_slots_available?(state)
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
+
+  defp issue_dispatch_state_available?(issue, terminal_states, claimed, running, blocked) do
+    not owner_input_issue_state?(issue.state) and
+      not todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
+      not MapSet.member?(claimed, issue.id) and
+      not Map.has_key?(running, issue.id) and
+      not Map.has_key?(blocked, issue.id)
+  end
 
   defp state_slots_available?(%Issue{state: issue_state}, running) when is_map(running) do
     limit = Config.max_concurrent_agents_for_state(issue_state)

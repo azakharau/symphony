@@ -260,33 +260,7 @@ defmodule SymphonyElixir.OpenCode.ACPClient do
 
     direct =
       Enum.reduce(capabilities, base, fn {key, value}, acc ->
-        key = to_string(key)
-
-        cond do
-          key in ["methods", "requests", "requestMethods"] and is_list(value) ->
-            Map.merge(acc, capability_map(value))
-
-          key in ["session", "sessions"] and is_map(value) ->
-            Map.merge(acc, nested_capability_map("session", value))
-
-          key in ["sessionCapabilities", "session_capabilities"] and is_map(value) ->
-            Map.merge(acc, nested_capability_map("session", value))
-
-          key in ["promptCapabilities", "prompt_capabilities"] and is_map(value) and value != %{} ->
-            Map.put(acc, "session/prompt", true)
-
-          key in ["loadSession", "load_session"] and truthy?(value) ->
-            Map.put(acc, "session/load", true)
-
-          String.contains?(key, "/") and truthy?(value) ->
-            Map.put(acc, key, true)
-
-          String.contains?(key, "_") and truthy?(value) ->
-            Map.put(acc, String.replace(key, "_", "/"), true)
-
-          true ->
-            acc
-        end
+        put_capability_entry(acc, to_string(key), value)
       end)
 
     nested =
@@ -299,6 +273,44 @@ defmodule SymphonyElixir.OpenCode.ACPClient do
   end
 
   defp capability_map(_capabilities), do: %{}
+
+  defp put_capability_entry(acc, key, value)
+       when key in ["methods", "requests", "requestMethods"] and is_list(value) do
+    Map.merge(acc, capability_map(value))
+  end
+
+  defp put_capability_entry(acc, key, value)
+       when key in ["session", "sessions"] and is_map(value) do
+    Map.merge(acc, nested_capability_map("session", value))
+  end
+
+  defp put_capability_entry(acc, key, value)
+       when key in ["sessionCapabilities", "session_capabilities"] and is_map(value) do
+    Map.merge(acc, nested_capability_map("session", value))
+  end
+
+  defp put_capability_entry(acc, key, value)
+       when key in ["promptCapabilities", "prompt_capabilities"] and is_map(value) and value != %{} do
+    Map.put(acc, "session/prompt", true)
+  end
+
+  defp put_capability_entry(acc, key, value)
+       when key in ["loadSession", "load_session"] do
+    if truthy?(value), do: Map.put(acc, "session/load", true), else: acc
+  end
+
+  defp put_capability_entry(acc, key, value) do
+    cond do
+      String.contains?(key, "/") and truthy?(value) ->
+        Map.put(acc, key, true)
+
+      String.contains?(key, "_") and truthy?(value) ->
+        Map.put(acc, String.replace(key, "_", "/"), true)
+
+      true ->
+        acc
+    end
+  end
 
   defp agent_capability_shape?(capabilities) do
     Enum.any?(capabilities, fn {key, _value} ->

@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.OpenCodeACPRunnerTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.OpenCode.ACPSessionStore
   alias SymphonyElixir.OpenCode.Runner
 
   defmodule FailingSessionStore do
@@ -232,7 +233,7 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
 
   defp write_session_store!(workspace_root, issue, project_root, session_id) do
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
-    :ok = SymphonyElixir.OpenCode.ACPSessionStore.put(issue, project_root, session_id)
+    :ok = ACPSessionStore.put(issue, project_root, session_id)
   end
 
   defp fake_acp_server! do

@@ -4,7 +4,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
   """
 
   alias SymphonyElixir.{Config, Linear.Issue, PathSafety}
-  alias SymphonyElixir.OpenCode.{ACPClient, ACPSessionStore}
+  alias SymphonyElixir.OpenCode.{ACPClient, ACPSessionStore, Runner}
 
   @spec run(Path.t(), Issue.t(), String.t(), keyword()) ::
           {:ok, %{output: String.t(), command: [String.t()]}} | {:error, term()}
@@ -58,7 +58,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
 
   @spec handoff_comment(Issue.t(), map()) :: String.t()
   def handoff_comment(%Issue{} = issue, %{output: output, command: command}) do
-    SymphonyElixir.OpenCode.Runner.handoff_comment(issue, %{output: output, command: command})
+    Runner.handoff_comment(issue, %{output: output, command: command})
   end
 
   defp open_session(client_module, client, existing_session_id, issue, cwd, opencode) do
@@ -98,8 +98,6 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
   defp tag_resumed(other), do: other
 
   defp run_prompt(client_module, client, session_id, prompt, opencode, command) do
-    caller = self()
-
     task =
       Task.async(fn ->
         client_module.prompt(
@@ -117,8 +115,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
       opencode,
       command,
       [],
-      false,
-      caller
+      false
     )
   end
 
@@ -130,8 +127,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
          opencode,
          command,
          events,
-         end_turn?,
-         _caller
+         end_turn?
        ) do
     receive do
       {ref, {:ok, result}} when ref == task.ref ->
@@ -169,8 +165,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
           opencode,
           command,
           [{method, params} | events],
-          end_turn? or end_turn_event?(method, params),
-          self()
+          end_turn? or end_turn_event?(method, params)
         )
 
       {:acp_request, method, params} ->
@@ -182,8 +177,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
           opencode,
           command,
           [{method, params} | events],
-          end_turn?,
-          self()
+          end_turn?
         )
     after
       stall_timeout(opencode.stall_timeout_ms) ->

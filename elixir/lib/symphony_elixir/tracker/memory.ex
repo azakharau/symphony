@@ -6,8 +6,8 @@ defmodule SymphonyElixir.Tracker.Memory do
   @behaviour SymphonyElixir.Tracker
 
   alias SymphonyElixir.Linear.Issue
-  alias SymphonyElixir.ReviewDecision
   alias SymphonyElixir.OpenCode.TaskPrompt
+  alias SymphonyElixir.ReviewDecision
 
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues do

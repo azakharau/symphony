@@ -6,8 +6,8 @@ defmodule SymphonyElixir.Linear.Adapter do
   @behaviour SymphonyElixir.Tracker
 
   alias SymphonyElixir.Linear.Client
-  alias SymphonyElixir.ReviewDecision
   alias SymphonyElixir.OpenCode.TaskPrompt
+  alias SymphonyElixir.ReviewDecision
 
   @create_comment_mutation """
   mutation SymphonyCreateComment($issueId: String!, $body: String!) {
@@ -106,12 +106,7 @@ defmodule SymphonyElixir.Linear.Adapter do
            get_in(response, ["data", "issue", "comments", "nodes"]) do
       comments
       |> Enum.sort_by(&Map.get(&1, "createdAt", ""), :desc)
-      |> Enum.find_value(fn %{"body" => body} ->
-        case TaskPrompt.extract_packet(body) do
-          {:ok, packet} -> {:ok, packet}
-          {:error, _reason} -> nil
-        end
-      end)
+      |> Enum.find_value(&extract_opencode_task_packet/1)
       |> case do
         {:ok, packet} -> {:ok, packet}
         nil -> {:error, :opencode_task_prompt_not_found}
@@ -121,6 +116,15 @@ defmodule SymphonyElixir.Linear.Adapter do
       _ -> {:error, :opencode_task_prompt_not_found}
     end
   end
+
+  defp extract_opencode_task_packet(%{"body" => body}) do
+    case TaskPrompt.extract_packet(body) do
+      {:ok, packet} -> {:ok, packet}
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp extract_opencode_task_packet(_comment), do: nil
 
   @spec review_decisions(String.t()) :: {:ok, [ReviewDecision.t()]} | {:error, term()}
   def review_decisions(issue_id) when is_binary(issue_id) do

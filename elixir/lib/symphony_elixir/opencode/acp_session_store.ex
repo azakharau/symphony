@@ -29,10 +29,8 @@ defmodule SymphonyElixir.OpenCode.ACPSessionStore do
       when is_binary(project_root) and is_binary(session_id) and session_id != "" do
     with {:ok, key} <- session_key(issue, project_root),
          {:ok, canonical_root} <- PathSafety.canonicalize(project_root),
-         {:ok, sessions} <- read_sessions(),
-         :ok <-
-           write_sessions(Map.put(sessions, key, session_entry(issue, canonical_root, session_id))) do
-      :ok
+         {:ok, sessions} <- read_sessions() do
+      write_sessions(Map.put(sessions, key, session_entry(issue, canonical_root, session_id)))
     end
   end
 

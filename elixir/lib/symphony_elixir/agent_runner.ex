@@ -5,8 +5,8 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.OpenCode.Runner, as: OpenCodeRunner
   alias SymphonyElixir.{Config, Linear.Issue, ProcessPolicy, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.OpenCode.Runner, as: OpenCodeRunner
 
   @type worker_host :: String.t() | nil
 
@@ -106,42 +106,50 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_opencode_once(workspace, issue, _opts) do
     with {:ok, packet} <- Tracker.latest_opencode_task_packet(issue.id),
          {:ok, decisions} <- Tracker.review_decisions(issue.id) do
-      case ProcessPolicy.opencode_dispatch_decision(packet, decisions) do
-        :allow ->
-          case OpenCodeRunner.run(workspace, issue, packet.prompt) do
-            {:ok, result} ->
-              with :ok <-
-                     Tracker.create_comment(
-                       issue.id,
-                       OpenCodeRunner.handoff_comment(issue, result)
-                     ),
-                   :ok <-
-                     Tracker.update_issue_state(
-                       issue.id,
-                       Config.settings!().opencode.result_state
-                     ) do
-                :ok
-              end
+      handle_opencode_dispatch(
+        workspace,
+        issue,
+        packet,
+        ProcessPolicy.opencode_dispatch_decision(packet, decisions)
+      )
+    end
+  end
 
-            {:error, {:need_owner_input, reason}} ->
-              with :ok <-
-                     Tracker.create_comment(issue.id, opencode_owner_input_comment(issue, reason)),
-                   :ok <- Tracker.update_issue_state(issue.id, "Need Owner Input") do
-                :ok
-              end
+  defp handle_opencode_dispatch(workspace, issue, packet, :allow) do
+    case OpenCodeRunner.run(workspace, issue, packet.prompt) do
+      {:ok, result} ->
+        record_opencode_handoff(issue, result)
 
-            {:error, reason} ->
-              {:error, reason}
-          end
+      {:error, {:need_owner_input, reason}} ->
+        record_opencode_owner_input(issue, reason)
 
-        {:block, block} ->
-          Logger.warning("OpenCode dispatch blocked for #{issue_context(issue)} reason=#{inspect(block[:reason])} slice_id=#{block[:slice_id]} rejection_count=#{block[:rejection_count]}")
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
-          with :ok <- Tracker.create_comment(issue.id, ProcessPolicy.loop_breaker_comment(block)),
-               :ok <- Tracker.update_issue_state(issue.id, block.rca_required_state) do
-            :ok
-          end
-      end
+  defp handle_opencode_dispatch(_workspace, issue, _packet, {:block, block}) do
+    Logger.warning("OpenCode dispatch blocked for #{issue_context(issue)} reason=#{inspect(block[:reason])} slice_id=#{block[:slice_id]} rejection_count=#{block[:rejection_count]}")
+
+    update_issue_after_comment(issue.id, ProcessPolicy.loop_breaker_comment(block), block.rca_required_state)
+  end
+
+  defp record_opencode_handoff(issue, result) do
+    update_issue_after_comment(
+      issue.id,
+      OpenCodeRunner.handoff_comment(issue, result),
+      Config.settings!().opencode.result_state
+    )
+  end
+
+  defp record_opencode_owner_input(issue, reason) do
+    update_issue_after_comment(issue.id, opencode_owner_input_comment(issue, reason), "Need Owner Input")
+  end
+
+  defp update_issue_after_comment(issue_id, comment, state_name) do
+    case Tracker.create_comment(issue_id, comment) do
+      :ok -> Tracker.update_issue_state(issue_id, state_name)
+      {:error, reason} -> {:error, reason}
     end
   end
 

@@ -6,6 +6,7 @@ defmodule SymphonyElixir.OpenCode.Runner do
   require Logger
 
   alias SymphonyElixir.{Config, Linear.Issue}
+  alias SymphonyElixir.OpenCode.ACPRunner
 
   @max_handoff_bytes 20_000
 
@@ -16,7 +17,7 @@ defmodule SymphonyElixir.OpenCode.Runner do
     opencode = Config.settings!().opencode
 
     if opencode.protocol == "acp" do
-      SymphonyElixir.OpenCode.ACPRunner.run(workspace, issue, prompt, opts)
+      ACPRunner.run(workspace, issue, prompt, opts)
     else
       run_cli(workspace, issue, prompt, opts, opencode)
     end
@@ -54,42 +55,57 @@ defmodule SymphonyElixir.OpenCode.Runner do
 
     task =
       Task.async(fn ->
-        if is_binary(session_id) and session_id != "" do
-          session_result_reader =
-            Keyword.get(opts, :session_result_reader, &read_completed_session_result/2)
-
-          case session_result_reader.(execution_dir, session_id) do
-            {:error, {:opencode_session_handoff_incomplete, _session_id}} ->
-              run_opencode_command(
-                runner,
-                command,
-                args,
-                incomplete_session_continuation_prompt(),
-                execution_dir,
-                session_id
-              )
-
-            {:error, {:opencode_session_not_completed, _session_id}} ->
-              run_opencode_command(
-                runner,
-                command,
-                args,
-                incomplete_session_continuation_prompt(),
-                execution_dir,
-                session_id
-              )
-
-            other ->
-              other
-          end
-        else
-          run_opencode_command(runner, command, args, prompt, execution_dir, session_id)
-        end
+        run_cli_task(runner, command, args, prompt, execution_dir, session_id, opts)
       end)
 
-    case Task.yield(task, opencode.timeout_ms) || Task.shutdown(task, :brutal_kill) do
+    task
+    |> await_cli_task(opencode.timeout_ms)
+    |> cli_task_result(command, args, session_id, opencode.timeout_ms)
+  rescue
+    error in [ErlangError, RuntimeError, ArgumentError, File.Error] ->
+      {:error, {:opencode_failed, Exception.message(error)}}
+  end
+
+  defp run_cli_task(runner, command, args, _prompt, execution_dir, session_id, opts)
+       when is_binary(session_id) and session_id != "" do
+    session_result_reader =
+      Keyword.get(opts, :session_result_reader, &read_completed_session_result/2)
+
+    case session_result_reader.(execution_dir, session_id) do
+      {:error, {:opencode_session_handoff_incomplete, _session_id}} ->
+        run_incomplete_session_command(runner, command, args, execution_dir, session_id)
+
+      {:error, {:opencode_session_not_completed, _session_id}} ->
+        run_incomplete_session_command(runner, command, args, execution_dir, session_id)
+
+      other ->
+        other
+    end
+  end
+
+  defp run_cli_task(runner, command, args, prompt, execution_dir, session_id, _opts) do
+    run_opencode_command(runner, command, args, prompt, execution_dir, session_id)
+  end
+
+  defp run_incomplete_session_command(runner, command, args, execution_dir, session_id) do
+    run_opencode_command(
+      runner,
+      command,
+      args,
+      incomplete_session_continuation_prompt(),
+      execution_dir,
+      session_id
+    )
+  end
+
+  defp await_cli_task(task, timeout_ms) do
+    Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill)
+  end
+
+  defp cli_task_result(task_result, command, args, session_id, timeout_ms) do
+    case task_result do
       nil ->
-        {:error, {:opencode_timeout, opencode.timeout_ms}}
+        {:error, {:opencode_timeout, timeout_ms}}
 
       {:exit, reason} ->
         {:error, {:opencode_failed, reason}}
@@ -106,9 +122,6 @@ defmodule SymphonyElixir.OpenCode.Runner do
       {:ok, {output, status}} ->
         {:error, {:opencode_exit, status, trim_output(output)}}
     end
-  rescue
-    error in [ErlangError, RuntimeError, ArgumentError, File.Error] ->
-      {:error, {:opencode_failed, Exception.message(error)}}
   end
 
   defp maybe_attach(args, nil), do: args
@@ -199,9 +212,8 @@ defmodule SymphonyElixir.OpenCode.Runner do
 
   defp same_issue_identifier?(session_title, issue_title)
        when is_binary(session_title) and is_binary(issue_title) do
-    with {:ok, issue_identifier} <- issue_identifier_prefix(issue_title) do
-      String.starts_with?(session_title, issue_identifier <> " ")
-    else
+    case issue_identifier_prefix(issue_title) do
+      {:ok, issue_identifier} -> String.starts_with?(session_title, issue_identifier <> " ")
       _ -> false
     end
   end
@@ -409,9 +421,12 @@ defmodule SymphonyElixir.OpenCode.Runner do
     body
     |> String.split("\n")
     |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
-    |> Enum.reject(&(&1 in ["- `(none)`", "- (none)", "(none)", "`(none)`", "none", "None"]))
+    |> Enum.reject(&non_substantive_section_line?/1)
     |> Enum.any?()
+  end
+
+  defp non_substantive_section_line?(line) do
+    line in ["", "- `(none)`", "- (none)", "(none)", "`(none)`", "none", "None"]
   end
 
   defp incomplete_session_continuation_prompt do

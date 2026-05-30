@@ -192,10 +192,20 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
   end
 
   defp workspace_root! do
-    root =
-      Path.join(System.tmp_dir!(), "opencode-acp-sessions-#{System.unique_integer([:positive])}")
+    suffix =
+      8
+      |> :crypto.strong_rand_bytes()
+      |> Base.url_encode64(padding: false)
 
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "opencode-acp-sessions-#{System.os_time(:nanosecond)}-#{suffix}"
+      )
+
+    File.rm_rf!(root)
     File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf(root) end)
     root
   end
 

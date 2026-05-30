@@ -3,6 +3,11 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
 
   alias SymphonyElixir.OpenCode.Runner
 
+  defmodule FailingSessionStore do
+    def fetch(_issue, _project_root), do: {:ok, nil}
+    def put(_issue, _project_root, _session_id), do: {:error, :write_failed}
+  end
+
   test "opencode acp runner starts command with acp args and project root cwd" do
     {python, script} = fake_acp_server!()
     project_root = File.cwd!()
@@ -98,6 +103,22 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
 
     assert {:error, {:need_owner_input, {:opencode_acp_session_attached, "new-session"}}} =
              Runner.run("/tmp/workspace", issue, "duplicate prompt")
+  end
+
+  test "opencode acp runner does not prompt when durable session write fails" do
+    {python, script} = fake_acp_server!()
+    workspace_root = workspace_root!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      opencode_command: python,
+      opencode_args: [script, "fail-if-prompt"],
+      opencode_project_root: File.cwd!(),
+      workspace_root: workspace_root
+    )
+
+    assert {:error, {:opencode_acp_session_store_failed, :write_failed}} =
+             Runner.run("/tmp/workspace", issue(), "prompt body", session_store: FailingSessionStore)
   end
 
   test "opencode acp runner maps end_turn to successful handoff" do
@@ -253,6 +274,8 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
             send({"jsonrpc":"2.0","method":"session/update","params":{"type":"agent_text","text":"slow done"}})
             send({"jsonrpc":"2.0","method":"session/update","params":{"type":"end_turn","processCwd":os.getcwd()}})
             send({"jsonrpc":"2.0","id":mid,"result":{"stopReason":"end_turn","processCwd":os.getcwd()}})
+        elif method == "session/prompt" and scenario == "fail-if-prompt":
+            send({"jsonrpc":"2.0","id":mid,"error":{"message":"prompt should not be sent before durable session write"}})
         elif method == "session/prompt":
             send({"jsonrpc":"2.0","method":"session/update","params":{"type":"agent_text","text":"done"}})
             send({"jsonrpc":"2.0","method":"session/update","params":{"type":"end_turn","processCwd":os.getcwd()}})

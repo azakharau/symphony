@@ -34,15 +34,17 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
                  initialize_params(opencode),
                  opencode.read_timeout_ms
                ),
+             {:ok, existing_session_id} <- fetch_stored_session_id(session_store, issue, cwd),
              {:ok, session_result} <-
-               open_session(client_module, client, session_store, issue, cwd, opencode) do
-          session_id = session_id(session_result) || stored_session_id(session_store, issue, cwd)
-          store_session_id(session_store, issue, cwd, session_id)
+               open_session(client_module, client, existing_session_id, issue, cwd, opencode) do
+          session_id = session_id(session_result) || existing_session_id
 
           if resumed_session?(session_result) do
             {:error, {:need_owner_input, {:opencode_acp_session_attached, session_id}}}
           else
-            run_prompt(client_module, client, session_id, prompt, opencode, [command | args])
+            with :ok <- persist_new_session_id(session_store, issue, cwd, session_id) do
+              run_prompt(client_module, client, session_id, prompt, opencode, [command | args])
+            end
           end
         end
       after
@@ -59,10 +61,10 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
     SymphonyElixir.OpenCode.Runner.handoff_comment(issue, %{output: output, command: command})
   end
 
-  defp open_session(client_module, client, session_store, issue, cwd, opencode) do
+  defp open_session(client_module, client, existing_session_id, issue, cwd, opencode) do
     params = session_params(issue, cwd, opencode)
 
-    case stored_session_id(session_store, issue, cwd) do
+    case existing_session_id do
       session_id when is_binary(session_id) and session_id != "" ->
         cond do
           client_module.capability?(client, "session/resume") ->
@@ -236,18 +238,24 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
 
   defp opencode_project_root(_project_root, workspace), do: workspace
 
-  defp stored_session_id(session_store, issue, cwd) do
+  defp fetch_stored_session_id(session_store, issue, cwd) do
     case session_store.fetch(issue, cwd) do
-      {:ok, session_id} -> session_id
-      {:error, _reason} -> nil
+      {:ok, session_id} -> {:ok, session_id}
+      {:error, reason} -> {:error, {:opencode_acp_session_store_failed, reason}}
     end
   end
 
-  defp store_session_id(_session_store, _issue, _cwd, nil), do: :ok
-  defp store_session_id(_session_store, _issue, _cwd, ""), do: :ok
+  defp persist_new_session_id(_session_store, _issue, _cwd, nil),
+    do: {:error, {:opencode_acp_session_store_failed, :missing_session_id}}
 
-  defp store_session_id(session_store, issue, cwd, session_id) do
-    session_store.put(issue, cwd, session_id)
+  defp persist_new_session_id(_session_store, _issue, _cwd, ""),
+    do: {:error, {:opencode_acp_session_store_failed, :missing_session_id}}
+
+  defp persist_new_session_id(session_store, issue, cwd, session_id) do
+    case session_store.put(issue, cwd, session_id) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:opencode_acp_session_store_failed, reason}}
+    end
   end
 
   defp session_id(%{"sessionId" => session_id}), do: session_id

@@ -105,6 +105,8 @@ agent:
   max_turns: 20
 codex:
   command: codex app-server
+opencode:
+  protocol: cli
 ---
 
 You are working on a Linear issue {{ issue.identifier }}.
@@ -124,6 +126,17 @@ Notes:
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
   Symphony validation.
+- `opencode.protocol` defaults to `cli`, preserving the existing OpenCode CLI runner. To opt in to
+  ACP stdio transport, set `opencode.protocol: acp` and use an `opencode.command` that supports ACP;
+  rollback is changing `protocol` back to `cli`.
+- OpenCode ACP fields: `opencode.args` defaults to `["acp"]` for ACP and `[]` for CLI;
+  `opencode.project_root` optionally sets the ACP cwd; `opencode.agent` defaults to `build`;
+  `opencode.model` is optional; `opencode.timeout_ms`, `opencode.read_timeout_ms`, and
+  `opencode.stall_timeout_ms` control run, request, and stall timeouts; `opencode.permission_policy`
+  defaults to `reject` and may be `reject` or `cancel`.
+- ACP session IDs are stored durably at `workspace.root/.symphony/opencode_acp_sessions.json`, keyed
+  by canonical project root and Linear issue ID. This lets Symphony reuse an existing OpenCode ACP
+  session after daemon restart and prevents duplicate sessions for the same issue/project pair.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue

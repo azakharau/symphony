@@ -34,6 +34,20 @@ codex:
   thread_sandbox: workspace-write
   turn_sandbox_policy:
     type: workspaceWrite
+opencode:
+  # OpenCode stays on the legacy CLI runner by default. Set protocol: acp only
+  # when the configured opencode command supports ACP over stdio.
+  protocol: cli
+  command: opencode
+  args: []
+  agent: build
+  timeout_ms: 3600000
+  read_timeout_ms: 5000
+  stall_timeout_ms: 300000
+  permission_policy: reject
+  # ACP session IDs are stored under workspace.root/.symphony/opencode_acp_sessions.json
+  # keyed by project root and Linear issue so restarts reuse sessions instead of
+  # resending initial prompts or creating duplicates.
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`

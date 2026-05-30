@@ -51,6 +51,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:project_slug, :string)
       field(:assignee, :string)
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
+
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
     end
 
@@ -142,7 +143,12 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
+        [
+          :max_concurrent_agents,
+          :max_turns,
+          :max_retry_backoff_ms,
+          :max_concurrent_agents_by_state
+        ],
         empty_values: []
       )
       |> validate_number(:max_concurrent_agents, greater_than: 0)
@@ -237,21 +243,49 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     embedded_schema do
+      field(:protocol, :string, default: "cli")
       field(:command, :string, default: "opencode")
+      field(:args, {:array, :string})
       field(:project_root, :string)
       field(:server_url, :string)
       field(:agent, :string, default: "build")
+      field(:model, :string)
       field(:format, :string, default: "json")
       field(:result_state, :string, default: "In Review")
       field(:timeout_ms, :integer, default: 3_600_000)
+      field(:read_timeout_ms, :integer, default: 5_000)
+      field(:stall_timeout_ms, :integer, default: 300_000)
+      field(:permission_policy, :string, default: "reject")
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:command, :project_root, :server_url, :agent, :format, :result_state, :timeout_ms], empty_values: [])
+      |> cast(
+        attrs,
+        [
+          :protocol,
+          :command,
+          :args,
+          :project_root,
+          :server_url,
+          :agent,
+          :model,
+          :format,
+          :result_state,
+          :timeout_ms,
+          :read_timeout_ms,
+          :stall_timeout_ms,
+          :permission_policy
+        ],
+        empty_values: []
+      )
       |> validate_required([:command, :agent, :format, :result_state])
+      |> validate_inclusion(:protocol, ["cli", "acp"])
+      |> validate_inclusion(:permission_policy, ["reject", "cancel"])
       |> validate_number(:timeout_ms, greater_than: 0)
+      |> validate_number(:read_timeout_ms, greater_than: 0)
+      |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
     end
   end
 
@@ -485,7 +519,11 @@ defmodule SymphonyElixir.Config.Schema do
 
     workspace = %{
       settings.workspace
-      | root: resolve_path_value(settings.workspace.root, Path.join(System.tmp_dir!(), "symphony_workspaces"))
+      | root:
+          resolve_path_value(
+            settings.workspace.root,
+            Path.join(System.tmp_dir!(), "symphony_workspaces")
+          )
     }
 
     codex = %{
@@ -497,7 +535,8 @@ defmodule SymphonyElixir.Config.Schema do
 
     opencode = %{
       settings.opencode
-      | project_root: resolve_optional_path_value(settings.opencode.project_root)
+      | args: default_opencode_args(settings.opencode.protocol, settings.opencode.args),
+        project_root: resolve_optional_path_value(settings.opencode.project_root)
     }
 
     %{settings | tracker: tracker, workspace: workspace, codex: codex, opencode: opencode}
@@ -514,6 +553,10 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp normalize_optional_map(nil), do: nil
   defp normalize_optional_map(value) when is_map(value), do: normalize_keys(value)
+
+  defp default_opencode_args("acp", nil), do: ["acp"]
+  defp default_opencode_args(_protocol, nil), do: []
+  defp default_opencode_args(_protocol, args) when is_list(args), do: args
 
   defp normalize_key(value) when is_atom(value), do: Atom.to_string(value)
   defp normalize_key(value), do: to_string(value)

@@ -14,6 +14,16 @@ defmodule SymphonyElixir.OpenCode.Runner do
   def run(workspace, %Issue{} = issue, prompt, opts \\ [])
       when is_binary(workspace) and is_binary(prompt) do
     opencode = Config.settings!().opencode
+
+    if opencode.protocol == "acp" do
+      SymphonyElixir.OpenCode.ACPRunner.run(workspace, issue, prompt, opts)
+    else
+      run_cli(workspace, issue, prompt, opts, opencode)
+    end
+  end
+
+  defp run_cli(workspace, %Issue{} = issue, prompt, opts, opencode)
+       when is_binary(workspace) and is_binary(prompt) do
     command = Keyword.get(opts, :command, opencode.command)
     runner = Keyword.get(opts, :runner, &System.cmd/3)
     execution_dir = opencode_project_root(opencode.project_root, workspace)
@@ -45,7 +55,8 @@ defmodule SymphonyElixir.OpenCode.Runner do
     task =
       Task.async(fn ->
         if is_binary(session_id) and session_id != "" do
-          session_result_reader = Keyword.get(opts, :session_result_reader, &read_completed_session_result/2)
+          session_result_reader =
+            Keyword.get(opts, :session_result_reader, &read_completed_session_result/2)
 
           case session_result_reader.(execution_dir, session_id) do
             {:error, {:opencode_session_handoff_incomplete, _session_id}} ->
@@ -175,7 +186,11 @@ defmodule SymphonyElixir.OpenCode.Runner do
     end
   end
 
-  defp matching_session?(%{"title" => session_title, "directory" => directory}, execution_dir, issue_title) do
+  defp matching_session?(
+         %{"title" => session_title, "directory" => directory},
+         execution_dir,
+         issue_title
+       ) do
     directory == execution_dir and
       (session_title == issue_title or same_issue_identifier?(session_title, issue_title))
   end
@@ -204,7 +219,8 @@ defmodule SymphonyElixir.OpenCode.Runner do
   defp session_updated_sort_key(%{"created" => created}) when is_integer(created), do: created
   defp session_updated_sort_key(_session), do: 0
 
-  defp opencode_project_root(project_root, _workspace) when is_binary(project_root) and project_root != "" do
+  defp opencode_project_root(project_root, _workspace)
+       when is_binary(project_root) and project_root != "" do
     project_root
   end
 
@@ -313,9 +329,14 @@ defmodule SymphonyElixir.OpenCode.Runner do
 
   defp decode_sqlite_json(output) do
     case Jason.decode(output) do
-      {:ok, rows} when is_list(rows) -> {:ok, rows}
-      {:ok, other} -> {:error, {:opencode_sqlite_unexpected_payload, other}}
-      {:error, reason} -> {:error, {:opencode_sqlite_json_decode_failed, Exception.message(reason), trim_output(output)}}
+      {:ok, rows} when is_list(rows) ->
+        {:ok, rows}
+
+      {:ok, other} ->
+        {:error, {:opencode_sqlite_unexpected_payload, other}}
+
+      {:error, reason} ->
+        {:error, {:opencode_sqlite_json_decode_failed, Exception.message(reason), trim_output(output)}}
     end
   end
 
@@ -337,7 +358,8 @@ defmodule SymphonyElixir.OpenCode.Runner do
   end
 
   defp incomplete_handoff_text?(text) when is_binary(text) do
-    incomplete_section_present?(text, "In Progress") or incomplete_section_present?(text, "Blocked") or
+    incomplete_section_present?(text, "In Progress") or
+      incomplete_section_present?(text, "Blocked") or
       owner_input_requested?(text)
   end
 

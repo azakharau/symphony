@@ -13,7 +13,8 @@ defmodule SymphonyElixir.AgentRunner do
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
     # The orchestrator owns host retries so one worker lifetime never hops machines.
-    worker_host = selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
+    worker_host =
+      selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
 
     Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
@@ -36,7 +37,13 @@ defmodule SymphonyElixir.AgentRunner do
 
         try do
           with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-            run_issue_with_configured_runner(workspace, issue, codex_update_recipient, opts, worker_host)
+            run_issue_with_configured_runner(
+              workspace,
+              issue,
+              codex_update_recipient,
+              opts,
+              worker_host
+            )
           end
         after
           Workspace.run_after_run_hook(workspace, issue, worker_host)
@@ -77,7 +84,13 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
-  defp run_issue_with_configured_runner(workspace, issue, codex_update_recipient, opts, worker_host) do
+  defp run_issue_with_configured_runner(
+         workspace,
+         issue,
+         codex_update_recipient,
+         opts,
+         worker_host
+       ) do
     case runner_kind_for_issue(issue) do
       "codex" ->
         run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
@@ -95,10 +108,30 @@ defmodule SymphonyElixir.AgentRunner do
          {:ok, decisions} <- Tracker.review_decisions(issue.id) do
       case ProcessPolicy.opencode_dispatch_decision(packet, decisions) do
         :allow ->
-          with {:ok, result} <- OpenCodeRunner.run(workspace, issue, packet.prompt),
-               :ok <- Tracker.create_comment(issue.id, OpenCodeRunner.handoff_comment(issue, result)),
-               :ok <- Tracker.update_issue_state(issue.id, Config.settings!().opencode.result_state) do
-            :ok
+          case OpenCodeRunner.run(workspace, issue, packet.prompt) do
+            {:ok, result} ->
+              with :ok <-
+                     Tracker.create_comment(
+                       issue.id,
+                       OpenCodeRunner.handoff_comment(issue, result)
+                     ),
+                   :ok <-
+                     Tracker.update_issue_state(
+                       issue.id,
+                       Config.settings!().opencode.result_state
+                     ) do
+                :ok
+              end
+
+            {:error, {:need_owner_input, reason}} ->
+              with :ok <-
+                     Tracker.create_comment(issue.id, opencode_owner_input_comment(issue, reason)),
+                   :ok <- Tracker.update_issue_state(issue.id, "Need Owner Input") do
+                :ok
+              end
+
+            {:error, reason} ->
+              {:error, reason}
           end
 
         {:block, block} ->
@@ -112,14 +145,44 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
+  defp opencode_owner_input_comment(issue, reason) do
+    """
+    ## OpenCode Handoff
+
+    Issue: #{issue.identifier}
+    Runner: OpenCode
+    Status: need owner input
+
+    OpenCode ACP requested owner input or permission before it could complete.
+
+    Reason:
+
+    ```text
+    #{inspect(reason)}
+    ```
+    """
+  end
+
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
-    issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+
+    issue_state_fetcher =
+      Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+
     codex_workspace = codex_project_root(workspace)
 
     with {:ok, session} <- AppServer.start_session(codex_workspace, worker_host: worker_host) do
       try do
-        do_run_codex_turns(session, codex_workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        do_run_codex_turns(
+          session,
+          codex_workspace,
+          issue,
+          codex_update_recipient,
+          opts,
+          issue_state_fetcher,
+          1,
+          max_turns
+        )
       after
         AppServer.stop_session(session)
       end
@@ -133,7 +196,16 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+  defp do_run_codex_turns(
+         app_session,
+         workspace,
+         issue,
+         codex_update_recipient,
+         opts,
+         issue_state_fetcher,
+         turn_number,
+         max_turns
+       ) do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
     with {:ok, turn_session} <-
@@ -207,7 +279,8 @@ defmodule SymphonyElixir.AgentRunner do
     """
   end
 
-  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
+  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher)
+       when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
         cond do

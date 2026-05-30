@@ -16,7 +16,15 @@ defmodule SymphonyElixir.CoreTest do
     assert config.polling.full_interval_ms == 60_000
     assert config.polling.fast_states == ["Todo", "Need Owner Input"]
     assert config.tracker.active_states == ["Todo", "In Progress"]
-    assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
+
+    assert config.tracker.terminal_states == [
+             "Closed",
+             "Cancelled",
+             "Canceled",
+             "Duplicate",
+             "Done"
+           ]
+
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
     assert config.runner.default == "codex"
@@ -33,7 +41,11 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "polling.interval_ms"
 
-    write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: 45_000, poll_full_interval_ms: 120_000)
+    write_workflow_file!(Workflow.workflow_file_path(),
+      poll_interval_ms: 45_000,
+      poll_full_interval_ms: 120_000
+    )
+
     assert Config.settings!().polling.interval_ms == 45_000
     assert Config.settings!().polling.full_interval_ms == 120_000
 
@@ -75,7 +87,10 @@ defmodule SymphonyElixir.CoreTest do
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "/bin/sh app-server")
     assert :ok = Config.validate!()
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_approval_policy: "definitely-not-valid")
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_approval_policy: "definitely-not-valid"
+    )
+
     assert :ok = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_thread_sandbox: "unsafe-ish")
@@ -102,13 +117,62 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "runner.default"
 
-    write_workflow_file!(Workflow.workflow_file_path(), runner_default: "codex", runner_routes: %{"In Progress" => "opencode"})
+    write_workflow_file!(Workflow.workflow_file_path(),
+      runner_default: "codex",
+      runner_routes: %{"In Progress" => "opencode"}
+    )
+
     assert :ok = Config.validate!()
     assert Config.settings!().runner.routes == %{"in progress" => "opencode"}
 
-    write_workflow_file!(Workflow.workflow_file_path(), runner_routes: %{"In Progress" => "unknown"})
+    write_workflow_file!(Workflow.workflow_file_path(),
+      runner_routes: %{"In Progress" => "unknown"}
+    )
+
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "runner.routes"
+  end
+
+  test "workflow config accepts opencode acp protocol fields" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      opencode_args: ["acp"],
+      opencode_project_root: "/home/agent/proj/example",
+      opencode_agent: "build",
+      opencode_model: "gpt-5.5",
+      opencode_timeout_ms: 1_000,
+      opencode_read_timeout_ms: 50,
+      opencode_stall_timeout_ms: 100,
+      opencode_permission_policy: "cancel"
+    )
+
+    assert :ok = Config.validate!()
+    config = Config.settings!()
+    assert config.opencode.protocol == "acp"
+    assert config.opencode.args == ["acp"]
+    assert config.opencode.project_root == "/home/agent/proj/example"
+    assert config.opencode.model == "gpt-5.5"
+    assert config.opencode.read_timeout_ms == 50
+    assert config.opencode.stall_timeout_ms == 100
+    assert config.opencode.permission_policy == "cancel"
+  end
+
+  test "workflow config rejects unsupported opencode protocol" do
+    write_workflow_file!(Workflow.workflow_file_path(), opencode_protocol: "mcp")
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "opencode.protocol"
+    assert message =~ "is invalid"
+  end
+
+  test "runner routes keep In Progress on opencode with acp protocol" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      runner_routes: %{"In Progress" => "opencode"}
+    )
+
+    assert :ok = Config.validate!()
+    assert Config.settings!().runner.routes == %{"in progress" => "opencode"}
   end
 
   test "current WORKFLOW.md file is valid and complete" do
@@ -128,10 +192,15 @@ defmodule SymphonyElixir.CoreTest do
 
     hooks = Map.get(config, "hooks", %{})
     assert is_map(hooks)
-    assert Map.get(hooks, "after_create") =~ "git clone --depth 1 https://github.com/openai/symphony ."
+
+    assert Map.get(hooks, "after_create") =~
+             "git clone --depth 1 https://github.com/openai/symphony ."
+
     assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
     assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
-    assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
+
+    assert Map.get(hooks, "before_remove") =~
+             "cd elixir && mise exec -- mix workspace.before_remove"
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())
@@ -197,7 +266,9 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "workflow load accepts prompt-only files without front matter" do
-    workflow_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "PROMPT_ONLY_WORKFLOW.md")
+    workflow_path =
+      Path.join(Path.dirname(Workflow.workflow_file_path()), "PROMPT_ONLY_WORKFLOW.md")
+
     File.write!(workflow_path, "Prompt only\n")
 
     assert {:ok, %{config: %{}, prompt: "Prompt only", prompt_template: "Prompt only"}} =
@@ -205,7 +276,9 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "workflow load accepts unterminated front matter with an empty prompt" do
-    workflow_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "UNTERMINATED_WORKFLOW.md")
+    workflow_path =
+      Path.join(Path.dirname(Workflow.workflow_file_path()), "UNTERMINATED_WORKFLOW.md")
+
     File.write!(workflow_path, "---\ntracker:\n  kind: linear\n")
 
     assert {:ok, %{config: %{"tracker" => %{"kind" => "linear"}}, prompt: "", prompt_template: ""}} =
@@ -213,7 +286,9 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "workflow load rejects non-map front matter" do
-    workflow_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "INVALID_FRONT_MATTER_WORKFLOW.md")
+    workflow_path =
+      Path.join(Path.dirname(Workflow.workflow_file_path()), "INVALID_FRONT_MATTER_WORKFLOW.md")
+
     File.write!(workflow_path, "---\n- not-a-map\n---\nPrompt body\n")
 
     assert {:error, :workflow_front_matter_not_a_map} = Workflow.load(workflow_path)
@@ -234,7 +309,8 @@ defmodule SymphonyElixir.CoreTest do
     end)
 
     if is_pid(orchestrator_pid) do
-      assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
+      assert :ok =
+               Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
     end
 
     assert {:ok, pid} = SymphonyElixir.start_link()
@@ -841,7 +917,9 @@ defmodule SymphonyElixir.CoreTest do
              Orchestrator.handle_call(:request_refresh, {self(), make_ref()}, refreshed_state)
 
     assert coalesced_state.tick_token == refreshed_state.tick_token
-    assert {:noreply, ^coalesced_state} = Orchestrator.handle_info({:tick, stale_tick_token}, coalesced_state)
+
+    assert {:noreply, ^coalesced_state} =
+             Orchestrator.handle_info({:tick, stale_tick_token}, coalesced_state)
   end
 
   test "select_worker_host_for_test skips full ssh hosts under the shared per-host cap" do
@@ -933,7 +1011,8 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "prompt builder renders issue datetime fields without crashing" do
-    workflow_prompt = "Ticket {{ issue.identifier }} created={{ issue.created_at }} updated={{ issue.updated_at }}"
+    workflow_prompt =
+      "Ticket {{ issue.identifier }} created={{ issue.created_at }} updated={{ issue.updated_at }}"
 
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
 
@@ -1070,7 +1149,8 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
+    assert :ok =
+             Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
 
     Workflow.set_workflow_file_path(Path.join(System.tmp_dir!(), "missing-workflow-#{System.unique_integer([:positive])}.md"))
 

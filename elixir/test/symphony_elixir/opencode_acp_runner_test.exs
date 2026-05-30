@@ -1,0 +1,256 @@
+defmodule SymphonyElixir.OpenCodeACPRunnerTest do
+  use SymphonyElixir.TestSupport
+
+  alias SymphonyElixir.OpenCode.Runner
+
+  test "opencode acp runner starts command with acp args and project root cwd" do
+    {python, script} = fake_acp_server!()
+    project_root = File.cwd!()
+    issue = issue()
+    workspace_root = workspace_root!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      opencode_command: python,
+      opencode_args: [script, "runner"],
+      opencode_project_root: project_root,
+      opencode_stall_timeout_ms: 200,
+      workspace_root: workspace_root
+    )
+
+    assert {:ok, %{command: [^python, ^script, "runner"], output: output}} =
+             Runner.run("/tmp/workspace", issue, "prompt body")
+
+    assert output =~ "processCwd"
+    assert output =~ project_root
+  end
+
+  test "opencode acp runner reuses persisted issue session id" do
+    {python, script} = fake_acp_server!()
+    issue = issue()
+    workspace_root = workspace_root!()
+    write_session_store!(workspace_root, issue, File.cwd!(), "existing-session")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      opencode_command: python,
+      opencode_args: [script, "runner"],
+      opencode_project_root: File.cwd!(),
+      workspace_root: workspace_root
+    )
+
+    assert {:error, {:need_owner_input, {:opencode_acp_session_attached, "existing-session"}}} =
+             Runner.run("/tmp/workspace", issue, "prompt body")
+  end
+
+  test "opencode acp runner does not resend initial prompt after resume" do
+    {python, script} = fake_acp_server!()
+    issue = issue()
+    workspace_root = workspace_root!()
+    write_session_store!(workspace_root, issue, File.cwd!(), "existing-session")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      opencode_command: python,
+      opencode_args: [script, "no-prompt-after-resume"],
+      opencode_project_root: File.cwd!(),
+      workspace_root: workspace_root
+    )
+
+    assert {:error, {:need_owner_input, {:opencode_acp_session_attached, "existing-session"}}} =
+             Runner.run("/tmp/workspace", issue, "initial prompt must not be sent")
+  end
+
+  test "opencode acp runner durable session mapping survives runner process restart" do
+    {python, script} = fake_acp_server!()
+    workspace_root = workspace_root!()
+    issue = issue()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      opencode_command: python,
+      opencode_args: [script, "runner"],
+      opencode_project_root: File.cwd!(),
+      workspace_root: workspace_root
+    )
+
+    assert {:ok, %{output: output}} = Runner.run("/tmp/workspace", issue, "initial prompt")
+    assert output =~ "ACP result"
+
+    assert {:error, {:need_owner_input, {:opencode_acp_session_attached, "new-session"}}} =
+             Runner.run("/tmp/workspace", issue, "initial prompt must not repeat")
+  end
+
+  test "opencode acp runner prevents duplicate sessions for same issue and project" do
+    {python, script} = fake_acp_server!()
+    workspace_root = workspace_root!()
+    issue = issue()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      opencode_command: python,
+      opencode_args: [script, "count-new"],
+      opencode_project_root: File.cwd!(),
+      workspace_root: workspace_root
+    )
+
+    assert {:ok, _result} = Runner.run("/tmp/workspace", issue, "initial prompt")
+
+    assert {:error, {:need_owner_input, {:opencode_acp_session_attached, "new-session"}}} =
+             Runner.run("/tmp/workspace", issue, "duplicate prompt")
+  end
+
+  test "opencode acp runner maps end_turn to successful handoff" do
+    {python, script} = fake_acp_server!()
+    workspace_root = workspace_root!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      opencode_command: python,
+      opencode_args: [script, "runner"],
+      opencode_project_root: File.cwd!(),
+      workspace_root: workspace_root
+    )
+
+    assert {:ok, %{output: output}} = Runner.run("/tmp/workspace", issue(), "prompt body")
+    assert output =~ "ACP result"
+    assert output =~ "end_turn"
+  end
+
+  test "opencode acp runner parks user input requests as need owner input" do
+    {python, script} = fake_acp_server!()
+    workspace_root = workspace_root!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      opencode_command: python,
+      opencode_args: [script, "user-input"],
+      opencode_project_root: File.cwd!(),
+      opencode_stall_timeout_ms: 200,
+      workspace_root: workspace_root
+    )
+
+    assert {:error, {:need_owner_input, _events}} =
+             Runner.run("/tmp/workspace", issue(), "prompt body")
+  end
+
+  test "opencode acp runner disables stall timeout when configured as zero" do
+    {python, script} = fake_acp_server!()
+    workspace_root = workspace_root!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      opencode_command: python,
+      opencode_args: [script, "slow-success"],
+      opencode_project_root: File.cwd!(),
+      opencode_stall_timeout_ms: 0,
+      workspace_root: workspace_root
+    )
+
+    assert {:ok, %{output: output}} = Runner.run("/tmp/workspace", issue(), "prompt body")
+    assert output =~ "slow done"
+  end
+
+  test "opencode acp runner falls back to cli when protocol is cli" do
+    test_pid = self()
+    issue = issue()
+
+    write_workflow_file!(Workflow.workflow_file_path(), opencode_protocol: "cli")
+
+    assert {:ok, %{output: "done\n"}} =
+             Runner.run("/tmp/workspace", issue, "prompt body",
+               runner: fn command, args, opts ->
+                 send(test_pid, {:cli_called, command, args, opts})
+                 {"done\n", 0}
+               end
+             )
+
+    assert_received {:cli_called, "bash", _args, opts}
+    assert opts[:cd] == "/tmp/workspace"
+  end
+
+  test "opencode acp runner returns deterministic command not found error" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      opencode_command: "definitely-not-opencode-acp",
+      opencode_project_root: File.cwd!(),
+      workspace_root: workspace_root!()
+    )
+
+    assert {:error, {:acp_command_not_found, "definitely-not-opencode-acp"}} =
+             Runner.run("/tmp/workspace", issue(), "prompt body")
+  end
+
+  defp issue do
+    %Issue{
+      id: "issue-1",
+      identifier: "NER-1",
+      title: "Implement scoped change",
+      description: "Task",
+      state: "In Progress"
+    }
+  end
+
+  defp workspace_root! do
+    root =
+      Path.join(System.tmp_dir!(), "opencode-acp-sessions-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(root)
+    root
+  end
+
+  defp write_session_store!(workspace_root, issue, project_root, session_id) do
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    :ok = SymphonyElixir.OpenCode.ACPSessionStore.put(issue, project_root, session_id)
+  end
+
+  defp fake_acp_server! do
+    path =
+      Path.join(System.tmp_dir!(), "fake-acp-runner-#{System.unique_integer([:positive])}.py")
+
+    File.write!(path, ~S'''
+    import json, os, sys
+    scenario = sys.argv[1] if len(sys.argv) > 1 else "runner"
+
+    def send(obj):
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+
+    for line in sys.stdin:
+        msg = json.loads(line)
+        if "method" not in msg:
+            continue
+        mid = msg["id"]
+        method = msg["method"]
+        params = msg.get("params", {})
+        caps = {"session/new": True, "session/load": True, "session/resume": True, "session/prompt": True, "session/cancel": True}
+        if method == "initialize":
+            send({"jsonrpc":"2.0","id":mid,"result":{"capabilities":caps}})
+        elif method == "session/new":
+            send({"jsonrpc":"2.0","id":mid,"result":{"sessionId":"new-session","cwd":params.get("cwd"),"processCwd":os.getcwd()}})
+        elif method == "session/resume":
+            send({"jsonrpc":"2.0","id":mid,"result":{"sessionId":params.get("sessionId"),"resumed":True}})
+        elif method == "session/load":
+            send({"jsonrpc":"2.0","id":mid,"result":{"sessionId":params.get("sessionId"),"loaded":True}})
+        elif method == "session/prompt" and scenario == "no-prompt-after-resume":
+            send({"jsonrpc":"2.0","id":mid,"error":{"message":"prompt replayed"}})
+        elif method == "session/prompt" and scenario == "user-input":
+            send({"jsonrpc":"2.0","method":"session/update","params":{"type":"user_input_required","message":"permission needed"}})
+            send({"jsonrpc":"2.0","id":mid,"result":{"stopReason":"user_input_required"}})
+        elif method == "session/prompt" and scenario == "slow-success":
+            import time
+            time.sleep(0.05)
+            send({"jsonrpc":"2.0","method":"session/update","params":{"type":"agent_text","text":"slow done"}})
+            send({"jsonrpc":"2.0","method":"session/update","params":{"type":"end_turn","processCwd":os.getcwd()}})
+            send({"jsonrpc":"2.0","id":mid,"result":{"stopReason":"end_turn","processCwd":os.getcwd()}})
+        elif method == "session/prompt":
+            send({"jsonrpc":"2.0","method":"session/update","params":{"type":"agent_text","text":"done"}})
+            send({"jsonrpc":"2.0","method":"session/update","params":{"type":"end_turn","processCwd":os.getcwd()}})
+            send({"jsonrpc":"2.0","id":mid,"result":{"stopReason":"end_turn","processCwd":os.getcwd()}})
+        elif method == "session/cancel":
+            send({"jsonrpc":"2.0","id":mid,"result":{"cancelled":True}})
+    ''')
+
+    {System.find_executable("python3") || System.find_executable("python"), path}
+  end
+end

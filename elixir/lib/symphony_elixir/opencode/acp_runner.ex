@@ -17,6 +17,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
     session_store = Keyword.get(opts, :session_store, ACPSessionStore)
     cwd = Keyword.get(opts, :cwd, opencode_project_root(opencode.project_root, workspace))
     title = Keyword.get(opts, :title, issue_title(issue))
+    on_event = Keyword.get(opts, :on_event, fn _event -> :ok end)
 
     with {:ok, cwd} <- safe_cwd(cwd),
          {:ok, client} <-
@@ -44,7 +45,8 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
             {:error, {:need_owner_input, {:opencode_acp_session_attached, session_id}}}
           else
             with :ok <- persist_new_session_id(session_store, issue, cwd, session_id) do
-              run_prompt(client_module, client, session_id, prompt, opencode, [command | args], cwd)
+              emit_session_started(on_event, session_id, [command | args], cwd, opencode)
+              run_prompt(client_module, client, session_id, prompt, opencode, [command | args], cwd, on_event)
             end
           end
         end
@@ -98,7 +100,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
 
   defp tag_resumed(other), do: other
 
-  defp run_prompt(client_module, client, session_id, prompt, opencode, command, cwd) do
+  defp run_prompt(client_module, client, session_id, prompt, opencode, command, cwd, on_event) do
     task =
       Task.async(fn ->
         client_module.prompt(
@@ -124,6 +126,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
       opencode,
       command,
       cwd,
+      on_event,
       [],
       false
     )
@@ -137,6 +140,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
          opencode,
          command,
          cwd,
+         on_event,
          events,
          end_turn?
        ) do
@@ -176,6 +180,8 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
         {:error, {:opencode_acp_prompt_failed, reason}}
 
       {:acp_notification, method, params} ->
+        emit_acp_update(on_event, :notification, method, params, session_id, command, cwd, opencode)
+
         collect_prompt_result(
           task,
           client_module,
@@ -184,11 +190,14 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
           opencode,
           command,
           cwd,
+          on_event,
           [{method, params} | events],
           end_turn? or end_turn_event?(method, params)
         )
 
       {:acp_request, method, params} ->
+        emit_acp_update(on_event, :request, method, params, session_id, command, cwd, opencode)
+
         collect_prompt_result(
           task,
           client_module,
@@ -197,6 +206,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
           opencode,
           command,
           cwd,
+          on_event,
           [{method, params} | events],
           end_turn?
         )
@@ -220,6 +230,52 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
   catch
     _kind, reason -> {:error, reason}
   end
+
+  defp emit_session_started(on_event, session_id, command, cwd, opencode) do
+    on_event.(%{
+      event: :session_started,
+      phase: :session,
+      timestamp: DateTime.utc_now(),
+      runner_owner: "opencode",
+      project_root: cwd,
+      command: command,
+      session_id: session_id,
+      attach_url: opencode.server_url
+    })
+  end
+
+  defp emit_acp_update(on_event, event, method, params, session_id, command, cwd, opencode) do
+    payload = %{"method" => method, "params" => params}
+
+    update =
+      %{
+        event: event,
+        phase: acp_update_phase(method, params),
+        timestamp: DateTime.utc_now(),
+        runner_owner: "opencode",
+        project_root: cwd,
+        command: command,
+        session_id: session_id,
+        attach_url: opencode.server_url,
+        payload: payload
+      }
+      |> maybe_put_usage(params)
+
+    on_event.(update)
+  end
+
+  defp acp_update_phase(_method, %{"type" => "usage"}), do: :usage
+
+  defp acp_update_phase(method, params) do
+    cond do
+      end_turn_event?(method, params) -> :completed
+      user_input_required?([{method, params}]) -> :blocked
+      true -> :running
+    end
+  end
+
+  defp maybe_put_usage(update, %{"usage" => usage}) when is_map(usage), do: Map.put(update, :usage, usage)
+  defp maybe_put_usage(update, _params), do: update
 
   defp safe_cwd(cwd) do
     with {:ok, canonical} <- PathSafety.canonicalize(cwd),

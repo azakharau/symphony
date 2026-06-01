@@ -203,6 +203,93 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot_entry.last_codex_event == :command_prepared
   end
 
+  test "orchestrator snapshot tracks OpenCode ACP usage updates as running session tokens" do
+    issue_id = "issue-opencode-usage-snapshot"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-247",
+      title: "OpenCode usage snapshot",
+      description: "Capture OpenCode ACP token usage",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-247"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :OpenCodeUsageOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      runner_kind: "opencode",
+      runner_owner: "opencode",
+      runner_phase: :command,
+      session_id: "ses-opencode-usage",
+      turn_count: 1,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    now = DateTime.utc_now()
+
+    send(
+      pid,
+      {:runner_worker_update, issue_id,
+       %{
+         event: :notification,
+         phase: :usage,
+         timestamp: now,
+         runner_kind: "opencode",
+         runner_owner: "opencode",
+         session_id: "ses-opencode-usage",
+         usage: %{"inputTokens" => 12, "outputTokens" => 4, "totalTokens" => 16},
+         payload: %{
+           "method" => "session/update",
+           "params" => %{
+             "type" => "usage",
+             "usage" => %{"inputTokens" => 12, "outputTokens" => 4, "totalTokens" => 16}
+           }
+         }
+       }}
+    )
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+    assert snapshot_entry.codex_input_tokens == 12
+    assert snapshot_entry.codex_output_tokens == 4
+    assert snapshot_entry.codex_total_tokens == 16
+    assert snapshot_entry.runner_phase == :usage
+    assert snapshot_entry.last_codex_event == :notification
+    assert snapshot_entry.last_codex_message.message["method"] == "session/update"
+
+    assert StatusDashboard.humanize_codex_message(snapshot_entry.last_codex_message) ==
+             "session usage updated (in 12, out 4, total 16)"
+  end
+
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do
     issue_id = "issue-usage-snapshot"
 
@@ -1923,6 +2010,23 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     }
 
     assert StatusDashboard.humanize_codex_message(message) == "git status --short"
+  end
+
+  test "status dashboard humanizes OpenCode runner command updates without dumping maps" do
+    message = %{
+      event: :command_prepared,
+      runner_kind: "opencode",
+      phase: :command,
+      command: ["/usr/local/bin/opencode", "acp"],
+      project_root: "/home/agent/proj/symphony",
+      session_id: nil
+    }
+
+    humanized = StatusDashboard.humanize_codex_message(message)
+
+    assert humanized == "command prepared (opencode acp)"
+    refute humanized =~ "%{"
+    refute humanized =~ "/usr/local/bin/opencode"
   end
 
   test "status dashboard formats auto-approval updates from codex" do

@@ -139,6 +139,52 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
     assert output =~ "end_turn"
   end
 
+  test "opencode acp runner streams session updates and usage through runner events" do
+    {python, script} = fake_acp_server!()
+    workspace_root = workspace_root!()
+    test_pid = self()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      opencode_command: python,
+      opencode_args: [script, "streaming"],
+      opencode_project_root: File.cwd!(),
+      workspace_root: workspace_root
+    )
+
+    assert {:ok, %{output: output}} =
+             Runner.run("/tmp/workspace", issue(), "prompt body", on_event: fn event -> send(test_pid, {:opencode_event, event}) end)
+
+    assert output =~ "streamed text"
+
+    assert_receive {:opencode_event, %{event: :command_prepared, phase: :command}}
+    assert_receive {:opencode_event, %{event: :session_started, session_id: "new-session", phase: :session}}
+
+    assert_receive {:opencode_event,
+                    %{
+                      event: :notification,
+                      phase: :running,
+                      payload: %{
+                        "method" => "session/update",
+                        "params" => %{"type" => "agent_text", "text" => "streamed text"}
+                      }
+                    }}
+
+    assert_receive {:opencode_event,
+                    %{
+                      event: :notification,
+                      phase: :usage,
+                      usage: %{"inputTokens" => 12, "outputTokens" => 4, "totalTokens" => 16},
+                      payload: %{
+                        "method" => "session/update",
+                        "params" => %{
+                          "type" => "usage",
+                          "usage" => %{"inputTokens" => 12, "outputTokens" => 4, "totalTokens" => 16}
+                        }
+                      }
+                    }}
+  end
+
   test "opencode acp runner parks user input requests as need owner input" do
     {python, script} = fake_acp_server!()
     workspace_root = workspace_root!()
@@ -273,6 +319,12 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
             import time
             time.sleep(0.05)
             send({"jsonrpc":"2.0","method":"session/update","params":{"type":"agent_text","text":"slow done"}})
+            send({"jsonrpc":"2.0","method":"session/update","params":{"type":"end_turn","processCwd":os.getcwd()}})
+            send({"jsonrpc":"2.0","id":mid,"result":{"stopReason":"end_turn","processCwd":os.getcwd()}})
+        elif method == "session/prompt" and scenario == "streaming":
+            send({"jsonrpc":"2.0","method":"session/update","params":{"type":"agent_text","text":"streamed text"}})
+            send({"jsonrpc":"2.0","method":"session/update","params":{"type":"tool_plan","tool":"edit"}})
+            send({"jsonrpc":"2.0","method":"session/update","params":{"type":"usage","usage":{"inputTokens":12,"outputTokens":4,"totalTokens":16}}})
             send({"jsonrpc":"2.0","method":"session/update","params":{"type":"end_turn","processCwd":os.getcwd()}})
             send({"jsonrpc":"2.0","id":mid,"result":{"stopReason":"end_turn","processCwd":os.getcwd()}})
         elif method == "session/prompt" and scenario == "fail-if-prompt":

@@ -25,6 +25,16 @@ defmodule SymphonyElixir.StatusDashboard do
   @running_event_min_width 12
   @running_row_chrome_width 10
   @default_terminal_columns 115
+  @runner_status_events [
+    :command_prepared,
+    :session_started,
+    :completed,
+    :failed,
+    :timeout,
+    :exit_failed,
+    :malformed_task_prompt_blocked,
+    :loop_breaker_blocked
+  ]
 
   @ansi_reset IO.ANSI.reset()
   @ansi_bold IO.ANSI.bright()
@@ -1159,6 +1169,11 @@ defmodule SymphonyElixir.StatusDashboard do
   @spec humanize_codex_message(term()) :: String.t()
   def humanize_codex_message(nil), do: "no runner message yet"
 
+  def humanize_codex_message(%{event: event} = message) when event in @runner_status_events do
+    (humanize_runner_event(event, message) || humanize_codex_payload(message))
+    |> truncate(140)
+  end
+
   def humanize_codex_message(%{event: event, message: message}) do
     payload = unwrap_codex_message_payload(message)
 
@@ -1239,6 +1254,51 @@ defmodule SymphonyElixir.StatusDashboard do
   defp humanize_codex_event(:turn_cancelled, _message, _payload), do: "turn cancelled"
   defp humanize_codex_event(:malformed, _message, _payload), do: "malformed JSON event from codex"
   defp humanize_codex_event(_event, _message, _payload), do: nil
+
+  defp humanize_runner_event(:command_prepared, message) do
+    case runner_command_label(map_value(message, ["command", :command])) do
+      nil -> "command prepared"
+      command -> "command prepared (#{command})"
+    end
+  end
+
+  defp humanize_runner_event(:session_started, message) do
+    case map_value(message, ["session_id", :session_id]) do
+      session_id when is_binary(session_id) and session_id != "" -> "session started (#{session_id})"
+      _session_id -> "session started"
+    end
+  end
+
+  defp humanize_runner_event(:completed, message) do
+    case map_value(message, ["session_id", :session_id]) do
+      session_id when is_binary(session_id) and session_id != "" -> "runner completed (#{session_id})"
+      _session_id -> "runner completed"
+    end
+  end
+
+  defp humanize_runner_event(:failed, message), do: "runner failed: #{format_reason(map_value(message, ["failure", :failure]) || message)}"
+  defp humanize_runner_event(:timeout, message), do: "runner timeout: #{format_reason(map_value(message, ["failure", :failure]) || message)}"
+  defp humanize_runner_event(:exit_failed, message), do: "runner exit failed: #{format_reason(map_value(message, ["failure", :failure]) || message)}"
+  defp humanize_runner_event(:malformed_task_prompt_blocked, message), do: "runner policy blocked: #{format_reason(map_value(message, ["failure", :failure]) || message)}"
+  defp humanize_runner_event(:loop_breaker_blocked, message), do: "runner policy blocked: #{format_reason(map_value(message, ["failure", :failure]) || message)}"
+  defp humanize_runner_event(_event, _message), do: nil
+
+  defp runner_command_label(command) when is_list(command) do
+    command
+    |> Enum.take(4)
+    |> Enum.map(fn
+      value when is_binary(value) -> Path.basename(value)
+      value -> to_string(value)
+    end)
+    |> Enum.reject(&(&1 == ""))
+    |> case do
+      [] -> nil
+      parts -> Enum.join(parts, " ")
+    end
+  end
+
+  defp runner_command_label(command) when is_binary(command), do: Path.basename(command)
+  defp runner_command_label(_command), do: nil
 
   defp unwrap_codex_message_payload(%{} = message) do
     cond do
@@ -1347,6 +1407,55 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp humanize_codex_method("turn/cancelled", _payload), do: "turn cancelled"
+
+  defp humanize_codex_method("session/update", payload) do
+    params =
+      map_path(payload, ["params"]) ||
+        map_path(payload, [:params]) ||
+        %{}
+
+    type = map_value(params, ["type", :type])
+
+    case type do
+      "agent_text" ->
+        text = map_value(params, ["text", :text, "message", :message])
+
+        if is_binary(text) and String.trim(text) != "" do
+          "agent message streaming: #{inline_text(text)}"
+        else
+          "agent message streaming"
+        end
+
+      "tool_plan" ->
+        tool = map_value(params, ["tool", :tool, "name", :name])
+
+        if is_binary(tool) and String.trim(tool) != "" do
+          "tool plan updated (#{tool})"
+        else
+          "tool plan updated"
+        end
+
+      "usage" ->
+        usage = map_value(params, ["usage", :usage])
+
+        case format_usage_counts(usage) do
+          nil -> "session usage updated"
+          usage_text -> "session usage updated (#{usage_text})"
+        end
+
+      type when type in ["end_turn", "stop"] ->
+        "turn completed (#{type})"
+
+      type when type in ["user_input_required", "permission"] ->
+        "turn blocked: waiting for user input"
+
+      type when is_binary(type) and type != "" ->
+        "session update (#{type})"
+
+      _type ->
+        "session update"
+    end
+  end
 
   defp humanize_codex_method("turn/diff/updated", payload) do
     diff =

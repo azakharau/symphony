@@ -63,6 +63,14 @@ defmodule SymphonyElixir.OpenCodeLiveGateTest do
     assert command_update.protocol == "acp"
     assert command_update.session_id == nil
 
+    session_update = receive_runner_update("issue-opencode-live", :session_started, [])
+    assert session_update.event == :session_started
+    assert session_update.runner_kind == "opencode"
+    assert session_update.runner_owner == "opencode"
+    assert session_update.project_root == @project_root
+    assert session_update.command == [command, "acp"]
+    assert_session_id_shape(session_update.session_id)
+
     assert_receive {:memory_tracker_comment, "issue-opencode-live", comment}, 600_000
     assert comment =~ "## OpenCode Handoff"
     assert comment =~ "Runner: OpenCode"
@@ -72,7 +80,13 @@ defmodule SymphonyElixir.OpenCodeLiveGateTest do
 
     assert_receive {:memory_tracker_state_update, "issue-opencode-live", "In Review"}
 
-    handoff_update = receive_runner_update("issue-opencode-live", :handoff_recorded, [:completed])
+    handoff_update =
+      receive_runner_update("issue-opencode-live", :handoff_recorded, [
+        :notification,
+        :request,
+        :completed
+      ])
+
     assert handoff_update.event == :handoff_recorded
     assert handoff_update.runner_kind == "opencode"
     assert handoff_update.runner_owner == "opencode"

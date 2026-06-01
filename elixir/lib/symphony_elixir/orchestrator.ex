@@ -251,7 +251,7 @@ defmodule SymphonyElixir.Orchestrator do
         {:noreply, state}
 
       running_entry ->
-        updated_running_entry = integrate_runner_update(running_entry, update)
+        {updated_running_entry, _token_delta} = integrate_runner_update(running_entry, update)
 
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
@@ -2436,25 +2436,45 @@ defmodule SymphonyElixir.Orchestrator do
   defp blocked_issue_state(_metadata), do: nil
 
   defp integrate_runner_update(running_entry, %{event: event, timestamp: timestamp} = update) do
-    running_entry
-    |> Map.put(:runner_owner, Map.get(update, :runner_owner, Map.get(update, :runner_kind, Map.get(running_entry, :runner_owner))))
-    |> maybe_put_runtime_value(:runner_kind, Map.get(update, :runner_kind))
-    |> maybe_put_runtime_value(:runner_phase, Map.get(update, :phase))
-    |> maybe_put_runtime_value(:runner_command, Map.get(update, :command))
-    |> maybe_put_runtime_value(:runner_project_root, Map.get(update, :project_root))
-    |> maybe_put_runtime_value(:runner_attach_url, Map.get(update, :attach_url))
-    |> maybe_put_runtime_value(:runner_result_state, Map.get(update, :result_state))
-    |> maybe_put_runtime_value(:runner_failure, Map.get(update, :failure))
-    |> maybe_put_runtime_value(:runner_outcome, Map.get(update, :outcome))
-    |> maybe_put_runtime_value(:session_id, Map.get(update, :session_id))
-    |> Map.put(:last_codex_timestamp, timestamp)
-    |> Map.put(:last_codex_event, event)
-    |> Map.put(:last_codex_message, summarize_runner_update(update))
+    token_delta = extract_token_delta(running_entry, update)
+    codex_input_tokens = Map.get(running_entry, :codex_input_tokens, 0)
+    codex_output_tokens = Map.get(running_entry, :codex_output_tokens, 0)
+    codex_total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
+    last_reported_input = Map.get(running_entry, :codex_last_reported_input_tokens, 0)
+    last_reported_output = Map.get(running_entry, :codex_last_reported_output_tokens, 0)
+    last_reported_total = Map.get(running_entry, :codex_last_reported_total_tokens, 0)
+    turn_count = Map.get(running_entry, :turn_count, 0)
+
+    updated_running_entry =
+      running_entry
+      |> Map.put(:runner_owner, Map.get(update, :runner_owner, Map.get(update, :runner_kind, Map.get(running_entry, :runner_owner))))
+      |> maybe_put_runtime_value(:runner_kind, Map.get(update, :runner_kind))
+      |> maybe_put_runtime_value(:runner_phase, Map.get(update, :phase))
+      |> maybe_put_runtime_value(:runner_command, Map.get(update, :command))
+      |> maybe_put_runtime_value(:runner_project_root, Map.get(update, :project_root))
+      |> maybe_put_runtime_value(:runner_attach_url, Map.get(update, :attach_url))
+      |> maybe_put_runtime_value(:runner_result_state, Map.get(update, :result_state))
+      |> maybe_put_runtime_value(:runner_failure, Map.get(update, :failure))
+      |> maybe_put_runtime_value(:runner_outcome, Map.get(update, :outcome))
+      |> maybe_put_runtime_value(:session_id, Map.get(update, :session_id))
+      |> Map.put(:last_codex_timestamp, timestamp)
+      |> Map.put(:last_codex_event, event)
+      |> Map.put(:last_codex_message, summarize_runner_update(update))
+      |> Map.put(:codex_input_tokens, codex_input_tokens + token_delta.input_tokens)
+      |> Map.put(:codex_output_tokens, codex_output_tokens + token_delta.output_tokens)
+      |> Map.put(:codex_total_tokens, codex_total_tokens + token_delta.total_tokens)
+      |> Map.put(:codex_last_reported_input_tokens, max(last_reported_input, token_delta.input_reported))
+      |> Map.put(:codex_last_reported_output_tokens, max(last_reported_output, token_delta.output_reported))
+      |> Map.put(:codex_last_reported_total_tokens, max(last_reported_total, token_delta.total_reported))
+      |> Map.put(:turn_count, turn_count_for_update(turn_count, running_entry.session_id, update))
+
+    {updated_running_entry, token_delta}
   end
 
   defp summarize_runner_update(update) when is_map(update) do
     %{
       event: Map.get(update, :event),
+      message: Map.get(update, :payload) || Map.get(update, :raw),
       runner_kind: Map.get(update, :runner_kind),
       phase: Map.get(update, :phase),
       command: Map.get(update, :command),
@@ -2812,6 +2832,8 @@ defmodule SymphonyElixir.Orchestrator do
       [:params, :msg, :info, :total_token_usage],
       ["params", "tokenUsage", "total"],
       [:params, :tokenUsage, :total],
+      ["params", "usage"],
+      [:params, :usage],
       ["tokenUsage", "total"],
       [:tokenUsage, :total]
     ]
@@ -2986,8 +3008,8 @@ defmodule SymphonyElixir.Orchestrator do
         :completionTokens
       ])
 
-  defp get_token_usage(usage, :total),
-    do:
+  defp get_token_usage(usage, :total) do
+    explicit_total =
       payload_get(usage, [
         "total_tokens",
         "total",
@@ -2996,6 +3018,16 @@ defmodule SymphonyElixir.Orchestrator do
         "totalTokens",
         :totalTokens
       ])
+
+    input = get_token_usage(usage, :input)
+    output = get_token_usage(usage, :output)
+
+    cond do
+      is_integer(explicit_total) -> explicit_total
+      is_integer(input) and is_integer(output) -> input + output
+      true -> nil
+    end
+  end
 
   defp payload_get(payload, fields) when is_list(fields) do
     Enum.find_value(fields, fn field -> map_integer_value(payload, field) end)

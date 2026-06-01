@@ -123,7 +123,8 @@ defmodule SymphonyElixir.OpenCode.Runner do
              command: context.command,
              args: args,
              cwd: context.execution_dir,
-             title: title
+             title: title,
+             on_event: context.on_event
            )
          ) do
       {:ok, result} ->

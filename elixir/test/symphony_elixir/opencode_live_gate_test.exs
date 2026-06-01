@@ -30,7 +30,7 @@ defmodule SymphonyElixir.OpenCodeLiveGateTest do
       opencode_result_state: "In Review",
       opencode_timeout_ms: 10_800_000,
       opencode_read_timeout_ms: 30_000,
-      opencode_stall_timeout_ms: 30_000,
+      opencode_stall_timeout_ms: 0,
       prompt: "Fallback prompt must not be used by the OpenCode live gate."
     )
 

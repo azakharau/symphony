@@ -141,6 +141,8 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(opencode, "args") == ["acp"]
     assert Map.get(opencode, "agent") == "build"
     assert Map.get(opencode, "server_url") == nil
+    assert Map.get(opencode, "timeout_ms") == 10_800_000
+    assert Map.get(opencode, "stall_timeout_ms") == 0
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())

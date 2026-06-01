@@ -92,6 +92,7 @@ defmodule SymphonyElixir.RootConfigTest do
     assert alpha.execution == %{"enabled" => true, "max_concurrent_runs" => 2}
     assert alpha.gates == %{"dispatch_enabled" => true, "requires_review" => true}
     assert alpha.process_names.workflow_store == {:symphony_project, "alpha-project", :workflow_store}
+    assert alpha.process_names.task_supervisor == {:symphony_project, "alpha-project", :task_supervisor}
     assert ProjectContext.dispatchable?(alpha)
 
     assert %ProjectContext{
@@ -141,10 +142,44 @@ defmodule SymphonyElixir.RootConfigTest do
     assert message =~ "projects must be a list"
   end
 
-  test "rejects missing workflow paths" do
-    assert {:error, {:invalid_root_config, message}} =
+  test "rejects non-map root config" do
+    assert {:error, :root_config_not_a_map} = RootConfig.parse([])
+  end
+
+  test "reports missing root config files" do
+    path = Path.join(tmp_root("missing-file"), "projects.yml")
+
+    assert {:error, {:missing_root_config_file, ^path, :enoent}} = RootConfig.load(path)
+  end
+
+  test "rejects root YAML that is not a map" do
+    root = tmp_root("yaml-not-map")
+    config_path = Path.join(root, "projects.yml")
+    File.mkdir_p!(root)
+    File.write!(config_path, "- not\n- a\n- map\n")
+
+    assert {:error, :root_config_not_a_map} = RootConfig.load(config_path)
+  after
+    File.rm_rf(tmp_root("yaml-not-map"))
+  end
+
+  test "rejects malformed server and project entries" do
+    assert {:error, {:invalid_root_config, "server must be a map"}} =
+             RootConfig.parse(%{"server" => [], "projects" => []})
+
+    assert {:error, {:invalid_root_config, "projects[1] must be a map"}} =
+             RootConfig.parse(%{"projects" => ["not-a-map"]})
+
+    assert {:error, {:invalid_root_config, "projects[1].id is required"}} =
+             RootConfig.parse(%{"projects" => [%{"workflow_path" => "WORKFLOW.md"}]})
+  end
+
+  test "isolates missing workflow paths to usable-id project contexts" do
+    assert {:ok, %RootConfig{projects: [project]}} =
              RootConfig.parse(%{"projects" => [%{"id" => "missing-workflow"}]})
 
+    assert project.status == :invalid
+    assert {:invalid_project, [{:invalid_root_config, message}]} = ProjectContext.dispatch_blocker(project)
     assert message =~ "workflow_path is required"
   end
 
@@ -153,6 +188,75 @@ defmodule SymphonyElixir.RootConfigTest do
              RootConfig.parse(%{"projects" => [%{"id" => "Bad ID", "workflow_path" => "WORKFLOW.md"}]})
 
     assert message =~ "lower-case URL-safe"
+  end
+
+  test "rejects invalid project field shapes" do
+    cases = [
+      {%{"id" => "bad", "workflow_path" => ""}, "workflow_path must be a non-empty string"},
+      {%{"id" => "bad", "workflow_path" => "WORKFLOW.md", "logs_root" => ""}, "logs_root must be a non-empty string"},
+      {%{"id" => "bad", "workflow_path" => "WORKFLOW.md", "repo_root" => 1}, "repo_root must be a string"},
+      {%{"id" => "bad", "workflow_path" => "WORKFLOW.md", "enabled" => "yes"}, "enabled must be a boolean"},
+      {%{"id" => "bad", "workflow_path" => "WORKFLOW.md", "dashboard_order" => "1"}, "dashboard_order must be an integer"},
+      {%{"id" => "bad", "workflow_path" => "WORKFLOW.md", "runner" => []}, "runner must be a map"},
+      {%{"id" => "bad", "workflow_path" => "WORKFLOW.md", "linear" => %{"team" => []}}, "linear.team must be a map"}
+    ]
+
+    for {project, expected_message} <- cases do
+      assert {:ok, %RootConfig{projects: [parsed]}} = RootConfig.parse(%{"projects" => [project]})
+      assert parsed.status == :invalid
+      assert {:invalid_project, [{:invalid_root_config, message}]} = ProjectContext.dispatch_blocker(parsed)
+      assert message =~ expected_message
+    end
+  end
+
+  test "keeps valid siblings when usable-id project entries have invalid config" do
+    root = tmp_root("invalid-sibling")
+    workflow = Path.join(root, "valid/WORKFLOW.md")
+    File.mkdir_p!(Path.dirname(workflow))
+    File.write!(workflow, "---\ntracker:\n  kind: memory\n---\nvalid")
+
+    assert {:ok, %RootConfig{projects: [valid, invalid]}} =
+             RootConfig.parse(
+               %{
+                 "projects" => [
+                   %{"id" => "valid", "enabled" => true, "workflow_path" => "valid/WORKFLOW.md"},
+                   %{"id" => "invalid", "enabled" => true, "workflow_path" => ""}
+                 ]
+               },
+               root
+             )
+
+    assert valid.status == :valid
+    assert invalid.status == :invalid
+  after
+    File.rm_rf(tmp_root("invalid-sibling"))
+  end
+
+  test "falls back to project id for blank or non-string names and accepts nil optional maps" do
+    assert {:ok, %RootConfig{projects: [blank_name, non_string_name, nil_maps]}} =
+             RootConfig.parse(%{
+               "projects" => [
+                 %{"id" => "blank", "name" => " ", "workflow_path" => "WORKFLOW.md"},
+                 %{"id" => "non-string", "name" => 123, "workflow_path" => "WORKFLOW.md"},
+                 %{
+                   "id" => "nil-maps",
+                   "workflow_path" => "WORKFLOW.md",
+                   "linear" => nil,
+                   "mnemesh" => nil,
+                   "runner" => nil,
+                   "execution" => nil,
+                   "gates" => nil
+                 }
+               ]
+             })
+
+    assert blank_name.name == "blank"
+    assert non_string_name.name == "non-string"
+    assert nil_maps.linear == %{"team" => %{}, "project" => %{}, "milestone" => %{}}
+    assert nil_maps.mnemesh == %{}
+    assert nil_maps.runner == %{}
+    assert nil_maps.execution == %{"enabled" => true}
+    assert nil_maps.gates == %{"dispatch_enabled" => true}
   end
 
   test "uses default server host and allows absent port" do
@@ -216,6 +320,41 @@ defmodule SymphonyElixir.RootConfigTest do
     assert ProjectContext.dispatch_blocker(gate_disabled) == :gate_disabled
   after
     File.rm_rf(tmp_root("dispatch"))
+  end
+
+  test "workflow load errors are isolated to the project context" do
+    root = tmp_root("workflow-load-error")
+    workflow = Path.join(root, "bad/WORKFLOW.md")
+    File.mkdir_p!(Path.dirname(workflow))
+    File.write!(workflow, "---\n- not\n- a\n- map\n---\nprompt\n")
+
+    assert {:ok, %RootConfig{projects: [project]}} =
+             RootConfig.parse(
+               %{"projects" => [%{"id" => "bad", "enabled" => true, "workflow_path" => "bad/WORKFLOW.md"}]},
+               root
+             )
+
+    assert project.status == :invalid
+    assert [{:workflow_load_error, _reason}] = project.errors
+  after
+    File.rm_rf(tmp_root("workflow-load-error"))
+  end
+
+  test "project context default status and map defaults are explicit" do
+    disabled = ProjectContext.new(%{id: "disabled", enabled: false, workflow_path: "WORKFLOW.md"})
+    valid = ProjectContext.new(%{id: "valid", enabled: true, workflow_path: "WORKFLOW.md"})
+    invalid = ProjectContext.new(%{id: "invalid", enabled: true, workflow_path: "WORKFLOW.md", errors: [:bad]})
+
+    assert disabled.status == :disabled
+    assert ProjectContext.dispatch_blocker(disabled) == :disabled
+    assert valid.status == :valid
+    assert invalid.status == :invalid
+
+    status_disabled = %ProjectContext{valid | status: :disabled}
+    assert ProjectContext.dispatch_blocker(status_disabled) == :disabled
+
+    defaulted = %ProjectContext{valid | execution: nil, gates: nil}
+    assert ProjectContext.dispatch_blocker(defaulted) == nil
   end
 
   defp tmp_root(name) do

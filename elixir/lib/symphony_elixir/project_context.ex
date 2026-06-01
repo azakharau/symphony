@@ -30,6 +30,7 @@ defmodule SymphonyElixir.ProjectContext do
 
   @type process_names :: %{
           workflow_store: term(),
+          task_supervisor: term(),
           orchestrator: term(),
           http_server: term(),
           status_dashboard: term()
@@ -95,12 +96,12 @@ defmodule SymphonyElixir.ProjectContext do
           | :execution_disabled
           | :gate_disabled
           | nil
-  def dispatch_blocker(%__MODULE__{enabled: false}), do: :disabled
-  def dispatch_blocker(%__MODULE__{status: :disabled}), do: :disabled
-
   def dispatch_blocker(%__MODULE__{status: :invalid, errors: errors}) do
     {:invalid_project, errors}
   end
+
+  def dispatch_blocker(%__MODULE__{enabled: false}), do: :disabled
+  def dispatch_blocker(%__MODULE__{status: :disabled}), do: :disabled
 
   def dispatch_blocker(%__MODULE__{execution: execution, gates: gates, workflow_path: workflow_path}) do
     cond do
@@ -115,6 +116,7 @@ defmodule SymphonyElixir.ProjectContext do
   def process_names(project_id) when is_binary(project_id) do
     %{
       workflow_store: {:symphony_project, project_id, :workflow_store},
+      task_supervisor: {:symphony_project, project_id, :task_supervisor},
       orchestrator: {:symphony_project, project_id, :orchestrator},
       http_server: {:symphony_project, project_id, :http_server},
       status_dashboard: {:symphony_project, project_id, :status_dashboard}

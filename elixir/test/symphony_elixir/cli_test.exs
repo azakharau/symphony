@@ -137,7 +137,7 @@ defmodule SymphonyElixir.CLITest do
     assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
   end
 
-  test "parses --projects-config and reports root startup as unsupported" do
+  test "parses --projects-config, sets root path, and starts root application" do
     parent = self()
     config_path = "tmp/projects.yml"
     expanded_path = Path.expand(config_path)
@@ -158,22 +158,29 @@ defmodule SymphonyElixir.CLITest do
       end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
+      set_root_config_path: fn path ->
+        send(parent, {:root_config_path_set, path})
+        :ok
+      end,
       load_root_config: fn path ->
         send(parent, {:projects_config_loaded, path})
         {:ok, root_config}
       end,
-      ensure_root_started: fn ^root_config -> {:error, :root_mode_not_yet_supported} end,
+      ensure_root_started: fn ^root_config ->
+        send(parent, {:root_started, root_config})
+        {:ok, [:symphony_elixir]}
+      end,
       ensure_all_started: fn ->
         send(parent, :single_project_started)
         {:ok, [:symphony_elixir]}
       end
     }
 
-    assert {:error, message} = CLI.evaluate([@ack_flag, "--projects-config", config_path], deps)
-    assert message =~ "Root projects config mode parsed"
-    assert message =~ "multiproject startup is not yet supported"
+    assert :ok = CLI.evaluate([@ack_flag, "--projects-config", config_path], deps)
     assert_received {:projects_config_checked, ^expanded_path}
     assert_received {:projects_config_loaded, ^expanded_path}
+    assert_received {:root_config_path_set, ^expanded_path}
+    assert_received {:root_started, ^root_config}
     refute_received :workflow_set
     refute_received :single_project_started
   end

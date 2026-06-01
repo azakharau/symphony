@@ -197,12 +197,12 @@ mix test test/symphony_elixir/workspace_and_config_test.exs
 - `lib/symphony_elixir/opencode/*`
 - `lib/symphony_elixir/codex/*`
 
-- [ ] Introduce a root-mode application child layout with `RootConfigStore`, `Registry`, and `DynamicSupervisor`.
-- [ ] Let each enabled project start a child supervisor containing its own `WorkflowStore`, `Task.Supervisor`, and `Orchestrator` names.
-- [ ] Update `WorkflowStore.start_link/1` to accept `:name` and `:workflow_path`; preserve old `WorkflowStore.current/0` compatibility for single-project mode.
-- [ ] Add root config reload handling that starts/stops project child supervisors without restarting the daemon.
-- [ ] Represent invalid workflow projects as errored project states instead of crashing root supervisor.
-- [ ] Add tests that root reload starts a new enabled project, stops a disabled project, and survives one project child crash.
+- [x] Introduce a root-mode application child layout with `RootConfigStore`, `Registry`, and `DynamicSupervisor`.
+- [x] Let each enabled project start a child supervisor containing its own `WorkflowStore`, `Task.Supervisor`, and paused `Orchestrator` names.
+- [x] Update `WorkflowStore.start_link/1` to accept `:name` and `:workflow_path`; preserve old `WorkflowStore.current/0` compatibility for single-project mode.
+- [x] Add root config reload handling that starts/stops project child supervisors without restarting the daemon.
+- [x] Represent invalid workflow projects as errored project states instead of crashing root supervisor.
+- [x] Add tests that root reload starts a new enabled project, stops a disabled project, and survives one project child crash.
 
 **Validation commands:**
 

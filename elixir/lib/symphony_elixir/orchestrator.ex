@@ -50,7 +50,8 @@ defmodule SymphonyElixir.Orchestrator do
       active_project_milestone_id: nil,
       codex_totals: nil,
       runner_runtime_totals: nil,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      dispatch_paused?: false
     ]
 
     @type t :: %__MODULE__{}
@@ -63,7 +64,35 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
-  def init(_opts) do
+  def init(opts) do
+    dispatch_paused? = Keyword.get(opts, :dispatch_paused?, false)
+
+    if dispatch_paused? do
+      {:ok, paused_state()}
+    else
+      {:ok, active_state()}
+    end
+  end
+
+  defp paused_state do
+    %State{
+      poll_interval_ms: nil,
+      full_poll_interval_ms: nil,
+      last_full_poll_at_ms: nil,
+      fast_poll_states: [],
+      max_concurrent_agents: 0,
+      next_poll_due_at_ms: nil,
+      poll_check_in_progress: false,
+      tick_timer_ref: nil,
+      tick_token: nil,
+      codex_totals: @empty_codex_totals,
+      runner_runtime_totals: @empty_runner_runtime_totals,
+      codex_rate_limits: nil,
+      dispatch_paused?: true
+    }
+  end
+
+  defp active_state do
     now_ms = System.monotonic_time(:millisecond)
     config = Config.settings!()
 
@@ -79,16 +108,20 @@ defmodule SymphonyElixir.Orchestrator do
       tick_token: nil,
       codex_totals: @empty_codex_totals,
       runner_runtime_totals: @empty_runner_runtime_totals,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      dispatch_paused?: false
     }
 
     run_terminal_workspace_cleanup()
-    state = schedule_tick(state, 0)
-
-    {:ok, state}
+    schedule_tick(state, 0)
   end
 
   @impl true
+  def handle_info({:tick, tick_token}, %{dispatch_paused?: true, tick_token: tick_token} = state)
+      when is_reference(tick_token) do
+    {:noreply, state}
+  end
+
   def handle_info({:tick, tick_token}, %{tick_token: tick_token} = state)
       when is_reference(tick_token) do
     state = refresh_runtime_config(state)
@@ -108,6 +141,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:tick, _tick_token}, state), do: {:noreply, state}
 
+  def handle_info(:tick, %{dispatch_paused?: true} = state), do: {:noreply, state}
+
   def handle_info(:tick, state) do
     state = refresh_runtime_config(state)
 
@@ -123,6 +158,8 @@ defmodule SymphonyElixir.Orchestrator do
     :ok = schedule_poll_cycle_start()
     {:noreply, state}
   end
+
+  def handle_info(:run_poll_cycle, %{dispatch_paused?: true} = state), do: {:noreply, state}
 
   def handle_info(:run_poll_cycle, state) do
     state = refresh_runtime_config(state)

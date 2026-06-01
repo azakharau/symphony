@@ -1999,7 +1999,7 @@ defmodule SymphonyElixir.Orchestrator do
          milestone_batch_allowed?(issue, state) and
          dispatch_slots_available?(issue, state) and
          worker_slots_available?(state, metadata[:worker_host], runner_kind_for_issue(issue, state)) do
-      {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host])}
+      {:noreply, do_dispatch_issue(state, issue, attempt, metadata[:worker_host], :project_milestone_planning)}
     else
       {:noreply,
        schedule_issue_retry(

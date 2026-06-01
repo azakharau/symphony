@@ -135,6 +135,8 @@ defmodule SymphonyElixir.Runner.CodexAdapter do
     """
   end
 
+  defp continue_with_issue?(%Issue{synthetic_kind: :project_milestone_planning} = issue, _issue_state_fetcher, _settings), do: {:done, issue}
+
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher, settings) when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->

@@ -1380,6 +1380,46 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
              })
   end
 
+  test "codex adapter treats project milestone planning as one-shot synthetic pulse" do
+    workspace_root = Path.join(System.tmp_dir!(), "symphony-codex-milestone-pulse-#{System.unique_integer([:positive])}")
+    codex_project_root = Path.join(workspace_root, "project")
+    codex_binary = Path.join(workspace_root, "fake-codex")
+    trace_file = Path.join(workspace_root, "codex.trace")
+
+    File.mkdir_p!(codex_project_root)
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    write_fake_codex!(codex_binary, trace_file)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: Path.join(workspace_root, "workspaces"),
+      codex_command: codex_binary,
+      codex_project_root: codex_project_root,
+      runner_routes: %{"Todo" => "codex"},
+      max_turns: 4,
+      prompt: "Plan milestone {{ issue.project_milestone.name }}"
+    )
+
+    issue = %Issue{
+      id: "project-milestone:milestone-1:planning",
+      identifier: "MILESTONE-milestone-1",
+      title: "Plan milestone: milestone 1",
+      state: "Todo",
+      synthetic_kind: :project_milestone_planning,
+      project_milestone: %{id: "milestone-1", name: "Milestone", description: "phase_state: todo"}
+    }
+
+    assert :ok =
+             CodexAdapter.run(%{
+               workspace: Path.join([workspace_root, "workspaces", "milestone-1"]),
+               issue: issue,
+               update_recipient: self(),
+               worker_host: nil,
+               emit_update: fn _ -> :ok end,
+               opts: [issue_state_fetcher: fn _ids -> flunk("synthetic milestone planning must not refresh Linear issue state") end]
+             })
+  end
+
   test "agent runner routes In Progress issues to OpenCode and returns to In Review" do
     workspace_root =
       Path.join(

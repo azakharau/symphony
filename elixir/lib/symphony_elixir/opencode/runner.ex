@@ -714,12 +714,15 @@ defmodule SymphonyElixir.OpenCode.Runner do
   end
 
   defp run_opencode_command(runner, command, args, prompt, execution_dir, _session_id) do
+    prompt_dir = opencode_prompt_dir(execution_dir)
+
     prompt_path =
       Path.join(
-        System.tmp_dir!(),
+        prompt_dir,
         "symphony-opencode-prompt-#{System.unique_integer([:positive, :monotonic])}.md"
       )
 
+    File.mkdir_p!(prompt_dir)
     File.write!(prompt_path, prompt)
 
     try do
@@ -741,6 +744,51 @@ defmodule SymphonyElixir.OpenCode.Runner do
     after
       File.rm(prompt_path)
     end
+  end
+
+  defp opencode_prompt_dir(execution_dir) do
+    execution_dir
+    |> prompt_dir_candidates()
+    |> Enum.find(&(not temp_path?(&1)))
+    |> case do
+      nil -> user_state_prompt_dir()
+      prompt_dir -> prompt_dir
+    end
+  end
+
+  defp prompt_dir_candidates(execution_dir) do
+    [
+      scoped_prompt_dir(execution_dir),
+      scoped_prompt_dir(Config.settings!().opencode.project_root),
+      user_state_prompt_dir()
+    ]
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp scoped_prompt_dir(path) when is_binary(path) and path != "",
+    do: Path.join([path, ".symphony", "opencode-prompts"])
+
+  defp scoped_prompt_dir(_path), do: nil
+
+  defp user_state_prompt_dir do
+    state_home =
+      case System.get_env("XDG_STATE_HOME") do
+        value when is_binary(value) and value != "" -> value
+        _ -> Path.join(System.user_home!(), ".local/state")
+      end
+
+    Path.join([state_home, "symphony", "opencode-prompts"])
+  end
+
+  defp temp_path?(path) do
+    expanded_path = Path.expand(path)
+
+    [System.tmp_dir!(), "/tmp"]
+    |> Enum.map(&Path.expand/1)
+    |> Enum.uniq()
+    |> Enum.any?(fn tmp_root ->
+      expanded_path == tmp_root or String.starts_with?(expanded_path, tmp_root <> "/")
+    end)
   end
 
   @spec handoff_comment(Issue.t(), map()) :: String.t()

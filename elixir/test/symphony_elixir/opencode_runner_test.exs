@@ -61,6 +61,14 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
   end
 
   test "opencode runner invokes configured command with Symphony task context" do
+    workspace =
+      Path.join(
+        Path.join(System.user_home!(), "symphony-opencode-test-workspaces"),
+        "symphony-opencode-prompt-workspace-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> File.rm_rf(workspace) end)
+
     issue = %Issue{
       id: "issue-1",
       identifier: "NER-1",
@@ -72,7 +80,7 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
     test_pid = self()
 
     assert {:ok, %{output: "done\n", command: ["opencode" | _args]}} =
-             Runner.run("/tmp/workspace", issue, "prompt body",
+             Runner.run(workspace, issue, "prompt body",
                runner: fn command, args, opts ->
                  prompt = File.read!(Enum.at(args, 3))
                  send(test_pid, {:opencode_called, command, args, opts, prompt})
@@ -90,7 +98,7 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
              "opencode",
              "run",
              "--dir",
-             "/tmp/workspace",
+             ^workspace,
              "--agent",
              "build",
              "--format",
@@ -100,8 +108,9 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
            ] = received_args
 
     assert prompt_path =~ "symphony-opencode-prompt-"
+    assert String.starts_with?(prompt_path, Path.join(workspace, ".symphony"))
     refute Enum.member?(received_args, "prompt body")
-    assert opts[:cd] == "/tmp/workspace"
+    assert opts[:cd] == workspace
     assert opts[:stderr_to_stdout] == true
   end
 

@@ -137,8 +137,10 @@ defmodule SymphonyElixir.CoreTest do
     assert get_in(runner, ["routes", "In Progress"]) == "opencode"
 
     opencode = Map.get(config, "opencode", %{})
+    assert Map.get(opencode, "protocol") == "acp"
+    assert Map.get(opencode, "args") == ["acp"]
     assert Map.get(opencode, "agent") == "build"
-    assert Map.get(opencode, "server_url") == "http://127.0.0.1:3000"
+    assert Map.get(opencode, "server_url") == nil
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())

@@ -51,6 +51,9 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
           {:error, {:opencode_remote_worker_host_unsupported, details}} ->
             block_remote_opencode_worker_host(issue, details, emit_update, project_context)
 
+          {:error, {:need_owner_input, reason}} ->
+            record_opencode_owner_input(issue, reason, emit_update, project_context)
+
           {:error, reason} ->
             {:error, reason}
         end
@@ -156,6 +159,22 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
     end
   end
 
+  defp record_opencode_owner_input(issue, reason, emit_update, project_context) do
+    emit_update.(%{
+      event: :owner_input_requested,
+      phase: :blocked,
+      outcome: :rerouted,
+      timestamp: DateTime.utc_now(),
+      result_state: "Need Owner Input",
+      failure: %{reason: :need_owner_input}
+    })
+
+    with :ok <- Tracker.create_comment(issue.id, opencode_owner_input_comment(issue, reason), project_context),
+         :ok <- Tracker.update_issue_state(issue.id, "Need Owner Input", project_context) do
+      Outcome.rerouted(reason: :need_owner_input, result_state: "Need Owner Input", failure: %{reason: reason})
+    end
+  end
+
   defp reroute_missing_opencode_task_prompt(%Issue{id: issue_id} = issue, project_context, emit_update)
        when is_binary(issue_id) do
     target_state = codex_reroute_state(project_context)
@@ -216,6 +235,24 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
     Symphony found the `symphony:opencode-task-prompt:v1` marker, but the packet is not runnable: `#{inspect(reason)}`.
 
     OpenCode was not started. Symphony is moving this issue to `#{rca_required_state}` so Codex/Machine Architect can replace the task packet with a valid fenced prompt and a non-empty `slice_id` before this issue can run in OpenCode.
+    """
+  end
+
+  defp opencode_owner_input_comment(%Issue{} = issue, reason) do
+    """
+    ## OpenCode Handoff
+
+    Issue: #{issue.identifier}
+    Runner: OpenCode
+    Status: need owner input
+
+    OpenCode requested owner input or permission before it could complete.
+
+    Reason:
+
+    ```text
+    #{inspect(reason)}
+    ```
     """
   end
 

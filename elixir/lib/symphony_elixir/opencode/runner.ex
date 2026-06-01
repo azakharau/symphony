@@ -6,6 +6,7 @@ defmodule SymphonyElixir.OpenCode.Runner do
   require Logger
 
   alias SymphonyElixir.{Config, Linear.Issue}
+  alias SymphonyElixir.OpenCode.ACPRunner
   alias SymphonyElixir.OpenCode.TaskPrompt
 
   @max_handoff_bytes 20_000
@@ -32,7 +33,7 @@ defmodule SymphonyElixir.OpenCode.Runner do
     worker_host = Keyword.get(opts, :worker_host)
 
     with :ok <- ensure_local_worker_host(worker_host, workspace, execution_dir) do
-      run_local_opencode(%{
+      context = %{
         workspace: workspace,
         issue: issue,
         packet: packet,
@@ -42,7 +43,12 @@ defmodule SymphonyElixir.OpenCode.Runner do
         runner: runner,
         execution_dir: execution_dir,
         on_event: on_event
-      })
+      }
+
+      case opencode.protocol do
+        "acp" -> run_local_acp_opencode(context)
+        _protocol -> run_local_opencode(context)
+      end
     end
   rescue
     error in [ErlangError, RuntimeError, ArgumentError, File.Error] ->
@@ -84,6 +90,64 @@ defmodule SymphonyElixir.OpenCode.Runner do
 
     task = Task.async(fn -> execute_opencode_task(context) end)
     handle_opencode_task_result(Task.yield(task, opencode.timeout_ms) || Task.shutdown(task, :brutal_kill), context)
+  end
+
+  defp run_local_acp_opencode(%{issue: issue, packet: packet, opencode: opencode} = context) do
+    args = Keyword.get(context.opts, :args, opencode.args || ["acp"])
+    title = packet_title(issue, packet)
+
+    context.on_event.(%{
+      event: :command_prepared,
+      phase: :command,
+      timestamp: DateTime.utc_now(),
+      runner_owner: "opencode",
+      project_root: context.execution_dir,
+      workspace_path: context.workspace,
+      command: [context.command | args],
+      session_id: nil,
+      attach_url: opencode.server_url,
+      title: title,
+      protocol: "acp"
+    })
+
+    Logger.info([
+      "Starting OpenCode ACP runner for issue_id=#{issue.id} issue_identifier=#{issue.identifier} ",
+      "workspace=#{context.workspace} execution_dir=#{context.execution_dir} attach=#{opencode.server_url || "none"}"
+    ])
+
+    case ACPRunner.run(
+           context.workspace,
+           issue,
+           packet.prompt,
+           Keyword.merge(context.opts,
+             command: context.command,
+             args: args,
+             cwd: context.execution_dir,
+             title: title
+           )
+         ) do
+      {:ok, result} ->
+        result =
+          result
+          |> Map.put_new(:command, [context.command | args])
+          |> Map.put_new(:project_root, context.execution_dir)
+          |> Map.put_new(:session_id, nil)
+          |> Map.put_new(:attach_url, opencode.server_url)
+          |> Map.put_new(:runner_owner, "opencode")
+
+        emit_completed_event(result, context.on_event)
+        {:ok, result}
+
+      {:error, reason} ->
+        context.on_event.(%{
+          event: :failed,
+          phase: :failed,
+          timestamp: DateTime.utc_now(),
+          failure: failure_classification(reason)
+        })
+
+        {:error, reason}
+    end
   end
 
   defp emit_command_prepared(%{} = context) do
@@ -529,8 +593,16 @@ defmodule SymphonyElixir.OpenCode.Runner do
   end
 
   defp decode_sqlite_json(output) do
-    {:ok, rows} = Jason.decode(output)
-    {:ok, rows}
+    case Jason.decode(output) do
+      {:ok, rows} when is_list(rows) ->
+        {:ok, rows}
+
+      {:ok, other} ->
+        {:error, {:opencode_sqlite_unexpected_payload, other}}
+
+      {:error, reason} ->
+        {:error, {:opencode_sqlite_json_decode_failed, Exception.message(reason), trim_output(output)}}
+    end
   end
 
   defp decode_part_text(%{"data" => data}) when is_binary(data) do
@@ -599,11 +671,11 @@ defmodule SymphonyElixir.OpenCode.Runner do
     body
     |> String.split("\n")
     |> Enum.map(&String.trim/1)
-    |> Enum.reject(&empty_or_none_section_line?/1)
+    |> Enum.reject(&non_substantive_section_line?/1)
     |> Enum.any?()
   end
 
-  defp empty_or_none_section_line?(line) do
+  defp non_substantive_section_line?(line) do
     line == "" or line in ["- `(none)`", "- (none)", "(none)", "`(none)`", "none", "None"]
   end
 
@@ -672,13 +744,16 @@ defmodule SymphonyElixir.OpenCode.Runner do
   end
 
   @spec handoff_comment(Issue.t(), map()) :: String.t()
-  def handoff_comment(%Issue{} = issue, %{output: output, command: command}) do
+  def handoff_comment(%Issue{} = issue, %{output: output, command: command} = result) do
+    project_root = Map.get(result, :project_root)
+
     """
     ## OpenCode Handoff
 
     Issue: #{issue.identifier}
     Runner: OpenCode
     Status: completed
+    Project root: #{project_root || "(unknown)"}
 
     Command:
 

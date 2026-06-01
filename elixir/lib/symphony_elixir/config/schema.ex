@@ -237,13 +237,19 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     embedded_schema do
+      field(:protocol, :string, default: "cli")
       field(:command, :string, default: "opencode")
+      field(:args, {:array, :string})
       field(:project_root, :string)
       field(:server_url, :string)
       field(:agent, :string, default: "build")
+      field(:model, :string)
       field(:format, :string, default: "json")
       field(:result_state, :string, default: "In Review")
       field(:timeout_ms, :integer, default: 3_600_000)
+      field(:read_timeout_ms, :integer, default: 5_000)
+      field(:stall_timeout_ms, :integer, default: 300_000)
+      field(:permission_policy, :string, default: "reject")
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -251,11 +257,28 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:command, :project_root, :server_url, :agent, :format, :result_state, :timeout_ms],
+        [
+          :protocol,
+          :command,
+          :args,
+          :project_root,
+          :server_url,
+          :agent,
+          :model,
+          :format,
+          :result_state,
+          :timeout_ms,
+          :read_timeout_ms,
+          :stall_timeout_ms,
+          :permission_policy
+        ],
         empty_values: []
       )
       |> validate_required([:command, :agent, :format, :result_state])
+      |> validate_inclusion(:protocol, ["cli", "acp"])
       |> validate_number(:timeout_ms, greater_than: 0)
+      |> validate_number(:read_timeout_ms, greater_than: 0)
+      |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
     end
   end
 

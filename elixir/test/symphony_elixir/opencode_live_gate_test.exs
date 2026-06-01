@@ -4,6 +4,7 @@ defmodule SymphonyElixir.OpenCodeLiveGateTest do
   alias SymphonyElixir.Linear.Issue
 
   @moduletag :opencode_live
+  @moduletag timeout: 10_800_000
 
   @project_root "/home/agent/proj/symphony"
   @opencode_command "/usr/local/bin/opencode"
@@ -20,11 +21,16 @@ defmodule SymphonyElixir.OpenCodeLiveGateTest do
       workspace_root: Path.join(workspace_root, "workspaces"),
       runner_routes: %{"In Progress" => "opencode"},
       opencode_command: command,
+      opencode_protocol: "acp",
+      opencode_args: ["acp"],
       opencode_project_root: @project_root,
       opencode_server_url: server_url,
       opencode_agent: "build",
       opencode_format: "json",
       opencode_result_state: "In Review",
+      opencode_timeout_ms: 10_800_000,
+      opencode_read_timeout_ms: 30_000,
+      opencode_stall_timeout_ms: 30_000,
       prompt: "Fallback prompt must not be used by the OpenCode live gate."
     )
 
@@ -53,8 +59,9 @@ defmodule SymphonyElixir.OpenCodeLiveGateTest do
     assert command_update.runner_owner == "opencode"
     assert command_update.project_root == @project_root
     assert command_update.workspace_path == workspace_path
-    assert_opencode_command(command_update.command, command, server_url)
-    assert_session_id_shape(command_update.session_id)
+    assert command_update.command == [command, "acp"]
+    assert command_update.protocol == "acp"
+    assert command_update.session_id == nil
 
     assert_receive {:memory_tracker_comment, "issue-opencode-live", comment}, 600_000
     assert comment =~ "## OpenCode Handoff"
@@ -127,45 +134,6 @@ defmodule SymphonyElixir.OpenCodeLiveGateTest do
       value when is_binary(value) and value != "" -> value
       _ -> nil
     end
-  end
-
-  defp assert_opencode_command(command_args, command, server_url) do
-    assert [
-             ^command,
-             "run",
-             "--dir",
-             @project_root,
-             "--agent",
-             "build",
-             "--format",
-             "json",
-             "--title",
-             title | attach_args
-           ] = command_args
-
-    assert title =~ "SYMLIVE-12 Validate OpenCode live gate "
-    assert title =~ ~r/^SYMLIVE-12 Validate OpenCode live gate \[slice=live-gate fp=[0-9a-f]{12}\]$/
-
-    case server_url do
-      value when is_binary(value) and value != "" ->
-        assert_attach_args(attach_args, value)
-
-      _ ->
-        assert attach_args == []
-    end
-  end
-
-  defp assert_attach_args(["--attach", attach_url], expected_url) do
-    assert attach_url == expected_url
-  end
-
-  defp assert_attach_args(["--session", session_id, "--attach", attach_url], expected_url) do
-    assert_session_id_shape(session_id)
-    assert attach_url == expected_url
-  end
-
-  defp assert_attach_args(attach_args, _expected_url) do
-    flunk("unexpected OpenCode attach arguments: #{inspect(attach_args)}")
   end
 
   defp assert_session_id_shape(nil), do: :ok

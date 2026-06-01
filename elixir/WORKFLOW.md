@@ -36,19 +36,26 @@ runner:
     "RCA Required": codex
     "In Progress": opencode
 opencode:
+  protocol: acp
   command: /usr/local/bin/opencode
+  args:
+    - acp
   project_root: /home/agent/proj/symphony
-  server_url: http://127.0.0.1:3000
+  server_url: null
   agent: build
+  model: null
   format: json
   result_state: "In Review"
   timeout_ms: 10800000
+  read_timeout_ms: 30000
+  stall_timeout_ms: 300000
+  permission_policy: reject
 
 OpenCode live validation gate:
 
 - Default `mix test` is deterministic and excludes the live OpenCode gate; it must not require `/usr/local/bin/opencode`, an OpenCode web server, or live Linear.
 - Run the opt-in gate from `/home/agent/proj/symphony/elixir` with `SYMPHONY_OPENCODE_LIVE=1 OPENCODE_COMMAND=/usr/local/bin/opencode mix test.opencodelive`.
-- To attach to a visible OpenCode server session, also set `OPENCODE_SERVER_URL=http://127.0.0.1:3000`; the gate passes that URL as `--attach` and asserts command evidence for title, `build` agent route, canonical directory `/home/agent/proj/symphony`, and session id when OpenCode exposes one.
+- To link handoff evidence to a visible OpenCode Web session, also set `OPENCODE_SERVER_URL=http://127.0.0.1:3000`; ACP still runs as the stdio command `/usr/local/bin/opencode acp`, and the URL is recorded only as attach metadata.
 - The gate uses the memory tracker, an evidence-only no-edit OpenCode prompt, and `git status --short` before/after protection; it proves an `In Progress` issue dispatches through OpenCode and reaches the controlled `In Review` handoff state without production Linear mutation.
 - Cleanup is limited to test-owned temporary workspaces. If the gate fails, interpret the command output as local OpenCode/server/session evidence and record the exact command, result, attach URL, session id when present, and any Mnemesh evidence refs on the Linear/Mnemesh validation record.
 - `/home/agent/proj/symphony` is the canonical live gate project root. `/home/agent/.symphony/vendor/openai-symphony` is only a compatibility alias for older service paths, not the live validation root.

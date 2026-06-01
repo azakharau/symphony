@@ -6,7 +6,12 @@ defmodule SymphonyElixir.CLI do
   alias SymphonyElixir.LogFile
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
-  @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer]
+  @switches [
+    {@acknowledgement_switch, :boolean},
+    logs_root: :string,
+    port: :integer,
+    projects_config: :string
+  ]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type deps :: %{
@@ -14,6 +19,8 @@ defmodule SymphonyElixir.CLI do
           set_workflow_file_path: (String.t() -> :ok | {:error, term()}),
           set_logs_root: (String.t() -> :ok | {:error, term()}),
           set_server_port_override: (non_neg_integer() | nil -> :ok | {:error, term()}),
+          load_root_config: (String.t() -> {:ok, SymphonyElixir.RootConfig.t()} | {:error, term()}),
+          ensure_root_started: (SymphonyElixir.RootConfig.t() -> ensure_started_result()),
           ensure_all_started: (-> ensure_started_result())
         }
 
@@ -36,14 +43,21 @@ defmodule SymphonyElixir.CLI do
         with :ok <- require_guardrails_acknowledgement(opts),
              :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps) do
-          run(Path.expand("WORKFLOW.md"), deps)
+          case Keyword.get(opts, :projects_config) do
+            nil -> run(Path.expand("WORKFLOW.md"), deps)
+            projects_config_path -> run_projects_config(projects_config_path, deps)
+          end
         end
 
       {opts, [workflow_path], []} ->
         with :ok <- require_guardrails_acknowledgement(opts),
              :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps) do
-          run(workflow_path, deps)
+          if Keyword.has_key?(opts, :projects_config) do
+            {:error, usage_message()}
+          else
+            run(workflow_path, deps)
+          end
         end
 
       _ ->
@@ -70,9 +84,34 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
+  @spec run_projects_config(String.t(), deps()) :: :ok | {:error, String.t()}
+  def run_projects_config(projects_config_path, deps) do
+    expanded_path = Path.expand(projects_config_path)
+
+    if deps.file_regular?.(expanded_path) do
+      with {:ok, root_config} <- load_root_config(deps, expanded_path) do
+        case ensure_root_started(deps, root_config) do
+          {:ok, _started_apps} ->
+            :ok
+
+          {:error, :root_mode_not_yet_supported} ->
+            {:error, "Root projects config mode parsed #{expanded_path}, but multiproject startup is not yet supported in this build"}
+
+          {:error, reason} ->
+            {:error, "Failed to start Symphony with projects config #{expanded_path}: #{inspect(reason)}"}
+        end
+      else
+        {:error, reason} ->
+          {:error, "Invalid projects config #{expanded_path}: #{inspect(reason)}"}
+      end
+    else
+      {:error, "Projects config file not found: #{expanded_path}"}
+    end
+  end
+
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]"
+    "Usage: symphony [--logs-root <path>] [--port <port>] [--projects-config <path-to-projects.yml> | path-to-WORKFLOW.md]"
   end
 
   @spec runtime_deps() :: deps()
@@ -82,8 +121,18 @@ defmodule SymphonyElixir.CLI do
       set_workflow_file_path: &SymphonyElixir.Workflow.set_workflow_file_path/1,
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
+      load_root_config: &SymphonyElixir.RootConfig.load/1,
+      ensure_root_started: fn _root_config -> {:error, :root_mode_not_yet_supported} end,
       ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end
     }
+  end
+
+  defp load_root_config(deps, expanded_path) do
+    Map.get(deps, :load_root_config, &SymphonyElixir.RootConfig.load/1).(expanded_path)
+  end
+
+  defp ensure_root_started(deps, root_config) do
+    Map.get(deps, :ensure_root_started, fn _root_config -> {:error, :root_mode_not_yet_supported} end).(root_config)
   end
 
   defp maybe_set_logs_root(opts, deps) do

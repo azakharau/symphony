@@ -136,4 +136,59 @@ defmodule SymphonyElixir.CLITest do
 
     assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
   end
+
+  test "parses --projects-config and reports root startup as unsupported" do
+    parent = self()
+    config_path = "tmp/projects.yml"
+    expanded_path = Path.expand(config_path)
+
+    root_config = %SymphonyElixir.RootConfig{
+      server: %{host: "127.0.0.1", port: 4100},
+      projects: []
+    }
+
+    deps = %{
+      file_regular?: fn path ->
+        send(parent, {:projects_config_checked, path})
+        path == expanded_path
+      end,
+      set_workflow_file_path: fn _path ->
+        send(parent, :workflow_set)
+        :ok
+      end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      load_root_config: fn path ->
+        send(parent, {:projects_config_loaded, path})
+        {:ok, root_config}
+      end,
+      ensure_root_started: fn ^root_config -> {:error, :root_mode_not_yet_supported} end,
+      ensure_all_started: fn ->
+        send(parent, :single_project_started)
+        {:ok, [:symphony_elixir]}
+      end
+    }
+
+    assert {:error, message} = CLI.evaluate([@ack_flag, "--projects-config", config_path], deps)
+    assert message =~ "Root projects config mode parsed"
+    assert message =~ "multiproject startup is not yet supported"
+    assert_received {:projects_config_checked, ^expanded_path}
+    assert_received {:projects_config_loaded, ^expanded_path}
+    refute_received :workflow_set
+    refute_received :single_project_started
+  end
+
+  test "rejects --projects-config combined with a workflow path" do
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert {:error, message} = CLI.evaluate([@ack_flag, "--projects-config", "projects.yml", "WORKFLOW.md"], deps)
+    assert message =~ "--projects-config"
+    assert message =~ "path-to-WORKFLOW.md"
+  end
 end

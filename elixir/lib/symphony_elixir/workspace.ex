@@ -10,18 +10,18 @@ defmodule SymphonyElixir.Workspace do
 
   @type worker_host :: String.t() | nil
 
-  @spec create_for_issue(map() | String.t() | nil, worker_host()) ::
+  @spec create_for_issue(map() | String.t() | nil, worker_host(), term()) ::
           {:ok, Path.t()} | {:error, term()}
-  def create_for_issue(issue_or_identifier, worker_host \\ nil) do
+  def create_for_issue(issue_or_identifier, worker_host \\ nil, settings \\ Config.settings!()) do
     issue_context = issue_context(issue_or_identifier)
 
     try do
       safe_id = safe_identifier(issue_context.issue_identifier)
 
-      with {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host),
-           :ok <- validate_workspace_path(workspace, worker_host),
-           {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host),
-           :ok <- maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
+      with {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host, settings),
+           :ok <- validate_workspace_path(workspace, worker_host, settings),
+           {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host, settings),
+           :ok <- maybe_run_after_create_hook(workspace, issue_context, created?, worker_host, settings) do
         {:ok, workspace}
       end
     rescue
@@ -31,7 +31,7 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp ensure_workspace(workspace, nil) do
+  defp ensure_workspace(workspace, nil, _settings) do
     cond do
       File.dir?(workspace) ->
         {:ok, workspace, false}
@@ -45,7 +45,7 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp ensure_workspace(workspace, worker_host) when is_binary(worker_host) do
+  defp ensure_workspace(workspace, worker_host, settings) when is_binary(worker_host) do
     script =
       [
         "set -eu",
@@ -66,7 +66,7 @@ defmodule SymphonyElixir.Workspace do
       |> Enum.reject(&(&1 == ""))
       |> Enum.join("\n")
 
-    case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
+    case run_remote_command(worker_host, script, settings.hooks.timeout_ms) do
       {:ok, {output, 0}} ->
         parse_remote_workspace_output(output)
 
@@ -85,15 +85,18 @@ defmodule SymphonyElixir.Workspace do
   end
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
-  def remove(workspace), do: remove(workspace, nil)
+  def remove(workspace), do: remove(workspace, nil, Config.settings!())
 
   @spec remove(Path.t(), worker_host()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
-  def remove(workspace, nil) do
+  def remove(workspace, nil), do: remove(workspace, nil, Config.settings!())
+
+  @spec remove(Path.t(), nil, term()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
+  def remove(workspace, nil, settings) do
     case File.exists?(workspace) do
       true ->
-        case validate_workspace_path(workspace, nil) do
+        case validate_workspace_path(workspace, nil, settings) do
           :ok ->
-            maybe_run_before_remove_hook(workspace, nil)
+            maybe_run_before_remove_hook(workspace, nil, settings)
             File.rm_rf(workspace)
 
           {:error, reason} ->
@@ -106,7 +109,12 @@ defmodule SymphonyElixir.Workspace do
   end
 
   def remove(workspace, worker_host) when is_binary(worker_host) do
-    maybe_run_before_remove_hook(workspace, worker_host)
+    remove(workspace, worker_host, Config.settings!())
+  end
+
+  @spec remove(Path.t(), worker_host(), term()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
+  def remove(workspace, worker_host, settings) when is_binary(worker_host) do
+    maybe_run_before_remove_hook(workspace, worker_host, settings)
 
     script =
       [
@@ -115,7 +123,7 @@ defmodule SymphonyElixir.Workspace do
       ]
       |> Enum.join("\n")
 
-    case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
+    case run_remote_command(worker_host, script, settings.hooks.timeout_ms) do
       {:ok, {_output, 0}} ->
         {:ok, []}
 
@@ -134,7 +142,7 @@ defmodule SymphonyElixir.Workspace do
   def remove_issue_workspaces(identifier, worker_host) when is_binary(identifier) and is_binary(worker_host) do
     safe_id = safe_identifier(identifier)
 
-    case workspace_path_for_issue(safe_id, worker_host) do
+    case workspace_path_for_issue(safe_id, worker_host, Config.settings!()) do
       {:ok, workspace} -> remove(workspace, worker_host)
       {:error, _reason} -> :ok
     end
@@ -143,19 +151,40 @@ defmodule SymphonyElixir.Workspace do
   end
 
   def remove_issue_workspaces(identifier, nil) when is_binary(identifier) do
+    remove_issue_workspaces(identifier, nil, Config.settings!())
+  end
+
+  @spec remove_issue_workspaces(term(), nil, term()) :: :ok
+  def remove_issue_workspaces(identifier, nil, settings) when is_binary(identifier) do
     safe_id = safe_identifier(identifier)
 
-    case Config.settings!().worker.ssh_hosts do
+    case settings.worker.ssh_hosts do
       [] ->
-        case workspace_path_for_issue(safe_id, nil) do
-          {:ok, workspace} -> remove(workspace, nil)
+        case workspace_path_for_issue(safe_id, nil, settings) do
+          {:ok, workspace} -> remove(workspace, nil, settings)
           {:error, _reason} -> :ok
         end
 
       worker_hosts ->
-        Enum.each(worker_hosts, &remove_issue_workspaces(identifier, &1))
+        Enum.each(worker_hosts, &remove_issue_workspaces(identifier, &1, settings))
     end
 
+    :ok
+  end
+
+  @spec remove_issue_workspaces(term(), worker_host(), term()) :: :ok
+  def remove_issue_workspaces(identifier, worker_host, settings) when is_binary(identifier) and is_binary(worker_host) do
+    safe_id = safe_identifier(identifier)
+
+    case workspace_path_for_issue(safe_id, worker_host, settings) do
+      {:ok, workspace} -> remove(workspace, worker_host, settings)
+      {:error, _reason} -> :ok
+    end
+
+    :ok
+  end
+
+  def remove_issue_workspaces(_identifier, _worker_host, _settings) do
     :ok
   end
 
@@ -163,52 +192,54 @@ defmodule SymphonyElixir.Workspace do
     :ok
   end
 
-  @spec run_before_run_hook(Path.t(), map() | String.t() | nil, worker_host()) ::
+  @spec run_before_run_hook(Path.t(), map() | String.t() | nil, worker_host(), term()) ::
           :ok | {:error, term()}
-  def run_before_run_hook(workspace, issue_or_identifier, worker_host \\ nil) when is_binary(workspace) do
+  def run_before_run_hook(workspace, issue_or_identifier, worker_host \\ nil, settings \\ Config.settings!())
+      when is_binary(workspace) do
     issue_context = issue_context(issue_or_identifier)
-    hooks = Config.settings!().hooks
+    hooks = settings.hooks
 
     case hooks.before_run do
       nil ->
         :ok
 
       command ->
-        run_hook(command, workspace, issue_context, "before_run", worker_host)
+        run_hook(command, workspace, issue_context, "before_run", worker_host, settings)
     end
   end
 
-  @spec run_after_run_hook(Path.t(), map() | String.t() | nil, worker_host()) :: :ok
-  def run_after_run_hook(workspace, issue_or_identifier, worker_host \\ nil) when is_binary(workspace) do
+  @spec run_after_run_hook(Path.t(), map() | String.t() | nil, worker_host(), term()) :: :ok
+  def run_after_run_hook(workspace, issue_or_identifier, worker_host \\ nil, settings \\ Config.settings!())
+      when is_binary(workspace) do
     issue_context = issue_context(issue_or_identifier)
-    hooks = Config.settings!().hooks
+    hooks = settings.hooks
 
     case hooks.after_run do
       nil ->
         :ok
 
       command ->
-        run_hook(command, workspace, issue_context, "after_run", worker_host)
+        run_hook(command, workspace, issue_context, "after_run", worker_host, settings)
         |> ignore_hook_failure()
     end
   end
 
-  defp workspace_path_for_issue(safe_id, nil) when is_binary(safe_id) do
-    Config.settings!().workspace.root
+  defp workspace_path_for_issue(safe_id, nil, settings) when is_binary(safe_id) do
+    settings.workspace.root
     |> Path.join(safe_id)
     |> PathSafety.canonicalize()
   end
 
-  defp workspace_path_for_issue(safe_id, worker_host) when is_binary(safe_id) and is_binary(worker_host) do
-    {:ok, Path.join(Config.settings!().workspace.root, safe_id)}
+  defp workspace_path_for_issue(safe_id, worker_host, settings) when is_binary(safe_id) and is_binary(worker_host) do
+    {:ok, Path.join(settings.workspace.root, safe_id)}
   end
 
   defp safe_identifier(identifier) do
     String.replace(identifier || "issue", ~r/[^a-zA-Z0-9._-]/, "_")
   end
 
-  defp maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
-    hooks = Config.settings!().hooks
+  defp maybe_run_after_create_hook(workspace, issue_context, created?, worker_host, settings) do
+    hooks = settings.hooks
 
     case created? do
       true ->
@@ -217,7 +248,7 @@ defmodule SymphonyElixir.Workspace do
             :ok
 
           command ->
-            run_hook(command, workspace, issue_context, "after_create", worker_host)
+            run_hook(command, workspace, issue_context, "after_create", worker_host, settings)
         end
 
       false ->
@@ -225,8 +256,8 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp maybe_run_before_remove_hook(workspace, nil) do
-    hooks = Config.settings!().hooks
+  defp maybe_run_before_remove_hook(workspace, nil, settings) do
+    hooks = settings.hooks
 
     case File.dir?(workspace) do
       true ->
@@ -240,7 +271,8 @@ defmodule SymphonyElixir.Workspace do
               workspace,
               %{issue_id: nil, issue_identifier: Path.basename(workspace)},
               "before_remove",
-              nil
+              nil,
+              settings
             )
             |> ignore_hook_failure()
         end
@@ -250,8 +282,8 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp maybe_run_before_remove_hook(workspace, worker_host) when is_binary(worker_host) do
-    hooks = Config.settings!().hooks
+  defp maybe_run_before_remove_hook(workspace, worker_host, settings) when is_binary(worker_host) do
+    hooks = settings.hooks
 
     case hooks.before_remove do
       nil ->
@@ -268,7 +300,7 @@ defmodule SymphonyElixir.Workspace do
           ]
           |> Enum.join("\n")
 
-        run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms)
+        run_remote_command(worker_host, script, settings.hooks.timeout_ms)
         |> case do
           {:ok, {output, status}} ->
             handle_hook_command_result(
@@ -291,8 +323,8 @@ defmodule SymphonyElixir.Workspace do
   defp ignore_hook_failure(:ok), do: :ok
   defp ignore_hook_failure({:error, _reason}), do: :ok
 
-  defp run_hook(command, workspace, issue_context, hook_name, nil) do
-    timeout_ms = Config.settings!().hooks.timeout_ms
+  defp run_hook(command, workspace, issue_context, hook_name, nil, settings) do
+    timeout_ms = settings.hooks.timeout_ms
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local")
 
@@ -314,8 +346,8 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp run_hook(command, workspace, issue_context, hook_name, worker_host) when is_binary(worker_host) do
-    timeout_ms = Config.settings!().hooks.timeout_ms
+  defp run_hook(command, workspace, issue_context, hook_name, worker_host, settings) when is_binary(worker_host) do
+    timeout_ms = settings.hooks.timeout_ms
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host}")
 
@@ -355,9 +387,9 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp validate_workspace_path(workspace, nil) when is_binary(workspace) do
+  defp validate_workspace_path(workspace, nil, settings) when is_binary(workspace) do
     expanded_workspace = Path.expand(workspace)
-    expanded_root = Path.expand(Config.settings!().workspace.root)
+    expanded_root = Path.expand(settings.workspace.root)
     expanded_root_prefix = expanded_root <> "/"
 
     with {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded_workspace),
@@ -383,7 +415,7 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp validate_workspace_path(workspace, worker_host)
+  defp validate_workspace_path(workspace, worker_host, _settings)
        when is_binary(workspace) and is_binary(worker_host) do
     cond do
       String.trim(workspace) == "" ->

@@ -3,8 +3,10 @@ defmodule SymphonyElixir.Config do
   Runtime configuration loaded from `WORKFLOW.md`.
   """
 
+  alias SymphonyElixir.{ProjectContext, ProjectRegistry}
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Workflow
+  alias SymphonyElixir.WorkflowStore
 
   @default_prompt_template """
   You are working on a Linear issue.
@@ -46,6 +48,25 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @spec settings(ProjectContext.t() | GenServer.server() | nil) :: {:ok, Schema.t()} | {:error, term()}
+  def settings(nil), do: settings()
+
+  def settings(%ProjectContext{} = context) do
+    context.process_names.workflow_store
+    |> ProjectRegistry.via_name()
+    |> settings()
+  end
+
+  def settings(workflow_store_name) do
+    case WorkflowStore.current(workflow_store_name) do
+      {:ok, %{config: config}} when is_map(config) ->
+        Schema.parse(config)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   @spec settings!() :: Schema.t()
   def settings! do
     case settings() do
@@ -54,6 +75,16 @@ defmodule SymphonyElixir.Config do
 
       {:error, reason} ->
         raise ArgumentError, message: format_config_error(reason)
+    end
+  end
+
+  @spec settings!(ProjectContext.t() | GenServer.server() | nil) :: Schema.t()
+  def settings!(nil), do: settings!()
+
+  def settings!(context_or_store) do
+    case settings(context_or_store) do
+      {:ok, settings} -> settings
+      {:error, reason} -> raise ArgumentError, message: format_config_error(reason)
     end
   end
 
@@ -66,6 +97,21 @@ defmodule SymphonyElixir.Config do
       Schema.normalize_issue_state(state_name),
       config.agent.max_concurrent_agents
     )
+  end
+
+  @spec max_concurrent_agents_for_state(term(), ProjectContext.t() | GenServer.server() | nil) :: pos_integer()
+  def max_concurrent_agents_for_state(state_name, context_or_store) when is_binary(state_name) do
+    config = settings!(context_or_store)
+
+    Map.get(
+      config.agent.max_concurrent_agents_by_state,
+      Schema.normalize_issue_state(state_name),
+      config.agent.max_concurrent_agents
+    )
+  end
+
+  def max_concurrent_agents_for_state(_state_name, context_or_store) do
+    settings!(context_or_store).agent.max_concurrent_agents
   end
 
   def max_concurrent_agents_for_state(_state_name), do: settings!().agent.max_concurrent_agents
@@ -84,6 +130,25 @@ defmodule SymphonyElixir.Config do
   @spec workflow_prompt() :: String.t()
   def workflow_prompt do
     case Workflow.current() do
+      {:ok, %{prompt_template: prompt}} ->
+        if String.trim(prompt) == "", do: @default_prompt_template, else: prompt
+
+      _ ->
+        @default_prompt_template
+    end
+  end
+
+  @spec workflow_prompt(ProjectContext.t() | GenServer.server() | nil) :: String.t()
+  def workflow_prompt(nil), do: workflow_prompt()
+
+  def workflow_prompt(%ProjectContext{} = context) do
+    context.process_names.workflow_store
+    |> ProjectRegistry.via_name()
+    |> workflow_prompt()
+  end
+
+  def workflow_prompt(workflow_store_name) do
+    case WorkflowStore.current(workflow_store_name) do
       {:ok, %{prompt_template: prompt}} ->
         if String.trim(prompt) == "", do: @default_prompt_template, else: prompt
 

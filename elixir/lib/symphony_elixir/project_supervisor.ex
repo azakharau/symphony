@@ -25,7 +25,7 @@ defmodule SymphonyElixir.ProjectSupervisor do
     children = [
       {WorkflowStore, name: ProjectRegistry.via_name(names.workflow_store), workflow_path: context.workflow_path},
       {Task.Supervisor, name: ProjectRegistry.via_name(names.task_supervisor)},
-      {Orchestrator, name: ProjectRegistry.via_name(names.orchestrator), dispatch_paused?: true}
+      {Orchestrator, name: ProjectRegistry.via_name(names.orchestrator), dispatch_paused?: true, project_context: context}
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

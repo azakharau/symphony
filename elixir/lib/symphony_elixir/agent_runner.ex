@@ -12,19 +12,22 @@ defmodule SymphonyElixir.AgentRunner do
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, update_recipient \\ nil, opts \\ []) do
+    project_context = Keyword.get(opts, :project_context)
+    settings = Keyword.get(opts, :settings) || Config.settings!(project_context)
+
     # The orchestrator owns host retries so one worker lifetime never hops machines.
-    case adapter_for_runner_kind(runner_kind_for_issue(issue)) do
+    case adapter_for_runner_kind(runner_kind_for_issue(issue, settings)) do
       {:ok, adapter} ->
         worker_host =
           selected_worker_host(
             Keyword.get(opts, :worker_host),
-            Config.settings!().worker.ssh_hosts,
+            settings.worker.ssh_hosts,
             adapter.capabilities()
           )
 
         Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
-        case run_on_worker_host(issue, update_recipient, opts, worker_host) do
+        case run_on_worker_host(issue, update_recipient, opts, worker_host, settings, project_context) do
           success when success == :ok or is_struct(success, Outcome) ->
             :ok
 
@@ -39,19 +42,19 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp run_on_worker_host(issue, update_recipient, opts, worker_host) do
+  defp run_on_worker_host(issue, update_recipient, opts, worker_host, settings, project_context) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
-    case Workspace.create_for_issue(issue, worker_host) do
+    case Workspace.create_for_issue(issue, worker_host, settings) do
       {:ok, workspace} ->
         send_worker_runtime_info(update_recipient, issue, worker_host, workspace)
 
         try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-            run_issue_with_configured_runner(workspace, issue, update_recipient, opts, worker_host)
+          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host, settings) do
+            run_issue_with_configured_runner(workspace, issue, update_recipient, opts, worker_host, settings, project_context)
           end
         after
-          Workspace.run_after_run_hook(workspace, issue, worker_host)
+          Workspace.run_after_run_hook(workspace, issue, worker_host, settings)
         end
 
       {:error, reason} ->
@@ -75,8 +78,8 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
-  defp run_issue_with_configured_runner(workspace, issue, update_recipient, opts, worker_host) do
-    runner_kind = runner_kind_for_issue(issue)
+  defp run_issue_with_configured_runner(workspace, issue, update_recipient, opts, worker_host, settings, project_context) do
+    runner_kind = runner_kind_for_issue(issue, settings)
 
     case adapter_for_runner_kind(runner_kind) do
       {:ok, adapter} ->
@@ -85,6 +88,8 @@ defmodule SymphonyElixir.AgentRunner do
           issue: issue,
           update_recipient: update_recipient,
           opts: opts,
+          settings: settings,
+          project_context: project_context,
           worker_host: worker_host,
           emit_update: runner_update_emitter(update_recipient, issue, runner_kind)
         })
@@ -109,9 +114,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp runner_update_emitter(_recipient, _issue, _runner_kind), do: fn _update -> :ok end
 
-  defp runner_kind_for_issue(%Issue{state: state_name}) when is_binary(state_name) do
-    settings = Config.settings!()
-
+  defp runner_kind_for_issue(%Issue{state: state_name}, settings) when is_binary(state_name) do
     Map.get(
       settings.runner.routes,
       normalize_issue_state(state_name),
@@ -119,7 +122,7 @@ defmodule SymphonyElixir.AgentRunner do
     )
   end
 
-  defp runner_kind_for_issue(_issue), do: Config.settings!().runner.default
+  defp runner_kind_for_issue(_issue, settings), do: settings.runner.default
 
   defp selected_worker_host(_preferred_host, _configured_hosts, %{remote_worker_hosts: false}), do: nil
 

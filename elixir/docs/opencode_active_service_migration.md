@@ -8,6 +8,7 @@ This runbook records read-only evidence and operator checklists for migrating ac
 - `AGENTS.md` keeps validation centered on targeted checks first and `mix specs.check` for full Elixir validation when code changes require it.
 - `WORKFLOW.md` identifies the operator-visible project root as `/home/agent/proj/symphony`, the Elixir app root as `/home/agent/proj/symphony/elixir`, and the current branch as `agent-server/opencode-runner-extension`.
 - `WORKFLOW.md` sets `runner.default: codex`, routes `In Progress` to `opencode`, and configures OpenCode with `/usr/local/bin/opencode`, `http://127.0.0.1:3000`, agent `build`, JSON format, and `result_state: "In Review"`.
+- As of 2026-06-01, the physical checkout lives at `/home/agent/proj/symphony`; `/home/agent/.symphony/vendor/openai-symphony` is a compatibility symlink for older service paths.
 
 ## Read-only active-service inventory
 
@@ -161,7 +162,7 @@ No cutover is authorized by this runbook. Until owner approval is explicit for a
 - The current inventory shows five active `openai-symphony*.service` units; changing any active service can affect live issue processing.
 - The inventory was read-only and timestamped; service state may drift after `2026-05-31T22:35Z`.
 - Local OpenCode runtime evidence was collected, including version, HTTP reachability, `4115` state, service status, and `/api/session` route checks; full end-to-end issue lifecycle and cutover readiness remain unproven by this runbook.
-- The active `openai-symphony-symphony.service` uses `/home/agent/.symphony/vendor/openai-symphony/elixir/WORKFLOW.md` in its current `ExecStart`, while the operator-visible repo path is `/home/agent/proj/symphony/elixir`.
+- At the 2026-05-31 inventory time, the active `openai-symphony-symphony.service` used `/home/agent/.symphony/vendor/openai-symphony/elixir/WORKFLOW.md` in its `ExecStart`, while the operator-visible repo path was `/home/agent/proj/symphony/elixir`. As of 2026-06-01, the vendor path is a compatibility symlink back to the physical `/home/agent/proj/symphony` checkout.
 - The scoped port check only proves listener state for `3000` and `4111` through `4115`; it intentionally does not claim anything about other ports.
 - `SYM-5` was retrying because no orchestrator slots were available in the 22:35Z state response, so capacity and scheduling behavior remain a residual risk for migration timing.
 - Multiproject work remains blocked until this migration completes or an owner-visible blocker is recorded.

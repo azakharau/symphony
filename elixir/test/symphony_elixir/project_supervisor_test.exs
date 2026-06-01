@@ -1,7 +1,8 @@
 defmodule SymphonyElixir.ProjectSupervisorTest do
   use ExUnit.Case
 
-  alias SymphonyElixir.{Orchestrator, ProjectRegistry, RootConfigStore, WorkflowStore}
+  alias SymphonyElixir.{Config, Orchestrator, ProjectRegistry, PromptBuilder, RootConfigStore, Tracker, WorkflowStore, Workspace}
+  alias SymphonyElixir.Linear.Issue
 
   setup do
     root = Path.join(System.tmp_dir!(), "symphony-project-supervisor-#{System.unique_integer([:positive])}")
@@ -276,6 +277,88 @@ defmodule SymphonyElixir.ProjectSupervisorTest do
     end
   end
 
+  test "enabled projects keep workflow config, prompts, workspaces, runners, and orchestration local", %{
+    root: root,
+    config_path: config_path
+  } do
+    alpha_workspace_root = Path.join(root, "alpha-workspaces")
+    beta_workspace_root = Path.join(root, "beta-workspaces")
+
+    alpha_workflow =
+      write_project_runtime_workflow!(root, "alpha",
+        tracker_project_slug: "alpha-slug",
+        workspace_root: alpha_workspace_root,
+        max_concurrent_agents: 1,
+        runner_default: "opencode",
+        codex_project_root: Path.join(root, "alpha-codex"),
+        opencode_project_root: Path.join(root, "alpha-opencode"),
+        prompt: "alpha prompt {{ issue.identifier }}"
+      )
+
+    beta_workflow =
+      write_project_runtime_workflow!(root, "beta",
+        tracker_project_slug: "beta-slug",
+        workspace_root: beta_workspace_root,
+        max_concurrent_agents: 2,
+        runner_default: "codex",
+        codex_project_root: Path.join(root, "beta-codex"),
+        opencode_project_root: Path.join(root, "beta-opencode"),
+        prompt: "beta prompt {{ issue.identifier }}"
+      )
+
+    write_projects_config!(config_path, [
+      %{id: "alpha", enabled: true, workflow_path: alpha_workflow},
+      %{id: "beta", enabled: true, workflow_path: beta_workflow}
+    ])
+
+    start_supervised!({RootConfigStore, path: config_path})
+
+    %{alpha: alpha_context, beta: beta_context} = project_contexts_by_id()
+
+    assert_paused_project_orchestrator("alpha")
+    assert_paused_project_orchestrator("beta")
+    alpha_state = paused_project_orchestrator_state("alpha")
+    beta_state = paused_project_orchestrator_state("beta")
+
+    assert alpha_state.project_context.project_id == "alpha"
+    assert beta_state.project_context.project_id == "beta"
+    assert alpha_state.task_supervisor == ProjectRegistry.via_name(alpha_context.process_names.task_supervisor)
+    assert beta_state.task_supervisor == ProjectRegistry.via_name(beta_context.process_names.task_supervisor)
+    assert alpha_state.max_concurrent_agents == 0
+    assert beta_state.max_concurrent_agents == 0
+
+    alpha_settings = Config.settings!(alpha_context)
+    beta_settings = Config.settings!(beta_context)
+
+    assert alpha_settings.tracker.project_slug == "alpha-slug"
+    assert beta_settings.tracker.project_slug == "beta-slug"
+    assert alpha_settings.workspace.root == alpha_workspace_root
+    assert beta_settings.workspace.root == beta_workspace_root
+    assert alpha_settings.runner.default == "opencode"
+    assert beta_settings.runner.default == "codex"
+    assert alpha_settings.agent.max_concurrent_agents == 1
+    assert beta_settings.agent.max_concurrent_agents == 2
+    assert alpha_settings.codex.project_root == Path.join(root, "alpha-codex")
+    assert beta_settings.codex.project_root == Path.join(root, "beta-codex")
+    assert alpha_settings.opencode.project_root == Path.join(root, "alpha-opencode")
+    assert beta_settings.opencode.project_root == Path.join(root, "beta-opencode")
+    assert Tracker.adapter(alpha_context) == SymphonyElixir.Tracker.Memory
+    assert Tracker.adapter(beta_context) == SymphonyElixir.Tracker.Memory
+
+    issue = %Issue{id: "issue-1", identifier: "SYM-4", title: "Runtime locality", state: "Todo"}
+
+    assert PromptBuilder.build_prompt(issue, project_context: alpha_context) == "alpha prompt SYM-4"
+    assert PromptBuilder.build_prompt(issue, project_context: beta_context) == "beta prompt SYM-4"
+
+    assert {:ok, alpha_workspace} = Workspace.create_for_issue(issue, nil, alpha_settings)
+    assert {:ok, beta_workspace} = Workspace.create_for_issue(issue, nil, beta_settings)
+
+    assert String.starts_with?(alpha_workspace, alpha_workspace_root)
+    assert String.starts_with?(beta_workspace, beta_workspace_root)
+    refute String.starts_with?(alpha_workspace, beta_workspace_root)
+    refute String.starts_with?(beta_workspace, alpha_workspace_root)
+  end
+
   test "default orchestrator startup remains unpaused and schedules polling" do
     assert {:ok, %Orchestrator.State{} = state} = Orchestrator.init([])
 
@@ -306,10 +389,76 @@ defmodule SymphonyElixir.ProjectSupervisorTest do
     orchestrator_pid
   end
 
+  defp paused_project_orchestrator_state(project_id) do
+    project_id
+    |> project_orchestrator_pid()
+    |> :sys.get_state()
+  end
+
+  defp project_contexts_by_id do
+    RootConfigStore.project_states()
+    |> Map.new(fn {project_id, %{context: context}} -> {String.to_atom(project_id), context} end)
+  end
+
   defp write_project_workflow!(root, project_id, prompt \\ nil) do
     path = Path.join([root, project_id, "WORKFLOW.md"])
     File.mkdir_p!(Path.dirname(path))
     File.write!(path, "---\ntracker:\n  kind: memory\n---\n#{prompt || project_id}")
+    path
+  end
+
+  defp write_project_runtime_workflow!(root, project_id, opts) do
+    path = Path.join([root, project_id, "WORKFLOW.md"])
+    File.mkdir_p!(Path.dirname(path))
+
+    File.write!(path, """
+    ---
+    tracker:
+      kind: memory
+      project_slug: "#{opts[:tracker_project_slug]}"
+      active_states: [Todo, In Progress]
+      terminal_states: [Closed, Done]
+    workspace:
+      root: "#{opts[:workspace_root]}"
+    agent:
+      max_concurrent_agents: #{opts[:max_concurrent_agents]}
+      max_turns: 20
+      max_retry_backoff_ms: 300000
+      max_concurrent_agents_by_state: {}
+    runner:
+      default: "#{opts[:runner_default]}"
+      routes: {"RCA Required": "codex", "In Review": "codex"}
+    codex:
+      command: "codex app-server"
+      project_root: "#{opts[:codex_project_root]}"
+      thread_sandbox: "workspace-write"
+      turn_timeout_ms: 3600000
+      read_timeout_ms: 5000
+      stall_timeout_ms: 300000
+    opencode:
+      command: opencode
+      project_root: "#{opts[:opencode_project_root]}"
+      agent: "build"
+      format: "json"
+      result_state: "In Review"
+      timeout_ms: 3600000
+    process_policy:
+      rca_required_state: "RCA Required"
+      max_rejections_per_slice: 2
+    polling:
+      interval_ms: 30000
+      full_interval_ms: 60000
+      fast_states: [Todo]
+    hooks:
+      timeout_ms: 60000
+    observability:
+      dashboard_enabled: true
+      refresh_ms: 1000
+      render_interval_ms: 16
+    ---
+    #{opts[:prompt]}
+    """)
+
     path
   end
 

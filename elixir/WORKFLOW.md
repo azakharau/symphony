@@ -43,6 +43,16 @@ opencode:
   format: json
   result_state: "In Review"
   timeout_ms: 10800000
+
+OpenCode live validation gate:
+
+- Default `mix test` is deterministic and excludes the live OpenCode gate; it must not require `/usr/local/bin/opencode`, an OpenCode web server, or live Linear.
+- Run the opt-in gate from `/home/agent/proj/symphony/elixir` with `SYMPHONY_OPENCODE_LIVE=1 OPENCODE_COMMAND=/usr/local/bin/opencode mix test.opencodelive`.
+- To attach to a visible OpenCode server session, also set `OPENCODE_SERVER_URL=http://127.0.0.1:3000`; the gate passes that URL as `--attach` and asserts command evidence for title, `build` agent route, canonical directory `/home/agent/proj/symphony`, and session id when OpenCode exposes one.
+- The gate uses the memory tracker, an evidence-only no-edit OpenCode prompt, and `git status --short` before/after protection; it proves an `In Progress` issue dispatches through OpenCode and reaches the controlled `In Review` handoff state without production Linear mutation.
+- Cleanup is limited to test-owned temporary workspaces. If the gate fails, interpret the command output as local OpenCode/server/session evidence and record the exact command, result, attach URL, session id when present, and any Mnemesh evidence refs on the Linear/Mnemesh validation record.
+- `/home/agent/proj/symphony` is the canonical live gate project root. `/home/agent/.symphony/vendor/openai-symphony` is only a compatibility alias for older service paths, not the live validation root.
+
 process_policy:
   rca_required_state: "RCA Required"
   max_rejections_per_slice: 2
@@ -63,8 +73,8 @@ Project identity:
 
 - Linear team: `SYM` / `SYMPHONY`.
 - Linear project: `symphony`, `projectId=07df87ce-4e93-4d2c-a73d-84aee1f27e07`, `project_slug=87b3b7431580`.
-- Canonical repository checkout: `/home/agent/.symphony/vendor/openai-symphony`.
-- Operator-visible project root for Codex/OpenCode UI: `/home/agent/proj/symphony`.
+- Canonical repository checkout: `/home/agent/proj/symphony`.
+- Compatibility alias for older service paths: `/home/agent/.symphony/vendor/openai-symphony`.
 - Elixir app root: `/home/agent/proj/symphony/elixir`.
 - Current working branch for this project: `agent-server/opencode-runner-extension`.
 

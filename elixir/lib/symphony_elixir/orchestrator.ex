@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, ProjectContext, ProjectRegistry, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Runner.{CodexAdapter, OpenCodeDispatch, Outcome}
 
@@ -40,6 +40,8 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      :project_context,
+      :task_supervisor,
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
@@ -68,14 +70,18 @@ defmodule SymphonyElixir.Orchestrator do
     dispatch_paused? = Keyword.get(opts, :dispatch_paused?, false)
 
     if dispatch_paused? do
-      {:ok, paused_state()}
+      {:ok, paused_state(opts)}
     else
-      {:ok, active_state()}
+      {:ok, active_state(opts)}
     end
   end
 
-  defp paused_state do
+  defp paused_state(opts) do
+    project_context = Keyword.get(opts, :project_context)
+
     %State{
+      project_context: project_context,
+      task_supervisor: task_supervisor_name(project_context),
       poll_interval_ms: nil,
       full_poll_interval_ms: nil,
       last_full_poll_at_ms: nil,
@@ -92,11 +98,14 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp active_state do
+  defp active_state(opts) do
     now_ms = System.monotonic_time(:millisecond)
-    config = Config.settings!()
+    project_context = Keyword.get(opts, :project_context)
+    config = Config.settings!(project_context)
 
     state = %State{
+      project_context: project_context,
+      task_supervisor: task_supervisor_name(project_context),
       poll_interval_ms: config.polling.interval_ms,
       full_poll_interval_ms: config.polling.full_interval_ms,
       last_full_poll_at_ms: nil,
@@ -112,7 +121,7 @@ defmodule SymphonyElixir.Orchestrator do
       dispatch_paused?: false
     }
 
-    run_terminal_workspace_cleanup()
+    run_terminal_workspace_cleanup(state)
     schedule_tick(state, 0)
   end
 
@@ -348,7 +357,7 @@ defmodule SymphonyElixir.Orchestrator do
         state
       end
 
-    with :ok <- Config.validate!(),
+    with :ok <- validate_runtime_config(state),
          {:ok, issues} <- fetch_poll_candidate_issues(state, full_poll?),
          true <- available_slots(state) > 0 do
       issues
@@ -433,14 +442,14 @@ defmodule SymphonyElixir.Orchestrator do
   defp fetch_poll_candidate_issues(%State{} = state, full_poll?) when is_boolean(full_poll?) do
     case poll_states(state, full_poll?) do
       [] -> {:ok, []}
-      states -> Tracker.fetch_issues_by_states(states)
+      states -> Tracker.fetch_issues_by_states(states, state.project_context)
     end
   end
 
-  defp poll_states(%State{} = _state, true), do: Config.settings!().tracker.active_states
+  defp poll_states(%State{} = state, true), do: settings_for_state(state).tracker.active_states
 
   defp poll_states(%State{} = state, false) do
-    active_states = active_state_set()
+    active_states = active_state_set(state)
 
     state.fast_poll_states
     |> List.wrap()
@@ -458,13 +467,13 @@ defmodule SymphonyElixir.Orchestrator do
     if running_ids == [] do
       state
     else
-      case Tracker.fetch_issue_states_by_ids(running_ids) do
+      case Tracker.fetch_issue_states_by_ids(running_ids, state.project_context) do
         {:ok, issues} ->
           issues
           |> reconcile_running_issue_states(
             state,
-            active_state_set(),
-            terminal_state_set()
+            active_state_set(state),
+            terminal_state_set(state)
           )
           |> reconcile_missing_running_issue_ids(running_ids, issues)
 
@@ -482,13 +491,13 @@ defmodule SymphonyElixir.Orchestrator do
     if blocked_ids == [] do
       state
     else
-      case Tracker.fetch_issue_states_by_ids(blocked_ids) do
+      case Tracker.fetch_issue_states_by_ids(blocked_ids, state.project_context) do
         {:ok, issues} ->
           issues
           |> reconcile_blocked_issue_states(
             state,
-            active_state_set(),
-            terminal_state_set()
+            active_state_set(state),
+            terminal_state_set(state)
           )
           |> reconcile_missing_blocked_issue_ids(blocked_ids, issues)
 
@@ -503,17 +512,17 @@ defmodule SymphonyElixir.Orchestrator do
   @doc false
   @spec reconcile_issue_states_for_test([Issue.t()], term()) :: term()
   def reconcile_issue_states_for_test(issues, %State{} = state) when is_list(issues) do
-    reconcile_running_issue_states(issues, state, active_state_set(), terminal_state_set())
+    reconcile_running_issue_states(issues, state, active_state_set(state), terminal_state_set(state))
   end
 
   def reconcile_issue_states_for_test(issues, state) when is_list(issues) do
-    reconcile_running_issue_states(issues, state, active_state_set(), terminal_state_set())
+    reconcile_running_issue_states(issues, state, active_state_set(state), terminal_state_set(state))
   end
 
   @doc false
   @spec should_dispatch_issue_for_test(Issue.t(), term()) :: boolean()
   def should_dispatch_issue_for_test(%Issue{} = issue, %State{} = state) do
-    should_dispatch_issue?(issue, state, active_state_set(), terminal_state_set())
+    should_dispatch_issue?(issue, state, active_state_set(state), terminal_state_set(state))
   end
 
   @doc false
@@ -521,7 +530,8 @@ defmodule SymphonyElixir.Orchestrator do
           {:ok, Issue.t()} | {:skip, Issue.t() | :missing} | {:error, term()}
   def revalidate_issue_for_dispatch_for_test(%Issue{} = issue, issue_fetcher)
       when is_function(issue_fetcher, 1) do
-    revalidate_issue_for_dispatch(issue, issue_fetcher, terminal_state_set())
+    state = %State{}
+    revalidate_issue_for_dispatch(issue, issue_fetcher, state, terminal_state_set(state))
   end
 
   @doc false
@@ -548,7 +558,7 @@ defmodule SymphonyElixir.Orchestrator do
   @spec milestone_planning_issues_for_test([map()], [Issue.t()], term()) :: [Issue.t()]
   def milestone_planning_issues_for_test(milestones, issues, %State{} = state)
       when is_list(milestones) and is_list(issues) do
-    milestone_planning_issues(milestones, issues, state, active_state_set(), terminal_state_set())
+    milestone_planning_issues(milestones, issues, state, active_state_set(state), terminal_state_set(state))
   end
 
   @doc false
@@ -633,7 +643,7 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Blocked issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; releasing block")
 
-        cleanup_issue_workspace(issue.identifier, blocked_issue_worker_host(state, issue.id))
+        cleanup_issue_workspace(state, issue.identifier, blocked_issue_worker_host(state, issue.id))
         release_issue_claim(state, issue.id)
 
       !issue_routable_to_worker?(issue) ->
@@ -753,10 +763,10 @@ defmodule SymphonyElixir.Orchestrator do
         worker_host = Map.get(running_entry, :worker_host)
 
         if cleanup_workspace do
-          cleanup_issue_workspace(identifier, worker_host)
+          cleanup_issue_workspace(state, identifier, worker_host)
         end
 
-        stop_running_task(pid, ref)
+        stop_running_task(pid, ref, Map.get(running_entry, :task_supervisor, state.task_supervisor))
 
         %{
           state
@@ -772,7 +782,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_stalled_running_issues(%State{} = state) do
-    timeout_ms = Config.settings!().codex.stall_timeout_ms
+    timeout_ms = settings_for_state(state).codex.stall_timeout_ms
 
     cond do
       timeout_ms <= 0 ->
@@ -932,8 +942,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp codex_message_method(%{method: method}) when is_binary(method), do: method
   defp codex_message_method(_message), do: nil
 
-  defp terminate_task(pid) when is_pid(pid) do
-    case Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid) do
+  defp terminate_task(pid, task_supervisor) when is_pid(pid) do
+    case Task.Supervisor.terminate_child(task_supervisor || SymphonyElixir.TaskSupervisor, pid) do
       :ok ->
         :ok
 
@@ -942,11 +952,11 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp terminate_task(_pid), do: :ok
+  defp terminate_task(_pid, _task_supervisor), do: :ok
 
-  defp stop_running_task(pid, ref) do
+  defp stop_running_task(pid, ref, task_supervisor \\ SymphonyElixir.TaskSupervisor) do
     if is_pid(pid) do
-      terminate_task(pid)
+      terminate_task(pid, task_supervisor)
     end
 
     if is_reference(ref) do
@@ -957,7 +967,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp stop_and_block_issue(%State{} = state, issue_id, running_entry, error) do
-    stop_running_task(Map.get(running_entry, :pid), Map.get(running_entry, :ref))
+    stop_running_task(Map.get(running_entry, :pid), Map.get(running_entry, :ref), Map.get(running_entry, :task_supervisor))
     block_issue_from_entry(state, issue_id, running_entry, error)
   end
 
@@ -994,8 +1004,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp choose_issues(issues, state) do
-    active_states = active_state_set()
-    terminal_states = terminal_state_set()
+    active_states = active_state_set(state)
+    terminal_states = terminal_state_set(state)
     state = maybe_release_active_project_milestone(state, issues, active_states, terminal_states)
 
     issues
@@ -1024,7 +1034,7 @@ defmodule SymphonyElixir.Orchestrator do
       map_size(state.running) == 0 and
       map_size(state.retry_attempts) == 0 and
       available_slots(state) > 0 and
-      pulse_dispatch_enabled?()
+      pulse_dispatch_enabled?(state)
   end
 
   defp dispatch_idle_pulse(%State{} = state, full_poll?) do
@@ -1037,8 +1047,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_dispatch_milestone_planning(%State{} = state, active_issues, full_poll?) when is_list(active_issues) do
-    active_states = active_state_set()
-    terminal_states = terminal_state_set()
+    active_states = active_state_set(state)
+    terminal_states = terminal_state_set(state)
 
     cond do
       not full_poll? ->
@@ -1053,7 +1063,7 @@ defmodule SymphonyElixir.Orchestrator do
       available_slots(state) <= 0 ->
         state
 
-      not pulse_dispatch_enabled?() ->
+      not pulse_dispatch_enabled?(state) ->
         state
 
       true ->
@@ -1064,7 +1074,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_dispatch_milestone_planning(state, _active_issues, _full_poll?), do: state
 
   defp dispatch_next_milestone_planning_issue(%State{} = state, active_issues, active_states, terminal_states) do
-    case Tracker.fetch_project_milestones() do
+    case Tracker.fetch_project_milestones(state.project_context) do
       {:ok, milestones} ->
         milestones
         |> milestone_planning_issues(active_issues, state, active_states, terminal_states)
@@ -1094,13 +1104,13 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  defp pulse_dispatch_enabled? do
-    active_state_set()
+  defp pulse_dispatch_enabled?(%State{} = state) do
+    active_state_set(state)
     |> Enum.any?(fn state_name -> not String.starts_with?(state_name, "__") end)
   end
 
   defp dispatch_latest_owner_input_pulse(%State{} = state) do
-    if MapSet.member?(active_state_set(), "need owner input") do
+    if MapSet.member?(active_state_set(state), "need owner input") do
       fetch_and_dispatch_owner_input_pulse(state)
     else
       {:none, state}
@@ -1108,7 +1118,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp fetch_and_dispatch_owner_input_pulse(%State{} = state) do
-    case Tracker.fetch_issues_by_states(["Need Owner Input"]) do
+    case Tracker.fetch_issues_by_states(["Need Owner Input"], state.project_context) do
       {:ok, issues} ->
         dispatch_owner_input_pulse_candidate(latest_owner_input_issue_for_pulse(issues, state), state)
 
@@ -1133,7 +1143,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_owner_input_pulse_candidate(nil, %State{} = state), do: {:none, state}
 
   defp dispatch_latest_done_continuation_pulse(%State{} = state) do
-    case Tracker.fetch_issues_by_states(["Done"]) do
+    case Tracker.fetch_issues_by_states(["Done"], state.project_context) do
       {:ok, issues} ->
         issues
         |> latest_done_issue_for_continuation(state)
@@ -1467,8 +1477,8 @@ defmodule SymphonyElixir.Orchestrator do
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
       issue_not_already_tracked?(issue.id, claimed, running, blocked) and
       available_slots(state) > 0 and
-      state_slots_available?(issue, running) and
-      worker_slots_available?(state, nil, runner_kind_for_issue(issue))
+      state_slots_available?(issue, state) and
+      worker_slots_available?(state, nil, runner_kind_for_issue(issue, state))
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
@@ -1479,10 +1489,14 @@ defmodule SymphonyElixir.Orchestrator do
       !Map.has_key?(blocked, issue_id)
   end
 
-  defp state_slots_available?(%Issue{state: issue_state}, running) when is_map(running) do
-    limit = Config.max_concurrent_agents_for_state(issue_state)
+  defp state_slots_available?(%Issue{state: issue_state}, %State{running: running} = state) when is_map(running) do
+    limit = Config.max_concurrent_agents_for_state(issue_state, state.project_context)
     used = running_issue_count_for_state(running, issue_state)
     limit > used
+  end
+
+  defp state_slots_available?(%Issue{} = issue, running) when is_map(running) do
+    state_slots_available?(issue, %State{running: running})
   end
 
   defp state_slots_available?(_issue, _running), do: false
@@ -1699,8 +1713,8 @@ defmodule SymphonyElixir.Orchestrator do
     MapSet.member?(active_states, normalize_issue_state(state_name))
   end
 
-  defp runner_kind_for_issue(%Issue{state: state_name}) when is_binary(state_name) do
-    settings = Config.settings!()
+  defp runner_kind_for_issue(%Issue{state: state_name}, %State{} = state) when is_binary(state_name) do
+    settings = settings_for_state(state)
 
     Map.get(
       settings.runner.routes,
@@ -1709,31 +1723,38 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
-  defp runner_kind_for_issue(_issue), do: Config.settings!().runner.default
+  defp runner_kind_for_issue(_issue, %State{} = state), do: settings_for_state(state).runner.default
+
+  defp runner_kind_for_issue(issue), do: runner_kind_for_issue(issue, %State{})
 
   defp normalize_issue_state(state_name) when is_binary(state_name) do
     String.downcase(String.trim(state_name))
   end
 
-  defp terminal_state_set do
-    Config.settings!().tracker.terminal_states
+  defp terminal_state_set(%State{} = state) do
+    settings_for_state(state).tracker.terminal_states
     |> Enum.map(&normalize_issue_state/1)
     |> Enum.filter(&(&1 != ""))
     |> MapSet.new()
   end
 
-  defp active_state_set do
-    Config.settings!().tracker.active_states
+  defp terminal_state_set, do: terminal_state_set(%State{})
+
+  defp active_state_set(%State{} = state) do
+    settings_for_state(state).tracker.active_states
     |> Enum.map(&normalize_issue_state/1)
     |> Enum.filter(&(&1 != ""))
     |> MapSet.new()
   end
+
+  defp active_state_set, do: active_state_set(%State{})
 
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
     case revalidate_issue_for_dispatch(
            issue,
-           &Tracker.fetch_issue_states_by_ids/1,
-           terminal_state_set()
+           fn ids -> Tracker.fetch_issue_states_by_ids(ids, state.project_context) end,
+           state,
+           terminal_state_set(state)
          ) do
       {:ok, %Issue{} = refreshed_issue} ->
         do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
@@ -1764,7 +1785,7 @@ defmodule SymphonyElixir.Orchestrator do
        ) do
     recipient = self()
 
-    runner_kind = runner_kind_for_issue(issue)
+    runner_kind = runner_kind_for_issue(issue, state)
 
     case select_worker_host(state, preferred_worker_host, runner_kind) do
       :no_worker_capacity ->
@@ -1785,10 +1806,17 @@ defmodule SymphonyElixir.Orchestrator do
          worker_host,
          pulse_kind
        ) do
-    runner_kind = runner_kind_for_issue(issue)
+    runner_kind = runner_kind_for_issue(issue, state)
 
-    case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+    task_supervisor = state.task_supervisor || SymphonyElixir.TaskSupervisor
+
+    case Task.Supervisor.start_child(task_supervisor, fn ->
+           AgentRunner.run(issue, recipient,
+             attempt: attempt,
+             worker_host: worker_host,
+             settings: settings_for_state(state),
+             project_context: state.project_context
+           )
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -1799,6 +1827,7 @@ defmodule SymphonyElixir.Orchestrator do
           Map.put(state.running, issue.id, %{
             pid: pid,
             ref: ref,
+            task_supervisor: task_supervisor,
             identifier: issue.identifier,
             issue: issue,
             runner_kind: runner_kind,
@@ -1850,11 +1879,11 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp revalidate_issue_for_dispatch(%Issue{id: issue_id}, issue_fetcher, terminal_states)
+  defp revalidate_issue_for_dispatch(%Issue{id: issue_id}, issue_fetcher, %State{} = state, terminal_states)
        when is_binary(issue_id) and is_function(issue_fetcher, 1) do
     case issue_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
-        if retry_candidate_issue?(refreshed_issue, terminal_states) do
+        if retry_candidate_issue?(refreshed_issue, state, terminal_states) do
           {:ok, refreshed_issue}
         else
           {:skip, refreshed_issue}
@@ -1868,7 +1897,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
+  defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _state, _terminal_states), do: {:ok, issue}
 
   defp complete_issue(%State{} = state, issue_id) do
     %{
@@ -1880,6 +1909,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
        when is_binary(issue_id) and is_map(metadata) do
+    metadata = Map.put_new(metadata, :project_context, state.project_context)
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
     delay_ms = retry_delay(next_attempt, metadata)
@@ -1927,7 +1957,8 @@ defmodule SymphonyElixir.Orchestrator do
       runner_project_root: metadata[:runner_project_root] || Map.get(previous_retry, :runner_project_root),
       runner_command: metadata[:runner_command] || Map.get(previous_retry, :runner_command),
       runner_result_state: metadata[:runner_result_state] || Map.get(previous_retry, :runner_result_state),
-      runner_failure: metadata[:runner_failure] || Map.get(previous_retry, :runner_failure)
+      runner_failure: metadata[:runner_failure] || Map.get(previous_retry, :runner_failure),
+      project_context: metadata[:project_context] || Map.get(previous_retry, :project_context)
     }
   end
 
@@ -1963,11 +1994,11 @@ defmodule SymphonyElixir.Orchestrator do
          attempt,
          %{issue: %Issue{synthetic_kind: :project_milestone_planning} = issue} = metadata
        ) do
-    if retry_candidate_issue?(issue, terminal_state_set()) and
+    if retry_candidate_issue?(issue, state, terminal_state_set(state)) and
          milestone_dispatch_allowed?(issue) and
          milestone_batch_allowed?(issue, state) and
          dispatch_slots_available?(issue, state) and
-         worker_slots_available?(state, metadata[:worker_host], runner_kind_for_issue(issue)) do
+         worker_slots_available?(state, metadata[:worker_host], runner_kind_for_issue(issue, state)) do
       {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host])}
     else
       {:noreply,
@@ -1981,7 +2012,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_retry_issue(%State{} = state, issue_id, attempt, metadata) do
-    case Tracker.fetch_candidate_issues() do
+    case Tracker.fetch_candidate_issues(state.project_context) do
       {:ok, issues} ->
         issues
         |> find_issue_by_id(issue_id)
@@ -2001,16 +2032,16 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_retry_issue_lookup(%Issue{} = issue, state, issue_id, attempt, metadata) do
-    terminal_states = terminal_state_set()
+    terminal_states = terminal_state_set(state)
 
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
-        cleanup_issue_workspace(issue.identifier, metadata[:worker_host])
+        cleanup_issue_workspace(state, issue.identifier, metadata[:worker_host])
         {:noreply, release_issue_claim(state, issue_id)}
 
-      retry_candidate_issue?(issue, terminal_states) ->
+      retry_candidate_issue?(issue, state, terminal_states) ->
         handle_active_retry(state, issue, attempt, metadata)
 
       true ->
@@ -2025,13 +2056,17 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, release_issue_claim(state, issue_id)}
   end
 
-  defp cleanup_issue_workspace(identifier, worker_host \\ nil)
+  defp cleanup_issue_workspace(state_or_identifier, identifier_or_worker_host \\ nil, worker_host \\ nil)
 
-  defp cleanup_issue_workspace(identifier, worker_host) when is_binary(identifier) do
+  defp cleanup_issue_workspace(%State{} = state, identifier, worker_host) when is_binary(identifier) do
+    Workspace.remove_issue_workspaces(identifier, worker_host, settings_for_state(state))
+  end
+
+  defp cleanup_issue_workspace(identifier, worker_host, nil) when is_binary(identifier) do
     Workspace.remove_issue_workspaces(identifier, worker_host)
   end
 
-  defp cleanup_issue_workspace(_identifier, _worker_host), do: :ok
+  defp cleanup_issue_workspace(_state_or_identifier, _identifier_or_worker_host, _worker_host), do: :ok
 
   defp blocked_issue_worker_host(%State{} = state, issue_id) do
     state.blocked
@@ -2039,13 +2074,13 @@ defmodule SymphonyElixir.Orchestrator do
     |> Map.get(:worker_host)
   end
 
-  defp run_terminal_workspace_cleanup do
-    case Tracker.fetch_issues_by_states(Config.settings!().tracker.terminal_states) do
+  defp run_terminal_workspace_cleanup(%State{} = state) do
+    case Tracker.fetch_issues_by_states(settings_for_state(state).tracker.terminal_states, state.project_context) do
       {:ok, issues} ->
         issues
         |> Enum.each(fn
           %Issue{identifier: identifier} when is_binary(identifier) ->
-            cleanup_issue_workspace(identifier)
+            cleanup_issue_workspace(state, identifier, nil)
 
           _ ->
             :ok
@@ -2061,11 +2096,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_active_retry(state, issue, attempt, metadata) do
-    if retry_candidate_issue?(issue, terminal_state_set()) and
+    if retry_candidate_issue?(issue, state, terminal_state_set(state)) and
          milestone_dispatch_allowed?(issue) and
          milestone_batch_allowed?(issue, state) and
          dispatch_slots_available?(issue, state) and
-         worker_slots_available?(state, metadata[:worker_host], runner_kind_for_issue(issue)) do
+         worker_slots_available?(state, metadata[:worker_host], runner_kind_for_issue(issue, state)) do
       {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host])}
     else
       Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
@@ -2097,16 +2132,16 @@ defmodule SymphonyElixir.Orchestrator do
     if metadata[:delay_type] == :continuation and attempt == 1 do
       @continuation_retry_delay_ms
     else
-      failure_retry_delay(attempt)
+      failure_retry_delay(attempt, metadata)
     end
   end
 
-  defp failure_retry_delay(attempt) do
+  defp failure_retry_delay(attempt, metadata) do
     max_delay_power = min(attempt - 1, 10)
 
     min(
       @failure_retry_base_ms * (1 <<< max_delay_power),
-      Config.settings!().agent.max_retry_backoff_ms
+      Config.settings!(metadata[:project_context]).agent.max_retry_backoff_ms
     )
   end
 
@@ -2151,7 +2186,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp select_remote_worker_host(%State{} = state, preferred_worker_host) do
-    case Config.settings!().worker.ssh_hosts do
+    case settings_for_state(state).worker.ssh_hosts do
       [] ->
         nil
 
@@ -2204,7 +2239,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp runner_supports_remote_worker_hosts?(_runner_kind), do: false
 
   defp worker_host_slots_available?(%State{} = state, worker_host) when is_binary(worker_host) do
-    case Config.settings!().worker.max_concurrent_agents_per_host do
+    case settings_for_state(state).worker.max_concurrent_agents_per_host do
       limit when is_integer(limit) and limit > 0 ->
         running_worker_host_count(state.running, worker_host) < limit
 
@@ -2241,7 +2276,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp available_slots(%State{} = state) do
     max(
-      (state.max_concurrent_agents || Config.settings!().agent.max_concurrent_agents) -
+      (state.max_concurrent_agents || settings_for_state(state).agent.max_concurrent_agents) -
         map_size(state.running),
       0
     )
@@ -2598,7 +2633,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp refresh_runtime_config(%State{} = state) do
-    config = Config.settings!()
+    config = settings_for_state(state)
 
     %{
       state
@@ -2609,13 +2644,48 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
-    candidate_issue?(issue, active_state_set(), terminal_states) and
+  defp settings_for_state(%State{project_context: project_context}), do: Config.settings!(project_context)
+
+  defp validate_runtime_config(%State{project_context: nil}), do: Config.validate!()
+
+  defp validate_runtime_config(%State{} = state) do
+    with {:ok, settings} <- Config.settings(state.project_context) do
+      validate_settings_semantics(settings)
+    end
+  end
+
+  defp validate_settings_semantics(settings) do
+    cond do
+      is_nil(settings.tracker.kind) ->
+        {:error, :missing_tracker_kind}
+
+      settings.tracker.kind not in ["linear", "memory"] ->
+        {:error, {:unsupported_tracker_kind, settings.tracker.kind}}
+
+      settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
+        {:error, :missing_linear_api_token}
+
+      settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
+        {:error, :missing_linear_project_slug}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp task_supervisor_name(%ProjectContext{} = context) do
+    ProjectRegistry.via_name(context.process_names.task_supervisor)
+  end
+
+  defp task_supervisor_name(_context), do: SymphonyElixir.TaskSupervisor
+
+  defp retry_candidate_issue?(%Issue{} = issue, %State{} = state, terminal_states) do
+    candidate_issue?(issue, active_state_set(state), terminal_states) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states)
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
-    available_slots(state) > 0 and state_slots_available?(issue, state.running)
+    available_slots(state) > 0 and state_slots_available?(issue, state)
   end
 
   defp apply_codex_token_delta(

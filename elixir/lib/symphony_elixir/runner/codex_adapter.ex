@@ -17,15 +17,20 @@ defmodule SymphonyElixir.Runner.CodexAdapter do
   def capabilities, do: %{remote_worker_hosts: true}
 
   @impl true
-  def run(%{
-        workspace: workspace,
-        issue: issue,
-        update_recipient: update_recipient,
-        opts: opts,
-        worker_host: worker_host,
-        emit_update: _emit_update
-      }) do
-    run_codex_turns(workspace, issue, update_recipient, opts, worker_host)
+  def run(
+        %{
+          workspace: workspace,
+          issue: issue,
+          update_recipient: update_recipient,
+          opts: opts,
+          worker_host: worker_host,
+          emit_update: _emit_update
+        } = context
+      ) do
+    project_context = Map.get(context, :project_context)
+    settings = Map.get(context, :settings) || Config.settings!(project_context)
+
+    run_codex_turns(workspace, issue, update_recipient, opts, worker_host, settings, project_context)
   end
 
   defp codex_message_handler(recipient, issue) do
@@ -40,10 +45,10 @@ defmodule SymphonyElixir.Runner.CodexAdapter do
 
   defp send_codex_update(_recipient, _issue, _message), do: :ok
 
-  defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
-    max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
-    issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
-    codex_workspace = codex_project_root(workspace)
+  defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host, settings, project_context) do
+    max_turns = Keyword.get(opts, :max_turns, settings.agent.max_turns)
+    issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, fn ids -> Tracker.fetch_issue_states_by_ids(ids, project_context) end)
+    codex_workspace = codex_project_root(workspace, settings)
 
     with {:ok, session} <- AppServer.start_session(codex_workspace, worker_host: worker_host) do
       try do
@@ -55,7 +60,8 @@ defmodule SymphonyElixir.Runner.CodexAdapter do
           opts,
           issue_state_fetcher,
           1,
-          max_turns
+          max_turns,
+          settings
         )
       after
         AppServer.stop_session(session)
@@ -63,14 +69,14 @@ defmodule SymphonyElixir.Runner.CodexAdapter do
     end
   end
 
-  defp codex_project_root(default_workspace) do
-    case Config.settings!().codex.project_root do
+  defp codex_project_root(default_workspace, settings) do
+    case settings.codex.project_root do
       project_root when is_binary(project_root) and project_root != "" -> project_root
       _ -> default_workspace
     end
   end
 
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns, settings) do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
     with {:ok, turn_session} <-
@@ -82,7 +88,7 @@ defmodule SymphonyElixir.Runner.CodexAdapter do
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
-      case continue_with_issue?(issue, issue_state_fetcher) do
+      case continue_with_issue?(issue, issue_state_fetcher, settings) do
         {:continue, refreshed_issue} when turn_number < max_turns ->
           Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
@@ -94,7 +100,8 @@ defmodule SymphonyElixir.Runner.CodexAdapter do
             opts,
             issue_state_fetcher,
             turn_number + 1,
-            max_turns
+            max_turns,
+            settings
           )
 
         {:continue, refreshed_issue} ->
@@ -128,14 +135,14 @@ defmodule SymphonyElixir.Runner.CodexAdapter do
     """
   end
 
-  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
+  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher, settings) when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
         cond do
-          not active_issue_state?(refreshed_issue.state) -> {:done, refreshed_issue}
+          not active_issue_state?(refreshed_issue.state, settings) -> {:done, refreshed_issue}
           owner_input_issue_state?(refreshed_issue.state) -> {:done, refreshed_issue}
-          runner_kind_for_issue(refreshed_issue) == "codex" -> {:continue, refreshed_issue}
-          true -> {:handoff, refreshed_issue, runner_kind_for_issue(refreshed_issue)}
+          runner_kind_for_issue(refreshed_issue, settings) == "codex" -> {:continue, refreshed_issue}
+          true -> {:handoff, refreshed_issue, runner_kind_for_issue(refreshed_issue, settings)}
         end
 
       {:ok, []} ->
@@ -146,23 +153,22 @@ defmodule SymphonyElixir.Runner.CodexAdapter do
     end
   end
 
-  defp continue_with_issue?(issue, _issue_state_fetcher), do: {:done, issue}
+  defp continue_with_issue?(issue, _issue_state_fetcher, _settings), do: {:done, issue}
 
-  defp active_issue_state?(state_name) when is_binary(state_name) do
+  defp active_issue_state?(state_name, settings) when is_binary(state_name) do
     normalized_state = normalize_issue_state(state_name)
 
-    Config.settings!().tracker.active_states
+    settings.tracker.active_states
     |> Enum.any?(fn active_state -> normalize_issue_state(active_state) == normalized_state end)
   end
 
-  defp active_issue_state?(_state_name), do: false
+  defp active_issue_state?(_state_name, _settings), do: false
 
   defp owner_input_issue_state?(state_name) when is_binary(state_name) do
     normalize_issue_state(state_name) == "need owner input"
   end
 
-  defp runner_kind_for_issue(%Issue{state: state_name}) when is_binary(state_name) do
-    settings = Config.settings!()
+  defp runner_kind_for_issue(%Issue{state: state_name}, settings) when is_binary(state_name) do
     Map.get(settings.runner.routes, normalize_issue_state(state_name), settings.runner.default)
   end
 

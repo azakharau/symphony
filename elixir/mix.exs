@@ -52,6 +52,12 @@ defmodule SymphonyElixir.MixProject do
     ]
   end
 
+  def cli do
+    [
+      preferred_envs: ["test.opencodelive": :test]
+    ]
+  end
+
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
@@ -83,7 +89,8 @@ defmodule SymphonyElixir.MixProject do
     [
       setup: ["deps.get"],
       build: ["escript.build"],
-      lint: ["specs.check", "credo --strict"]
+      lint: ["specs.check", "credo --strict"],
+      "test.opencodelive": ["test --include opencode_live test/symphony_elixir/opencode_live_gate_test.exs"]
     ]
   end
 

@@ -115,8 +115,26 @@ defmodule SymphonyElixir.RootConfigStore do
 
   defp stop_project(project_id) do
     case SymphonyElixir.ProjectRegistry.whereis({:project_supervisor, project_id}) do
-      pid when is_pid(pid) -> DynamicSupervisor.terminate_child(SymphonyElixir.ProjectSupervisor.DynamicSupervisor, pid)
-      nil -> :ok
+      pid when is_pid(pid) ->
+        with :ok <- DynamicSupervisor.terminate_child(SymphonyElixir.ProjectSupervisor.DynamicSupervisor, pid) do
+          await_project_stopped(project_id, 50)
+        end
+
+      nil ->
+        :ok
+    end
+  end
+
+  defp await_project_stopped(_project_id, 0), do: :ok
+
+  defp await_project_stopped(project_id, attempts_left) do
+    case SymphonyElixir.ProjectRegistry.whereis({:project_supervisor, project_id}) do
+      nil ->
+        :ok
+
+      _pid ->
+        Process.sleep(1)
+        await_project_stopped(project_id, attempts_left - 1)
     end
   end
 end

@@ -106,9 +106,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
 
           <article class="metric-card">
-            <p class="metric-label">Runtime</p>
+            <p class="metric-label">Runner runtime</p>
             <p class="metric-value numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></p>
-            <p class="metric-detail">Total Codex runtime across completed and active sessions.</p>
+            <p class="metric-detail">Total elapsed runtime across completed and active runner sessions.</p>
           </article>
         </section>
 
@@ -139,6 +139,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 <colgroup>
                   <col style="width: 12rem;" />
                   <col style="width: 8rem;" />
+                  <col style="width: 9rem;" />
                   <col style="width: 7.5rem;" />
                   <col style="width: 8.5rem;" />
                   <col />
@@ -148,9 +149,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   <tr>
                     <th>Issue</th>
                     <th>State</th>
+                    <th>Runner</th>
                     <th>Session</th>
                     <th>Runtime / turns</th>
-                    <th>Codex update</th>
+                    <th>Runner update</th>
                     <th>Tokens</th>
                   </tr>
                 </thead>
@@ -166,6 +168,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       <span class={state_badge_class(entry.state)}>
                         <%= entry.state %>
                       </span>
+                    </td>
+                    <td>
+                      <div class="detail-stack">
+                        <span><%= runner_owner(entry) %></span>
+                        <span class="muted event-meta"><%= runner_phase(entry) %></span>
+                      </div>
                     </td>
                     <td>
                       <div class="session-stack">
@@ -189,12 +197,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       <div class="detail-stack">
                         <span
                           class="event-text"
-                          title={entry.last_message || to_string(entry.last_event || "n/a")}
-                        ><%= entry.last_message || to_string(entry.last_event || "n/a") %></span>
+                          title={entry.last_runner_message || to_string(entry.last_runner_event || "n/a")}
+                        ><%= entry.last_runner_message || to_string(entry.last_runner_event || "n/a") %></span>
                         <span class="muted event-meta">
-                          <%= entry.last_event || "n/a" %>
-                          <%= if entry.last_event_at do %>
-                            · <span class="mono numeric"><%= entry.last_event_at %></span>
+                          <%= entry.last_runner_event || "n/a" %>
+                          <%= if entry.last_runner_event_at do %>
+                            · <span class="mono numeric"><%= entry.last_runner_event_at %></span>
                           <% end %>
                         </span>
                       </div>
@@ -216,7 +224,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <div class="section-header">
             <div>
               <h2 class="section-title">Blocked sessions</h2>
-              <p class="section-copy">Issues paused because Codex requested operator input or approval.</p>
+              <p class="section-copy">Issues paused because a runner needs operator input or hit a policy block.</p>
             </div>
           </div>
 
@@ -224,11 +232,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="empty-state">No blocked sessions.</p>
           <% else %>
             <div class="table-wrap">
-              <table class="data-table" style="min-width: 760px;">
+              <table class="data-table" style="min-width: 840px;">
                 <thead>
                   <tr>
                     <th>Issue</th>
                     <th>State</th>
+                    <th>Runner</th>
                     <th>Session</th>
                     <th>Blocked at</th>
                     <th>Last update</th>
@@ -247,6 +256,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       <span class={state_badge_class(entry.state || "Blocked")}>
                         <%= entry.state || "Blocked" %>
                       </span>
+                    </td>
+                    <td>
+                      <div class="detail-stack">
+                        <span><%= runner_owner(entry) %></span>
+                        <span class="muted event-meta"><%= runner_phase(entry) %></span>
+                      </div>
                     </td>
                     <td>
                       <%= if entry.session_id do %>
@@ -268,12 +283,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       <div class="detail-stack">
                         <span
                           class="event-text"
-                          title={entry.last_message || to_string(entry.last_event || "n/a")}
-                        ><%= entry.last_message || to_string(entry.last_event || "n/a") %></span>
+                          title={entry.last_runner_message || to_string(entry.last_runner_event || "n/a")}
+                        ><%= entry.last_runner_message || to_string(entry.last_runner_event || "n/a") %></span>
                         <span class="muted event-meta">
-                          <%= entry.last_event || "n/a" %>
-                          <%= if entry.last_event_at do %>
-                            · <span class="mono numeric"><%= entry.last_event_at %></span>
+                          <%= entry.last_runner_event || "n/a" %>
+                          <%= if entry.last_runner_event_at do %>
+                            · <span class="mono numeric"><%= entry.last_runner_event_at %></span>
                           <% end %>
                         </span>
                       </div>
@@ -342,7 +357,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp completed_runtime_seconds(payload) do
-    payload.codex_totals.seconds_running || 0
+    runtime_totals = Map.get(payload, :runner_runtime_totals)
+    codex_totals = Map.get(payload, :codex_totals, %{})
+
+    Map.get(runtime_totals || %{}, :seconds_running) || Map.get(codex_totals || %{}, :seconds_running, 0)
   end
 
   defp total_runtime_seconds(payload, now) do
@@ -400,6 +418,32 @@ defmodule SymphonyElixirWeb.DashboardLive do
       true -> base
     end
   end
+
+  defp runner_owner(entry) when is_map(entry) do
+    runner_value(entry, :owner) || runner_value(entry, :kind) || "n/a"
+  end
+
+  defp runner_owner(_entry), do: "n/a"
+
+  defp runner_phase(entry) when is_map(entry) do
+    runner_value(entry, :phase) || "starting"
+  end
+
+  defp runner_phase(_entry), do: "starting"
+
+  defp runner_value(entry, field) do
+    nested_runner_value(Map.get(entry, :runner), field) || Map.get(entry, legacy_runner_key(field))
+  end
+
+  defp nested_runner_value(runner, field) when is_map(runner) do
+    Map.get(runner, field) || Map.get(runner, to_string(field))
+  end
+
+  defp nested_runner_value(_runner, _field), do: nil
+
+  defp legacy_runner_key(:kind), do: :runner_kind
+  defp legacy_runner_key(:owner), do: :runner_owner
+  defp legacy_runner_key(:phase), do: :runner_phase
 
   defp schedule_runtime_tick do
     Process.send_after(self(), :runtime_tick, @runtime_tick_ms)

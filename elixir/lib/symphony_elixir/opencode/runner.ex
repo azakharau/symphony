@@ -6,26 +6,67 @@ defmodule SymphonyElixir.OpenCode.Runner do
   require Logger
 
   alias SymphonyElixir.{Config, Linear.Issue}
+  alias SymphonyElixir.OpenCode.TaskPrompt
 
   @max_handoff_bytes 20_000
 
-  @spec run(Path.t(), Issue.t(), String.t(), keyword()) ::
-          {:ok, %{output: String.t(), command: [String.t()]}} | {:error, term()}
-  def run(workspace, %Issue{} = issue, prompt, opts \\ [])
-      when is_binary(workspace) and is_binary(prompt) do
+  @type result :: %{
+          output: String.t(),
+          command: [String.t()],
+          project_root: Path.t(),
+          session_id: String.t() | nil,
+          attach_url: String.t() | nil,
+          runner_owner: String.t()
+        }
+
+  @spec run(Path.t(), Issue.t(), TaskPrompt.Packet.t() | String.t(), keyword()) ::
+          {:ok, result()} | {:error, term()}
+  def run(workspace, %Issue{} = issue, prompt_or_packet, opts \\ [])
+      when is_binary(workspace) do
+    packet = normalize_task_packet(prompt_or_packet)
     opencode = Config.settings!().opencode
     command = Keyword.get(opts, :command, opencode.command)
     runner = Keyword.get(opts, :runner, &System.cmd/3)
     execution_dir = opencode_project_root(opencode.project_root, workspace)
+    on_event = Keyword.get(opts, :on_event, fn _event -> :ok end)
+    worker_host = Keyword.get(opts, :worker_host)
 
-    title = issue_title(issue)
-    session_id = existing_session_id(command, execution_dir, title, opencode.server_url, opts)
+    with :ok <- ensure_local_worker_host(worker_host, workspace, execution_dir) do
+      run_local_opencode(%{
+        workspace: workspace,
+        issue: issue,
+        packet: packet,
+        opts: opts,
+        opencode: opencode,
+        command: command,
+        runner: runner,
+        execution_dir: execution_dir,
+        on_event: on_event
+      })
+    end
+  rescue
+    error in [ErlangError, RuntimeError, ArgumentError, File.Error] ->
+      reason = {:opencode_failed, Exception.message(error)}
+
+      Keyword.get(opts, :on_event, fn _event -> :ok end).(%{
+        event: :failed,
+        phase: :failed,
+        timestamp: DateTime.utc_now(),
+        failure: failure_classification(reason)
+      })
+
+      {:error, reason}
+  end
+
+  defp run_local_opencode(%{issue: issue, packet: packet, opencode: opencode} = context) do
+    title = packet_title(issue, packet)
+    session_id = existing_session_id(context.command, context.execution_dir, title, opencode.server_url, context.opts)
 
     args =
       [
         "run",
         "--dir",
-        execution_dir,
+        context.execution_dir,
         "--agent",
         opencode.agent,
         "--format",
@@ -36,68 +77,226 @@ defmodule SymphonyElixir.OpenCode.Runner do
       |> maybe_continue_session(session_id)
       |> maybe_attach(opencode.server_url)
 
-    session_suffix = if is_binary(session_id), do: " existing_session=#{session_id}", else: ""
+    context = Map.merge(context, %{args: args, session_id: session_id, title: title})
 
-    Logger.info(
-      "Starting OpenCode runner for issue_id=#{issue.id} issue_identifier=#{issue.identifier} workspace=#{workspace} execution_dir=#{execution_dir} attach=#{opencode.server_url || "none"}#{session_suffix}"
-    )
+    emit_command_prepared(context)
+    log_opencode_start(context)
 
-    task =
-      Task.async(fn ->
-        if is_binary(session_id) and session_id != "" do
-          session_result_reader = Keyword.get(opts, :session_result_reader, &read_completed_session_result/2)
+    task = Task.async(fn -> execute_opencode_task(context) end)
+    handle_opencode_task_result(Task.yield(task, opencode.timeout_ms) || Task.shutdown(task, :brutal_kill), context)
+  end
 
-          case session_result_reader.(execution_dir, session_id) do
-            {:error, {:opencode_session_handoff_incomplete, _session_id}} ->
-              run_opencode_command(
-                runner,
-                command,
-                args,
-                incomplete_session_continuation_prompt(),
-                execution_dir,
-                session_id
-              )
+  defp emit_command_prepared(%{} = context) do
+    context.on_event.(%{
+      event: :command_prepared,
+      phase: :command,
+      timestamp: DateTime.utc_now(),
+      runner_owner: "opencode",
+      project_root: context.execution_dir,
+      workspace_path: context.workspace,
+      command: [context.command | context.args],
+      session_id: context.session_id,
+      attach_url: context.opencode.server_url
+    })
+  end
 
-            {:error, {:opencode_session_not_completed, _session_id}} ->
-              run_opencode_command(
-                runner,
-                command,
-                args,
-                incomplete_session_continuation_prompt(),
-                execution_dir,
-                session_id
-              )
+  defp log_opencode_start(%{issue: issue, opencode: opencode} = context) do
+    session_suffix = if is_binary(context.session_id), do: " existing_session=#{context.session_id}", else: ""
 
-            other ->
-              other
-          end
-        else
-          run_opencode_command(runner, command, args, prompt, execution_dir, session_id)
-        end
-      end)
+    Logger.info([
+      "Starting OpenCode runner for issue_id=#{issue.id} issue_identifier=#{issue.identifier} ",
+      "workspace=#{context.workspace} execution_dir=#{context.execution_dir} ",
+      "attach=#{opencode.server_url || "none"}#{session_suffix}"
+    ])
+  end
 
-    case Task.yield(task, opencode.timeout_ms) || Task.shutdown(task, :brutal_kill) do
-      nil ->
-        {:error, {:opencode_timeout, opencode.timeout_ms}}
+  defp execute_opencode_task(%{session_id: session_id} = context) when is_binary(session_id) and session_id != "" do
+    session_result_reader = Keyword.get(context.opts, :session_result_reader, &read_completed_session_result/2)
 
-      {:exit, reason} ->
-        {:error, {:opencode_failed, reason}}
+    case session_result_reader.(context.execution_dir, session_id) do
+      {:error, {:opencode_session_handoff_incomplete, _session_id}} ->
+        continue_incomplete_opencode_session(context)
 
-      {:ok, {:ok, output}} ->
-        {:ok, %{output: output, command: [command, "session", "resume-result", session_id]}}
+      {:error, {:opencode_session_not_completed, _session_id}} ->
+        continue_incomplete_opencode_session(context)
 
-      {:ok, {:error, reason}} ->
-        {:error, reason}
-
-      {:ok, {output, 0}} ->
-        {:ok, %{output: output, command: [command | args]}}
-
-      {:ok, {output, status}} ->
-        {:error, {:opencode_exit, status, trim_output(output)}}
+      other ->
+        other
     end
   rescue
     error in [ErlangError, RuntimeError, ArgumentError, File.Error] ->
       {:error, {:opencode_failed, Exception.message(error)}}
+  end
+
+  defp execute_opencode_task(%{} = context) do
+    run_opencode_command(
+      context.runner,
+      context.command,
+      context.args,
+      context.packet.prompt,
+      context.execution_dir,
+      context.session_id
+    )
+  end
+
+  defp continue_incomplete_opencode_session(%{} = context) do
+    run_opencode_command(
+      context.runner,
+      context.command,
+      context.args,
+      incomplete_session_continuation_prompt(),
+      context.execution_dir,
+      context.session_id
+    )
+  end
+
+  defp handle_opencode_task_result(task_result, %{opencode: opencode} = context) do
+    case task_result do
+      nil ->
+        context.on_event.(%{
+          event: :timeout,
+          phase: :failed,
+          timestamp: DateTime.utc_now(),
+          failure: %{reason: :timeout, timeout_ms: opencode.timeout_ms}
+        })
+
+        {:error, {:opencode_timeout, opencode.timeout_ms}}
+
+      {:exit, reason} ->
+        context.on_event.(%{
+          event: :failed,
+          phase: :failed,
+          timestamp: DateTime.utc_now(),
+          failure: failure_classification({:opencode_failed, reason})
+        })
+
+        {:error, {:opencode_failed, reason}}
+
+      {:ok, {:ok, output}} ->
+        result =
+          opencode_result(
+            output,
+            [context.command, "session", "resume-result", context.session_id],
+            context.execution_dir,
+            context.session_id,
+            opencode.server_url
+          )
+
+        emit_completed_event(result, context.on_event)
+        {:ok, result}
+
+      {:ok, {:error, reason}} ->
+        context.on_event.(%{
+          event: :failed,
+          phase: :failed,
+          timestamp: DateTime.utc_now(),
+          failure: failure_classification(reason)
+        })
+
+        {:error, reason}
+
+      {:ok, {output, 0}} ->
+        result_session_id =
+          result_session_id(
+            output,
+            context.session_id,
+            context.command,
+            context.execution_dir,
+            context.title,
+            opencode.server_url,
+            context.opts
+          )
+
+        result = opencode_result(output, [context.command | context.args], context.execution_dir, result_session_id, opencode.server_url)
+        emit_completed_event(result, context.on_event)
+        {:ok, result}
+
+      {:ok, {output, status}} ->
+        context.on_event.(%{
+          event: :exit_failed,
+          phase: :failed,
+          timestamp: DateTime.utc_now(),
+          failure: %{reason: :opencode_exit, status: status}
+        })
+
+        {:error, {:opencode_exit, status, trim_output(output)}}
+    end
+  end
+
+  defp emit_completed_event(result, on_event) do
+    on_event.(Map.merge(result_event(result), %{event: :completed, phase: :completed, timestamp: DateTime.utc_now()}))
+  end
+
+  defp ensure_local_worker_host(worker_host, _workspace, _execution_dir)
+       when worker_host in [nil, "", "localhost", "127.0.0.1", "::1"],
+       do: :ok
+
+  defp ensure_local_worker_host(worker_host, workspace, execution_dir) when is_binary(worker_host) do
+    {:error,
+     {:opencode_remote_worker_host_unsupported,
+      %{
+        worker_host: worker_host,
+        workspace: workspace,
+        project_root: execution_dir
+      }}}
+  end
+
+  defp ensure_local_worker_host(worker_host, workspace, execution_dir) do
+    ensure_local_worker_host(to_string(worker_host), workspace, execution_dir)
+  end
+
+  defp failure_classification(reason) when is_atom(reason), do: %{reason: reason}
+
+  defp failure_classification({reason, status, _output}) when is_atom(reason) and is_integer(status) do
+    %{reason: reason, status: status}
+  end
+
+  defp failure_classification({reason, timeout_ms}) when is_atom(reason) and is_integer(timeout_ms) do
+    %{reason: reason, timeout_ms: timeout_ms}
+  end
+
+  defp failure_classification({reason, _detail}) when is_atom(reason), do: %{reason: reason}
+  defp failure_classification({reason, _detail, _extra}) when is_atom(reason), do: %{reason: reason}
+  defp failure_classification(_reason), do: %{reason: :opencode_failed}
+
+  defp opencode_result(output, command, project_root, session_id, attach_url) do
+    %{
+      output: output,
+      command: command,
+      project_root: project_root,
+      session_id: session_id,
+      attach_url: attach_url,
+      runner_owner: "opencode"
+    }
+  end
+
+  defp normalize_task_packet(%TaskPrompt.Packet{} = packet), do: packet
+
+  defp normalize_task_packet(prompt) when is_binary(prompt) do
+    %TaskPrompt.Packet{prompt: prompt, slice_id: "legacy", fingerprint: fingerprint(prompt)}
+  end
+
+  defp packet_title(%Issue{} = issue, %TaskPrompt.Packet{} = packet) do
+    if packet.slice_id == "legacy" do
+      issue_title(issue)
+    else
+      "#{issue_title(issue)} [#{TaskPrompt.title_suffix(packet)}]"
+    end
+  end
+
+  defp fingerprint(prompt) do
+    :crypto.hash(:sha256, prompt)
+    |> Base.encode16(case: :lower)
+  end
+
+  defp result_event(result) when is_map(result) do
+    %{
+      runner_owner: Map.get(result, :runner_owner),
+      project_root: Map.get(result, :project_root),
+      command: Map.get(result, :command),
+      session_id: Map.get(result, :session_id),
+      attach_url: Map.get(result, :attach_url)
+    }
   end
 
   defp maybe_attach(args, nil), do: args
@@ -108,8 +307,6 @@ defmodule SymphonyElixir.OpenCode.Runner do
       url -> args ++ ["--attach", url]
     end
   end
-
-  defp maybe_attach(args, _server_url), do: args
 
   defp maybe_continue_session(args, session_id) when is_binary(session_id) and session_id != "" do
     args ++ ["--session", session_id]
@@ -175,34 +372,57 @@ defmodule SymphonyElixir.OpenCode.Runner do
     end
   end
 
-  defp matching_session?(%{"title" => session_title, "directory" => directory}, execution_dir, issue_title) do
-    directory == execution_dir and
-      (session_title == issue_title or same_issue_identifier?(session_title, issue_title))
+  defp matching_session?(%{"title" => session_title, "directory" => directory}, execution_dir, title) do
+    directory == execution_dir and session_title == title
   end
 
   defp matching_session?(_session, _execution_dir, _title), do: false
 
-  defp same_issue_identifier?(session_title, issue_title)
-       when is_binary(session_title) and is_binary(issue_title) do
-    with {:ok, issue_identifier} <- issue_identifier_prefix(issue_title) do
-      String.starts_with?(session_title, issue_identifier <> " ")
-    else
-      _ -> false
-    end
-  end
-
-  defp same_issue_identifier?(_session_title, _issue_title), do: false
-
-  defp issue_identifier_prefix(title) when is_binary(title) do
-    case Regex.run(~r/^[A-Z][A-Z0-9]*-\d+/, title) do
-      [identifier] -> {:ok, identifier}
-      _ -> :error
-    end
-  end
-
   defp session_updated_sort_key(%{"updated" => updated}) when is_integer(updated), do: updated
   defp session_updated_sort_key(%{"created" => created}) when is_integer(created), do: created
   defp session_updated_sort_key(_session), do: 0
+
+  defp result_session_id(_output, session_id, _command, _execution_dir, _title, _server_url, _opts)
+       when is_binary(session_id) and session_id != "",
+       do: session_id
+
+  defp result_session_id(output, _session_id, command, execution_dir, title, server_url, opts) do
+    extracted_session_id(output) || rediscovered_session_id(command, execution_dir, title, server_url, opts)
+  end
+
+  defp extracted_session_id(output) when is_binary(output) do
+    output
+    |> String.split(~r/\R/, trim: true)
+    |> Enum.find_value(fn line ->
+      case Jason.decode(line) do
+        {:ok, decoded} -> session_id_from_payload(decoded)
+        _ -> nil
+      end
+    end)
+  end
+
+  defp extracted_session_id(_output), do: nil
+
+  defp session_id_from_payload(%{"session_id" => session_id}) when is_binary(session_id) and session_id != "", do: session_id
+  defp session_id_from_payload(%{"sessionID" => session_id}) when is_binary(session_id) and session_id != "", do: session_id
+  defp session_id_from_payload(%{"session" => %{"id" => session_id}}) when is_binary(session_id) and session_id != "", do: session_id
+  defp session_id_from_payload(%{"result" => payload}) when is_map(payload), do: session_id_from_payload(payload)
+  defp session_id_from_payload(_payload), do: nil
+
+  defp rediscovered_session_id(command, execution_dir, title, server_url, opts) do
+    if session_reuse_enabled?(server_url, opts) do
+      session_lister = Keyword.get(opts, :session_lister, &list_sessions/3)
+
+      case session_lister.(command, execution_dir, title) do
+        {:ok, sessions} ->
+          newest_matching_session_id(sessions, execution_dir, title)
+
+        {:error, reason} ->
+          Logger.debug("Unable to rediscover OpenCode session for title=#{inspect(title)} dir=#{execution_dir}: #{inspect(reason)}")
+          nil
+      end
+    end
+  end
 
   defp opencode_project_root(project_root, _workspace) when is_binary(project_root) and project_root != "" do
     project_root
@@ -306,17 +526,11 @@ defmodule SymphonyElixir.OpenCode.Runner do
       {output, status} ->
         {:error, {:opencode_sqlite_failed, status, trim_output(output)}}
     end
-  rescue
-    error in [ErlangError, RuntimeError, ArgumentError, File.Error] ->
-      {:error, {:opencode_sqlite_failed, Exception.message(error)}}
   end
 
   defp decode_sqlite_json(output) do
-    case Jason.decode(output) do
-      {:ok, rows} when is_list(rows) -> {:ok, rows}
-      {:ok, other} -> {:error, {:opencode_sqlite_unexpected_payload, other}}
-      {:error, reason} -> {:error, {:opencode_sqlite_json_decode_failed, Exception.message(reason), trim_output(output)}}
-    end
+    {:ok, rows} = Jason.decode(output)
+    {:ok, rows}
   end
 
   defp decode_part_text(%{"data" => data}) when is_binary(data) do
@@ -325,8 +539,6 @@ defmodule SymphonyElixir.OpenCode.Runner do
       _ -> ""
     end
   end
-
-  defp decode_part_text(_row), do: ""
 
   defp ensure_completed_handoff_text(text, session_id) when is_binary(text) do
     if incomplete_handoff_text?(text) do
@@ -387,9 +599,12 @@ defmodule SymphonyElixir.OpenCode.Runner do
     body
     |> String.split("\n")
     |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
-    |> Enum.reject(&(&1 in ["- `(none)`", "- (none)", "(none)", "`(none)`", "none", "None"]))
+    |> Enum.reject(&empty_or_none_section_line?/1)
     |> Enum.any?()
+  end
+
+  defp empty_or_none_section_line?(line) do
+    line == "" or line in ["- `(none)`", "- (none)", "(none)", "`(none)`", "none", "None"]
   end
 
   defp incomplete_session_continuation_prompt do
@@ -448,6 +663,9 @@ defmodule SymphonyElixir.OpenCode.Runner do
         cd: execution_dir,
         stderr_to_stdout: true
       )
+    rescue
+      error in [ErlangError, RuntimeError, ArgumentError, File.Error] ->
+        {:error, {:opencode_failed, Exception.message(error)}}
     after
       File.rm(prompt_path)
     end

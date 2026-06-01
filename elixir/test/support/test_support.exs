@@ -25,6 +25,8 @@ defmodule SymphonyElixir.TestSupport do
         only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0]
 
       setup do
+        SymphonyElixir.TestSupport.ensure_application_started()
+
         workflow_root =
           Path.join(
             System.tmp_dir!(),
@@ -70,22 +72,69 @@ defmodule SymphonyElixir.TestSupport do
   def restore_env(key, nil), do: System.delete_env(key)
   def restore_env(key, value), do: System.put_env(key, value)
 
+  def ensure_application_started do
+    case Process.whereis(SymphonyElixir.Supervisor) do
+      supervisor when is_pid(supervisor) ->
+        :ok
+
+      nil ->
+        ensure_started_with_application_controller()
+    end
+  end
+
   def stop_default_http_server do
-    case Enum.find(Supervisor.which_children(SymphonyElixir.Supervisor), fn
-           {SymphonyElixir.HttpServer, _pid, _type, _modules} -> true
-           _child -> false
-         end) do
-      {SymphonyElixir.HttpServer, pid, _type, _modules} when is_pid(pid) ->
-        :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer)
+    with supervisor when is_pid(supervisor) <- Process.whereis(SymphonyElixir.Supervisor),
+         {SymphonyElixir.HttpServer, pid, _type, _modules} when is_pid(pid) <- http_server_child(supervisor) do
+      terminate_default_http_server_child(pid)
+    else
+      _ -> :ok
+    end
+  end
 
-        if Process.alive?(pid) do
-          Process.exit(pid, :normal)
+  defp terminate_default_http_server_child(pid) when is_pid(pid) do
+    case Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer) do
+      :ok ->
+        stop_http_server_process(pid)
+
+      {:error, :not_found} ->
+        :ok
+    end
+  end
+
+  defp stop_http_server_process(pid) when is_pid(pid) do
+    if Process.alive?(pid) do
+      Process.exit(pid, :normal)
+    end
+
+    :ok
+  end
+
+  defp http_server_child(supervisor) when is_pid(supervisor) do
+    Enum.find(Supervisor.which_children(supervisor), fn
+      {SymphonyElixir.HttpServer, _pid, _type, _modules} -> true
+      _child -> false
+    end)
+  end
+
+  defp ensure_started_with_application_controller do
+    case Application.ensure_all_started(:symphony_elixir) do
+      {:ok, _started} -> ensure_supervisor_started()
+      {:error, {:already_started, :symphony_elixir}} -> ensure_supervisor_started()
+      {:error, reason} -> raise "failed to start :symphony_elixir for test setup: #{inspect(reason)}"
+    end
+  end
+
+  defp ensure_supervisor_started do
+    case Process.whereis(SymphonyElixir.Supervisor) do
+      supervisor when is_pid(supervisor) ->
+        :ok
+
+      nil ->
+        case SymphonyElixir.Application.start(:normal, []) do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+          {:error, reason} -> raise "failed to start SymphonyElixir.Supervisor: #{inspect(reason)}"
         end
-
-        :ok
-
-      _ ->
-        :ok
     end
   end
 

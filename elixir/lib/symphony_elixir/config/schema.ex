@@ -93,7 +93,7 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     embedded_schema do
-      field(:root, :string, default: Path.join(System.tmp_dir!(), "symphony_workspaces"))
+      field(:root, :string)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -249,7 +249,11 @@ defmodule SymphonyElixir.Config.Schema do
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:command, :project_root, :server_url, :agent, :format, :result_state, :timeout_ms], empty_values: [])
+      |> cast(
+        attrs,
+        [:command, :project_root, :server_url, :agent, :format, :result_state, :timeout_ms],
+        empty_values: []
+      )
       |> validate_required([:command, :agent, :format, :result_state])
       |> validate_number(:timeout_ms, greater_than: 0)
     end
@@ -361,7 +365,12 @@ defmodule SymphonyElixir.Config.Schema do
     |> apply_action(:validate)
     |> case do
       {:ok, settings} ->
-        {:ok, finalize_settings(settings)}
+        settings = finalize_settings(settings)
+
+        with :ok <- validate_rca_required_state_routes_to_codex(settings),
+             :ok <- validate_opencode_result_state_routes_to_codex(settings) do
+          {:ok, settings}
+        end
 
       {:error, changeset} ->
         {:error, {:invalid_workflow_config, format_errors(changeset)}}
@@ -503,6 +512,32 @@ defmodule SymphonyElixir.Config.Schema do
     %{settings | tracker: tracker, workspace: workspace, codex: codex, opencode: opencode}
   end
 
+  defp validate_rca_required_state_routes_to_codex(settings) do
+    rca_required_state = settings.process_policy.rca_required_state
+    runner_kind = runner_kind_for_state(rca_required_state, settings)
+
+    if runner_kind == "codex" do
+      :ok
+    else
+      {:error, {:invalid_workflow_config, "process_policy.rca_required_state #{inspect(rca_required_state)} must route to codex, got #{inspect(runner_kind)}"}}
+    end
+  end
+
+  defp validate_opencode_result_state_routes_to_codex(settings) do
+    result_state = settings.opencode.result_state
+    runner_kind = runner_kind_for_state(result_state, settings)
+
+    if runner_kind == "codex" do
+      :ok
+    else
+      {:error, {:invalid_workflow_config, "opencode.result_state #{inspect(result_state)} must route to codex, got #{inspect(runner_kind)}"}}
+    end
+  end
+
+  defp runner_kind_for_state(state_name, settings) when is_binary(state_name) do
+    Map.get(settings.runner.routes, normalize_issue_state(state_name), settings.runner.default)
+  end
+
   defp normalize_keys(value) when is_map(value) do
     Enum.reduce(value, %{}, fn {key, raw_value}, normalized ->
       Map.put(normalized, normalize_key(key), normalize_keys(raw_value))
@@ -538,6 +573,8 @@ defmodule SymphonyElixir.Config.Schema do
       resolved -> resolved
     end
   end
+
+  defp resolve_path_value(nil, default), do: default
 
   defp resolve_path_value(value, default) when is_binary(value) do
     case normalize_path_token(value) do

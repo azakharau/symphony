@@ -72,6 +72,8 @@ defmodule SymphonyElixir.TestSupport.Snapshot do
   defp normalize_content(content) do
     content
     |> String.replace("\r\n", "\n")
+    |> String.split("\n")
+    |> Enum.map_join("\n", &String.trim_trailing/1)
     |> String.trim_trailing("\n")
     |> Kernel.<>("\n")
   end

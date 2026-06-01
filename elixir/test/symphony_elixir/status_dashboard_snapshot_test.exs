@@ -74,6 +74,7 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
            total_tokens: 268_500,
            seconds_running: 4_321
          },
+         runner_runtime_totals: %{seconds_running: 4_800},
          rate_limits: %{
            limit_id: "gpt-5",
            primary: %{remaining: 12_345, limit: 20_000, reset_in_seconds: 30},
@@ -166,6 +167,30 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
     refute backoff_line =~ "\\n"
   end
 
+  test "snapshot fixture: policy-blocked runners" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         blocked: [
+           blocked_entry(%{
+             identifier: "MT-246",
+             state: "In Progress",
+             runner_kind: "opencode",
+             runner_owner: "opencode",
+             runner_phase: :policy_blocked,
+             runner_failure: %{reason: :opencode_task_prompt_not_found, detail: :no_codex_reroute_state},
+             error: "runner policy blocked: :opencode_task_prompt_not_found detail=:no_codex_reroute_state"
+           })
+         ],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    Snapshot.assert_dashboard_snapshot!("policy_blocks", render_snapshot(snapshot_data, 0.0))
+  end
+
   test "snapshot fixture: unlimited credits variant" do
     snapshot_data =
       {:ok,
@@ -223,6 +248,22 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
         attempt: 1,
         due_in_ms: 1_000,
         error: "retry scheduled"
+      },
+      overrides
+    )
+  end
+
+  defp blocked_entry(overrides) do
+    Map.merge(
+      %{
+        issue_id: "issue-blocked-1",
+        identifier: "MT-BLOCKED",
+        state: "In Progress",
+        runner_kind: "opencode",
+        runner_owner: "opencode",
+        runner_phase: :policy_blocked,
+        runner_failure: nil,
+        error: "runner policy blocked"
       },
       overrides
     )

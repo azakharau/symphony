@@ -3,8 +3,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias Ecto.Changeset
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
-  alias SymphonyElixir.PromptBuilder
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.PromptBuilder
 
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
@@ -609,7 +609,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       },
       comments: [
         %{body: "owner reply", created_at: ~U[2026-01-04 00:00:00Z], parent_id: "question-1"},
-        %{body: "test report", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
+        %{body: "## Benchmark report
+
+Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
       ]
     }
 
@@ -623,7 +625,33 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([issue], state) == nil
   end
 
-  test "owner-input pulse ignores agent top-level comments without owner reply parent" do
+  test "owner-input pulse accepts top-level owner answers" do
+    issue = %Issue{
+      id: "owner-top-level-answer",
+      identifier: "NER-38",
+      title: "Owner review: benchmark runner?",
+      state: "Need Owner Input",
+      latest_comment_at: ~U[2026-01-04 00:00:00Z],
+      project_milestone: %{
+        id: "milestone-1",
+        name: "Approved phase",
+        description: "phase_state: todo"
+      },
+      comments: [%{body: "yes", created_at: ~U[2026-01-04 00:00:00Z], parent_id: nil}]
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      owner_input_pulsed: MapSet.new()
+    }
+
+    assert %Issue{id: "owner-top-level-answer"} =
+             Orchestrator.latest_owner_input_issue_for_pulse_for_test([issue], state)
+  end
+
+  test "owner-input pulse ignores generated top-level reports without owner reply parent" do
     agent_report = %Issue{
       id: "owner-report",
       identifier: "NER-26",
@@ -635,7 +663,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         name: "Approved phase",
         description: "phase_state: todo"
       },
-      comments: [%{body: "test report", created_at: ~U[2026-01-04 00:00:00Z], parent_id: nil}]
+      comments: [%{body: "## Benchmark report\n\nValidation results...", created_at: ~U[2026-01-04 00:00:00Z], parent_id: nil}]
     }
 
     state = %Orchestrator.State{
@@ -646,6 +674,37 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     }
 
     assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([agent_report], state) == nil
+  end
+
+  test "owner-input pulse ignores generated top-level questions without owner reply parent" do
+    agent_question = %Issue{
+      id: "owner-question",
+      identifier: "NER-39",
+      title: "Agent question left for owner review",
+      state: "Need Owner Input",
+      latest_comment_at: ~U[2026-01-04 00:00:00Z],
+      project_milestone: %{
+        id: "milestone-1",
+        name: "Approved phase",
+        description: "phase_state: todo"
+      },
+      comments: [
+        %{
+          body: "Which benchmark gate should run next after this accepted slice: diagnostic-only, claim-safe, or stop and wait?",
+          created_at: ~U[2026-01-04 00:00:00Z],
+          parent_id: nil
+        }
+      ]
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      owner_input_pulsed: MapSet.new()
+    }
+
+    assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([agent_question], state) == nil
   end
 
   test "owner-input pulse ignores issue without todo project milestone" do
@@ -864,6 +923,130 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  test "milestone phase marker is parsed from the control line only" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-todo-control-1",
+      identifier: "MT-1011A",
+      title: "Milestone work",
+      state: "In Progress",
+      project_milestone: %{
+        id: "milestone-2",
+        name: "todo milestone",
+        description:
+          "phase_state: todo\n\n" <>
+            "launch_gate: change the first line to `phase_state: todo` only after explicit owner decision\n" <>
+            "pause_gate: use `phase_state: paused` to keep this milestone dormant\n" <>
+            "decision_gate: use `phase_state: needs-decision` when owner review is required\n"
+      }
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "milestone phase marker later in description does not allow dispatch" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-later-todo-1",
+      identifier: "MT-1011B",
+      title: "Milestone work",
+      state: "Todo",
+      project_milestone: %{
+        id: "milestone-later-todo",
+        name: "Later todo milestone",
+        description: "Product direction\nphase_state: todo"
+      }
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "paused first-line milestone marker with later todo does not allow dispatch" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-paused-later-todo-1",
+      identifier: "MT-1011C",
+      title: "Milestone work",
+      state: "Todo",
+      project_milestone: %{
+        id: "milestone-paused-later-todo",
+        name: "Paused milestone",
+        description: "phase_state: paused\nphase_state: todo"
+      }
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "needs-decision first-line milestone marker with later todo does not allow dispatch" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-needs-later-todo-1",
+      identifier: "MT-1011D",
+      title: "Milestone work",
+      state: "Todo",
+      project_milestone: %{
+        id: "milestone-needs-later-todo",
+        name: "Needs decision milestone",
+        description: "phase_state: needs-decision\nphase_state: todo"
+      }
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "missing first-line milestone marker does not allow dispatch even with later guidance" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-no-first-line-marker-1",
+      identifier: "MT-1011E",
+      title: "Milestone work",
+      state: "Todo",
+      project_milestone: %{
+        id: "milestone-no-first-line-marker",
+        name: "Draft milestone",
+        description: "Product direction\nUse phase_state: todo only after approval"
+      }
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
   test "issue outside active project milestone is not dispatch-eligible" do
     state = %Orchestrator.State{
       max_concurrent_agents: 3,
@@ -975,6 +1158,129 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert planning_issue.description =~ "Make source authoring compact."
   end
 
+  test "full poll dispatches exactly one synthetic project milestone planning issue" do
+    previous_milestones = Application.get_env(:symphony_elixir, :memory_tracker_project_milestones)
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-milestone-planning-dispatch-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: test_root,
+        tracker_active_states: ["Todo", "In Progress", "Need Owner Input"],
+        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
+        poll_fast_states: ["Todo"],
+        runner_default: "opencode",
+        runner_routes: %{"In Review" => "codex", "RCA Required" => "codex"}
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+      Application.put_env(:symphony_elixir, :memory_tracker_project_milestones, [
+        %{
+          id: "milestone-planning-1",
+          name: "Planning boundary",
+          description: "phase_state: todo\n\nDispatch one planning task."
+        }
+      ])
+
+      initial_state = %Orchestrator.State{
+        poll_interval_ms: 30_000,
+        full_poll_interval_ms: 60_000,
+        last_full_poll_at_ms: nil,
+        fast_poll_states: ["Todo"],
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        blocked: %{},
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        runner_runtime_totals: %{seconds_running: 0}
+      }
+
+      assert {:noreply, state} = Orchestrator.handle_info(:run_poll_cycle, initial_state)
+
+      assert [issue_id] = Map.keys(state.running)
+      assert issue_id == "project-milestone:milestone-planning-1:planning"
+      assert MapSet.member?(state.claimed, issue_id)
+      assert state.active_project_milestone_id == "milestone-planning-1"
+
+      assert %{
+               issue: %Issue{} = planning_issue,
+               pulse_kind: :project_milestone_planning
+             } = state.running[issue_id]
+
+      assert planning_issue.synthetic_kind == :project_milestone_planning
+      assert planning_issue.project_milestone.id == "milestone-planning-1"
+
+      if is_reference(state.tick_timer_ref), do: Process.cancel_timer(state.tick_timer_ref)
+    after
+      restore_app_env(:memory_tracker_project_milestones, previous_milestones)
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "non-full poll does not dispatch project milestone planning issue" do
+    previous_milestones = Application.get_env(:symphony_elixir, :memory_tracker_project_milestones)
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-milestone-planning-fast-poll-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: test_root,
+        tracker_active_states: ["Todo", "In Progress", "Need Owner Input"],
+        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
+        poll_fast_states: ["Todo"],
+        runner_default: "opencode",
+        runner_routes: %{"In Review" => "codex", "RCA Required" => "codex"}
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+      Application.put_env(:symphony_elixir, :memory_tracker_project_milestones, [
+        %{
+          id: "milestone-fast-poll",
+          name: "Fast poll skipped",
+          description: "phase_state: todo"
+        }
+      ])
+
+      initial_state = %Orchestrator.State{
+        poll_interval_ms: 30_000,
+        full_poll_interval_ms: 60_000,
+        last_full_poll_at_ms: System.monotonic_time(:millisecond),
+        fast_poll_states: ["Todo"],
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        blocked: %{},
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        runner_runtime_totals: %{seconds_running: 0}
+      }
+
+      assert {:noreply, state} = Orchestrator.handle_info(:run_poll_cycle, initial_state)
+
+      assert state.running == %{}
+      assert state.claimed == MapSet.new()
+      assert state.active_project_milestone_id == nil
+
+      if is_reference(state.tick_timer_ref), do: Process.cancel_timer(state.tick_timer_ref)
+    after
+      restore_app_env(:memory_tracker_project_milestones, previous_milestones)
+      File.rm_rf(test_root)
+    end
+  end
+
   test "synthetic project milestone planning issue renders optional milestone fields for strict templates" do
     write_workflow_file!(Workflow.workflow_file_path(),
       prompt: "Milestone {{ issue.project_milestone.name }} target={{ issue.project_milestone.target_date }} url={{ issue.url }}"
@@ -1071,7 +1377,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert [] = Orchestrator.milestone_planning_issues_for_test([other_milestone], [], state)
   end
 
-  test "synthetic project milestone planning issue skips Linear issue revalidation" do
+  test "synthetic project milestone planning issue is not privileged during dispatch revalidation" do
     issue = %Issue{
       id: "project-milestone:milestone-1:planning",
       identifier: "MILESTONE-milestone-1",
@@ -1081,9 +1387,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       project_milestone: %{id: "milestone-1", name: "Milestone", description: "phase_state: todo"}
     }
 
-    assert {:ok, ^issue} =
-             Orchestrator.revalidate_issue_for_dispatch_for_test(issue, fn _ids ->
-               flunk("synthetic milestone planning issue must not be fetched as a Linear issue")
+    assert {:skip, :missing} =
+             Orchestrator.revalidate_issue_for_dispatch_for_test(issue, fn ["project-milestone:milestone-1:planning"] ->
+               {:ok, []}
              end)
   end
 
@@ -1391,6 +1697,25 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert message =~ "codex.stall_timeout_ms"
 
     write_workflow_file!(Workflow.workflow_file_path(),
+      runner_routes: %{"RCA Required" => "opencode"},
+      process_policy_rca_required_state: "RCA Required"
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.settings()
+    assert message =~ "process_policy.rca_required_state"
+    assert message =~ "must route to codex"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      runner_routes: %{"In Review" => "opencode", "RCA Required" => "codex"},
+      opencode_result_state: "In Review",
+      process_policy_rca_required_state: "RCA Required"
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.settings()
+    assert message =~ "opencode.result_state"
+    assert message =~ "must route to codex"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
       tracker_active_states: %{todo: true},
       tracker_terminal_states: %{done: true},
       poll_interval_ms: %{bad: true},
@@ -1441,6 +1766,32 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server")
     assert Config.settings!().codex.command == "codex app-server"
+  end
+
+  test "config resolves optional project roots from missing and blank environment tokens" do
+    missing_env = "SYMPHONY_TEST_MISSING_ROOT"
+    blank_env = "SYMPHONY_TEST_BLANK_ROOT"
+    previous_missing = System.get_env(missing_env)
+    previous_blank = System.get_env(blank_env)
+
+    on_exit(fn ->
+      restore_env(missing_env, previous_missing)
+      restore_env(blank_env, previous_blank)
+    end)
+
+    System.delete_env(missing_env)
+    System.put_env(blank_env, "")
+
+    assert %{} = Schema.normalize_runner_routes(nil)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_project_root: "$#{missing_env}",
+      opencode_project_root: "$#{blank_env}"
+    )
+
+    config = Config.settings!()
+    assert config.codex.project_root == nil
+    assert config.opencode.project_root == nil
   end
 
   test "config resolves $VAR references for env-backed secret and path values" do
@@ -1865,4 +2216,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       File.rm_rf(test_root)
     end
   end
+
+  defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
+  defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 end

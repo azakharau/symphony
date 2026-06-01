@@ -6,8 +6,8 @@ defmodule SymphonyElixir.Tracker.Memory do
   @behaviour SymphonyElixir.Tracker
 
   alias SymphonyElixir.Linear.Issue
-  alias SymphonyElixir.ReviewDecision
   alias SymphonyElixir.OpenCode.TaskPrompt
+  alias SymphonyElixir.ReviewDecision
 
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues do
@@ -67,19 +67,30 @@ defmodule SymphonyElixir.Tracker.Memory do
       memory_comments(issue_id)
 
     comments
-    |> List.wrap()
-    |> Enum.reverse()
-    |> Enum.find_value(fn body ->
-      case TaskPrompt.extract_packet(body) do
-        {:ok, packet} -> {:ok, packet}
-        {:error, _reason} -> nil
-      end
-    end)
+    |> latest_packet_from_comments()
     |> case do
       {:ok, packet} -> {:ok, packet}
+      {:error, reason} -> {:error, reason}
       nil -> latest_packet_from_issue_description(issue_id)
     end
   end
+
+  defp latest_packet_from_comments(comments) do
+    comments
+    |> List.wrap()
+    |> Enum.reverse()
+    |> Enum.find_value(&extract_opencode_packet_from_body/1)
+  end
+
+  defp extract_opencode_packet_from_body(body) when is_binary(body) do
+    case TaskPrompt.extract_packet(body) do
+      {:ok, packet} -> {:ok, packet}
+      {:error, :opencode_task_prompt_not_found} -> nil
+      {:error, reason} -> if TaskPrompt.marker_present?(body), do: {:error, reason}, else: nil
+    end
+  end
+
+  defp extract_opencode_packet_from_body(_body), do: nil
 
   @spec review_decisions(String.t()) :: {:ok, [ReviewDecision.t()]} | {:error, term()}
   def review_decisions(issue_id) when is_binary(issue_id) do

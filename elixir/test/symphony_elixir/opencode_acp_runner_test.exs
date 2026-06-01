@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.OpenCodeACPRunnerTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.AgentRunner
   alias SymphonyElixir.OpenCode.ACPSessionStore
   alias SymphonyElixir.OpenCode.Runner
 
@@ -65,6 +66,48 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
 
     assert {:error, {:need_owner_input, {:opencode_acp_session_attached, "existing-session"}}} =
              Runner.run("/tmp/workspace", issue, "initial prompt must not be sent")
+  end
+
+  test "opencode acp dispatch records attached session diagnostic instead of handoff" do
+    {python, script} = fake_acp_server!()
+    issue = issue()
+    workspace_root = workspace_root!()
+    project_root = File.cwd!()
+
+    write_session_store!(workspace_root, issue, project_root, "existing-session")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      runner_routes: %{"In Progress" => "opencode"},
+      opencode_protocol: "acp",
+      opencode_command: python,
+      opencode_args: [script, "runner"],
+      opencode_project_root: project_root,
+      workspace_root: workspace_root
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_opencode_comments, %{
+      issue.id => [
+        """
+        <!-- symphony:opencode-task-prompt:v1 slice_id=attached-session -->
+        ```text
+        Existing session should not replay this prompt.
+        ```
+        """
+      ]
+    })
+
+    assert :ok = AgentRunner.run(issue, self())
+
+    assert_receive {:memory_tracker_comment, "issue-1", comment}
+    assert comment =~ "## OpenCode Session Attached"
+    assert comment =~ "Session ID: `existing-session`"
+    refute comment =~ "## OpenCode Handoff"
+    refute comment =~ "OpenCode requested owner input"
+
+    assert_receive {:memory_tracker_state_update, "issue-1", "Need Owner Input"}
   end
 
   test "opencode acp runner durable session mapping survives runner process restart" do

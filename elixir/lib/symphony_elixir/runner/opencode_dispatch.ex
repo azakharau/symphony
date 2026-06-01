@@ -51,6 +51,9 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
           {:error, {:opencode_remote_worker_host_unsupported, details}} ->
             block_remote_opencode_worker_host(issue, details, emit_update, project_context)
 
+          {:error, {:need_owner_input, {:opencode_acp_session_attached, session_id}}} ->
+            record_opencode_attached_session(issue, session_id, emit_update, project_context)
+
           {:error, {:need_owner_input, reason}} ->
             record_opencode_owner_input(issue, reason, emit_update, project_context)
 
@@ -175,6 +178,27 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
     end
   end
 
+  defp record_opencode_attached_session(issue, session_id, emit_update, project_context) do
+    emit_update.(%{
+      event: :session_attached,
+      phase: :blocked,
+      outcome: :rerouted,
+      timestamp: DateTime.utc_now(),
+      result_state: "Need Owner Input",
+      session_id: session_id,
+      failure: %{reason: :opencode_acp_session_attached}
+    })
+
+    with :ok <- Tracker.create_comment(issue.id, opencode_attached_session_comment(issue, session_id), project_context),
+         :ok <- Tracker.update_issue_state(issue.id, "Need Owner Input", project_context) do
+      Outcome.rerouted(
+        reason: :opencode_acp_session_attached,
+        result_state: "Need Owner Input",
+        failure: %{reason: :opencode_acp_session_attached, session_id: session_id}
+      )
+    end
+  end
+
   defp reroute_missing_opencode_task_prompt(%Issue{id: issue_id} = issue, project_context, emit_update)
        when is_binary(issue_id) do
     target_state = codex_reroute_state(project_context)
@@ -253,6 +277,21 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
     ```text
     #{inspect(reason)}
     ```
+    """
+  end
+
+  defp opencode_attached_session_comment(%Issue{} = issue, session_id) do
+    """
+    ## OpenCode Session Attached
+
+    Issue: #{issue.identifier}
+    Runner: OpenCode ACP
+    Status: session attached
+    Session ID: `#{session_id}`
+
+    Symphony found an existing persisted OpenCode ACP session for this issue and did not resend the task prompt. This is a session attachment guard, not a completed OpenCode handoff and not an owner-input request emitted by OpenCode.
+
+    Inspect or continue the session in OpenCode, then move the issue back to `In Progress` when it is ready to run again, or provide owner direction in this issue.
     """
   end
 

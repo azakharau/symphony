@@ -1806,6 +1806,26 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     assert Config.settings!().codex.command == "codex app-server"
   end
 
+  test "opencode acp defaults to no idle stall watchdog when stall timeout is omitted" do
+    File.write!(
+      Workflow.workflow_file_path(),
+      """
+      ---
+      opencode:
+        protocol: acp
+        command: opencode
+        timeout_ms: 10800000
+      ---
+
+      prompt
+      """
+    )
+
+    config = Config.settings!()
+    assert config.opencode.timeout_ms == 10_800_000
+    assert config.opencode.stall_timeout_ms == 0
+  end
+
   test "config resolves optional project roots from missing and blank environment tokens" do
     missing_env = "SYMPHONY_TEST_MISSING_ROOT"
     blank_env = "SYMPHONY_TEST_BLANK_ROOT"

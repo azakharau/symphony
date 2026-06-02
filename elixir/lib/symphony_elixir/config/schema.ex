@@ -254,6 +254,8 @@ defmodule SymphonyElixir.Config.Schema do
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
+      stall_timeout_present? = stall_timeout_present?(attrs)
+
       schema
       |> cast(
         attrs,
@@ -274,12 +276,28 @@ defmodule SymphonyElixir.Config.Schema do
         ],
         empty_values: []
       )
+      |> default_acp_stall_timeout(stall_timeout_present?)
       |> validate_required([:command, :agent, :format, :result_state])
       |> validate_inclusion(:protocol, ["cli", "acp"])
       |> validate_number(:timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
     end
+
+    defp default_acp_stall_timeout(changeset, false) do
+      case get_field(changeset, :protocol) do
+        "acp" -> put_change(changeset, :stall_timeout_ms, 0)
+        _protocol -> changeset
+      end
+    end
+
+    defp default_acp_stall_timeout(changeset, _stall_timeout_present?), do: changeset
+
+    defp stall_timeout_present?(attrs) when is_map(attrs) do
+      Map.has_key?(attrs, :stall_timeout_ms) or Map.has_key?(attrs, "stall_timeout_ms")
+    end
+
+    defp stall_timeout_present?(_attrs), do: false
   end
 
   defmodule ProcessPolicy do

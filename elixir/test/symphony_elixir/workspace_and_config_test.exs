@@ -827,6 +827,146 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     assert Orchestrator.active_issues_blocking_idle_pulse_for_test([owner_input, normal_work]) == [normal_work]
   end
 
+  test "unchanged owner-input pulse suppresses without spawning a worker" do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-owner-input-suppress-ledger-#{System.unique_integer([:positive])}.json"
+      )
+
+    on_exit(fn -> File.rm(path) end)
+    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
+
+    on_exit(fn ->
+      if Process.alive?(ledger), do: GenServer.stop(ledger)
+    end)
+
+    fingerprint = "owner-unchanged:2026-01-04T00:00:00Z"
+    assert :ok = SymphonyElixir.PulseLedger.record_owner_input(ledger, fingerprint)
+
+    issue = %Issue{
+      id: "owner-unchanged",
+      identifier: "SYM-13",
+      title: "Owner parked question",
+      state: "Need Owner Input",
+      comments: [
+        %{body: "continue", created_at: ~U[2026-01-04 00:00:00Z], parent_id: nil}
+      ],
+      project_milestone: %{
+        id: "milestone-owner",
+        name: "Owner milestone",
+        description: "phase_state: todo"
+      }
+    }
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 1,
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      retry_attempts: %{},
+      owner_input_pulsed: MapSet.new(),
+      pulse_ledger: ledger,
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    assert {:none, new_state} = Orchestrator.dispatch_owner_input_pulse_candidate_for_test(issue, state)
+    assert new_state.running == %{}
+    assert new_state.retry_attempts == %{}
+    assert %{"owner_wait_no_change" => 1} = SymphonyElixir.PulseLedger.suppression_counts(ledger)
+  end
+
+  test "owner-input dispatch failure rolls back pending durable fingerprint" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["worker-a"],
+      worker_max_concurrent_agents_per_host: 1
+    )
+
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-owner-input-rollback-ledger-#{System.unique_integer([:positive])}.json"
+      )
+
+    on_exit(fn -> File.rm(path) end)
+    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
+
+    on_exit(fn ->
+      if Process.alive?(ledger), do: GenServer.stop(ledger)
+    end)
+
+    issue = %Issue{
+      id: "owner-dispatch-fails",
+      identifier: "SYM-13",
+      title: "Owner answered",
+      state: "Need Owner Input",
+      comments: [
+        %{body: "continue", created_at: ~U[2026-01-04 00:00:00Z], parent_id: nil}
+      ],
+      project_milestone: %{
+        id: "milestone-owner",
+        name: "Owner milestone",
+        description: "phase_state: todo"
+      }
+    }
+
+    occupied = %Issue{
+      id: "occupied",
+      identifier: "SYM-0",
+      title: "Occupies worker",
+      state: "Todo",
+      project_milestone: issue.project_milestone
+    }
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 2,
+      running: %{"occupied" => %{worker_host: "worker-a", issue: occupied}},
+      claimed: MapSet.new(),
+      blocked: %{},
+      retry_attempts: %{},
+      owner_input_pulsed: MapSet.new(),
+      pulse_ledger: ledger,
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    assert {:none, new_state} = Orchestrator.dispatch_owner_input_pulse_candidate_for_test(issue, state)
+    refute Map.has_key?(new_state.running, issue.id)
+    refute SymphonyElixir.PulseLedger.owner_input_processed?(ledger, "owner-dispatch-fails:2026-01-04T00:00:00Z")
+    refute SymphonyElixir.PulseLedger.has_pending?(ledger)
+  end
+
+  test "full idle pulse ignores Done continuation entirely" do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-done-idle-ledger-#{System.unique_integer([:positive])}.json"
+      )
+
+    on_exit(fn -> File.rm(path) end)
+    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
+
+    on_exit(fn ->
+      if Process.alive?(ledger), do: GenServer.stop(ledger)
+    end)
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 1,
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      retry_attempts: %{},
+      owner_input_pulsed: MapSet.new(),
+      pulse_ledger: ledger,
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    new_state = Orchestrator.dispatch_idle_pulse_for_test(state, true)
+
+    assert new_state.running == %{}
+    assert SymphonyElixir.PulseLedger.suppression_counts(ledger) == %{}
+    refute SymphonyElixir.PulseLedger.done_continuation_processed?(ledger, "done-id:updated")
+  end
+
   test "todo issue with non-terminal blocker is not dispatch-eligible" do
     state = %Orchestrator.State{
       max_concurrent_agents: 3,
@@ -1413,6 +1553,167 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     }
 
     assert [] = Orchestrator.milestone_planning_issues_for_test([other_milestone], [], state)
+  end
+
+  test "active milestone lock hydrates from ledger and blocks next milestone scan after restart" do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-active-milestone-hydrate-#{System.unique_integer([:positive])}.json"
+      )
+
+    on_exit(fn -> File.rm(path) end)
+    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
+
+    on_exit(fn ->
+      if Process.alive?(ledger), do: GenServer.stop(ledger)
+    end)
+
+    assert :ok = SymphonyElixir.PulseLedger.set_active_milestone(ledger, "milestone-current", "Current", "todo")
+
+    state =
+      Orchestrator.hydrate_active_milestone_for_test(%Orchestrator.State{
+        pulse_ledger: ledger,
+        max_concurrent_agents: 3,
+        running: %{},
+        claimed: MapSet.new(),
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      })
+
+    assert state.active_project_milestone_id == "milestone-current"
+
+    other_milestone = %{
+      id: "milestone-other",
+      name: "Other milestone",
+      description: "phase_state: todo"
+    }
+
+    assert [] = Orchestrator.milestone_planning_issues_for_test([other_milestone], [], state)
+  end
+
+  test "active child work keeps milestone lock without fetching milestone phase or writing suppressions" do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-active-milestone-child-work-#{System.unique_integer([:positive])}.json"
+      )
+
+    on_exit(fn -> File.rm(path) end)
+    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
+
+    on_exit(fn ->
+      if Process.alive?(ledger), do: GenServer.stop(ledger)
+    end)
+
+    assert :ok = SymphonyElixir.PulseLedger.set_active_milestone(ledger, "milestone-current", "Current", "todo")
+
+    milestone = %{id: "milestone-current", name: "Current", description: "phase_state: todo"}
+
+    active_issue = %Issue{
+      id: "issue-active",
+      identifier: "SYM-13",
+      title: "Active work",
+      state: "Todo",
+      project_milestone: milestone
+    }
+
+    state = %Orchestrator.State{
+      active_project_milestone_id: "milestone-current",
+      pulse_ledger: ledger,
+      running: %{},
+      blocked: %{},
+      retry_attempts: %{}
+    }
+
+    fetcher = fn ->
+      send(self(), :milestone_fetch_called)
+      {:ok, [milestone]}
+    end
+
+    new_state = Orchestrator.maybe_release_active_project_milestone_for_test(state, [active_issue], fetcher)
+
+    assert new_state.active_project_milestone_id == "milestone-current"
+    refute_received :milestone_fetch_called
+    assert SymphonyElixir.PulseLedger.suppression_counts(ledger) == %{}
+  end
+
+  test "open active milestone without child work stays locked without durable suppression churn" do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-active-milestone-open-#{System.unique_integer([:positive])}.json"
+      )
+
+    on_exit(fn -> File.rm(path) end)
+    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
+
+    on_exit(fn ->
+      if Process.alive?(ledger), do: GenServer.stop(ledger)
+    end)
+
+    assert :ok = SymphonyElixir.PulseLedger.set_active_milestone(ledger, "milestone-current", "Current", "todo")
+
+    milestone = %{id: "milestone-current", name: "Current", description: "phase_state: todo"}
+
+    state = %Orchestrator.State{
+      active_project_milestone_id: "milestone-current",
+      pulse_ledger: ledger,
+      running: %{},
+      blocked: %{},
+      retry_attempts: %{}
+    }
+
+    new_state = Orchestrator.maybe_release_active_project_milestone_for_test(state, [], fn -> {:ok, [milestone]} end)
+
+    assert new_state.active_project_milestone_id == "milestone-current"
+    assert SymphonyElixir.PulseLedger.active_milestone(ledger) != nil
+    assert SymphonyElixir.PulseLedger.suppression_counts(ledger) == %{}
+  end
+
+  test "explicit active milestone closure releases hydrated lock" do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-active-milestone-closed-#{System.unique_integer([:positive])}.json"
+      )
+
+    on_exit(fn -> File.rm(path) end)
+    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
+
+    on_exit(fn ->
+      if Process.alive?(ledger), do: GenServer.stop(ledger)
+    end)
+
+    assert :ok = SymphonyElixir.PulseLedger.set_active_milestone(ledger, "milestone-current", "Current", "todo")
+
+    milestone = %{id: "milestone-current", name: "Current", description: "phase_state: paused"}
+
+    state = %Orchestrator.State{
+      active_project_milestone_id: "milestone-current",
+      pulse_ledger: ledger,
+      running: %{},
+      blocked: %{},
+      retry_attempts: %{}
+    }
+
+    new_state = Orchestrator.maybe_release_active_project_milestone_for_test(state, [], fn -> {:ok, [milestone]} end)
+
+    assert new_state.active_project_milestone_id == nil
+    assert SymphonyElixir.PulseLedger.active_milestone(ledger) == nil
+  end
+
+  test "orchestrator uses PulseLedger project-context naming contract" do
+    context =
+      SymphonyElixir.ProjectContext.new(%{
+        id: "project-ledger-name",
+        name: "Project ledger name",
+        enabled: true,
+        workflow_path: Workflow.workflow_file_path()
+      })
+
+    assert Orchestrator.pulse_ledger_name_for_test(context) ==
+             SymphonyElixir.PulseLedger.process_name_for_test(project_context: context)
   end
 
   test "synthetic project milestone planning issue is not privileged during dispatch revalidation" do

@@ -133,9 +133,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp attach_pulse_ledger(%State{project_context: project_context} = state) do
     workspace_root = Config.settings!(project_context).workspace.root
     ledger_path = Path.join(workspace_root, "pulse_ledger.json")
-    ledger_name = :"pulse_ledger_#{project_context_id(project_context)}"
+    ledger_opts = pulse_ledger_start_opts(project_context, ledger_path)
 
-    case PulseLedger.start_link(name: ledger_name, file_path: ledger_path) do
+    case PulseLedger.start_link(ledger_opts) do
       {:ok, pid} ->
         %{state | pulse_ledger: pid}
 
@@ -148,10 +148,11 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp project_context_id(%ProjectContext{id: id}) when is_binary(id), do: String.replace(id, "-", "_")
-  defp project_context_id(%{id: id}) when is_binary(id), do: String.replace(id, "-", "_")
-  defp project_context_id(%{slug: slug}) when is_binary(slug), do: slug
-  defp project_context_id(_), do: "default"
+  defp pulse_ledger_start_opts(nil, ledger_path), do: [name: pulse_ledger_name(nil), file_path: ledger_path]
+  defp pulse_ledger_start_opts(project_context, ledger_path), do: [project_context: project_context, file_path: ledger_path]
+
+  defp pulse_ledger_name(nil), do: PulseLedger.process_name_for_test(name: :symphony_pulse_ledger_default)
+  defp pulse_ledger_name(project_context), do: PulseLedger.process_name_for_test(project_context: project_context)
 
   defp hydrate_active_milestone(%State{pulse_ledger: nil} = state), do: state
 
@@ -598,6 +599,39 @@ defmodule SymphonyElixir.Orchestrator do
   def active_issues_blocking_idle_pulse_for_test(issues) when is_list(issues) do
     active_issues_blocking_idle_pulse(issues)
   end
+
+  @doc false
+  @spec dispatch_owner_input_pulse_candidate_for_test(Issue.t(), State.t()) :: {:dispatched | :none, State.t()}
+  def dispatch_owner_input_pulse_candidate_for_test(%Issue{} = issue, %State{} = state) do
+    dispatch_owner_input_pulse_candidate(issue, state)
+  end
+
+  @doc false
+  @spec dispatch_idle_pulse_for_test(State.t(), boolean()) :: State.t()
+  def dispatch_idle_pulse_for_test(%State{} = state, full_poll?) when is_boolean(full_poll?) do
+    dispatch_idle_pulse(state, full_poll?)
+  end
+
+  @doc false
+  @spec hydrate_active_milestone_for_test(State.t()) :: State.t()
+  def hydrate_active_milestone_for_test(%State{} = state), do: hydrate_active_milestone(state)
+
+  @doc false
+  @spec maybe_release_active_project_milestone_for_test(State.t(), [Issue.t()], (-> {:ok, [map()]} | {:error, term()})) :: State.t()
+  def maybe_release_active_project_milestone_for_test(%State{} = state, issues, milestone_fetcher)
+      when is_list(issues) and is_function(milestone_fetcher, 0) do
+    maybe_release_active_project_milestone(
+      state,
+      issues,
+      active_state_set(state),
+      terminal_state_set(state),
+      milestone_fetcher
+    )
+  end
+
+  @doc false
+  @spec pulse_ledger_name_for_test(term()) :: GenServer.name() | nil
+  def pulse_ledger_name_for_test(project_context), do: pulse_ledger_name(project_context)
 
   @doc false
   @spec milestone_planning_issues_for_test([map()], [Issue.t()], term()) :: [Issue.t()]
@@ -1174,6 +1208,8 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp dispatch_owner_input_pulse_candidate(nil, %State{} = state), do: {:none, state}
+
   defp dispatch_owner_input_pulse_candidate(%Issue{} = issue, %State{pulse_ledger: nil} = state) do
     dispatch_owner_input_pulse_candidate_no_ledger(issue, state)
   end
@@ -1225,8 +1261,6 @@ defmodule SymphonyElixir.Orchestrator do
      |> mark_owner_input_pulsed(fingerprint)
      |> do_dispatch_issue(issue, nil, nil, :owner_input)}
   end
-
-  defp dispatch_owner_input_pulse_candidate(nil, %State{} = state), do: {:none, state}
 
   defp latest_owner_input_issue_for_pulse(issues, %State{} = state) when is_list(issues) do
     issues
@@ -1614,14 +1648,30 @@ defmodule SymphonyElixir.Orchestrator do
        do: state
 
   defp maybe_release_active_project_milestone(
-         %State{active_project_milestone_id: milestone_id} = state,
+         %State{} = state,
          issues,
          active_states,
          terminal_states
-       )
-       when is_binary(milestone_id) and is_list(issues) do
-    phase_closed? = milestone_release_phase_closed?(state)
+       ) do
+    maybe_release_active_project_milestone(
+      state,
+      issues,
+      active_states,
+      terminal_states,
+      fn -> Tracker.fetch_project_milestones(state.project_context) end
+    )
+  end
 
+  defp maybe_release_active_project_milestone(state, _issues, _active_states, _terminal_states), do: state
+
+  defp maybe_release_active_project_milestone(
+         %State{active_project_milestone_id: milestone_id} = state,
+         issues,
+         active_states,
+         terminal_states,
+         milestone_fetcher
+       )
+       when is_binary(milestone_id) and is_list(issues) and is_function(milestone_fetcher, 0) do
     active_milestone_has_work? =
       Enum.any?(issues, fn
         %Issue{} = issue ->
@@ -1636,56 +1686,32 @@ defmodule SymphonyElixir.Orchestrator do
     runtime_active? = active_project_milestone_has_runtime_state?(state, milestone_id)
 
     cond do
-      is_nil(state.pulse_ledger) and (active_milestone_has_work? or runtime_active?) ->
+      active_milestone_has_work? or runtime_active? ->
         state
 
       is_nil(state.pulse_ledger) ->
         %{state | active_project_milestone_id: nil}
 
-      phase_closed? and not active_milestone_has_work? and not runtime_active? ->
+      milestone_release_phase_closed?(state, milestone_fetcher) ->
         PulseLedger.clear_active_milestone(state.pulse_ledger)
         %{state | active_project_milestone_id: nil}
-
-      not phase_closed? and state.pulse_ledger ->
-        PulseLedger.record_suppression(
-          state.pulse_ledger,
-          PulseLedger.active_milestone_locked(),
-          nil,
-          nil,
-          milestone_id,
-          milestone_name_for_id(state, milestone_id),
-          "milestone #{milestone_name_for_id(state, milestone_id) || milestone_id} phase state = open"
-        )
-
-        PulseLedger.record_suppression(
-          state.pulse_ledger,
-          PulseLedger.next_milestone_scan_suppressed(),
-          nil,
-          nil,
-          milestone_id,
-          milestone_name_for_id(state, milestone_id),
-          "next milestone scan blocked by active milestone #{milestone_id}"
-        )
-
-        %{
-          state
-          | suppression_counts:
-              state.suppression_counts
-              |> increment_suppression(PulseLedger.active_milestone_locked())
-              |> increment_suppression(PulseLedger.next_milestone_scan_suppressed())
-        }
 
       true ->
         state
     end
   end
 
-  defp maybe_release_active_project_milestone(state, _issues, _active_states, _terminal_states), do: state
+  defp maybe_release_active_project_milestone(
+         %State{} = state,
+         _issues,
+         _active_states,
+         _terminal_states,
+         _milestone_fetcher
+       ),
+       do: state
 
-  defp milestone_release_phase_closed?(%State{active_project_milestone_id: nil}), do: false
-
-  defp milestone_release_phase_closed?(%State{} = state) do
-    case Tracker.fetch_project_milestones(state.project_context) do
+  defp milestone_release_phase_closed?(%State{} = state, milestone_fetcher) when is_function(milestone_fetcher, 0) do
+    case milestone_fetcher.() do
       {:ok, milestones} ->
         active_id = state.active_project_milestone_id
 
@@ -1703,19 +1729,7 @@ defmodule SymphonyElixir.Orchestrator do
                 Logger.info("Active milestone #{active_id} phase_state=#{phase}; releasing lock")
                 true
 
-              other ->
-                if not is_nil(state.pulse_ledger) do
-                  PulseLedger.record_suppression(
-                    state.pulse_ledger,
-                    PulseLedger.active_milestone_locked(),
-                    nil,
-                    nil,
-                    active_id,
-                    milestone_name(milestone),
-                    "milestone #{milestone_name(milestone)} phase_state=#{other} (still open)"
-                  )
-                end
-
+              _other ->
                 false
             end
         end
@@ -1723,29 +1737,7 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, reason} ->
         Logger.warning("Cannot check milestone release phase; fetch failed: #{inspect(reason)}; keeping lock")
 
-        if state.pulse_ledger do
-          PulseLedger.record_suppression(
-            state.pulse_ledger,
-            PulseLedger.active_milestone_locked(),
-            nil,
-            nil,
-            state.active_project_milestone_id,
-            nil,
-            "current milestone data unavailable; keeping lock"
-          )
-        end
-
         false
-    end
-  end
-
-  defp milestone_name_for_id(%State{} = state, _milestone_id) do
-    if state.pulse_ledger do
-      case PulseLedger.active_milestone(state.pulse_ledger) do
-        %{"milestone_name" => name} when is_binary(name) -> name
-        %{milestone_name: name} when is_binary(name) -> name
-        _ -> nil
-      end
     end
   end
 

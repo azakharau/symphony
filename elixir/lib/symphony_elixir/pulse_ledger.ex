@@ -51,6 +51,10 @@ defmodule SymphonyElixir.PulseLedger do
     end
   end
 
+  @doc false
+  @spec process_name_for_test(keyword()) :: GenServer.name() | nil
+  def process_name_for_test(opts) when is_list(opts), do: process_name(opts)
+
   defp project_context_id(%{id: id}) when is_binary(id), do: id
   defp project_context_id(%{"id" => id}) when is_binary(id), do: id
   defp project_context_id(%{project_id: project_id}) when is_binary(project_id), do: project_id

@@ -1555,6 +1555,25 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     assert [] = Orchestrator.milestone_planning_issues_for_test([other_milestone], [], state)
   end
 
+  test "open active project milestone does not dispatch synthetic planning for itself" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      active_project_milestone_id: "milestone-current",
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    current_milestone = %{
+      id: "milestone-current",
+      name: "Current milestone",
+      description: "phase_state: todo"
+    }
+
+    assert [] = Orchestrator.milestone_planning_issues_for_test([current_milestone], [], state)
+  end
+
   test "active milestone lock hydrates from ledger and blocks next milestone scan after restart" do
     path =
       Path.join(

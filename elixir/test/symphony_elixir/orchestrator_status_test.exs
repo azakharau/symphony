@@ -81,6 +81,55 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert %{"owner_wait_no_change" => 1} = snapshot.suppression_counts
   end
 
+  test "orchestrator snapshot exposes active milestone lock context" do
+    path = Path.join(System.tmp_dir!(), "symphony-active-milestone-snapshot-#{System.unique_integer([:positive])}.json")
+    on_exit(fn -> File.rm(path) end)
+
+    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
+
+    on_exit(fn ->
+      if Process.alive?(ledger), do: GenServer.stop(ledger)
+    end)
+
+    assert :ok = SymphonyElixir.PulseLedger.set_active_milestone(ledger, "milestone-current", "Current", "todo")
+
+    assert :ok =
+             SymphonyElixir.PulseLedger.record_suppression(
+               ledger,
+               "active_milestone_locked",
+               nil,
+               nil,
+               "milestone-current",
+               "Current",
+               "milestone is still open"
+             )
+
+    orchestrator_name = Module.concat(__MODULE__, :ActiveMilestoneProjectionOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, dispatch_paused?: true)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      %{state | pulse_ledger: ledger, active_project_milestone_id: "milestone-current"}
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+
+    assert snapshot.active_project_milestone_id == "milestone-current"
+
+    assert %{
+             milestone_id: "milestone-current",
+             milestone_name: "Current",
+             phase_state: "todo"
+           } = snapshot.active_milestone
+
+    assert %{"active_milestone_locked" => 1} = snapshot.suppression_counts
+  end
+
   test "orchestrator snapshot reflects last codex update and session id" do
     issue_id = "issue-snapshot"
 
@@ -1724,6 +1773,26 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     checking_rendered = StatusDashboard.format_snapshot_content_for_test(checking_snapshot, 0.0)
     assert checking_rendered =~ "checking now…"
+  end
+
+  test "status dashboard renders active milestone lock context" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil,
+         active_milestone: %{milestone_id: "milestone-current", milestone_name: "Current", phase_state: "todo"},
+         active_project_milestone_id: "milestone-current",
+         suppression_counts: %{"active_milestone_locked" => 2}
+       }}
+
+    rendered = StatusDashboard.format_snapshot_content_for_test(snapshot_data, 0.0)
+    plain = Regex.replace(~r/\e\[[0-9;]*m/, rendered, "")
+
+    assert plain =~ "Milestone: Current (todo)"
+    assert plain =~ "active_milestone_locked: 2"
   end
 
   test "status dashboard adds a spacer line before backoff queue when no agents are active" do

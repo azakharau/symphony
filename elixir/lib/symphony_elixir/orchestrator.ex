@@ -1444,10 +1444,6 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(milestone_id),
        do: true
 
-  defp milestone_planning_batch_allowed?(milestone_id, %State{active_project_milestone_id: active_id})
-       when is_binary(milestone_id) and is_binary(active_id),
-       do: milestone_id == active_id
-
   defp milestone_planning_batch_allowed?(_milestone_id, _state), do: false
 
   defp milestone_planning_issue_available?(planning_issue_id, %State{} = state) do
@@ -2609,7 +2605,9 @@ defmodule SymphonyElixir.Orchestrator do
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
          poll_interval_ms: state.poll_interval_ms
-       }
+       },
+       active_project_milestone_id: state.active_project_milestone_id,
+       active_milestone: active_milestone_snapshot(state)
      }, state}
   end
 
@@ -2805,6 +2803,33 @@ defmodule SymphonyElixir.Orchestrator do
     :timer.send_after(@poll_transition_render_delay_ms, self(), :run_poll_cycle)
     :ok
   end
+
+  defp active_milestone_snapshot(%State{pulse_ledger: nil}), do: nil
+
+  defp active_milestone_snapshot(%State{pulse_ledger: ledger, active_project_milestone_id: milestone_id}) when is_binary(milestone_id) do
+    case PulseLedger.active_milestone(ledger) do
+      %{"milestone_id" => id} = info when is_binary(id) ->
+        %{
+          milestone_id: milestone_id,
+          milestone_name: Map.get(info, "milestone_name"),
+          phase_state: Map.get(info, "phase_state"),
+          locked_at: Map.get(info, "locked_at")
+        }
+
+      %{milestone_id: id} = info when is_binary(id) ->
+        %{
+          milestone_id: milestone_id,
+          milestone_name: Map.get(info, :milestone_name),
+          phase_state: Map.get(info, :phase_state),
+          locked_at: Map.get(info, :locked_at)
+        }
+
+      _ ->
+        %{milestone_id: milestone_id}
+    end
+  end
+
+  defp active_milestone_snapshot(_state), do: nil
 
   defp next_poll_in_ms(nil, _now_ms), do: nil
 

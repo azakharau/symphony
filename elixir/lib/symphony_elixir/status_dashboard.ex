@@ -35,6 +35,7 @@ defmodule SymphonyElixir.StatusDashboard do
     :malformed_task_prompt_blocked,
     :loop_breaker_blocked
   ]
+  @active_milestone_locked "active_milestone_locked"
 
   @ansi_reset IO.ANSI.reset()
   @ansi_bold IO.ANSI.bright()
@@ -329,7 +330,10 @@ defmodule SymphonyElixir.StatusDashboard do
              codex_totals: codex_totals,
              runner_runtime_totals: runner_runtime_totals(snapshot, codex_totals),
              rate_limits: Map.get(snapshot, :rate_limits),
-             polling: Map.get(snapshot, :polling)
+             polling: Map.get(snapshot, :polling),
+             active_milestone: Map.get(snapshot, :active_milestone),
+             active_project_milestone_id: Map.get(snapshot, :active_project_milestone_id),
+             suppression_counts: Map.get(snapshot, :suppression_counts, %{})
            }},
           update_token_samples(token_samples, now_ms, total_tokens)
         }
@@ -347,6 +351,8 @@ defmodule SymphonyElixir.StatusDashboard do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
         blocked = Map.get(snapshot, :blocked, [])
         rate_limits = Map.get(snapshot, :rate_limits)
+        active_milestone = Map.get(snapshot, :active_milestone)
+        active_project_milestone_id = Map.get(snapshot, :active_project_milestone_id)
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
         codex_input_tokens = Map.get(codex_totals, :input_tokens, 0)
@@ -377,6 +383,7 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize(" | ", @ansi_gray) <>
              colorize("total #{format_count(codex_total_tokens)}", @ansi_yellow),
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
+           List.wrap(format_milestone_line(active_milestone, active_project_milestone_id, snapshot)),
            project_link_lines,
            project_refresh_line,
            colorize("├─ Running", @ansi_bold),
@@ -437,6 +444,31 @@ defmodule SymphonyElixir.StatusDashboard do
         [project_line]
     end
   end
+
+  defp format_milestone_line(nil, _milestone_id, _snapshot), do: nil
+
+  defp format_milestone_line(%{milestone_name: name, phase_state: phase}, _milestone_id, snapshot) when not is_nil(name) do
+    locked_count =
+      snapshot
+      |> Map.get(:suppression_counts, %{})
+      |> Map.get(@active_milestone_locked, 0)
+
+    lock_suffix =
+      if locked_count > 0 do
+        " │ #{@active_milestone_locked}: #{locked_count}"
+      else
+        ""
+      end
+
+    colorize("│ Milestone: ", @ansi_bold) <>
+      colorize(to_string(name), @ansi_cyan) <>
+      colorize(" (", @ansi_gray) <>
+      colorize(to_string(phase || "unknown"), @ansi_yellow) <>
+      colorize(")", @ansi_gray) <>
+      colorize(lock_suffix, @ansi_red)
+  end
+
+  defp format_milestone_line(_milestone, _milestone_id, _snapshot), do: nil
 
   defp format_project_refresh_line(%{checking?: true}) do
     colorize("│ Next refresh: ", @ansi_bold) <> colorize("checking now…", @ansi_cyan)

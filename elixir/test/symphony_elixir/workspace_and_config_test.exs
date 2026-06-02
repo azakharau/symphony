@@ -676,6 +676,44 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([agent_report], state) == nil
   end
 
+  test "owner-input pulse ignores OpenCode ACP session attachment guards" do
+    session_attached = %Issue{
+      id: "opencode-attached-session",
+      identifier: "MNE-32",
+      title: "OpenCode stalled session",
+      state: "Need Owner Input",
+      latest_comment_at: ~U[2026-06-02 16:24:27Z],
+      project_milestone: %{
+        id: "milestone-1",
+        name: "Approved phase",
+        description: "phase_state: todo"
+      },
+      comments: [
+        %{
+          body: """
+          ## OpenCode Session Attached
+
+          Issue: MNE-32
+          Runner: OpenCode ACP
+          Status: session attached
+          Session ID: `ses_176fbd743ffeY4UlNcPj3AGAD5`
+          """,
+          created_at: ~U[2026-06-02 16:24:27Z],
+          parent_id: nil
+        }
+      ]
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      owner_input_pulsed: MapSet.new()
+    }
+
+    assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([session_attached], state) == nil
+  end
+
   test "owner-input pulse ignores generated top-level questions without owner reply parent" do
     agent_question = %Issue{
       id: "owner-question",

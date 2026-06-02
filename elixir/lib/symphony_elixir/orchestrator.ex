@@ -1280,6 +1280,7 @@ defmodule SymphonyElixir.Orchestrator do
       [
         "<!-- symphony:",
         "## opencode handoff",
+        "## opencode session attached",
         "## symphony stop rule",
         "## benchmark",
         "## validation",
@@ -1287,6 +1288,7 @@ defmodule SymphonyElixir.Orchestrator do
         "```text\nstatus:",
         "symphony stop rule",
         "opencode handoff",
+        "opencode session attached",
         "changed files",
         "validation results"
       ],

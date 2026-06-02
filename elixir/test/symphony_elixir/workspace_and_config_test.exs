@@ -2035,6 +2035,10 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "codex.stall_timeout_ms"
 
+    write_workflow_file!(Workflow.workflow_file_path(), codex_max_total_tokens: "bad")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.max_total_tokens"
+
     write_workflow_file!(Workflow.workflow_file_path(),
       runner_routes: %{"RCA Required" => "opencode"},
       process_policy_rca_required_state: "RCA Required"

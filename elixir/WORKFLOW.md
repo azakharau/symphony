@@ -68,6 +68,7 @@ codex:
   project_root: /home/agent/proj/symphony
   read_timeout_ms: 10800000
   turn_timeout_ms: 10800000
+  max_total_tokens: 200000
   approval_policy: never
   thread_sandbox: danger-full-access
   turn_sandbox_policy:

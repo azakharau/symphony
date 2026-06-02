@@ -429,6 +429,92 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert is_integer(completed_state.runner_runtime_totals.seconds_running)
   end
 
+  test "codex token budget blocks runaway running sessions" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: nil,
+      codex_max_total_tokens: 100
+    )
+
+    issue_id = "issue-codex-token-budget"
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    worker_ref = Process.monitor(worker_pid)
+
+    on_exit(fn ->
+      Process.demonitor(worker_ref, [:flush])
+
+      if Process.alive?(worker_pid) do
+        Process.exit(worker_pid, :kill)
+      end
+    end)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: worker_pid,
+          ref: worker_ref,
+          identifier: "MT-BUDGET",
+          issue: %Issue{id: issue_id, identifier: "MT-BUDGET", state: "RCA Required"},
+          runner_kind: "codex",
+          runner_owner: "codex",
+          session_id: "thread-budget-turn-budget",
+          last_codex_message: nil,
+          last_codex_timestamp: nil,
+          last_codex_event: nil,
+          codex_input_tokens: 0,
+          codex_output_tokens: 0,
+          codex_total_tokens: 0,
+          codex_last_reported_input_tokens: 0,
+          codex_last_reported_output_tokens: 0,
+          codex_last_reported_total_tokens: 0,
+          started_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      blocked: %{},
+      retry_attempts: %{},
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      runner_runtime_totals: %{seconds_running: 0}
+    }
+
+    now = DateTime.utc_now()
+
+    update = %{
+      event: :notification,
+      payload: %{
+        "method" => "thread/tokenUsage/updated",
+        "params" => %{
+          "tokenUsage" => %{
+            "total" => %{"inputTokens" => 120, "outputTokens" => 5, "totalTokens" => 125}
+          }
+        }
+      },
+      timestamp: now
+    }
+
+    assert {:noreply, updated_state} =
+             Orchestrator.handle_info({:codex_worker_update, issue_id, update}, state)
+
+    refute Process.alive?(worker_pid)
+    refute Map.has_key?(updated_state.running, issue_id)
+    refute Map.has_key?(updated_state.retry_attempts, issue_id)
+    assert MapSet.member?(updated_state.claimed, issue_id)
+    assert updated_state.codex_totals.total_tokens == 125
+
+    assert %{
+             identifier: "MT-BUDGET",
+             runner_kind: "codex",
+             error: "codex token budget exceeded: total_tokens=125 max_total_tokens=100"
+           } = updated_state.blocked[issue_id]
+  end
+
   test "completed OpenCode runtime is tracked separately from Codex token totals" do
     issue_id = "issue-opencode-runtime"
 

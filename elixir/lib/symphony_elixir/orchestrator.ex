@@ -280,9 +280,10 @@ defmodule SymphonyElixir.Orchestrator do
           state
           |> apply_codex_token_delta(token_delta)
           |> apply_codex_rate_limits(update)
+          |> put_codex_running_entry_with_budget(issue_id, updated_running_entry)
 
         notify_dashboard()
-        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+        {:noreply, state}
     end
   end
 
@@ -1048,6 +1049,25 @@ defmodule SymphonyElixir.Orchestrator do
   defp stop_and_block_issue(%State{} = state, issue_id, running_entry, error) do
     stop_running_task(Map.get(running_entry, :pid), Map.get(running_entry, :ref), Map.get(running_entry, :task_supervisor))
     block_issue_from_entry(state, issue_id, running_entry, error)
+  end
+
+  defp put_codex_running_entry_with_budget(%State{} = state, issue_id, running_entry) do
+    max_total_tokens = settings_for_state(state).codex.max_total_tokens
+    total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
+
+    if is_integer(max_total_tokens) and max_total_tokens > 0 and total_tokens > max_total_tokens do
+      error = "codex token budget exceeded: total_tokens=#{total_tokens} max_total_tokens=#{max_total_tokens}"
+      identifier = Map.get(running_entry, :identifier, issue_id)
+      session_id = running_entry_session_id(running_entry)
+
+      Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id}; #{error}")
+
+      state
+      |> put_in([Access.key!(:running), issue_id], running_entry)
+      |> stop_and_block_issue(issue_id, running_entry, error)
+    else
+      %{state | running: Map.put(state.running, issue_id, running_entry)}
+    end
   end
 
   defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error) do

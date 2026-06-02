@@ -126,6 +126,9 @@ Notes:
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
   Symphony validation.
+- `codex.max_total_tokens` defaults to `0`, which disables the token budget guard. When set to a
+  positive value, Symphony blocks a running Codex issue without retry once reported cumulative
+  `totalTokens` exceeds the budget.
 - `opencode.protocol` defaults to `cli`, preserving the existing OpenCode CLI runner. To opt in to
   ACP stdio transport, set `opencode.protocol: acp` and use an `opencode.command` that supports ACP;
   rollback is changing `protocol` back to `cli`.

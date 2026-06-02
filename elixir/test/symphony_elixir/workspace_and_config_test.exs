@@ -1823,6 +1823,7 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
 
     config = Config.settings!()
     assert config.opencode.timeout_ms == 10_800_000
+    assert config.opencode.read_timeout_ms == 120_000
     assert config.opencode.stall_timeout_ms == 0
   end
 

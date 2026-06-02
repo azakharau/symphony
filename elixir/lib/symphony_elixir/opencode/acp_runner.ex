@@ -16,6 +16,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
     client_module = Keyword.get(opts, :client, ACPClient)
     session_store = Keyword.get(opts, :session_store, ACPSessionStore)
     session_result_reader = Keyword.get(opts, :session_result_reader, &Runner.read_completed_session_result/2)
+    session_usage_reader = Keyword.get(opts, :session_usage_reader, &Runner.read_session_usage/2)
     session_scope = session_store.prompt_scope(prompt)
     cwd = Keyword.get(opts, :cwd, opencode_project_root(opencode.project_root, workspace))
     title = Keyword.get(opts, :title, issue_title(issue))
@@ -51,7 +52,19 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
           else
             with :ok <- persist_new_session_id(session_store, issue, cwd, session_id, session_scope) do
               emit_session_started(on_event, session_id, [command | args], cwd, opencode)
-              run_prompt(client_module, client, session_id, prompt, opencode, [command | args], cwd, on_event, session_result_reader)
+
+              run_prompt(
+                client_module,
+                client,
+                session_id,
+                prompt,
+                opencode,
+                [command | args],
+                cwd,
+                on_event,
+                session_result_reader,
+                session_usage_reader
+              )
             end
           end
         end
@@ -105,7 +118,18 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
 
   defp tag_resumed(other), do: other
 
-  defp run_prompt(client_module, client, session_id, prompt, opencode, command, cwd, on_event, session_result_reader) do
+  defp run_prompt(
+         client_module,
+         client,
+         session_id,
+         prompt,
+         opencode,
+         command,
+         cwd,
+         on_event,
+         session_result_reader,
+         session_usage_reader
+       ) do
     task =
       Task.async(fn ->
         client_module.prompt(
@@ -134,7 +158,8 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
       on_event,
       [],
       false,
-      session_result_reader
+      session_result_reader,
+      session_usage_reader
     )
   end
 
@@ -149,7 +174,8 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
          on_event,
          events,
          end_turn?,
-         session_result_reader
+         session_result_reader,
+         session_usage_reader
        ) do
     receive do
       {ref, {:ok, result}} when ref == task.ref ->
@@ -193,7 +219,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
         {:error, {:opencode_acp_prompt_failed, reason}}
 
       {:acp_notification, method, params} ->
-        emit_acp_update(on_event, :notification, method, params, session_id, command, cwd, opencode)
+        emit_acp_update(on_event, :notification, method, params, session_id, command, cwd, opencode, session_usage_reader)
 
         collect_prompt_result(
           task,
@@ -206,11 +232,12 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
           on_event,
           [{method, params} | events],
           end_turn? or end_turn_event?(method, params),
-          session_result_reader
+          session_result_reader,
+          session_usage_reader
         )
 
       {:acp_request, method, params} ->
-        emit_acp_update(on_event, :request, method, params, session_id, command, cwd, opencode)
+        emit_acp_update(on_event, :request, method, params, session_id, command, cwd, opencode, session_usage_reader)
 
         collect_prompt_result(
           task,
@@ -223,7 +250,8 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
           on_event,
           [{method, params} | events],
           end_turn?,
-          session_result_reader
+          session_result_reader,
+          session_usage_reader
         )
     after
       stall_timeout(opencode.stall_timeout_ms) ->
@@ -287,7 +315,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
     })
   end
 
-  defp emit_acp_update(on_event, event, method, params, session_id, command, cwd, opencode) do
+  defp emit_acp_update(on_event, event, method, params, session_id, command, cwd, opencode, session_usage_reader) do
     payload = %{"method" => method, "params" => params}
 
     update =
@@ -303,6 +331,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
         payload: payload
       }
       |> maybe_put_usage(params)
+      |> maybe_put_persisted_usage(session_usage_reader, cwd, session_id)
 
     on_event.(update)
   end
@@ -319,6 +348,22 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
 
   defp maybe_put_usage(update, %{"usage" => usage}) when is_map(usage), do: Map.put(update, :usage, usage)
   defp maybe_put_usage(update, _params), do: update
+
+  defp maybe_put_persisted_usage(%{usage: usage} = update, _session_usage_reader, _cwd, _session_id)
+       when is_map(usage),
+       do: update
+
+  defp maybe_put_persisted_usage(update, session_usage_reader, cwd, session_id)
+       when is_function(session_usage_reader, 2) and is_binary(session_id) and session_id != "" do
+    case session_usage_reader.(cwd, session_id) do
+      {:ok, usage} when is_map(usage) -> Map.put(update, :usage, usage)
+      _other -> update
+    end
+  rescue
+    _error in [ErlangError, RuntimeError, ArgumentError, File.Error] -> update
+  end
+
+  defp maybe_put_persisted_usage(update, _session_usage_reader, _cwd, _session_id), do: update
 
   defp safe_cwd(cwd) do
     with {:ok, canonical} <- PathSafety.canonicalize(cwd),

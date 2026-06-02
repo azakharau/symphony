@@ -508,6 +508,24 @@ defmodule SymphonyElixir.OpenCode.Runner do
     end
   end
 
+  @spec read_session_usage(Path.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def read_session_usage(_execution_dir, session_id) do
+    db_path = opencode_db_path()
+
+    with true <- File.exists?(db_path) || {:error, {:opencode_db_not_found, db_path}},
+         {:ok, session} <- read_session_row(db_path, session_id) do
+      input = Map.get(session, "tokens_input") || 0
+      output = Map.get(session, "tokens_output") || 0
+
+      {:ok,
+       %{
+         "inputTokens" => input,
+         "outputTokens" => output,
+         "totalTokens" => input + output
+       }}
+    end
+  end
+
   defp opencode_db_path do
     data_home =
       case System.get_env("XDG_DATA_HOME") do

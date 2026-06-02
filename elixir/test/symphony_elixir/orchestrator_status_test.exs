@@ -41,6 +41,46 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, :stop)
   end
 
+  test "suppression_events and suppression_counts are non-empty when suppression has occurred" do
+    path = Path.join(System.tmp_dir!(), "symphony-snapshot-ledger-#{System.unique_integer([:positive])}.json")
+    on_exit(fn -> File.rm(path) end)
+
+    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
+
+    on_exit(fn ->
+      if Process.alive?(ledger), do: GenServer.stop(ledger)
+    end)
+
+    assert :ok =
+             SymphonyElixir.PulseLedger.record_suppression(
+               ledger,
+               SymphonyElixir.PulseLedger.owner_wait_no_change(),
+               "issue-1",
+               "SYM-1",
+               nil,
+               nil,
+               "owner input unchanged"
+             )
+
+    orchestrator_name = Module.concat(__MODULE__, :SuppressionProjectionOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, dispatch_paused?: true)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    :sys.replace_state(pid, fn state -> %{state | pulse_ledger: ledger} end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+
+    assert [event] = snapshot.suppression_events
+    assert event["kind"] == SymphonyElixir.PulseLedger.owner_wait_no_change()
+    assert event["issue_id"] == "issue-1"
+    assert %{"owner_wait_no_change" => 1} = snapshot.suppression_counts
+  end
+
   test "orchestrator snapshot reflects last codex update and session id" do
     issue_id = "issue-snapshot"
 

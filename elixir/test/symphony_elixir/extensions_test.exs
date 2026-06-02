@@ -829,6 +829,8 @@ defmodule SymphonyElixir.ExtensionsTest do
                "seconds_running" => 42.5
              },
              "runner_runtime_totals" => %{"seconds_running" => 84.5},
+             "suppression_events" => [],
+             "suppression_counts" => %{},
              "rate_limits" => %{"primary" => %{"remaining" => 11}}
            }
 

@@ -23,6 +23,8 @@ defmodule SymphonyElixirWeb.Presenter do
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
           codex_totals: snapshot.codex_totals,
           runner_runtime_totals: runner_runtime_totals(snapshot),
+          suppression_events: Map.get(snapshot, :suppression_events, []),
+          suppression_counts: Map.get(snapshot, :suppression_counts, %{}),
           rate_limits: snapshot.rate_limits
         }
 

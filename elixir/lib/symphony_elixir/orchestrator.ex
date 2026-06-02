@@ -1085,7 +1085,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_idle_pulse(%State{} = state, full_poll?) do
     case dispatch_latest_owner_input_pulse(state) do
       {:dispatched, state} -> state
-      {:none, state} when full_poll? -> dispatch_latest_done_continuation_pulse(state)
+      {:none, state} when full_poll? -> state
       {:none, state} -> state
       {:error, state} -> state
     end
@@ -1228,95 +1228,6 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp dispatch_owner_input_pulse_candidate(nil, %State{} = state), do: {:none, state}
 
-  defp dispatch_latest_done_continuation_pulse(%State{pulse_ledger: nil} = state) do
-    dispatch_latest_done_continuation_pulse_no_ledger(state)
-  end
-
-  defp dispatch_latest_done_continuation_pulse(%State{} = state) do
-    case Tracker.fetch_issues_by_states(["Done"], state.project_context) do
-      {:ok, issues} ->
-        issues
-        |> latest_done_issue_for_continuation(state)
-        |> case do
-          %Issue{} = issue ->
-            durable_key = done_continuation_durable_key(issue)
-
-            if PulseLedger.done_continuation_processed?(state.pulse_ledger, durable_key) do
-              Logger.info("Suppressing Done continuation pulse for #{issue_context(issue)}: already processed")
-
-              PulseLedger.record_suppression(
-                state.pulse_ledger,
-                PulseLedger.done_continuation_already_processed(),
-                issue.id,
-                issue.identifier,
-                nil,
-                nil,
-                "durable key already in durable ledger"
-              )
-
-              %{
-                state
-                | suppression_counts:
-                    increment_suppression(
-                      state.suppression_counts,
-                      PulseLedger.done_continuation_already_processed()
-                    )
-              }
-            else
-              PulseLedger.pending_done_continuation(state.pulse_ledger, durable_key)
-
-              Logger.info("Dispatching Codex continuation pulse from latest Done issue: #{issue_context(issue)}")
-
-              new_state =
-                state
-                |> mark_continuation_pulsed(issue.id)
-                |> do_dispatch_issue(issue, nil, nil, :done_continuation)
-
-              if Map.has_key?(new_state.running, issue.id) do
-                PulseLedger.commit_pending_done_continuation(state.pulse_ledger, durable_key)
-                new_state
-              else
-                PulseLedger.rollback_pending(state.pulse_ledger)
-                Logger.warning("Done continuation dispatch failed for #{issue_context(issue)}; fingerprint NOT durably committed")
-                new_state
-              end
-            end
-
-          nil ->
-            state
-        end
-
-      {:error, reason} ->
-        Logger.warning("Skipping Codex continuation pulse; failed to fetch Done issues: #{inspect(reason)}")
-
-        state
-    end
-  end
-
-  defp dispatch_latest_done_continuation_pulse_no_ledger(%State{} = state) do
-    case Tracker.fetch_issues_by_states(["Done"], state.project_context) do
-      {:ok, issues} ->
-        issues
-        |> latest_done_issue_for_continuation(state)
-        |> case do
-          %Issue{} = issue ->
-            Logger.info("Dispatching Codex continuation pulse from latest Done issue: #{issue_context(issue)}")
-
-            state
-            |> mark_continuation_pulsed(issue.id)
-            |> do_dispatch_issue(issue, nil, nil, :done_continuation)
-
-          nil ->
-            state
-        end
-
-      {:error, reason} ->
-        Logger.warning("Skipping Codex continuation pulse; failed to fetch Done issues: #{inspect(reason)}")
-
-        state
-    end
-  end
-
   defp latest_owner_input_issue_for_pulse(issues, %State{} = state) when is_list(issues) do
     issues
     |> Enum.filter(fn
@@ -1339,25 +1250,6 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp latest_owner_input_issue_for_pulse(_issues, _state), do: nil
 
-  defp latest_done_issue_for_continuation(issues, %State{} = state) when is_list(issues) do
-    issues
-    |> Enum.filter(fn
-      %Issue{id: id, state: state_name} = issue when is_binary(id) and is_binary(state_name) ->
-        normalize_issue_state(state_name) == "done" and
-          milestone_dispatch_allowed?(issue) and
-          milestone_batch_allowed?(issue, state) and
-          !MapSet.member?(state.continuation_pulsed, id) and
-          !MapSet.member?(state.claimed, id) and
-          !Map.has_key?(state.running, id) and
-          !Map.has_key?(state.blocked, id)
-
-      _ ->
-        false
-    end)
-    |> Enum.sort_by(&issue_updated_at_sort_key/1, :desc)
-    |> List.first()
-  end
-
   defp latest_done_issue_for_continuation(_issues, _state), do: nil
 
   defp owner_input_activity_sort_key(%Issue{} = issue) do
@@ -1366,30 +1258,14 @@ defmodule SymphonyElixir.Orchestrator do
     |> datetime_sort_key()
   end
 
-  defp issue_updated_at_sort_key(%Issue{updated_at: %DateTime{} = updated_at}) do
-    datetime_sort_key(updated_at)
-  end
-
-  defp issue_updated_at_sort_key(%Issue{}), do: 0
-
   defp datetime_sort_key(%DateTime{} = datetime), do: DateTime.to_unix(datetime, :microsecond)
   defp datetime_sort_key(_datetime), do: 0
-
-  defp done_continuation_durable_key(%Issue{id: id, updated_at: %DateTime{} = updated_at}) when is_binary(id) do
-    "#{id}:#{DateTime.to_iso8601(updated_at)}"
-  end
-
-  defp done_continuation_durable_key(%Issue{id: id}) when is_binary(id), do: "#{id}:unknown"
 
   defp increment_suppression(counts, kind) when is_map(counts) and is_binary(kind) do
     Map.update(counts, kind, 1, &(&1 + 1))
   end
 
   defp increment_suppression(_counts, kind) when is_binary(kind), do: %{kind => 1}
-
-  defp mark_continuation_pulsed(%State{} = state, issue_id) when is_binary(issue_id) do
-    %{state | continuation_pulsed: MapSet.put(state.continuation_pulsed, issue_id)}
-  end
 
   defp mark_owner_input_pulsed(%State{} = state, fingerprint) when is_binary(fingerprint) do
     %{state | owner_input_pulsed: MapSet.put(state.owner_input_pulsed, fingerprint)}

@@ -784,7 +784,7 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     assert Orchestrator.latest_done_issue_for_continuation_for_test([done_issue], state) == nil
   end
 
-  test "done continuation pulse accepts issue inside todo project milestone" do
+  test "done continuation pulse ignores issue inside todo project milestone" do
     done_issue = %Issue{
       id: "done-with-todo-milestone",
       identifier: "NER-18",
@@ -805,7 +805,7 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
       continuation_pulsed: MapSet.new()
     }
 
-    assert Orchestrator.latest_done_issue_for_continuation_for_test([done_issue], state) == done_issue
+    assert Orchestrator.latest_done_issue_for_continuation_for_test([done_issue], state) == nil
   end
 
   test "owner-input issues do not block idle owner pulse dispatch" do

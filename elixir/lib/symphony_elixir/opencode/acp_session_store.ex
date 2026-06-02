@@ -12,7 +12,12 @@ defmodule SymphonyElixir.OpenCode.ACPSessionStore do
 
   @spec fetch(Issue.t(), Path.t()) :: {:ok, String.t() | nil} | {:error, term()}
   def fetch(%Issue{} = issue, project_root) when is_binary(project_root) do
-    with {:ok, key} <- session_key(issue, project_root),
+    fetch(issue, project_root, nil)
+  end
+
+  @spec fetch(Issue.t(), Path.t(), String.t() | nil) :: {:ok, String.t() | nil} | {:error, term()}
+  def fetch(%Issue{} = issue, project_root, session_scope) when is_binary(project_root) do
+    with {:ok, key} <- session_key(issue, project_root, session_scope),
          {:ok, sessions} <- read_sessions() do
       case Map.get(sessions, key) do
         %{"session_id" => session_id} when is_binary(session_id) and session_id != "" ->
@@ -27,43 +32,67 @@ defmodule SymphonyElixir.OpenCode.ACPSessionStore do
   @spec put(Issue.t(), Path.t(), String.t()) :: :ok | {:error, term()}
   def put(%Issue{} = issue, project_root, session_id)
       when is_binary(project_root) and is_binary(session_id) and session_id != "" do
-    with {:ok, key} <- session_key(issue, project_root),
-         {:ok, canonical_root} <- PathSafety.canonicalize(project_root),
-         {:ok, sessions} <- read_sessions() do
-      write_sessions(Map.put(sessions, key, session_entry(issue, canonical_root, session_id)))
-    end
+    put(issue, project_root, session_id, nil)
   end
 
   def put(_issue, _project_root, _session_id), do: :ok
 
-  defp session_key(%Issue{id: issue_id}, project_root)
+  @spec put(Issue.t(), Path.t(), String.t(), String.t() | nil) :: :ok | {:error, term()}
+  def put(%Issue{} = issue, project_root, session_id, session_scope)
+      when is_binary(project_root) and is_binary(session_id) and session_id != "" do
+    with {:ok, key} <- session_key(issue, project_root, session_scope),
+         {:ok, canonical_root} <- PathSafety.canonicalize(project_root),
+         {:ok, sessions} <- read_sessions() do
+      write_sessions(Map.put(sessions, key, session_entry(issue, canonical_root, session_id, session_scope)))
+    end
+  end
+
+  def put(_issue, _project_root, _session_id, _session_scope), do: :ok
+
+  @spec prompt_scope(String.t()) :: String.t()
+  def prompt_scope(prompt) when is_binary(prompt) do
+    :crypto.hash(:sha256, prompt) |> Base.encode16(case: :lower)
+  end
+
+  defp session_key(%Issue{} = issue, project_root, session_scope) do
+    issue_key(issue)
+    |> case do
+      {:ok, issue_identifier} ->
+        with {:ok, canonical_root} <- PathSafety.canonicalize(project_root) do
+          digest_input =
+            [canonical_root, issue_identifier, normalize_scope(session_scope)]
+            |> Enum.join("\0")
+
+          {:ok, :crypto.hash(:sha256, digest_input) |> Base.encode16(case: :lower)}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp issue_key(%Issue{id: issue_id})
        when is_binary(issue_id) and issue_id != "" do
-    with {:ok, canonical_root} <- PathSafety.canonicalize(project_root) do
-      digest =
-        :crypto.hash(:sha256, canonical_root <> "\0" <> issue_id) |> Base.encode16(case: :lower)
-
-      {:ok, digest}
-    end
+    {:ok, issue_id}
   end
 
-  defp session_key(%Issue{identifier: identifier}, project_root)
+  defp issue_key(%Issue{identifier: identifier})
        when is_binary(identifier) and identifier != "" do
-    with {:ok, canonical_root} <- PathSafety.canonicalize(project_root) do
-      digest =
-        :crypto.hash(:sha256, canonical_root <> "\0" <> identifier) |> Base.encode16(case: :lower)
-
-      {:ok, digest}
-    end
+    {:ok, identifier}
   end
 
-  defp session_key(_issue, _project_root),
+  defp issue_key(_issue),
     do: {:error, :opencode_acp_session_key_missing_issue_id}
 
-  defp session_entry(%Issue{} = issue, canonical_root, session_id) do
+  defp normalize_scope(session_scope) when is_binary(session_scope) and session_scope != "", do: session_scope
+  defp normalize_scope(_session_scope), do: "legacy"
+
+  defp session_entry(%Issue{} = issue, canonical_root, session_id, session_scope) do
     %{
       "issue_id" => issue.id,
       "issue_identifier" => issue.identifier,
       "project_root" => canonical_root,
+      "session_scope" => normalize_scope(session_scope),
       "session_id" => session_id,
       "updated_at" => DateTime.utc_now() |> DateTime.to_iso8601()
     }

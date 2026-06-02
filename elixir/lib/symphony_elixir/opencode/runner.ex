@@ -495,7 +495,8 @@ defmodule SymphonyElixir.OpenCode.Runner do
 
   defp opencode_project_root(_project_root, workspace), do: workspace
 
-  defp read_completed_session_result(execution_dir, session_id) do
+  @spec read_completed_session_result(Path.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def read_completed_session_result(execution_dir, session_id) do
     db_path = opencode_db_path()
 
     with true <- File.exists?(db_path) || {:error, {:opencode_db_not_found, db_path}},

@@ -7,7 +7,10 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
 
   defmodule FailingSessionStore do
     def fetch(_issue, _project_root), do: {:ok, nil}
+    def fetch(_issue, _project_root, _session_scope), do: {:ok, nil}
     def put(_issue, _project_root, _session_id), do: {:error, :write_failed}
+    def put(_issue, _project_root, _session_id, _session_scope), do: {:error, :write_failed}
+    def prompt_scope(prompt), do: ACPSessionStore.prompt_scope(prompt)
   end
 
   test "opencode acp runner starts command with acp args and project root cwd" do
@@ -36,7 +39,7 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
     {python, script} = fake_acp_server!()
     issue = issue()
     workspace_root = workspace_root!()
-    write_session_store!(workspace_root, issue, File.cwd!(), "existing-session")
+    write_session_store!(workspace_root, issue, File.cwd!(), "existing-session", "prompt body")
 
     write_workflow_file!(Workflow.workflow_file_path(),
       opencode_protocol: "acp",
@@ -50,11 +53,82 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
              Runner.run("/tmp/workspace", issue, "prompt body")
   end
 
+  test "opencode acp runner attaches completed persisted session handoff instead of parking" do
+    {python, script} = fake_acp_server!()
+    issue = issue()
+    workspace_root = workspace_root!()
+    project_root = File.cwd!()
+    write_session_store!(workspace_root, issue, project_root, "existing-session", "prompt body")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      opencode_command: python,
+      opencode_args: [script, "runner"],
+      opencode_project_root: project_root,
+      workspace_root: workspace_root
+    )
+
+    assert {:ok, %{output: output, session_id: "existing-session"}} =
+             Runner.run("/tmp/workspace", issue, "prompt body",
+               session_result_reader: fn ^project_root, "existing-session" ->
+                 {:ok, "Latest assistant handoff:\n\nFinal persisted ACP handoff"}
+               end
+             )
+
+    assert output =~ "Final persisted ACP handoff"
+  end
+
+  test "opencode acp runner starts a fresh session when the task prompt changes" do
+    {python, script} = fake_acp_server!()
+    issue = issue()
+    workspace_root = workspace_root!()
+    project_root = File.cwd!()
+    write_session_store!(workspace_root, issue, project_root, "old-prompt-session", "old prompt")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      opencode_command: python,
+      opencode_args: [script, "runner"],
+      opencode_project_root: project_root,
+      workspace_root: workspace_root
+    )
+
+    assert {:ok, %{output: output, session_id: "new-session"}} =
+             Runner.run("/tmp/workspace", issue, "new prompt")
+
+    assert output =~ "ACP result"
+  end
+
+  test "opencode acp runner prefers completed local session handoff after fresh end_turn" do
+    {python, script} = fake_acp_server!()
+    issue = issue()
+    workspace_root = workspace_root!()
+    project_root = File.cwd!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      opencode_command: python,
+      opencode_args: [script, "runner"],
+      opencode_project_root: project_root,
+      workspace_root: workspace_root
+    )
+
+    assert {:ok, %{output: output, session_id: "new-session"}} =
+             Runner.run("/tmp/workspace", issue, "prompt body",
+               session_result_reader: fn ^project_root, "new-session" ->
+                 {:ok, "Latest assistant handoff:\n\nFresh persisted ACP handoff"}
+               end
+             )
+
+    assert output =~ "Fresh persisted ACP handoff"
+    refute output =~ "ACP result"
+  end
+
   test "opencode acp runner does not resend initial prompt after resume" do
     {python, script} = fake_acp_server!()
     issue = issue()
     workspace_root = workspace_root!()
-    write_session_store!(workspace_root, issue, File.cwd!(), "existing-session")
+    write_session_store!(workspace_root, issue, File.cwd!(), "existing-session", "initial prompt must not be sent")
 
     write_workflow_file!(Workflow.workflow_file_path(),
       opencode_protocol: "acp",
@@ -74,7 +148,7 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
     workspace_root = workspace_root!()
     project_root = File.cwd!()
 
-    write_session_store!(workspace_root, issue, project_root, "existing-session")
+    write_session_store!(workspace_root, issue, project_root, "existing-session", "Existing session should not replay this prompt.")
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -127,7 +201,7 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
     assert output =~ "ACP result"
 
     assert {:error, {:need_owner_input, {:opencode_acp_session_attached, "new-session"}}} =
-             Runner.run("/tmp/workspace", issue, "initial prompt must not repeat")
+             Runner.run("/tmp/workspace", issue, "initial prompt")
   end
 
   test "opencode acp runner prevents duplicate sessions for same issue and project" do
@@ -146,7 +220,7 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
     assert {:ok, _result} = Runner.run("/tmp/workspace", issue, "initial prompt")
 
     assert {:error, {:need_owner_input, {:opencode_acp_session_attached, "new-session"}}} =
-             Runner.run("/tmp/workspace", issue, "duplicate prompt")
+             Runner.run("/tmp/workspace", issue, "initial prompt")
   end
 
   test "opencode acp runner does not prompt when durable session write fails" do
@@ -320,9 +394,9 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
     root
   end
 
-  defp write_session_store!(workspace_root, issue, project_root, session_id) do
+  defp write_session_store!(workspace_root, issue, project_root, session_id, prompt) do
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
-    :ok = ACPSessionStore.put(issue, project_root, session_id)
+    :ok = ACPSessionStore.put(issue, project_root, session_id, ACPSessionStore.prompt_scope(prompt))
   end
 
   defp fake_acp_server! do

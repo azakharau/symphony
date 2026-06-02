@@ -103,7 +103,7 @@ Milestone gate:
 Status ownership:
 
 - During normal issue processing, run for Linear issues in `Todo` or `In Review`.
-- Additionally handle Symphony continuation pulses for `Done` and owner-answer pulses for `Need Owner Input`.
+- Additionally handle owner-answer pulses for `Need Owner Input`.
 - `Todo`: verify project + milestone, produce the architecture/task packet, post the OpenCode handoff when implementation is needed, and move the issue to `In Progress`.
 - `In Progress`: belongs to OpenCode. Do not process directly except when Symphony invokes OpenCode through the configured runner.
 - `In Review`: inspect OpenCode handoff, verify scope/evidence/diff/tests, then accept, reject, request repair, ask owner, or close.
@@ -181,12 +181,3 @@ Validation and closure:
 - Codex owns final git stage/commit/push after acceptance.
 - Do not stop live per-project services, enable the new multiproject service, or mutate systemd cutover state unless the issue explicitly says that approval was granted.
 - If the issue asks for cutover preparation, produce templates/runbooks and validation evidence only.
-
-Continuation pulse:
-
-- If invoked for a `Done` issue, treat it as a project-continuation pulse.
-- Do not reopen the completed issue unless closure is clearly wrong.
-- Inspect the current approved milestone, existing `Todo`/`In Review` issues inside that milestone, repo status, and recent Linear comments.
-- If an existing executable issue exists inside the active milestone, continue with that issue under the normal status rules.
-- If the approved milestone still has unfinished child work but no issue, create or update exactly one concrete issue in the same project and milestone.
-- If the active milestone is complete or the next direction is ambiguous, ask one concise owner/CTO question in the same/control issue, move it to `Need Owner Input`, and stop.

@@ -41,27 +41,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, :stop)
   end
 
-  test "suppression_events and suppression_counts are non-empty when suppression has occurred" do
-    path = Path.join(System.tmp_dir!(), "symphony-snapshot-ledger-#{System.unique_integer([:positive])}.json")
-    on_exit(fn -> File.rm(path) end)
-
-    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
-
-    on_exit(fn ->
-      if Process.alive?(ledger), do: GenServer.stop(ledger)
-    end)
-
-    assert :ok =
-             SymphonyElixir.PulseLedger.record_suppression(
-               ledger,
-               SymphonyElixir.PulseLedger.owner_wait_no_change(),
-               "issue-1",
-               "SYM-1",
-               nil,
-               nil,
-               "owner input unchanged"
-             )
-
+  test "snapshot exposes in-memory suppression counts without stale suppression events" do
     orchestrator_name = Module.concat(__MODULE__, :SuppressionProjectionOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, dispatch_paused?: true)
 
@@ -71,43 +51,21 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    :sys.replace_state(pid, fn state -> %{state | pulse_ledger: ledger} end)
+    :sys.replace_state(pid, fn state ->
+      %{state | suppression_counts: %{"owner_wait_no_change" => 1}}
+    end)
 
     snapshot = GenServer.call(pid, :snapshot)
 
-    assert [event] = snapshot.suppression_events
-    assert event["kind"] == SymphonyElixir.PulseLedger.owner_wait_no_change()
-    assert event["issue_id"] == "issue-1"
+    assert snapshot.suppression_events == []
     assert %{"owner_wait_no_change" => 1} = snapshot.suppression_counts
   end
 
-  test "orchestrator snapshot exposes active milestone lock context" do
+  test "orchestrator snapshot exposes configured active milestone runtime context" do
     write_workflow_file!(Workflow.workflow_file_path(),
       stewardship_active_milestone_id: "milestone-current",
       stewardship_active_milestone_name: "Current"
     )
-
-    path = Path.join(System.tmp_dir!(), "symphony-active-milestone-snapshot-#{System.unique_integer([:positive])}.json")
-    on_exit(fn -> File.rm(path) end)
-
-    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
-
-    on_exit(fn ->
-      if Process.alive?(ledger), do: GenServer.stop(ledger)
-    end)
-
-    assert :ok = SymphonyElixir.PulseLedger.set_active_milestone(ledger, "milestone-current", "Current")
-
-    assert :ok =
-             SymphonyElixir.PulseLedger.record_suppression(
-               ledger,
-               "active_milestone_locked",
-               nil,
-               nil,
-               "milestone-current",
-               "Current",
-               "milestone is still open"
-             )
 
     orchestrator_name = Module.concat(__MODULE__, :ActiveMilestoneProjectionOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, dispatch_paused?: true)
@@ -119,7 +77,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     :sys.replace_state(pid, fn state ->
-      %{state | pulse_ledger: ledger, active_project_milestone_id: "milestone-current"}
+      %{state | active_project_milestone_id: "milestone-current"}
     end)
 
     snapshot = GenServer.call(pid, :snapshot)
@@ -131,7 +89,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              milestone_name: "Current"
            } = snapshot.active_milestone
 
-    assert %{"active_milestone_locked" => 1} = snapshot.suppression_counts
+    assert snapshot.suppression_counts == %{}
   end
 
   test "orchestrator snapshot reflects last codex update and session id" do
@@ -482,13 +440,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert is_integer(completed_state.runner_runtime_totals.seconds_running)
   end
 
-  test "codex token budget blocks runaway running sessions" do
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
-      codex_max_total_tokens: 100
-    )
+  test "codex token telemetry does not block useful running sessions" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
 
-    issue_id = "issue-codex-token-budget"
+    issue_id = "issue-codex-token-telemetry"
 
     worker_pid =
       spawn(fn ->
@@ -512,11 +467,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         issue_id => %{
           pid: worker_pid,
           ref: worker_ref,
-          identifier: "MT-BUDGET",
-          issue: %Issue{id: issue_id, identifier: "MT-BUDGET", state: "RCA Required"},
+          identifier: "MT-TOKENS",
+          issue: %Issue{id: issue_id, identifier: "MT-TOKENS", state: "RCA Required"},
           runner_kind: "codex",
           runner_owner: "codex",
-          session_id: "thread-budget-turn-budget",
+          session_id: "thread-token-telemetry",
           last_codex_message: nil,
           last_codex_timestamp: nil,
           last_codex_event: nil,
@@ -555,17 +510,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert {:noreply, updated_state} =
              Orchestrator.handle_info({:codex_worker_update, issue_id, update}, state)
 
-    refute Process.alive?(worker_pid)
-    refute Map.has_key?(updated_state.running, issue_id)
+    assert Process.alive?(worker_pid)
+    assert %{codex_total_tokens: 125, codex_input_tokens: 120, codex_output_tokens: 5} = updated_state.running[issue_id]
     refute Map.has_key?(updated_state.retry_attempts, issue_id)
     assert MapSet.member?(updated_state.claimed, issue_id)
     assert updated_state.codex_totals.total_tokens == 125
-
-    assert %{
-             identifier: "MT-BUDGET",
-             runner_kind: "codex",
-             error: "codex token budget exceeded: total_tokens=125 max_total_tokens=100"
-           } = updated_state.blocked[issue_id]
+    assert updated_state.blocked == %{}
   end
 
   test "completed OpenCode runtime is tracked separately from Codex token totals" do

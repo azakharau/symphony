@@ -9,7 +9,7 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
 
   require Logger
 
-  alias SymphonyElixir.{Config, Linear.Issue, OpenCode.TaskPrompt, ProcessPolicy, PulseLedger, Tracker}
+  alias SymphonyElixir.{Config, Linear.Issue, OpenCode.TaskPrompt, ProcessPolicy, RuntimeCache, Tracker}
   alias SymphonyElixir.OpenCode.Runner, as: OpenCodeRunner
   alias SymphonyElixir.Runner.{OpenCodeAdapter, Outcome}
 
@@ -168,41 +168,19 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
 
   defp record_opencode_handoff(issue, packet, result, emit_update, project_context) do
     result_state = Config.settings!(project_context).opencode.result_state
-    ledger = pulse_ledger(project_context)
     fingerprint = handoff_fingerprint(packet, result)
 
-    cond do
-      acceptance_already_processed?(ledger, issue.id) ->
-        suppress_opencode_handoff(
-          ledger,
-          issue,
-          result,
-          emit_update,
-          result_state,
-          PulseLedger.acceptance_already_processed(),
-          "acceptance already processed"
-        )
-
-      handoff_seen?(ledger, fingerprint) ->
-        suppress_opencode_handoff(
-          ledger,
-          issue,
-          result,
-          emit_update,
-          result_state,
-          PulseLedger.handoff_unchanged(),
-          "handoff unchanged"
-        )
-
-      true ->
-        create_opencode_handoff(issue, result, emit_update, project_context, result_state, ledger, fingerprint)
+    if RuntimeCache.handoff_fingerprint_seen?(project_context, issue.id, fingerprint) do
+      suppress_opencode_handoff(result, emit_update, result_state, "handoff_unchanged", "handoff unchanged")
+    else
+      create_opencode_handoff(issue, result, emit_update, project_context, result_state, fingerprint)
     end
   end
 
-  defp create_opencode_handoff(issue, result, emit_update, project_context, result_state, ledger, fingerprint) do
+  defp create_opencode_handoff(issue, result, emit_update, project_context, result_state, fingerprint) do
     with :ok <- Tracker.create_comment(issue.id, OpenCodeRunner.handoff_comment(issue, result), project_context),
          :ok <- Tracker.update_issue_state(issue.id, result_state, project_context) do
-      record_handoff_fingerprint(ledger, fingerprint)
+      RuntimeCache.record_handoff_fingerprint(project_context, issue.id, fingerprint)
 
       emit_update.(%{
         event: :handoff_recorded,
@@ -221,81 +199,23 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
     end
   end
 
-  defp suppress_opencode_handoff(ledger, issue, result, emit_update, result_state, kind, reason) do
-    record_suppression(ledger, kind, issue, reason)
-
+  defp suppress_opencode_handoff(result, emit_update, result_state, kind, reason) do
     emit_update.(%{
       event: :handoff_suppressed,
       phase: :completed,
       outcome: :completed,
       timestamp: DateTime.utc_now(),
       result_state: result_state,
-      suppression_kind: kind,
-      suppression_reason: reason,
       command: result.command,
       runner_owner: Map.get(result, :runner_owner),
       session_id: Map.get(result, :session_id),
       project_root: Map.get(result, :project_root),
-      attach_url: Map.get(result, :attach_url)
+      attach_url: Map.get(result, :attach_url),
+      suppression_kind: kind,
+      suppression_reason: reason
     })
 
     Outcome.completed(result_state: result_state)
-  end
-
-  defp pulse_ledger(nil) do
-    case PulseLedger.process_name_for_test(name: :symphony_pulse_ledger_default) do
-      name when is_atom(name) -> Process.whereis(name)
-      _other -> nil
-    end
-  end
-
-  defp pulse_ledger(project_context) do
-    case PulseLedger.process_name_for_test(project_context: project_context) do
-      {:global, _term} = name -> GenServer.whereis(name)
-      name when is_atom(name) -> Process.whereis(name)
-      _other -> nil
-    end
-  end
-
-  defp acceptance_already_processed?(ledger, issue_id) when is_pid(ledger) and is_binary(issue_id) do
-    match?(%{}, PulseLedger.acceptance_record(ledger, issue_id))
-  end
-
-  defp acceptance_already_processed?(_ledger, _issue_id), do: false
-
-  defp handoff_seen?(ledger, fingerprint) when is_pid(ledger) and is_binary(fingerprint) do
-    PulseLedger.handoff_fingerprint_seen?(ledger, fingerprint)
-  end
-
-  defp handoff_seen?(_ledger, _fingerprint), do: false
-
-  defp record_handoff_fingerprint(ledger, fingerprint) when is_pid(ledger) and is_binary(fingerprint) do
-    PulseLedger.record_handoff_fingerprint(ledger, fingerprint)
-  end
-
-  defp record_handoff_fingerprint(_ledger, _fingerprint), do: :ok
-
-  defp record_suppression(ledger, kind, issue, reason) when is_pid(ledger) do
-    {milestone_id, milestone_name} = issue_milestone(issue)
-    PulseLedger.record_suppression(ledger, kind, issue.id, issue.identifier, milestone_id, milestone_name, reason)
-  end
-
-  defp record_suppression(_ledger, _kind, _issue, _reason), do: :ok
-
-  defp handoff_fingerprint(_packet, result) do
-    :crypto.hash(
-      :sha256,
-      inspect({
-        Map.get(result, :session_id),
-        Map.get(result, :output),
-        Map.get(result, :handoff),
-        Map.get(result, :result_state),
-        Map.get(result, :attach_url),
-        Map.get(result, :command),
-        Map.get(result, :project_root)
-      })
-    )
-    |> Base.encode16(case: :lower)
   end
 
   defp packet_fingerprint(prompt) do
@@ -303,14 +223,18 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
     |> Base.encode16(case: :lower)
   end
 
-  defp issue_milestone(%Issue{project_milestone: milestone}) when is_map(milestone) do
-    {map_value(milestone, :id, "id"), map_value(milestone, :name, "name")}
-  end
-
-  defp issue_milestone(_issue), do: {nil, nil}
-
-  defp map_value(map, atom_key, string_key) do
-    Map.get(map, atom_key) || Map.get(map, string_key)
+  defp handoff_fingerprint(_packet, result) do
+    :crypto.hash(
+      :sha256,
+      :erlang.term_to_binary({
+        Map.get(result, :session_id),
+        Map.get(result, :command),
+        Map.get(result, :project_root),
+        Map.get(result, :handoff),
+        Map.get(result, :output)
+      })
+    )
+    |> Base.encode16(case: :lower)
   end
 
   defp record_opencode_owner_input(issue, reason, emit_update, project_context) do
@@ -365,7 +289,9 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
       failure: %{reason: :opencode_task_prompt_not_found}
     })
 
-    with :ok <- Tracker.create_comment(issue_id, missing_opencode_task_prompt_comment(issue, target_state), project_context),
+    missing_prompt_comment = missing_opencode_task_prompt_comment(issue, target_state)
+
+    with :ok <- Tracker.create_comment(issue_id, missing_prompt_comment, project_context),
          :ok <- Tracker.update_issue_state(issue_id, target_state, project_context) do
       Outcome.rerouted(reason: :opencode_task_prompt_not_found, result_state: target_state)
     end

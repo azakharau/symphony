@@ -4,9 +4,11 @@ defmodule SymphonyElixir.Workspace do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, PathSafety, SSH}
+  alias SymphonyElixir.{Config, Linear.Issue, PathSafety, RuntimeCache, SSH}
+  alias SymphonyElixir.OpenCode.ACPSessionStore
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
+  @default_runtime_cache_ttl_ms 7 * 24 * 60 * 60 * 1_000
 
   @type worker_host :: String.t() | nil
 
@@ -90,14 +92,22 @@ defmodule SymphonyElixir.Workspace do
   @spec remove(Path.t(), worker_host()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
   def remove(workspace, nil), do: remove(workspace, nil, Config.settings!())
 
+  def remove(workspace, worker_host) when is_binary(worker_host) do
+    remove(workspace, worker_host, Config.settings!())
+  end
+
   @spec remove(Path.t(), nil, term()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
   def remove(workspace, nil, settings) do
     case File.exists?(workspace) do
       true ->
         case validate_workspace_path(workspace, nil, settings) do
           :ok ->
-            maybe_run_before_remove_hook(workspace, nil, settings)
-            File.rm_rf(workspace)
+            with :ok <- reject_current_working_tree_remove(workspace) do
+              maybe_run_before_remove_hook(workspace, nil, settings)
+              File.rm_rf(workspace)
+            else
+              {:error, reason} -> {:error, reason, ""}
+            end
 
           {:error, reason} ->
             {:error, reason, ""}
@@ -106,10 +116,6 @@ defmodule SymphonyElixir.Workspace do
       false ->
         File.rm_rf(workspace)
     end
-  end
-
-  def remove(workspace, worker_host) when is_binary(worker_host) do
-    remove(workspace, worker_host, Config.settings!())
   end
 
   @spec remove(Path.t(), worker_host(), term()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
@@ -154,6 +160,10 @@ defmodule SymphonyElixir.Workspace do
     remove_issue_workspaces(identifier, nil, Config.settings!())
   end
 
+  def remove_issue_workspaces(_identifier, _worker_host) do
+    :ok
+  end
+
   @spec remove_issue_workspaces(term(), nil, term()) :: :ok
   def remove_issue_workspaces(identifier, nil, settings) when is_binary(identifier) do
     safe_id = safe_identifier(identifier)
@@ -188,8 +198,52 @@ defmodule SymphonyElixir.Workspace do
     :ok
   end
 
-  def remove_issue_workspaces(_identifier, _worker_host) do
+  @spec cleanup_issue_runtime_cache(Issue.t(), term()) :: :ok
+  def cleanup_issue_runtime_cache(%Issue{} = issue, settings \\ Config.settings!()) do
+    :ok = remove_issue_workspaces(issue.identifier, nil, settings)
+    :ok = ACPSessionStore.remove_issue(issue, settings)
+    :ok = RuntimeCache.clear_issue(nil, issue)
     :ok
+  end
+
+  @spec remove_legacy_runtime_cache(term()) :: :ok
+  def remove_legacy_runtime_cache(settings \\ Config.settings!()) do
+    settings.workspace.root
+    |> Path.join("pulse_ledger.json")
+    |> File.rm()
+    |> case do
+      :ok ->
+        :ok
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to remove legacy pulse ledger cache path=#{Path.join(settings.workspace.root, ".symphony/pulse_ledger.json")} reason=#{inspect(reason)}")
+        :ok
+    end
+  end
+
+  @spec sweep_abandoned_runtime_cache([String.t()], term(), non_neg_integer()) :: {:ok, [Path.t()]} | {:error, term()}
+  def sweep_abandoned_runtime_cache(active_identifiers, settings \\ Config.settings!(), ttl_ms \\ @default_runtime_cache_ttl_ms)
+      when is_list(active_identifiers) and is_integer(ttl_ms) and ttl_ms >= 0 do
+    active_workspace_names =
+      active_identifiers
+      |> Enum.filter(&is_binary/1)
+      |> Enum.map(&safe_identifier/1)
+      |> MapSet.new()
+
+    with {:ok, root} <- PathSafety.canonicalize(settings.workspace.root),
+         {:ok, entries} <- list_workspace_entries(root) do
+      now_ms = System.system_time(:millisecond)
+
+      removed =
+        entries
+        |> Enum.filter(&abandoned_runtime_cache_entry?(&1, active_workspace_names, now_ms, ttl_ms))
+        |> Enum.flat_map(&remove_abandoned_runtime_cache_entry(&1, settings))
+
+      {:ok, removed}
+    end
   end
 
   @spec run_before_run_hook(Path.t(), map() | String.t() | nil, worker_host(), term()) ::
@@ -253,6 +307,44 @@ defmodule SymphonyElixir.Workspace do
 
       false ->
         :ok
+    end
+  end
+
+  defp list_workspace_entries(root) do
+    case File.ls(root) do
+      {:ok, names} ->
+        {:ok, Enum.map(names, &Path.join(root, &1))}
+
+      {:error, :enoent} ->
+        {:ok, []}
+
+      {:error, reason} ->
+        {:error, {:workspace_runtime_cache_list_failed, reason}}
+    end
+  end
+
+  defp abandoned_runtime_cache_entry?(path, active_workspace_names, now_ms, ttl_ms) do
+    File.dir?(path) and
+      Path.basename(path) not in [".symphony"] and
+      not MapSet.member?(active_workspace_names, Path.basename(path)) and
+      runtime_cache_entry_expired?(path, now_ms, ttl_ms)
+  end
+
+  defp runtime_cache_entry_expired?(path, now_ms, ttl_ms) do
+    case File.stat(path, time: :posix) do
+      {:ok, %{mtime: mtime_seconds}} -> now_ms - mtime_seconds * 1_000 >= ttl_ms
+      {:error, _reason} -> false
+    end
+  end
+
+  defp remove_abandoned_runtime_cache_entry(path, settings) do
+    case remove(path, nil, settings) do
+      {:ok, _files} ->
+        [path]
+
+      {:error, reason, _output} ->
+        Logger.warning("Failed to remove abandoned runtime cache path=#{path} reason=#{inspect(reason)}")
+        []
     end
   end
 
@@ -427,6 +519,24 @@ defmodule SymphonyElixir.Workspace do
       true ->
         :ok
     end
+  end
+
+  defp reject_current_working_tree_remove(workspace) when is_binary(workspace) do
+    with {:ok, canonical_workspace} <- PathSafety.canonicalize(workspace),
+         {:ok, cwd} <- File.cwd(),
+         {:ok, canonical_cwd} <- PathSafety.canonicalize(cwd) do
+      if same_or_child_path?(canonical_cwd, canonical_workspace) do
+        {:error, {:workspace_contains_current_working_directory, canonical_workspace, canonical_cwd}}
+      else
+        :ok
+      end
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp same_or_child_path?(path, root) do
+    path == root or String.starts_with?(path, root <> "/")
   end
 
   defp remote_shell_assign(variable_name, raw_path)

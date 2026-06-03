@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.TestSupport do
-  @workflow_prompt "You are an agent for this repository."
+  @workflow_prompt "Repository execution request."
 
   defmacro __using__(_opts) do
     quote do
@@ -195,6 +195,8 @@ defmodule SymphonyElixir.TestSupport do
           opencode_permission_policy: "reject",
           process_policy_rca_required_state: "RCA Required",
           process_policy_max_rejections_per_slice: 2,
+          stewardship_active_milestone_id: nil,
+          stewardship_active_milestone_name: nil,
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
@@ -259,6 +261,9 @@ defmodule SymphonyElixir.TestSupport do
 
     process_policy_max_rejections_per_slice =
       Keyword.get(config, :process_policy_max_rejections_per_slice)
+
+    stewardship_active_milestone_id = Keyword.get(config, :stewardship_active_milestone_id)
+    stewardship_active_milestone_name = Keyword.get(config, :stewardship_active_milestone_name)
 
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
@@ -326,6 +331,7 @@ defmodule SymphonyElixir.TestSupport do
         "process_policy:",
         "  rca_required_state: #{yaml_value(process_policy_rca_required_state)}",
         "  max_rejections_per_slice: #{yaml_value(process_policy_max_rejections_per_slice)}",
+        stewardship_yaml(stewardship_active_milestone_id, stewardship_active_milestone_name),
         hooks_yaml(
           hook_after_create,
           hook_before_run,
@@ -368,6 +374,17 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   defp yaml_value(value), do: yaml_value(to_string(value))
+
+  defp stewardship_yaml(nil, nil), do: nil
+
+  defp stewardship_yaml(active_milestone_id, active_milestone_name) do
+    [
+      "stewardship:",
+      "  active_milestone_id: #{yaml_value(active_milestone_id)}",
+      "  active_milestone_name: #{yaml_value(active_milestone_name)}"
+    ]
+    |> Enum.join("\n")
+  end
 
   defp hooks_yaml(nil, nil, nil, nil, timeout_ms),
     do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"

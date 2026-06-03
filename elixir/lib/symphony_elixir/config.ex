@@ -9,7 +9,7 @@ defmodule SymphonyElixir.Config do
   alias SymphonyElixir.WorkflowStore
 
   @default_prompt_template """
-  You are working on a Linear issue.
+  Linear issue execution request.
 
   Identifier: {{ issue.identifier }}
   Title: {{ issue.title }}

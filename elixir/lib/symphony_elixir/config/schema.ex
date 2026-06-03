@@ -340,6 +340,24 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Stewardship do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:active_milestone_id, :string)
+      field(:active_milestone_name, :string)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:active_milestone_id, :active_milestone_name], empty_values: [])
+    end
+  end
+
   defmodule Hooks do
     @moduledoc false
     use Ecto.Schema
@@ -412,6 +430,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:opencode, OpenCode, on_replace: :update, defaults_to_struct: true)
     embeds_one(:process_policy, ProcessPolicy, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:stewardship, Stewardship, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
@@ -541,6 +560,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:opencode, with: &OpenCode.changeset/2)
     |> cast_embed(:process_policy, with: &ProcessPolicy.changeset/2)
+    |> cast_embed(:stewardship, with: &Stewardship.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
@@ -570,7 +590,13 @@ defmodule SymphonyElixir.Config.Schema do
       | project_root: resolve_optional_path_value(settings.opencode.project_root)
     }
 
-    %{settings | tracker: tracker, workspace: workspace, codex: codex, opencode: opencode}
+    stewardship = %{
+      settings.stewardship
+      | active_milestone_id: normalize_optional_string(settings.stewardship.active_milestone_id),
+        active_milestone_name: normalize_optional_string(settings.stewardship.active_milestone_name)
+    }
+
+    %{settings | tracker: tracker, workspace: workspace, codex: codex, opencode: opencode, stewardship: stewardship}
   end
 
   defp validate_rca_required_state_routes_to_codex(settings) do
@@ -703,6 +729,17 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp normalize_secret_value(_value), do: nil
+
+  defp normalize_optional_string(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> case do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp normalize_optional_string(_value), do: nil
 
   defp default_turn_sandbox_policy(workspace) do
     %{

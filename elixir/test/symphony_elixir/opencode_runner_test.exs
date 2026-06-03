@@ -2,6 +2,7 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.OpenCode.{Runner, TaskPrompt}
+  alias SymphonyElixir.PulseLedger
   alias SymphonyElixir.ReviewDecision
   alias SymphonyElixir.Runner.{CodexAdapter, OpenCodeAdapter, OpenCodeDispatch}
   alias SymphonyElixir.Runner.Outcome
@@ -880,6 +881,197 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
     assert packet.slice_id == "quoted-slice"
   end
 
+  test "task prompt rejects forbidden role declaration preambles" do
+    assert {:error, :opencode_task_prompt_forbidden_role_preamble} =
+             TaskPrompt.extract_packet("""
+             <!-- symphony:opencode-task-prompt:v1 slice_id=role-preamble -->
+             ```text
+             You are the OpenCode build orchestrator for this repository.
+
+             Implement the bounded slice.
+             ```
+             """)
+  end
+
+  test "task prompt rejects any generated role declaration preamble starting with you are" do
+    assert {:error, :opencode_task_prompt_forbidden_role_preamble} =
+             TaskPrompt.extract_packet("""
+             <!-- symphony:opencode-task-prompt:v1 slice_id=generic-role-preamble -->
+             ```text
+             You are a bounded implementation worker.
+
+             Implement the bounded slice.
+             ```
+             """)
+  end
+
+  test "OpenCode dispatch suppresses duplicate handoff and accepted issue without tracker mutations" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-opencode-idempotent-handoff-#{System.unique_integer([:positive])}"
+      )
+
+    command = Path.join(workspace_root, "fake-opencode")
+    File.mkdir_p!(workspace_root)
+
+    File.write!(command, """
+    #!/usr/bin/env bash
+    printf 'idempotent handoff\n'
+    """)
+
+    File.chmod!(command, 0o755)
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.join(workspace_root, "workspaces"),
+      runner_routes: %{"In Progress" => "opencode"},
+      opencode_command: command,
+      opencode_result_state: "In Review"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_opencode_comments, %{"issue-idempotent" => [opencode_task_prompt_comment("same-slice", "dispatch prompt")]})
+
+    ledger_path = Path.join(workspace_root, "pulse_ledger.json")
+    ledger_name = PulseLedger.process_name_for_test(name: :symphony_pulse_ledger_default)
+
+    {ledger, stop_ledger?} =
+      case PulseLedger.start_link(name: ledger_name, file_path: ledger_path) do
+        {:ok, pid} ->
+          {pid, true}
+
+        {:error, {:already_started, pid}} ->
+          PulseLedger.reset(pid)
+          {pid, false}
+      end
+
+    on_exit(fn ->
+      if stop_ledger? and Process.alive?(ledger), do: GenServer.stop(ledger)
+    end)
+
+    issue = %Issue{
+      id: "issue-idempotent",
+      identifier: "NER-IDEMPOTENT",
+      title: "Run OpenCode once",
+      state: "In Progress"
+    }
+
+    run_context = %{
+      workspace: workspace_root,
+      issue: issue,
+      opts: [],
+      emit_update: fn update ->
+        send(self(), {:runner_update, update})
+        :ok
+      end
+    }
+
+    assert %Outcome{kind: :completed, result_state: "In Review"} = OpenCodeDispatch.run(run_context)
+    assert_receive {:memory_tracker_comment, "issue-idempotent", first_comment}
+    assert first_comment =~ "OpenCode Handoff"
+    assert_receive {:memory_tracker_state_update, "issue-idempotent", "In Review"}
+
+    assert %Outcome{kind: :completed, result_state: "In Review"} = OpenCodeDispatch.run(run_context)
+
+    assert_receive {:runner_update,
+                    %{
+                      event: :handoff_suppressed,
+                      suppression_kind: "handoff_unchanged",
+                      suppression_reason: "handoff unchanged"
+                    }}
+
+    refute_receive {:memory_tracker_comment, "issue-idempotent", _duplicate_comment}, 100
+    refute_receive {:memory_tracker_state_update, "issue-idempotent", "In Review"}, 100
+
+    assert %{"handoff_unchanged" => 1} = PulseLedger.suppression_counts(ledger)
+
+    assert :ok = PulseLedger.record_acceptance(ledger, "issue-idempotent", %{"status" => "accepted"})
+
+    assert %Outcome{kind: :completed, result_state: "In Review"} = OpenCodeDispatch.run(run_context)
+
+    assert_receive {:runner_update,
+                    %{
+                      event: :handoff_suppressed,
+                      suppression_kind: "acceptance_already_processed",
+                      suppression_reason: "acceptance already processed"
+                    }}
+
+    refute_receive {:memory_tracker_comment, "issue-idempotent", _accepted_comment}, 100
+    refute_receive {:memory_tracker_state_update, "issue-idempotent", "In Review"}, 100
+    assert %{"acceptance_already_processed" => 1} = PulseLedger.suppression_counts(ledger)
+  end
+
+  test "OpenCode handoff fingerprint uses result identity before suppressing replay" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-opencode-result-fingerprint-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(workspace_root)
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.join(workspace_root, "workspaces"),
+      runner_routes: %{"In Progress" => "opencode"},
+      opencode_command: "fake-opencode",
+      opencode_result_state: "In Review"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    Application.put_env(:symphony_elixir, :memory_tracker_opencode_comments, %{"issue-fp" => []})
+
+    ledger_path = Path.join(workspace_root, "pulse_ledger.json")
+    ledger_name = PulseLedger.process_name_for_test(name: :symphony_pulse_ledger_default)
+
+    {ledger, stop_ledger?} =
+      case PulseLedger.start_link(name: ledger_name, file_path: ledger_path) do
+        {:ok, pid} ->
+          {pid, true}
+
+        {:error, {:already_started, pid}} ->
+          PulseLedger.reset(pid)
+          {pid, false}
+      end
+
+    on_exit(fn ->
+      if stop_ledger? and Process.alive?(ledger), do: GenServer.stop(ledger)
+    end)
+
+    issue = %Issue{id: "issue-fp", identifier: "NER-FP", title: "Fingerprint", state: "In Progress"}
+    packet = %TaskPrompt.Packet{prompt: "same steward task prompt", slice_id: "issue-fp", fingerprint: String.duplicate("a", 64)}
+
+    base_context = %{
+      workspace: workspace_root,
+      issue: issue,
+      task_packet: packet,
+      emit_update: fn update ->
+        send(self(), {:runner_update, update})
+        :ok
+      end
+    }
+
+    runner = fn output ->
+      fn _command, _args, _opts -> {output, 0} end
+    end
+
+    assert %Outcome{kind: :completed} = OpenCodeDispatch.run(Map.put(base_context, :opts, runner: runner.("handoff one")))
+    assert_receive {:memory_tracker_comment, "issue-fp", first_comment}
+    assert first_comment =~ "handoff one"
+
+    assert %Outcome{kind: :completed} = OpenCodeDispatch.run(Map.put(base_context, :opts, runner: runner.("handoff two")))
+    assert_receive {:memory_tracker_comment, "issue-fp", second_comment}
+    assert second_comment =~ "handoff two"
+
+    assert %Outcome{kind: :completed} = OpenCodeDispatch.run(Map.put(base_context, :opts, runner: runner.("handoff two")))
+
+    assert_receive {:runner_update, %{event: :handoff_suppressed, suppression_kind: "handoff_unchanged"}}
+    refute_receive {:memory_tracker_comment, "issue-fp", _replayed_comment}, 100
+  end
+
   test "review decision parser handles single, invalid, and statusless payloads" do
     body = """
     <!-- symphony:review-decision:v1 -->
@@ -1323,7 +1515,14 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
       state: "Todo"
     }
 
-    assert :ok = AgentRunner.run(issue, nil)
+    packet = SymphonyElixir.Steward.ExecutionPacket.build(issue)
+    assert {:ok, steward_prompt} = SymphonyElixir.Steward.ExecutionPacket.prompt(packet)
+
+    assert :ok =
+             AgentRunner.run(issue, nil,
+               steward_execution_packet: packet,
+               steward_execution_prompt: steward_prompt
+             )
 
     trace = File.read!(trace_file)
     assert trace =~ "turn/start"
@@ -1389,46 +1588,6 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
              })
   end
 
-  test "codex adapter treats project milestone planning as one-shot synthetic pulse" do
-    workspace_root = Path.join(System.tmp_dir!(), "symphony-codex-milestone-pulse-#{System.unique_integer([:positive])}")
-    codex_project_root = Path.join(workspace_root, "project")
-    codex_binary = Path.join(workspace_root, "fake-codex")
-    trace_file = Path.join(workspace_root, "codex.trace")
-
-    File.mkdir_p!(codex_project_root)
-    on_exit(fn -> File.rm_rf(workspace_root) end)
-
-    write_fake_codex!(codex_binary, trace_file)
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      workspace_root: Path.join(workspace_root, "workspaces"),
-      codex_command: codex_binary,
-      codex_project_root: codex_project_root,
-      runner_routes: %{"Todo" => "codex"},
-      max_turns: 4,
-      prompt: "Plan milestone {{ issue.project_milestone.name }}"
-    )
-
-    issue = %Issue{
-      id: "project-milestone:milestone-1:planning",
-      identifier: "MILESTONE-milestone-1",
-      title: "Plan milestone: milestone 1",
-      state: "Todo",
-      synthetic_kind: :project_milestone_planning,
-      project_milestone: %{id: "milestone-1", name: "Milestone", description: "phase_state: todo"}
-    }
-
-    assert :ok =
-             CodexAdapter.run(%{
-               workspace: Path.join([workspace_root, "workspaces", "milestone-1"]),
-               issue: issue,
-               update_recipient: self(),
-               worker_host: nil,
-               emit_update: fn _ -> :ok end,
-               opts: [issue_state_fetcher: fn _ids -> flunk("synthetic milestone planning must not refresh Linear issue state") end]
-             })
-  end
-
   test "agent runner routes In Progress issues to OpenCode and returns to In Review" do
     workspace_root =
       Path.join(
@@ -1481,12 +1640,21 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
       state: "In Progress"
     }
 
-    assert :ok = AgentRunner.run(issue, nil)
+    packet = SymphonyElixir.Steward.ExecutionPacket.build(issue)
+    assert {:ok, steward_prompt} = SymphonyElixir.Steward.ExecutionPacket.prompt(packet)
+
+    assert :ok =
+             AgentRunner.run(issue, nil,
+               steward_execution_packet: packet,
+               steward_execution_prompt: steward_prompt
+             )
 
     assert_receive {:memory_tracker_comment, "issue-1", comment}
     assert comment =~ "## OpenCode Handoff"
     assert comment =~ "opencode completed"
-    assert comment =~ "Architect-authored full OpenCode prompt"
+    assert comment =~ "symphony:execution-packet:v1"
+    refute comment =~ ~r/^\s*You are\b/
+    refute comment =~ "Architect-authored full OpenCode prompt"
     refute comment =~ "OpenCode prompt for NER-42"
 
     assert_receive {:memory_tracker_state_update, "issue-1", "In Review"}

@@ -125,6 +125,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     state = attach_pulse_ledger(state)
     state = hydrate_active_milestone(state)
+    state = apply_configured_active_milestone(state, config)
 
     run_terminal_workspace_cleanup(state)
     schedule_tick(state, 0)
@@ -169,6 +170,49 @@ defmodule SymphonyElixir.Orchestrator do
       _ ->
         state
     end
+  end
+
+  defp apply_configured_active_milestone(%State{} = state, settings) do
+    configured_id = settings.stewardship.active_milestone_id
+    configured_name = settings.stewardship.active_milestone_name
+
+    cond do
+      is_binary(configured_id) ->
+        apply_configured_active_milestone_id(state, configured_id, configured_name)
+
+      true ->
+        clear_configured_active_milestone(state)
+    end
+  end
+
+  defp apply_configured_active_milestone_id(%State{pulse_ledger: nil} = state, milestone_id, _milestone_name) do
+    %{state | active_project_milestone_id: milestone_id}
+  end
+
+  defp apply_configured_active_milestone_id(%State{pulse_ledger: ledger} = state, milestone_id, milestone_name) do
+    if PulseLedger.active_milestone_reactivation_blocked_id(ledger) == milestone_id and
+         not active_project_milestone_has_runtime_state?(state, milestone_id) do
+      PulseLedger.clear_active_milestone(ledger)
+      Logger.info("Configured active milestone #{milestone_id} is durably closed; waiting for owner to clear or replace the configured pointer")
+      %{state | active_project_milestone_id: nil}
+    else
+      case PulseLedger.active_milestone(ledger) do
+        %{"milestone_id" => ^milestone_id, "milestone_name" => ^milestone_name} -> :ok
+        _active -> PulseLedger.set_active_milestone(ledger, milestone_id, milestone_name)
+      end
+
+      %{state | active_project_milestone_id: milestone_id}
+    end
+  end
+
+  defp clear_configured_active_milestone(%State{pulse_ledger: nil} = state) do
+    %{state | active_project_milestone_id: nil}
+  end
+
+  defp clear_configured_active_milestone(%State{pulse_ledger: ledger} = state) do
+    PulseLedger.clear_active_milestone(ledger)
+    PulseLedger.clear_active_milestone_reactivation_block(ledger)
+    %{state | active_project_milestone_id: nil}
   end
 
   @impl true
@@ -410,7 +454,7 @@ defmodule SymphonyElixir.Orchestrator do
       issues
       |> choose_issues(state)
       |> maybe_dispatch_idle_pulse(issues, full_poll?)
-      |> maybe_dispatch_milestone_planning(issues, full_poll?)
+      |> record_disabled_next_milestone_scan_suppression(issues, full_poll?)
     else
       {:error, :missing_linear_api_token} ->
         Logger.error("Linear API token missing in WORKFLOW.md")
@@ -618,28 +662,38 @@ defmodule SymphonyElixir.Orchestrator do
   def hydrate_active_milestone_for_test(%State{} = state), do: hydrate_active_milestone(state)
 
   @doc false
-  @spec maybe_release_active_project_milestone_for_test(State.t(), [Issue.t()], (-> {:ok, [map()]} | {:error, term()})) :: State.t()
-  def maybe_release_active_project_milestone_for_test(%State{} = state, issues, milestone_fetcher)
-      when is_list(issues) and is_function(milestone_fetcher, 0) do
+  @spec apply_configured_active_milestone_for_test(State.t()) :: State.t()
+  def apply_configured_active_milestone_for_test(%State{} = state) do
+    state
+    |> settings_for_state()
+    |> then(&apply_configured_active_milestone(state, &1))
+  end
+
+  @doc false
+  @spec maybe_release_active_project_milestone_for_test(State.t(), [Issue.t()]) :: State.t()
+  def maybe_release_active_project_milestone_for_test(%State{} = state, issues) when is_list(issues) do
     maybe_release_active_project_milestone(
       state,
       issues,
       active_state_set(state),
-      terminal_state_set(state),
-      milestone_fetcher
+      terminal_state_set(state)
+    )
+  end
+
+  @doc false
+  @spec maybe_release_active_project_milestone_from_poll_for_test(State.t(), [Issue.t()]) :: State.t()
+  def maybe_release_active_project_milestone_from_poll_for_test(%State{} = state, issues) when is_list(issues) do
+    maybe_release_active_project_milestone_from_poll(
+      state,
+      issues,
+      active_state_set(state),
+      terminal_state_set(state)
     )
   end
 
   @doc false
   @spec pulse_ledger_name_for_test(term()) :: GenServer.name() | nil
   def pulse_ledger_name_for_test(project_context), do: pulse_ledger_name(project_context)
-
-  @doc false
-  @spec milestone_planning_issues_for_test([map()], [Issue.t()], term()) :: [Issue.t()]
-  def milestone_planning_issues_for_test(milestones, issues, %State{} = state)
-      when is_list(milestones) and is_list(issues) do
-    milestone_planning_issues(milestones, issues, state, active_state_set(state), terminal_state_set(state))
-  end
 
   @doc false
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
@@ -1034,7 +1088,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp terminate_task(_pid, _task_supervisor), do: :ok
 
-  defp stop_running_task(pid, ref, task_supervisor \\ SymphonyElixir.TaskSupervisor) do
+  defp stop_running_task(pid, ref, task_supervisor) do
     if is_pid(pid) do
       terminate_task(pid, task_supervisor)
     end
@@ -1105,7 +1159,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp choose_issues(issues, state) do
     active_states = active_state_set(state)
     terminal_states = terminal_state_set(state)
-    state = maybe_release_active_project_milestone(state, issues, active_states, terminal_states)
+    state = maybe_release_active_project_milestone_from_poll(state, issues, active_states, terminal_states)
 
     issues
     |> sort_issues_for_dispatch()
@@ -1145,56 +1199,25 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp maybe_dispatch_milestone_planning(%State{} = state, active_issues, full_poll?) when is_list(active_issues) do
-    active_states = active_state_set(state)
-    terminal_states = terminal_state_set(state)
+  defp record_disabled_next_milestone_scan_suppression(%State{} = state, _active_issues, full_poll?) when is_boolean(full_poll?) do
+    if full_poll? and state.pulse_ledger do
+      PulseLedger.record_suppression(
+        state.pulse_ledger,
+        PulseLedger.next_milestone_scan_suppressed(),
+        nil,
+        nil,
+        state.active_project_milestone_id,
+        nil,
+        "autonomous next-milestone scan disabled"
+      )
 
-    cond do
-      not full_poll? ->
-        state
-
-      milestone_planning_blocking_active_issues(active_issues, active_states, terminal_states) != [] ->
-        state
-
-      map_size(state.running) > 0 or map_size(state.blocked) > 0 or map_size(state.retry_attempts) > 0 ->
-        state
-
-      available_slots(state) <= 0 ->
-        state
-
-      not pulse_dispatch_enabled?(state) ->
-        state
-
-      true ->
-        dispatch_next_milestone_planning_issue(state, active_issues, active_states, terminal_states)
+      %{state | suppression_counts: increment_suppression(state.suppression_counts, PulseLedger.next_milestone_scan_suppressed())}
+    else
+      state
     end
   end
 
-  defp maybe_dispatch_milestone_planning(state, _active_issues, _full_poll?), do: state
-
-  defp dispatch_next_milestone_planning_issue(%State{} = state, active_issues, active_states, terminal_states) do
-    case Tracker.fetch_project_milestones(state.project_context) do
-      {:ok, milestones} ->
-        milestones
-        |> milestone_planning_issues(active_issues, state, active_states, terminal_states)
-        |> List.first()
-        |> case do
-          %Issue{} = issue -> do_dispatch_issue(state, issue, nil, nil, :project_milestone_planning)
-          nil -> state
-        end
-
-      {:error, reason} ->
-        Logger.warning("Skipping project milestone planning dispatch; failed to fetch project milestones: #{inspect(reason)}")
-        state
-    end
-  end
-
-  defp milestone_planning_blocking_active_issues(issues, active_states, terminal_states) when is_list(issues) do
-    Enum.filter(issues, fn
-      %Issue{} = issue -> candidate_issue?(issue, active_states, terminal_states)
-      _issue -> false
-    end)
-  end
+  defp record_disabled_next_milestone_scan_suppression(state, _active_issues, _full_poll?), do: state
 
   defp active_issues_blocking_idle_pulse(issues) when is_list(issues) do
     Enum.reject(issues, fn
@@ -1287,7 +1310,6 @@ defmodule SymphonyElixir.Orchestrator do
     |> Enum.filter(fn
       %Issue{id: id, state: state_name} = issue when is_binary(id) and is_binary(state_name) ->
         normalize_issue_state(state_name) == "need owner input" and
-          milestone_dispatch_allowed?(issue) and
           milestone_batch_allowed?(issue, state) and
           not is_nil(owner_input_activity_at(issue)) and
           !MapSet.member?(state.owner_input_pulsed, owner_input_pulse_fingerprint(issue)) and
@@ -1416,145 +1438,6 @@ defmodule SymphonyElixir.Orchestrator do
   defp issue_created_at_sort_key(%Issue{}), do: 9_223_372_036_854_775_807
   defp issue_created_at_sort_key(_issue), do: 9_223_372_036_854_775_807
 
-  defp milestone_planning_issues(milestones, issues, %State{} = state, active_states, terminal_states)
-       when is_list(milestones) and is_list(issues) do
-    milestones
-    |> Enum.filter(&milestone_planning_allowed?(&1, issues, state, active_states, terminal_states))
-    |> Enum.map(&synthetic_milestone_planning_issue/1)
-  end
-
-  defp milestone_planning_issues(_milestones, _issues, _state, _active_states, _terminal_states), do: []
-
-  defp milestone_planning_allowed?(milestone, issues, %State{} = state, active_states, terminal_states)
-       when is_map(milestone) and is_list(issues) do
-    milestone_id = milestone_id(milestone)
-    planning_issue_id = synthetic_milestone_planning_issue_id(milestone_id)
-
-    not is_nil(milestone_id) and
-      milestone_phase_state?(milestone_description(milestone), "todo") and
-      milestone_planning_batch_allowed?(milestone_id, state) and
-      milestone_planning_issue_available?(planning_issue_id, state) and
-      milestone_without_active_issue?(issues, milestone_id, active_states, terminal_states) and
-      !active_project_milestone_has_runtime_state?(state, milestone_id)
-  end
-
-  defp milestone_planning_allowed?(_milestone, _issues, _state, _active_states, _terminal_states), do: false
-
-  defp milestone_planning_batch_allowed?(milestone_id, %State{active_project_milestone_id: nil})
-       when is_binary(milestone_id),
-       do: true
-
-  defp milestone_planning_batch_allowed?(_milestone_id, _state), do: false
-
-  defp milestone_planning_issue_available?(planning_issue_id, %State{} = state) do
-    !MapSet.member?(state.claimed, planning_issue_id) and
-      !Map.has_key?(state.running, planning_issue_id) and
-      !Map.has_key?(state.blocked, planning_issue_id) and
-      !Map.has_key?(state.retry_attempts, planning_issue_id)
-  end
-
-  defp milestone_without_active_issue?(issues, milestone_id, active_states, terminal_states) do
-    !any_active_issue_in_other_milestone?(issues, milestone_id, active_states, terminal_states) and
-      !milestone_has_active_issue?(issues, milestone_id, active_states, terminal_states)
-  end
-
-  defp any_active_issue_in_other_milestone?(issues, milestone_id, active_states, terminal_states) do
-    Enum.any?(issues, fn
-      %Issue{} = issue ->
-        issue_project_milestone_id(issue) != nil and
-          issue_project_milestone_id(issue) != milestone_id and
-          candidate_issue?(issue, active_states, terminal_states) and
-          milestone_dispatch_allowed?(issue)
-
-      _ ->
-        false
-    end)
-  end
-
-  defp milestone_has_active_issue?(issues, milestone_id, active_states, terminal_states) do
-    Enum.any?(issues, fn
-      %Issue{} = issue ->
-        issue_project_milestone_id(issue) == milestone_id and
-          candidate_issue?(issue, active_states, terminal_states) and
-          milestone_dispatch_allowed?(issue)
-
-      _ ->
-        false
-    end)
-  end
-
-  defp synthetic_milestone_planning_issue(milestone) when is_map(milestone) do
-    milestone_id = milestone_id(milestone)
-    milestone_name = milestone_name(milestone)
-
-    %Issue{
-      id: synthetic_milestone_planning_issue_id(milestone_id),
-      identifier: synthetic_milestone_planning_identifier(milestone_id),
-      title: "Plan milestone: #{milestone_name}",
-      description: synthetic_milestone_planning_description(milestone),
-      priority: 1,
-      state: "Todo",
-      project_milestone: synthetic_milestone_context(milestone),
-      synthetic_kind: :project_milestone_planning,
-      labels: ["milestone-planning"],
-      assigned_to_worker: true
-    }
-  end
-
-  defp synthetic_milestone_planning_issue_id(milestone_id) when is_binary(milestone_id) do
-    "project-milestone:#{milestone_id}:planning"
-  end
-
-  defp synthetic_milestone_planning_issue_id(_milestone_id), do: nil
-
-  defp synthetic_milestone_planning_identifier(milestone_id) when is_binary(milestone_id) do
-    "MILESTONE-#{milestone_id}"
-  end
-
-  defp milestone_id(%{} = milestone) do
-    case Map.get(milestone, :id) || Map.get(milestone, "id") do
-      id when is_binary(id) and id != "" -> id
-      _ -> nil
-    end
-  end
-
-  defp milestone_name(%{} = milestone) do
-    case Map.get(milestone, :name) || Map.get(milestone, "name") do
-      name when is_binary(name) and name != "" -> name
-      _ -> "Project Milestone"
-    end
-  end
-
-  defp synthetic_milestone_context(%{} = milestone) do
-    %{
-      id: milestone_id(milestone),
-      name: milestone_name(milestone),
-      description: milestone_description(milestone),
-      status: milestone_value(milestone, :status, "status"),
-      target_date: milestone_target_date(milestone)
-    }
-  end
-
-  defp synthetic_milestone_planning_description(milestone) when is_map(milestone) do
-    """
-    Synthetic milestone planning task for Machine Architect.
-
-    Project Milestone: #{milestone_name(milestone)}
-    Milestone ID: #{milestone_id(milestone)}
-
-    Milestone description:
-
-    #{milestone_description(milestone)}
-
-    Instructions:
-    - Treat this as a Machine Architect planning turn, not an OpenCode implementation task.
-    - Hydrate the matching Mnemesh context if refs are present in the milestone description.
-    - Create or reuse executable Linear issues inside this Project Milestone.
-    - Keep each executable issue scoped for the configured coding runner and preserve role boundaries.
-    - Do not create new product milestones or choose the next global product direction.
-    """
-  end
-
   defp should_dispatch_issue?(
          %Issue{} = issue,
          %State{running: running, claimed: claimed, blocked: blocked} = state,
@@ -1562,7 +1445,6 @@ defmodule SymphonyElixir.Orchestrator do
          terminal_states
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
-      milestone_dispatch_allowed?(issue) and
       milestone_batch_allowed?(issue, state) and
       !owner_input_issue_state?(issue.state) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
@@ -1622,31 +1504,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp candidate_issue?(_issue, _active_states, _terminal_states), do: false
 
-  defp milestone_dispatch_allowed?(%Issue{project_milestone: nil}), do: false
-
-  defp milestone_dispatch_allowed?(%Issue{project_milestone: milestone}) when is_map(milestone) do
-    description = milestone_description(milestone)
-
-    cond do
-      milestone_phase_state?(description, "paused") ->
-        false
-
-      milestone_phase_state?(description, "needs-decision") ->
-        false
-
-      milestone_phase_state?(description, "todo") ->
-        true
-
-      true ->
-        false
-    end
-  end
-
-  defp milestone_dispatch_allowed?(_issue), do: true
-
-  defp milestone_batch_allowed?(%Issue{} = issue, %State{active_project_milestone_id: nil}) do
-    not is_nil(issue_project_milestone_id(issue))
-  end
+  defp milestone_batch_allowed?(%Issue{}, %State{active_project_milestone_id: nil}), do: false
 
   defp milestone_batch_allowed?(%Issue{} = issue, %State{active_project_milestone_id: milestone_id})
        when is_binary(milestone_id) do
@@ -1669,92 +1527,147 @@ defmodule SymphonyElixir.Orchestrator do
          active_states,
          terminal_states
        ) do
-    maybe_release_active_project_milestone(
-      state,
-      issues,
-      active_states,
-      terminal_states,
-      fn -> Tracker.fetch_project_milestones(state.project_context) end
-    )
+    maybe_close_exhausted_active_project_milestone(state, issues, active_states, terminal_states)
   end
 
   defp maybe_release_active_project_milestone(state, _issues, _active_states, _terminal_states), do: state
 
-  defp maybe_release_active_project_milestone(
+  defp maybe_release_active_project_milestone_from_poll(
+         %State{active_project_milestone_id: nil} = state,
+         _issues,
+         _active_states,
+         _terminal_states
+       ),
+       do: state
+
+  defp maybe_release_active_project_milestone_from_poll(
          %State{active_project_milestone_id: milestone_id} = state,
          issues,
          active_states,
-         terminal_states,
-         milestone_fetcher
+         terminal_states
        )
-       when is_binary(milestone_id) and is_list(issues) and is_function(milestone_fetcher, 0) do
-    active_milestone_has_work? =
-      Enum.any?(issues, fn
-        %Issue{} = issue ->
-          issue_project_milestone_id(issue) == milestone_id and
-            candidate_issue?(issue, active_states, terminal_states) and
-            milestone_dispatch_allowed?(issue)
+       when is_binary(milestone_id) and is_list(issues) do
+    child_issues = active_project_milestone_child_issue_evidence(state, issues)
+    maybe_close_exhausted_active_project_milestone(state, child_issues, active_states, terminal_states)
+  end
 
-        _ ->
-          false
-      end)
+  defp maybe_release_active_project_milestone_from_poll(state, _issues, _active_states, _terminal_states), do: state
+
+  defp active_project_milestone_child_issue_evidence(
+         %State{active_project_milestone_id: milestone_id} = state,
+         issues
+       )
+       when is_binary(milestone_id) and is_list(issues) do
+    poll_child_issues = issues_for_project_milestone(issues, milestone_id)
+
+    case fetch_active_project_milestone_child_issues(state, milestone_id) do
+      {:ok, fetched_child_issues} -> merge_issues_by_id(poll_child_issues, fetched_child_issues)
+      {:error, _reason} -> poll_child_issues
+    end
+  end
+
+  defp active_project_milestone_child_issue_evidence(_state, issues) when is_list(issues), do: issues
+
+  defp fetch_active_project_milestone_child_issues(%State{} = state, milestone_id) when is_binary(milestone_id) do
+    case active_milestone_child_issue_state_names(state) do
+      [] ->
+        {:ok, []}
+
+      state_names ->
+        case Tracker.fetch_issues_by_states(state_names, state.project_context) do
+          {:ok, issues} when is_list(issues) ->
+            {:ok, issues_for_project_milestone(issues, milestone_id)}
+
+          {:error, reason} = error ->
+            Logger.warning("Skipping active milestone exhaustion check; failed to fetch child issue states: #{inspect(reason)}")
+
+            error
+        end
+    end
+  end
+
+  defp active_milestone_child_issue_state_names(%State{} = state) do
+    settings = settings_for_state(state)
+
+    (settings.tracker.active_states ++ settings.tracker.terminal_states ++ List.wrap(state.fast_poll_states))
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq_by(&normalize_issue_state/1)
+  end
+
+  defp merge_issues_by_id(left, right) when is_list(left) and is_list(right) do
+    (left ++ right)
+    |> Enum.reduce(%{}, fn
+      %Issue{id: id} = issue, acc when is_binary(id) -> Map.put(acc, id, issue)
+      _issue, acc -> acc
+    end)
+    |> Map.values()
+  end
+
+  defp maybe_close_exhausted_active_project_milestone(
+         %State{active_project_milestone_id: milestone_id} = state,
+         issues,
+         active_states,
+         terminal_states
+       )
+       when is_binary(milestone_id) and is_list(issues) do
+    active_milestone_issues = issues_for_project_milestone(issues, milestone_id)
 
     runtime_active? = active_project_milestone_has_runtime_state?(state, milestone_id)
 
     cond do
-      active_milestone_has_work? or runtime_active? ->
+      runtime_active? ->
         state
 
-      is_nil(state.pulse_ledger) ->
-        %{state | active_project_milestone_id: nil}
+      active_milestone_issues == [] ->
+        state
 
-      milestone_release_phase_closed?(state, milestone_fetcher) ->
-        PulseLedger.clear_active_milestone(state.pulse_ledger)
-        %{state | active_project_milestone_id: nil}
+      Enum.all?(active_milestone_issues, &terminal_issue_state?(&1.state, terminal_states)) ->
+        close_active_project_milestone(state, active_milestone_issues, active_states, terminal_states)
+
+      Enum.any?(active_milestone_issues, &active_issue_state?(&1.state, active_states)) ->
+        state
 
       true ->
         state
     end
   end
 
-  defp maybe_release_active_project_milestone(
-         %State{} = state,
-         _issues,
-         _active_states,
-         _terminal_states,
-         _milestone_fetcher
-       ),
-       do: state
+  defp maybe_close_exhausted_active_project_milestone(%State{} = state, _issues, _active_states, _terminal_states), do: state
 
-  defp milestone_release_phase_closed?(%State{} = state, milestone_fetcher) when is_function(milestone_fetcher, 0) do
-    case milestone_fetcher.() do
-      {:ok, milestones} ->
-        active_id = state.active_project_milestone_id
+  defp issues_for_project_milestone(issues, milestone_id) when is_list(issues) and is_binary(milestone_id) do
+    Enum.filter(issues, fn
+      %Issue{} = issue -> issue_project_milestone_id(issue) == milestone_id
+      _ -> false
+    end)
+  end
 
-        case Enum.find(milestones, &(milestone_id(&1) == active_id)) do
-          nil ->
-            Logger.warning("Active milestone #{active_id} not found in current milestone data; keeping lock")
-            false
+  defp close_active_project_milestone(%State{active_project_milestone_id: milestone_id, pulse_ledger: ledger} = state, issues, _active_states, terminal_states) do
+    summary = active_milestone_closure_summary(milestone_id, issues, terminal_states)
 
-          milestone ->
-            desc = milestone_description(milestone)
-            phase = milestone_phase_state(desc)
-
-            case phase do
-              p when p in ["paused", "done", "closed"] ->
-                Logger.info("Active milestone #{active_id} phase_state=#{phase}; releasing lock")
-                true
-
-              _other ->
-                false
-            end
-        end
-
-      {:error, reason} ->
-        Logger.warning("Cannot check milestone release phase; fetch failed: #{inspect(reason)}; keeping lock")
-
-        false
+    if ledger do
+      PulseLedger.record_active_milestone_closure(ledger, summary)
+      PulseLedger.clear_active_milestone(ledger)
     end
+
+    Logger.info("Active milestone #{milestone_id} exhausted; clearing active pointer until owner selects the next milestone")
+    %{state | active_project_milestone_id: nil}
+  end
+
+  defp active_milestone_closure_summary(milestone_id, issues, terminal_states) do
+    terminal_issue_ids =
+      issues
+      |> Enum.filter(&terminal_issue_state?(&1.state, terminal_states))
+      |> Enum.map(& &1.id)
+      |> Enum.sort()
+
+    %{
+      "milestone_id" => milestone_id,
+      "reason" => "all_known_child_issues_terminal",
+      "terminal_issue_count" => length(terminal_issue_ids),
+      "terminal_issue_ids" => terminal_issue_ids
+    }
   end
 
   defp active_project_milestone_has_runtime_state?(%State{} = state, milestone_id)
@@ -1794,46 +1707,15 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_project_milestone_id(_issue), do: nil
 
+  defp milestone_name(%{} = milestone) do
+    case Map.get(milestone, :name) || Map.get(milestone, "name") do
+      name when is_binary(name) and name != "" -> name
+      _ -> "Project Milestone"
+    end
+  end
+
   defp issue_project_milestone_name(%Issue{project_milestone: milestone}) when is_map(milestone), do: milestone_name(milestone)
   defp issue_project_milestone_name(_issue), do: nil
-
-  defp milestone_description(%{} = milestone) do
-    Map.get(milestone, :description) || Map.get(milestone, "description") || ""
-  end
-
-  defp milestone_target_date(%{} = milestone) do
-    milestone_value(milestone, :target_date, "target_date") ||
-      milestone_value(milestone, :targetDate, "targetDate")
-  end
-
-  defp milestone_value(%{} = milestone, atom_key, string_key) do
-    case Map.get(milestone, atom_key) || Map.get(milestone, string_key) do
-      value when value in ["", nil] -> nil
-      value -> value
-    end
-  end
-
-  defp milestone_phase_state?(description, state) when is_binary(description) and is_binary(state) do
-    milestone_phase_state(description) == normalize_issue_state(state)
-  end
-
-  defp milestone_phase_state?(_description, _state), do: false
-
-  defp milestone_phase_state(description) when is_binary(description) do
-    description
-    |> String.split(~r/\R/, parts: 2, trim: false)
-    |> List.first()
-    |> case do
-      first_line when is_binary(first_line) ->
-        case Regex.run(~r/^phase_state: ([a-z0-9_-]+)$/, first_line) do
-          [_match, state] -> normalize_issue_state(state)
-          _ -> nil
-        end
-
-      _ ->
-        nil
-    end
-  end
 
   defp owner_input_issue_state?(state_name) when is_binary(state_name) do
     normalize_issue_state(state_name) == "need owner input"
@@ -1886,8 +1768,6 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp runner_kind_for_issue(_issue, %State{} = state), do: settings_for_state(state).runner.default
 
-  defp runner_kind_for_issue(issue), do: runner_kind_for_issue(issue, %State{})
-
   defp normalize_issue_state(state_name) when is_binary(state_name) do
     String.downcase(String.trim(state_name))
   end
@@ -1899,16 +1779,12 @@ defmodule SymphonyElixir.Orchestrator do
     |> MapSet.new()
   end
 
-  defp terminal_state_set, do: terminal_state_set(%State{})
-
   defp active_state_set(%State{} = state) do
     settings_for_state(state).tracker.active_states
     |> Enum.map(&normalize_issue_state/1)
     |> Enum.filter(&(&1 != ""))
     |> MapSet.new()
   end
-
-  defp active_state_set, do: active_state_set(%State{})
 
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
     case revalidate_issue_for_dispatch(
@@ -1955,7 +1831,21 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       worker_host ->
-        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, pulse_kind)
+        {state, dispatch_opts} = execution_packet_dispatch_opts(state, issue)
+        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, pulse_kind, dispatch_opts)
+    end
+  end
+
+  defp execution_packet_dispatch_opts(%State{} = state, %Issue{} = issue) do
+    packet = SymphonyElixir.Steward.ExecutionPacket.build(issue, state.project_context)
+
+    if state.pulse_ledger do
+      :ok = PulseLedger.record_execution_packet(state.pulse_ledger, packet)
+    end
+
+    case SymphonyElixir.Steward.ExecutionPacket.prompt(packet) do
+      {:ok, prompt} -> {state, [steward_execution_packet: packet, steward_execution_prompt: prompt]}
+      {:error, reason} -> raise RuntimeError, "invalid steward execution packet prompt: #{inspect(reason)}"
     end
   end
 
@@ -1965,7 +1855,8 @@ defmodule SymphonyElixir.Orchestrator do
          attempt,
          recipient,
          worker_host,
-         pulse_kind
+         pulse_kind,
+         dispatch_opts
        ) do
     runner_kind = runner_kind_for_issue(issue, state)
 
@@ -1976,7 +1867,9 @@ defmodule SymphonyElixir.Orchestrator do
              attempt: attempt,
              worker_host: worker_host,
              settings: settings_for_state(state),
-             project_context: state.project_context
+             project_context: state.project_context,
+             steward_execution_packet: Keyword.get(dispatch_opts, :steward_execution_packet),
+             steward_execution_prompt: Keyword.get(dispatch_opts, :steward_execution_prompt)
            )
          end) do
       {:ok, pid} ->
@@ -2024,29 +1917,17 @@ defmodule SymphonyElixir.Orchestrator do
           | running: running,
             claimed: MapSet.put(state.claimed, issue.id),
             retry_attempts: Map.delete(state.retry_attempts, issue.id),
-            active_project_milestone_id: state.active_project_milestone_id || issue_project_milestone_id(issue)
+            active_project_milestone_id: state.active_project_milestone_id
         }
 
         if updated_state.pulse_ledger do
-          milestone_id = state.active_project_milestone_id || issue_project_milestone_id(issue)
+          milestone_id = state.active_project_milestone_id
 
           if milestone_id do
-            phase_state =
-              case issue do
-                %Issue{project_milestone: %{} = milestone} ->
-                  milestone
-                  |> milestone_description()
-                  |> milestone_phase_state()
-
-                _ ->
-                  nil
-              end
-
             PulseLedger.set_active_milestone(
               updated_state.pulse_ledger,
               milestone_id,
-              issue_project_milestone_name(issue),
-              phase_state
+              issue_project_milestone_name(issue)
             )
           end
         end
@@ -2175,29 +2056,6 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp handle_retry_issue(
-         %State{} = state,
-         issue_id,
-         attempt,
-         %{issue: %Issue{synthetic_kind: :project_milestone_planning} = issue} = metadata
-       ) do
-    if retry_candidate_issue?(issue, state, terminal_state_set(state)) and
-         milestone_dispatch_allowed?(issue) and
-         milestone_batch_allowed?(issue, state) and
-         dispatch_slots_available?(issue, state) and
-         worker_slots_available?(state, metadata[:worker_host], runner_kind_for_issue(issue, state)) do
-      {:noreply, do_dispatch_issue(state, issue, attempt, metadata[:worker_host], :project_milestone_planning)}
-    else
-      {:noreply,
-       schedule_issue_retry(
-         state,
-         issue_id,
-         attempt + 1,
-         Map.merge(metadata, %{error: "no available orchestrator slots"})
-       )}
-    end
-  end
-
   defp handle_retry_issue(%State{} = state, issue_id, attempt, metadata) do
     case Tracker.fetch_candidate_issues(state.project_context) do
       {:ok, issues} ->
@@ -2243,7 +2101,7 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, release_issue_claim(state, issue_id)}
   end
 
-  defp cleanup_issue_workspace(state_or_identifier, identifier_or_worker_host \\ nil, worker_host \\ nil)
+  defp cleanup_issue_workspace(state_or_identifier, identifier_or_worker_host, worker_host)
 
   defp cleanup_issue_workspace(%State{} = state, identifier, worker_host) when is_binary(identifier) do
     Workspace.remove_issue_workspaces(identifier, worker_host, settings_for_state(state))
@@ -2284,7 +2142,6 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp handle_active_retry(state, issue, attempt, metadata) do
     if retry_candidate_issue?(issue, state, terminal_state_set(state)) and
-         milestone_dispatch_allowed?(issue) and
          milestone_batch_allowed?(issue, state) and
          dispatch_slots_available?(issue, state) and
          worker_slots_available?(state, metadata[:worker_host], runner_kind_for_issue(issue, state)) do
@@ -2812,7 +2669,6 @@ defmodule SymphonyElixir.Orchestrator do
         %{
           milestone_id: milestone_id,
           milestone_name: Map.get(info, "milestone_name"),
-          phase_state: Map.get(info, "phase_state"),
           locked_at: Map.get(info, "locked_at")
         }
 
@@ -2820,7 +2676,6 @@ defmodule SymphonyElixir.Orchestrator do
         %{
           milestone_id: milestone_id,
           milestone_name: Map.get(info, :milestone_name),
-          phase_state: Map.get(info, :phase_state),
           locked_at: Map.get(info, :locked_at)
         }
 
@@ -2877,13 +2732,15 @@ defmodule SymphonyElixir.Orchestrator do
   defp refresh_runtime_config(%State{} = state) do
     config = settings_for_state(state)
 
-    %{
+    state = %{
       state
       | poll_interval_ms: config.polling.interval_ms,
         full_poll_interval_ms: config.polling.full_interval_ms,
         fast_poll_states: config.polling.fast_states,
         max_concurrent_agents: config.agent.max_concurrent_agents
     }
+
+    apply_configured_active_milestone(state, config)
   end
 
   defp settings_for_state(%State{project_context: project_context}), do: Config.settings!(project_context)

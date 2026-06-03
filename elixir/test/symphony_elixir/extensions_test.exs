@@ -108,7 +108,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   test "workflow store reloads changes, keeps last good workflow, and falls back when stopped" do
     ensure_workflow_store_running()
-    assert {:ok, %{prompt: "You are an agent for this repository."}} = Workflow.current()
+    assert {:ok, %{prompt: "Repository execution request."}} = Workflow.current()
 
     write_workflow_file!(Workflow.workflow_file_path(), prompt: "Second prompt")
     send(WorkflowStore, :poll)
@@ -831,7 +831,13 @@ defmodule SymphonyElixir.ExtensionsTest do
              "runner_runtime_totals" => %{"seconds_running" => 84.5},
              "suppression_events" => [],
              "suppression_counts" => %{},
-             "rate_limits" => %{"primary" => %{"remaining" => 11}}
+             "rate_limits" => %{"primary" => %{"remaining" => 11}},
+             "polling" => %{
+               "checking?" => false,
+               "next_poll_in_ms" => 5_000,
+               "poll_interval_ms" => 2_000
+             },
+             "active_milestone" => nil
            }
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")
@@ -1254,7 +1260,13 @@ defmodule SymphonyElixir.ExtensionsTest do
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
       runner_runtime_totals: %{seconds_running: 84.5},
-      rate_limits: %{"primary" => %{"remaining" => 11}}
+      rate_limits: %{"primary" => %{"remaining" => 11}},
+      polling: %{
+        "checking?" => false,
+        "next_poll_in_ms" => 5_000,
+        "poll_interval_ms" => 2_000
+      },
+      active_milestone: nil
     }
   end
 

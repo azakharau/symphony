@@ -49,12 +49,11 @@ defmodule SymphonyElixir.PulseLedgerTest do
     on_exit(fn -> File.rm(path) end)
     ledger = start_ledger(path)
 
-    assert :ok = PulseLedger.set_active_milestone(ledger, "milestone-1", "Milestone One", "doing")
+    assert :ok = PulseLedger.set_active_milestone(ledger, "milestone-1", "Milestone One")
 
     assert %{
              "milestone_id" => "milestone-1",
              "milestone_name" => "Milestone One",
-             "phase_state" => "doing",
              "locked_at" => locked_at
            } = PulseLedger.active_milestone(ledger)
 
@@ -84,7 +83,15 @@ defmodule SymphonyElixir.PulseLedgerTest do
 
     assert :ok = PulseLedger.record_owner_input(ledger, "owner-key")
     assert :ok = PulseLedger.record_done_continuation(ledger, "done-key")
-    assert :ok = PulseLedger.set_active_milestone(ledger, "milestone-1", "Milestone One", "done")
+    assert :ok = PulseLedger.set_active_milestone(ledger, "milestone-1", "Milestone One")
+    assert :ok = PulseLedger.record_execution_packet(ledger, %{"issue" => %{"id" => "issue-1"}, "packet_version" => "test"})
+    assert :ok = PulseLedger.record_acceptance(ledger, "issue-1", %{"status" => "accepted", "docs_checked" => true})
+    assert :ok = PulseLedger.record_active_milestone_closure(ledger, %{"milestone_id" => "milestone-1", "reason" => "all_known_child_issues_terminal"})
+    assert PulseLedger.active_milestone_reactivation_blocked_id(ledger) == "milestone-1"
+    assert :ok = PulseLedger.clear_active_milestone_reactivation_block(ledger)
+    assert PulseLedger.active_milestone_reactivation_blocked_id(ledger) == nil
+    assert :ok = PulseLedger.record_active_milestone_closure(ledger, %{"milestone_id" => "milestone-1", "reason" => "all_known_child_issues_terminal"})
+    assert :ok = PulseLedger.record_handoff_fingerprint(ledger, "handoff-fp")
     assert :ok = PulseLedger.record_suppression(ledger, "kind", nil, nil, "milestone-1", "Milestone One", "reason")
 
     GenServer.stop(ledger)
@@ -95,7 +102,64 @@ defmodule SymphonyElixir.PulseLedgerTest do
     assert PulseLedger.owner_input_processed?(pid, "owner-key")
     assert PulseLedger.done_continuation_processed?(pid, "done-key")
     assert %{"milestone_id" => "milestone-1"} = PulseLedger.active_milestone(pid)
+    assert %{"packet_version" => "test"} = PulseLedger.execution_packet(pid, "issue-1")
+    assert %{"status" => "accepted", "docs_checked" => true} = PulseLedger.acceptance_record(pid, "issue-1")
+    assert %{"reason" => "all_known_child_issues_terminal"} = PulseLedger.active_milestone_closure(pid, "milestone-1")
+    assert PulseLedger.active_milestone_reactivation_blocked_id(pid) == "milestone-1"
+    assert PulseLedger.handoff_fingerprint_seen?(pid, "handoff-fp")
     assert %{"kind" => 1} = PulseLedger.suppression_counts(pid)
+  end
+
+  test "durable execution packet is stored before worker dispatch can close" do
+    path = ledger_path("execution-packet")
+    on_exit(fn -> File.rm(path) end)
+    ledger = start_ledger(path)
+
+    packet = %{
+      "packet_version" => "symphony:execution-packet:v1",
+      "issue" => %{"id" => "issue-packet", "identifier" => "SYM-41"},
+      "active_milestone" => %{"id" => "milestone-current", "name" => "Current"}
+    }
+
+    assert :ok = PulseLedger.record_execution_packet(ledger, packet)
+    assert packet == PulseLedger.execution_packet(ledger, "issue-packet")
+  end
+
+  test "unchanged worker handoff fingerprint suppresses repeated acceptance dispatch" do
+    path = ledger_path("handoff-fingerprint")
+    on_exit(fn -> File.rm(path) end)
+    ledger = start_ledger(path)
+
+    fingerprint = :crypto.hash(:sha256, "same handoff") |> Base.encode16(case: :lower)
+
+    refute PulseLedger.handoff_fingerprint_seen?(ledger, fingerprint)
+    assert :ok = PulseLedger.record_handoff_fingerprint(ledger, fingerprint)
+    assert PulseLedger.handoff_fingerprint_seen?(ledger, fingerprint)
+  end
+
+  test "handoff and acceptance suppression categories are public ledger constants" do
+    assert PulseLedger.handoff_unchanged() == "handoff_unchanged"
+    assert PulseLedger.acceptance_already_processed() == "acceptance_already_processed"
+  end
+
+  test "accepted work requires durable acceptance record before closure" do
+    path = ledger_path("acceptance-record")
+    on_exit(fn -> File.rm(path) end)
+    ledger = start_ledger(path)
+
+    assert PulseLedger.acceptance_record(ledger, "issue-accepted") == nil
+
+    assert :ok =
+             PulseLedger.record_acceptance(ledger, "issue-accepted", %{
+               "status" => "accepted",
+               "slice_id" => "slice-1",
+               "docs_checked" => true
+             })
+
+    assert %{"status" => "accepted", "docs_checked" => true, "recorded_at" => recorded_at} =
+             PulseLedger.acceptance_record(ledger, "issue-accepted")
+
+    assert is_binary(recorded_at)
   end
 
   test "missing file on init creates empty state gracefully" do
@@ -145,13 +209,14 @@ defmodule SymphonyElixir.PulseLedgerTest do
 
     assert :ok = PulseLedger.record_owner_input(ledger, "owner-key")
     assert :ok = PulseLedger.record_done_continuation(ledger, "done-key")
-    assert :ok = PulseLedger.set_active_milestone(ledger, "milestone-1", "Milestone One", "doing")
+    assert :ok = PulseLedger.set_active_milestone(ledger, "milestone-1", "Milestone One")
     assert :ok = PulseLedger.record_suppression(ledger, "kind", nil, nil, nil, nil, "reason")
 
     assert :ok = PulseLedger.reset(ledger)
     refute PulseLedger.owner_input_processed?(ledger, "owner-key")
     refute PulseLedger.done_continuation_processed?(ledger, "done-key")
     assert PulseLedger.active_milestone(ledger) == nil
+    assert PulseLedger.active_milestone_reactivation_blocked_id(ledger) == nil
     assert PulseLedger.suppression_events(ledger) == []
     assert PulseLedger.suppression_counts(ledger) == %{}
   end
@@ -202,7 +267,7 @@ defmodule SymphonyElixir.PulseLedgerTest do
     ledger1 = start_ledger(path1)
     ledger2 = start_ledger(path2)
 
-    assert :ok = PulseLedger.set_active_milestone(ledger1, "ms-1", "Milestone One", "doing")
+    assert :ok = PulseLedger.set_active_milestone(ledger1, "ms-1", "Milestone One")
     assert %{"milestone_id" => "ms-1"} = PulseLedger.active_milestone(ledger1)
     assert PulseLedger.active_milestone(ledger2) == nil
   end

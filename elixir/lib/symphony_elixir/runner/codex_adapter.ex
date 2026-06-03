@@ -121,7 +121,9 @@ defmodule SymphonyElixir.Runner.CodexAdapter do
     end
   end
 
-  defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
+  defp build_turn_prompt(issue, opts, 1, _max_turns) do
+    Keyword.get(opts, :steward_execution_prompt) || PromptBuilder.build_prompt(issue, opts)
+  end
 
   defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
     """
@@ -134,8 +136,6 @@ defmodule SymphonyElixir.Runner.CodexAdapter do
     - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
     """
   end
-
-  defp continue_with_issue?(%Issue{synthetic_kind: :project_milestone_planning} = issue, _issue_state_fetcher, _settings), do: {:done, issue}
 
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher, settings) when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do

@@ -25,7 +25,9 @@ defmodule SymphonyElixirWeb.Presenter do
           runner_runtime_totals: runner_runtime_totals(snapshot),
           suppression_events: Map.get(snapshot, :suppression_events, []),
           suppression_counts: Map.get(snapshot, :suppression_counts, %{}),
-          rate_limits: snapshot.rate_limits
+          rate_limits: snapshot.rate_limits,
+          polling: Map.get(snapshot, :polling),
+          active_milestone: Map.get(snapshot, :active_milestone)
         }
 
       :timeout ->

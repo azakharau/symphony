@@ -447,7 +447,7 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_milestone_line(nil, _milestone_id, _snapshot), do: nil
 
-  defp format_milestone_line(%{milestone_name: name, phase_state: phase}, _milestone_id, snapshot) when not is_nil(name) do
+  defp format_milestone_line(%{milestone_name: name}, _milestone_id, snapshot) when not is_nil(name) do
     locked_count =
       snapshot
       |> Map.get(:suppression_counts, %{})
@@ -462,9 +462,6 @@ defmodule SymphonyElixir.StatusDashboard do
 
     colorize("│ Milestone: ", @ansi_bold) <>
       colorize(to_string(name), @ansi_cyan) <>
-      colorize(" (", @ansi_gray) <>
-      colorize(to_string(phase || "unknown"), @ansi_yellow) <>
-      colorize(")", @ansi_gray) <>
       colorize(lock_suffix, @ansi_red)
   end
 

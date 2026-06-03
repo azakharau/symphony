@@ -82,6 +82,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "orchestrator snapshot exposes active milestone lock context" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      stewardship_active_milestone_id: "milestone-current",
+      stewardship_active_milestone_name: "Current"
+    )
+
     path = Path.join(System.tmp_dir!(), "symphony-active-milestone-snapshot-#{System.unique_integer([:positive])}.json")
     on_exit(fn -> File.rm(path) end)
 
@@ -91,7 +96,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       if Process.alive?(ledger), do: GenServer.stop(ledger)
     end)
 
-    assert :ok = SymphonyElixir.PulseLedger.set_active_milestone(ledger, "milestone-current", "Current", "todo")
+    assert :ok = SymphonyElixir.PulseLedger.set_active_milestone(ledger, "milestone-current", "Current")
 
     assert :ok =
              SymphonyElixir.PulseLedger.record_suppression(
@@ -123,8 +128,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert %{
              milestone_id: "milestone-current",
-             milestone_name: "Current",
-             phase_state: "todo"
+             milestone_name: "Current"
            } = snapshot.active_milestone
 
     assert %{"active_milestone_locked" => 1} = snapshot.suppression_counts
@@ -1783,7 +1787,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
          retrying: [],
          codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
          rate_limits: nil,
-         active_milestone: %{milestone_id: "milestone-current", milestone_name: "Current", phase_state: "todo"},
+         active_milestone: %{milestone_id: "milestone-current", milestone_name: "Current"},
          active_project_milestone_id: "milestone-current",
          suppression_counts: %{"active_milestone_locked" => 2}
        }}
@@ -1791,7 +1795,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     rendered = StatusDashboard.format_snapshot_content_for_test(snapshot_data, 0.0)
     plain = Regex.replace(~r/\e\[[0-9;]*m/, rendered, "")
 
-    assert plain =~ "Milestone: Current (todo)"
+    assert plain =~ "Milestone: Current"
     assert plain =~ "active_milestone_locked: 2"
   end
 

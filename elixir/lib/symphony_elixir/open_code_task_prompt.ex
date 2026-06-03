@@ -36,7 +36,8 @@ defmodule SymphonyElixir.OpenCode.TaskPrompt do
   def extract_packet(body) when is_binary(body) do
     with {:ok, attrs, after_marker} <- split_marker(body),
          {:ok, slice_id} <- required_attr_value(attrs, "slice_id"),
-         {:ok, prompt} <- fenced_prompt(after_marker) do
+         {:ok, prompt} <- fenced_prompt(after_marker),
+         :ok <- reject_forbidden_preamble(prompt) do
       {:ok,
        %Packet{
          prompt: prompt,
@@ -117,5 +118,13 @@ defmodule SymphonyElixir.OpenCode.TaskPrompt do
   defp fingerprint(prompt) do
     :crypto.hash(:sha256, prompt)
     |> Base.encode16(case: :lower)
+  end
+
+  defp reject_forbidden_preamble(prompt) when is_binary(prompt) do
+    if SymphonyElixir.Steward.ExecutionPacket.forbidden_preamble?(prompt) do
+      {:error, :opencode_task_prompt_forbidden_role_preamble}
+    else
+      :ok
+    end
   end
 end

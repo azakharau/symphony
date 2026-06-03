@@ -9,7 +9,7 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
 
   require Logger
 
-  alias SymphonyElixir.{Config, Linear.Issue, ProcessPolicy, Tracker}
+  alias SymphonyElixir.{Config, Linear.Issue, OpenCode.TaskPrompt, ProcessPolicy, PulseLedger, Tracker}
   alias SymphonyElixir.OpenCode.Runner, as: OpenCodeRunner
   alias SymphonyElixir.Runner.{OpenCodeAdapter, Outcome}
 
@@ -23,7 +23,7 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
   def run(%{workspace: workspace, issue: issue, opts: opts, emit_update: emit_update} = context) do
     project_context = Map.get(context, :project_context)
 
-    case latest_opencode_task_packet_or_reroute(issue, project_context, emit_update) do
+    case steward_task_packet(context) || latest_opencode_task_packet_or_reroute(issue, project_context, emit_update) do
       {:ok, packet} ->
         with {:ok, decisions} <- Tracker.review_decisions(issue.id, project_context) do
           dispatch_opencode_packet(context, workspace, issue, packet, decisions, opts, emit_update, project_context)
@@ -46,7 +46,7 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
 
         case OpenCodeAdapter.run(runner_context) do
           {:ok, result} ->
-            record_opencode_handoff(issue, result, emit_update, project_context)
+            record_opencode_handoff(issue, packet, result, emit_update, project_context)
 
           {:error, {:opencode_remote_worker_host_unsupported, details}} ->
             block_remote_opencode_worker_host(issue, details, emit_update, project_context)
@@ -80,7 +80,8 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
       when reason in [
              :opencode_task_prompt_missing_slice_id,
              :opencode_task_prompt_empty,
-             :opencode_task_prompt_malformed_fence
+             :opencode_task_prompt_malformed_fence,
+             :opencode_task_prompt_forbidden_role_preamble
            ] ->
         block_malformed_opencode_task_prompt(issue, reason, project_context, emit_update)
 
@@ -90,6 +91,31 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
   end
 
   defp latest_opencode_task_packet_or_reroute(_issue, _project_context, _emit_update), do: {:error, :opencode_task_prompt_not_found}
+
+  defp steward_task_packet(%{task_packet: %TaskPrompt.Packet{} = packet}), do: {:ok, packet}
+
+  defp steward_task_packet(%{opts: opts}) when is_list(opts) do
+    with prompt when is_binary(prompt) <- Keyword.get(opts, :steward_execution_prompt),
+         packet when is_map(packet) <- Keyword.get(opts, :steward_execution_packet),
+         {:ok, built} <- steward_task_packet_from_prompt(packet, prompt) do
+      {:ok, built}
+    else
+      _ -> nil
+    end
+  end
+
+  defp steward_task_packet(_context), do: nil
+
+  defp steward_task_packet_from_prompt(%{"issue" => %{"id" => issue_id}}, prompt) when is_binary(issue_id) do
+    {:ok,
+     %TaskPrompt.Packet{
+       prompt: prompt,
+       slice_id: issue_id,
+       fingerprint: packet_fingerprint(prompt)
+     }}
+  end
+
+  defp steward_task_packet_from_prompt(_packet, _prompt), do: {:error, :missing_issue_id}
 
   defp block_malformed_opencode_task_prompt(%Issue{id: issue_id} = issue, reason, project_context, emit_update)
        when is_binary(issue_id) do
@@ -140,11 +166,44 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
     end
   end
 
-  defp record_opencode_handoff(issue, result, emit_update, project_context) do
+  defp record_opencode_handoff(issue, packet, result, emit_update, project_context) do
     result_state = Config.settings!(project_context).opencode.result_state
+    ledger = pulse_ledger(project_context)
+    fingerprint = handoff_fingerprint(packet, result)
 
+    cond do
+      acceptance_already_processed?(ledger, issue.id) ->
+        suppress_opencode_handoff(
+          ledger,
+          issue,
+          result,
+          emit_update,
+          result_state,
+          PulseLedger.acceptance_already_processed(),
+          "acceptance already processed"
+        )
+
+      handoff_seen?(ledger, fingerprint) ->
+        suppress_opencode_handoff(
+          ledger,
+          issue,
+          result,
+          emit_update,
+          result_state,
+          PulseLedger.handoff_unchanged(),
+          "handoff unchanged"
+        )
+
+      true ->
+        create_opencode_handoff(issue, result, emit_update, project_context, result_state, ledger, fingerprint)
+    end
+  end
+
+  defp create_opencode_handoff(issue, result, emit_update, project_context, result_state, ledger, fingerprint) do
     with :ok <- Tracker.create_comment(issue.id, OpenCodeRunner.handoff_comment(issue, result), project_context),
          :ok <- Tracker.update_issue_state(issue.id, result_state, project_context) do
+      record_handoff_fingerprint(ledger, fingerprint)
+
       emit_update.(%{
         event: :handoff_recorded,
         phase: :completed,
@@ -160,6 +219,98 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
 
       Outcome.completed(result_state: result_state)
     end
+  end
+
+  defp suppress_opencode_handoff(ledger, issue, result, emit_update, result_state, kind, reason) do
+    record_suppression(ledger, kind, issue, reason)
+
+    emit_update.(%{
+      event: :handoff_suppressed,
+      phase: :completed,
+      outcome: :completed,
+      timestamp: DateTime.utc_now(),
+      result_state: result_state,
+      suppression_kind: kind,
+      suppression_reason: reason,
+      command: result.command,
+      runner_owner: Map.get(result, :runner_owner),
+      session_id: Map.get(result, :session_id),
+      project_root: Map.get(result, :project_root),
+      attach_url: Map.get(result, :attach_url)
+    })
+
+    Outcome.completed(result_state: result_state)
+  end
+
+  defp pulse_ledger(nil) do
+    case PulseLedger.process_name_for_test(name: :symphony_pulse_ledger_default) do
+      name when is_atom(name) -> Process.whereis(name)
+      _other -> nil
+    end
+  end
+
+  defp pulse_ledger(project_context) do
+    case PulseLedger.process_name_for_test(project_context: project_context) do
+      {:global, _term} = name -> GenServer.whereis(name)
+      name when is_atom(name) -> Process.whereis(name)
+      _other -> nil
+    end
+  end
+
+  defp acceptance_already_processed?(ledger, issue_id) when is_pid(ledger) and is_binary(issue_id) do
+    match?(%{}, PulseLedger.acceptance_record(ledger, issue_id))
+  end
+
+  defp acceptance_already_processed?(_ledger, _issue_id), do: false
+
+  defp handoff_seen?(ledger, fingerprint) when is_pid(ledger) and is_binary(fingerprint) do
+    PulseLedger.handoff_fingerprint_seen?(ledger, fingerprint)
+  end
+
+  defp handoff_seen?(_ledger, _fingerprint), do: false
+
+  defp record_handoff_fingerprint(ledger, fingerprint) when is_pid(ledger) and is_binary(fingerprint) do
+    PulseLedger.record_handoff_fingerprint(ledger, fingerprint)
+  end
+
+  defp record_handoff_fingerprint(_ledger, _fingerprint), do: :ok
+
+  defp record_suppression(ledger, kind, issue, reason) when is_pid(ledger) do
+    {milestone_id, milestone_name} = issue_milestone(issue)
+    PulseLedger.record_suppression(ledger, kind, issue.id, issue.identifier, milestone_id, milestone_name, reason)
+  end
+
+  defp record_suppression(_ledger, _kind, _issue, _reason), do: :ok
+
+  defp handoff_fingerprint(_packet, result) do
+    :crypto.hash(
+      :sha256,
+      inspect({
+        Map.get(result, :session_id),
+        Map.get(result, :output),
+        Map.get(result, :handoff),
+        Map.get(result, :result_state),
+        Map.get(result, :attach_url),
+        Map.get(result, :command),
+        Map.get(result, :project_root)
+      })
+    )
+    |> Base.encode16(case: :lower)
+  end
+
+  defp packet_fingerprint(prompt) do
+    :crypto.hash(:sha256, prompt)
+    |> Base.encode16(case: :lower)
+  end
+
+  defp issue_milestone(%Issue{project_milestone: milestone}) when is_map(milestone) do
+    {map_value(milestone, :id, "id"), map_value(milestone, :name, "name")}
+  end
+
+  defp issue_milestone(_issue), do: {nil, nil}
+
+  defp map_value(map, atom_key, string_key) do
+    Map.get(map, atom_key) || Map.get(map, string_key)
   end
 
   defp record_opencode_owner_input(issue, reason, emit_update, project_context) do

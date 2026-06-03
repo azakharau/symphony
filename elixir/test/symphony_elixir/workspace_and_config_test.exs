@@ -4,7 +4,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.OpenCode.ACPSessionStore
   alias SymphonyElixir.PromptBuilder
+  alias SymphonyElixir.RuntimeCache
+  alias SymphonyElixir.Steward.ExecutionPacket
 
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
@@ -197,6 +200,29 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace remove rejects the current working tree" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-current-remove-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace_root)
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-CWD")
+
+      File.cd!(workspace, fn ->
+        assert {:error, {:workspace_contains_current_working_directory, ^workspace, ^workspace}, ""} = Workspace.remove(workspace)
+      end)
+
+      assert File.dir?(workspace)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "workspace surfaces after_create hook failures" do
     workspace_root =
       Path.join(
@@ -301,6 +327,179 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
   test "workspace cleanup ignores non-binary identifier" do
     assert :ok = Workspace.remove_issue_workspaces(nil)
+  end
+
+  test "runtime cache cleanup removes terminal issue workspace and ACP session" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-runtime-cache-terminal-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-terminal-cache",
+        identifier: "SYM-CACHE",
+        state: "Done"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      File.write!(Path.join(workspace, "artifact.txt"), "stale")
+
+      project_root = File.cwd!()
+      session_scope = ACPSessionStore.prompt_scope("prompt")
+      assert :ok = ACPSessionStore.put(issue, project_root, "ses-stale", session_scope)
+      assert {:ok, "ses-stale"} = ACPSessionStore.fetch(issue, project_root, session_scope)
+
+      assert :ok = Workspace.cleanup_issue_runtime_cache(issue, Config.settings!())
+
+      refute File.exists?(workspace)
+      assert {:ok, nil} = ACPSessionStore.fetch(issue, project_root, session_scope)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "runtime handoff cache survives the worker process that records it" do
+    issue = %Issue{id: "issue-runtime-cache-worker", identifier: "SYM-RUNTIME-CACHE"}
+    fingerprint = "fingerprint-#{System.unique_integer([:positive])}"
+    parent = self()
+
+    {worker, ref} =
+      spawn_monitor(fn ->
+        :ok = RuntimeCache.record_handoff_fingerprint(nil, issue.id, fingerprint)
+        send(parent, :runtime_cache_recorded)
+      end)
+
+    assert_receive :runtime_cache_recorded
+    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}
+
+    assert RuntimeCache.handoff_fingerprint_seen?(nil, issue.id, fingerprint)
+
+    :ok = RuntimeCache.clear_issue(nil, issue)
+    refute RuntimeCache.handoff_fingerprint_seen?(nil, issue.id, fingerprint)
+  end
+
+  test "runtime cache sweep deletes stale abandoned workspaces and preserves active workspaces" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-runtime-cache-sweep-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      active_workspace = Path.join(workspace_root, "SYM-ACTIVE")
+      abandoned_workspace = Path.join(workspace_root, "SYM-ABANDONED")
+      fresh_workspace = Path.join(workspace_root, "SYM-FRESH")
+
+      Enum.each([active_workspace, abandoned_workspace, fresh_workspace], fn path ->
+        File.mkdir_p!(path)
+        File.write!(Path.join(path, "marker.txt"), Path.basename(path))
+      end)
+
+      old_mtime = {{2024, 1, 1}, {0, 0, 0}}
+      File.touch!(abandoned_workspace, old_mtime)
+      File.touch!(active_workspace, old_mtime)
+
+      assert {:ok, removed} =
+               Workspace.sweep_abandoned_runtime_cache(["SYM-ACTIVE"], Config.settings!(), 60_000)
+
+      assert abandoned_workspace in removed
+      refute File.exists?(abandoned_workspace)
+      assert File.exists?(active_workspace)
+      assert File.exists?(fresh_workspace)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "legacy pulse ledger file is deleted during runtime cache cleanup" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-runtime-cache-ledger-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      File.mkdir_p!(workspace_root)
+      ledger_path = Path.join(workspace_root, "pulse_ledger.json")
+      File.write!(ledger_path, Jason.encode!(%{"suppression_counts" => %{"stale" => 1}}))
+
+      assert :ok = Workspace.remove_legacy_runtime_cache(Config.settings!())
+      refute File.exists?(ledger_path)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "live terminal reconciliation removes workspace, ACP session, and runtime cache" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-runtime-cache-live-terminal-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        tracker_terminal_states: ["Done"]
+      )
+
+      issue = %Issue{
+        id: "issue-live-terminal-cache",
+        identifier: "SYM-LIVE-CACHE",
+        state: "Done"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      File.write!(Path.join(workspace, "artifact.txt"), "stale")
+
+      project_root = File.cwd!()
+      session_scope = ACPSessionStore.prompt_scope("prompt")
+      assert :ok = ACPSessionStore.put(issue, project_root, "ses-live-stale", session_scope)
+      assert :ok = RuntimeCache.record_handoff_fingerprint(nil, issue.id, "fp-live-stale")
+
+      worker_pid =
+        spawn(fn ->
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      worker_ref = Process.monitor(worker_pid)
+
+      state = %Orchestrator.State{
+        running: %{
+          issue.id => %{
+            pid: worker_pid,
+            ref: worker_ref,
+            identifier: issue.identifier,
+            issue: %{issue | state: "In Progress"},
+            started_at: DateTime.utc_now()
+          }
+        },
+        claimed: MapSet.new([issue.id]),
+        blocked: %{},
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        runner_runtime_totals: %{seconds_running: 0}
+      }
+
+      new_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+      refute Map.has_key?(new_state.running, issue.id)
+      refute MapSet.member?(new_state.claimed, issue.id)
+      refute File.exists?(workspace)
+      assert {:ok, nil} = ACPSessionStore.fetch(issue, project_root, session_scope)
+      refute RuntimeCache.handoff_fingerprint_seen?(nil, issue.id, "fp-live-stale")
+    after
+      File.rm_rf(workspace_root)
+    end
   end
 
   test "linear issue helpers" do
@@ -830,22 +1029,34 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     assert Orchestrator.active_issues_blocking_idle_pulse_for_test([owner_input, normal_work]) == [normal_work]
   end
 
-  test "unchanged owner-input pulse suppresses without spawning a worker" do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-owner-input-suppress-ledger-#{System.unique_integer([:positive])}.json"
-      )
+  test "runtime cache GC prunes stale pulse and claim entries while preserving visible and active issue ids" do
+    state = %Orchestrator.State{
+      completed: MapSet.new(["stale-completed", "visible-done"]),
+      claimed: MapSet.new(["stale-claimed", "visible-owner", "running-id", "retry-id", "blocked-id"]),
+      continuation_pulsed: MapSet.new(["stale-done:2026-01-01T00:00:00Z", "visible-done:2026-01-02T00:00:00Z"]),
+      owner_input_pulsed: MapSet.new(["stale-owner:2026-01-01T00:00:00Z", "visible-owner:2026-01-02T00:00:00Z", "running-id:2026-01-02T00:00:00Z"]),
+      running: %{"running-id" => %{}},
+      retry_attempts: %{"retry-id" => %{}},
+      blocked: %{"blocked-id" => %{}}
+    }
 
-    on_exit(fn -> File.rm(path) end)
-    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
+    visible_issues = [
+      %Issue{id: "visible-owner", identifier: "SYM-OWNER", state: "Need Owner Input"},
+      %Issue{id: "visible-done", identifier: "SYM-DONE", state: "Done"}
+    ]
 
-    on_exit(fn ->
-      if Process.alive?(ledger), do: GenServer.stop(ledger)
-    end)
+    pruned = Orchestrator.runtime_cache_gc_for_test(state, visible_issues)
 
+    assert pruned.completed == MapSet.new(["visible-done"])
+    assert pruned.claimed == MapSet.new(["visible-owner", "running-id", "retry-id", "blocked-id"])
+    assert pruned.continuation_pulsed == MapSet.new(["visible-done:2026-01-02T00:00:00Z"])
+
+    assert pruned.owner_input_pulsed ==
+             MapSet.new(["visible-owner:2026-01-02T00:00:00Z", "running-id:2026-01-02T00:00:00Z"])
+  end
+
+  test "unchanged owner-input pulse suppresses from runtime cache without spawning a worker" do
     fingerprint = "owner-unchanged:2026-01-04T00:00:00Z"
-    assert :ok = SymphonyElixir.PulseLedger.record_owner_input(ledger, fingerprint)
 
     issue = %Issue{
       id: "owner-unchanged",
@@ -868,35 +1079,21 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
       claimed: MapSet.new(),
       blocked: %{},
       retry_attempts: %{},
-      owner_input_pulsed: MapSet.new(),
-      pulse_ledger: ledger,
+      owner_input_pulsed: MapSet.new([fingerprint]),
       codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
     }
 
     assert {:none, new_state} = Orchestrator.dispatch_owner_input_pulse_candidate_for_test(issue, state)
     assert new_state.running == %{}
     assert new_state.retry_attempts == %{}
-    assert %{"owner_wait_no_change" => 1} = SymphonyElixir.PulseLedger.suppression_counts(ledger)
+    assert %{"owner_wait_no_change" => 1} = new_state.suppression_counts
   end
 
-  test "owner-input dispatch failure rolls back pending durable fingerprint" do
+  test "owner-input dispatch failure does not mark runtime pulse cache" do
     write_workflow_file!(Workflow.workflow_file_path(),
       worker_ssh_hosts: ["worker-a"],
       worker_max_concurrent_agents_per_host: 1
     )
-
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-owner-input-rollback-ledger-#{System.unique_integer([:positive])}.json"
-      )
-
-    on_exit(fn -> File.rm(path) end)
-    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
-
-    on_exit(fn ->
-      if Process.alive?(ledger), do: GenServer.stop(ledger)
-    end)
 
     issue = %Issue{
       id: "owner-dispatch-fails",
@@ -928,30 +1125,15 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
       blocked: %{},
       retry_attempts: %{},
       owner_input_pulsed: MapSet.new(),
-      pulse_ledger: ledger,
       codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
     }
 
     assert {:none, new_state} = Orchestrator.dispatch_owner_input_pulse_candidate_for_test(issue, state)
     refute Map.has_key?(new_state.running, issue.id)
-    refute SymphonyElixir.PulseLedger.owner_input_processed?(ledger, "owner-dispatch-fails:2026-01-04T00:00:00Z")
-    refute SymphonyElixir.PulseLedger.has_pending?(ledger)
+    refute MapSet.member?(new_state.owner_input_pulsed, "owner-dispatch-fails:2026-01-04T00:00:00Z")
   end
 
   test "full idle pulse ignores Done continuation entirely" do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-done-idle-ledger-#{System.unique_integer([:positive])}.json"
-      )
-
-    on_exit(fn -> File.rm(path) end)
-    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
-
-    on_exit(fn ->
-      if Process.alive?(ledger), do: GenServer.stop(ledger)
-    end)
-
     state = %Orchestrator.State{
       max_concurrent_agents: 1,
       running: %{},
@@ -959,15 +1141,13 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
       blocked: %{},
       retry_attempts: %{},
       owner_input_pulsed: MapSet.new(),
-      pulse_ledger: ledger,
       codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
     }
 
     new_state = Orchestrator.dispatch_idle_pulse_for_test(state, true)
 
     assert new_state.running == %{}
-    assert SymphonyElixir.PulseLedger.suppression_counts(ledger) == %{}
-    refute SymphonyElixir.PulseLedger.done_continuation_processed?(ledger, "done-id:updated")
+    assert new_state.suppression_counts == %{}
   end
 
   test "todo issue with non-terminal blocker is not dispatch-eligible" do
@@ -1376,7 +1556,7 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     refute issue_source =~ "synthetic_kind"
   end
 
-  test "active milestone pointer can be set by stewardship config and persists through ledger restart" do
+  test "active milestone pointer is set only by stewardship config" do
     write_workflow_file!(Workflow.workflow_file_path(),
       stewardship_active_milestone_id: " milestone-configured ",
       stewardship_active_milestone_name: " Configured Milestone "
@@ -1385,26 +1565,10 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     assert Config.settings!().stewardship.active_milestone_id == "milestone-configured"
     assert Config.settings!().stewardship.active_milestone_name == "Configured Milestone"
 
-    path = Path.join(System.tmp_dir!(), "symphony-config-active-milestone-#{System.unique_integer([:positive])}.json")
-    on_exit(fn -> File.rm(path) end)
-
-    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
-    state = %Orchestrator.State{pulse_ledger: ledger, running: %{}, blocked: %{}, retry_attempts: %{}}
+    state = %Orchestrator.State{running: %{}, blocked: %{}, retry_attempts: %{}}
 
     state = Orchestrator.apply_configured_active_milestone_for_test(state)
     assert state.active_project_milestone_id == "milestone-configured"
-    assert %{"milestone_id" => "milestone-configured", "milestone_name" => "Configured Milestone"} = SymphonyElixir.PulseLedger.active_milestone(ledger)
-
-    GenServer.stop(ledger)
-
-    {:ok, restarted_ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
-    on_exit(fn -> if Process.alive?(restarted_ledger), do: GenServer.stop(restarted_ledger) end)
-
-    restarted_state =
-      %Orchestrator.State{pulse_ledger: restarted_ledger}
-      |> Orchestrator.hydrate_active_milestone_for_test()
-
-    assert restarted_state.active_project_milestone_id == "milestone-configured"
   end
 
   test "milestone dispatch gate follows active pointer match and blocks nil pointer" do
@@ -1431,23 +1595,14 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     refute Orchestrator.should_dispatch_issue_for_test(matching_issue, %Orchestrator.State{})
   end
 
-  test "closed configured milestone does not reactivate until owner clears or replaces pointer" do
-    path = Path.join(System.tmp_dir!(), "symphony-closed-config-active-milestone-#{System.unique_integer([:positive])}.json")
-    on_exit(fn -> File.rm(path) end)
-
-    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
-    on_exit(fn -> if Process.alive?(ledger), do: GenServer.stop(ledger) end)
-
-    assert :ok = SymphonyElixir.PulseLedger.record_active_milestone_closure(ledger, %{"milestone_id" => "milestone-closed", "reason" => "all_known_child_issues_terminal"})
-
+  test "configured milestone pointer can be cleared and reselected" do
     write_workflow_file!(Workflow.workflow_file_path(), stewardship_active_milestone_id: "milestone-closed")
 
     closed_state =
-      %Orchestrator.State{pulse_ledger: ledger, running: %{}, blocked: %{}, retry_attempts: %{}}
+      %Orchestrator.State{running: %{}, blocked: %{}, retry_attempts: %{}}
       |> Orchestrator.apply_configured_active_milestone_for_test()
 
-    assert closed_state.active_project_milestone_id == nil
-    assert SymphonyElixir.PulseLedger.active_milestone(ledger) == nil
+    assert closed_state.active_project_milestone_id == "milestone-closed"
 
     write_workflow_file!(Workflow.workflow_file_path(), stewardship_active_milestone_id: "milestone-replacement")
     replacement_state = Orchestrator.apply_configured_active_milestone_for_test(closed_state)
@@ -1460,6 +1615,30 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     write_workflow_file!(Workflow.workflow_file_path(), stewardship_active_milestone_id: "milestone-closed")
     reselected_state = Orchestrator.apply_configured_active_milestone_for_test(cleared_state)
     assert reselected_state.active_project_milestone_id == "milestone-closed"
+  end
+
+  test "runtime closed milestone does not reactivate until owner clears or replaces pointer" do
+    write_workflow_file!(Workflow.workflow_file_path(), stewardship_active_milestone_id: "milestone-closed")
+
+    closed_state =
+      %Orchestrator.State{
+        running: %{},
+        blocked: %{},
+        retry_attempts: %{},
+        closed_project_milestone_ids: MapSet.new(["milestone-closed"])
+      }
+      |> Orchestrator.apply_configured_active_milestone_for_test()
+
+    assert closed_state.active_project_milestone_id == nil
+
+    write_workflow_file!(Workflow.workflow_file_path(), stewardship_active_milestone_id: "milestone-replacement")
+    replacement_state = Orchestrator.apply_configured_active_milestone_for_test(closed_state)
+    assert replacement_state.active_project_milestone_id == "milestone-replacement"
+
+    write_workflow_file!(Workflow.workflow_file_path())
+    cleared_state = Orchestrator.apply_configured_active_milestone_for_test(replacement_state)
+    assert cleared_state.active_project_milestone_id == nil
+    assert cleared_state.closed_project_milestone_ids == MapSet.new()
   end
 
   test "non-full poll does not dispatch project milestone planning issue" do
@@ -1539,7 +1718,7 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
       description: "- acceptance: durable packet before dispatch"
     }
 
-    packet = SymphonyElixir.Steward.ExecutionPacket.build(issue)
+    packet = ExecutionPacket.build(issue)
 
     assert packet["packet_version"] == "symphony:execution-packet:v1"
     assert packet["active_milestone"] == %{"id" => "milestone-current", "name" => "Current"}
@@ -1547,26 +1726,11 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     assert packet["documentation_requirement"] =~ "docs"
     assert "return exact validation commands and outcomes" in packet["handoff_requirements"]
 
-    assert {:ok, prompt} = SymphonyElixir.Steward.ExecutionPacket.prompt(packet)
+    assert {:ok, prompt} = ExecutionPacket.prompt(packet)
     refute prompt =~ ~r/^\s*You are\b/
   end
 
   test "active child work keeps milestone lock without fetching milestone phase or writing suppressions" do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-active-milestone-child-work-#{System.unique_integer([:positive])}.json"
-      )
-
-    on_exit(fn -> File.rm(path) end)
-    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
-
-    on_exit(fn ->
-      if Process.alive?(ledger), do: GenServer.stop(ledger)
-    end)
-
-    assert :ok = SymphonyElixir.PulseLedger.set_active_milestone(ledger, "milestone-current", "Current")
-
     milestone = %{id: "milestone-current", name: "Current", description: "phase_state: todo"}
 
     active_issue = %Issue{
@@ -1579,7 +1743,6 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
 
     state = %Orchestrator.State{
       active_project_milestone_id: "milestone-current",
-      pulse_ledger: ledger,
       running: %{},
       blocked: %{},
       retry_attempts: %{}
@@ -1589,28 +1752,12 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
 
     assert new_state.active_project_milestone_id == "milestone-current"
     refute_received :milestone_fetch_called
-    assert SymphonyElixir.PulseLedger.suppression_counts(ledger) == %{}
+    assert new_state.suppression_counts == %{}
   end
 
   test "open active milestone without child work stays locked without durable suppression churn" do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-active-milestone-open-#{System.unique_integer([:positive])}.json"
-      )
-
-    on_exit(fn -> File.rm(path) end)
-    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
-
-    on_exit(fn ->
-      if Process.alive?(ledger), do: GenServer.stop(ledger)
-    end)
-
-    assert :ok = SymphonyElixir.PulseLedger.set_active_milestone(ledger, "milestone-current", "Current")
-
     state = %Orchestrator.State{
       active_project_milestone_id: "milestone-current",
-      pulse_ledger: ledger,
       running: %{},
       blocked: %{},
       retry_attempts: %{}
@@ -1619,26 +1766,10 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     new_state = Orchestrator.maybe_release_active_project_milestone_for_test(state, [])
 
     assert new_state.active_project_milestone_id == "milestone-current"
-    assert SymphonyElixir.PulseLedger.active_milestone(ledger) != nil
-    assert SymphonyElixir.PulseLedger.suppression_counts(ledger) == %{}
+    assert new_state.suppression_counts == %{}
   end
 
-  test "active milestone exhaustion is derived from terminal child issue states and records closure" do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-active-milestone-closed-#{System.unique_integer([:positive])}.json"
-      )
-
-    on_exit(fn -> File.rm(path) end)
-    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
-
-    on_exit(fn ->
-      if Process.alive?(ledger), do: GenServer.stop(ledger)
-    end)
-
-    assert :ok = SymphonyElixir.PulseLedger.set_active_milestone(ledger, "milestone-current", "Current")
-
+  test "active milestone exhaustion clears runtime closure state" do
     milestone = %{id: "milestone-current", name: "Current", description: "phase_state: todo"}
 
     terminal_issue = %Issue{
@@ -1651,7 +1782,6 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
 
     state = %Orchestrator.State{
       active_project_milestone_id: "milestone-current",
-      pulse_ledger: ledger,
       running: %{},
       blocked: %{},
       retry_attempts: %{}
@@ -1660,29 +1790,11 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     new_state = Orchestrator.maybe_release_active_project_milestone_for_test(state, [terminal_issue])
 
     assert new_state.active_project_milestone_id == nil
-    assert SymphonyElixir.PulseLedger.active_milestone(ledger) == nil
-
-    assert %{"reason" => "all_known_child_issues_terminal", "terminal_issue_ids" => ["issue-terminal"]} =
-             SymphonyElixir.PulseLedger.active_milestone_closure(ledger, "milestone-current")
+    assert MapSet.member?(new_state.closed_project_milestone_ids, "milestone-current")
   end
 
-  test "active milestone closes when poll input has no active child issues but fetched children are terminal" do
+  test "active milestone poll closure records runtime closure state" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
-
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-active-milestone-fetched-terminal-#{System.unique_integer([:positive])}.json"
-      )
-
-    on_exit(fn -> File.rm(path) end)
-    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
-
-    on_exit(fn ->
-      if Process.alive?(ledger), do: GenServer.stop(ledger)
-    end)
-
-    assert :ok = SymphonyElixir.PulseLedger.set_active_milestone(ledger, "milestone-current", "Current")
 
     milestone = %{id: "milestone-current", name: "Current", description: "phase_state: todo"}
 
@@ -1698,7 +1810,6 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
 
     state = %Orchestrator.State{
       active_project_milestone_id: "milestone-current",
-      pulse_ledger: ledger,
       running: %{},
       blocked: %{},
       retry_attempts: %{},
@@ -1708,22 +1819,10 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     new_state = Orchestrator.maybe_release_active_project_milestone_from_poll_for_test(state, [])
 
     assert new_state.active_project_milestone_id == nil
-    assert SymphonyElixir.PulseLedger.active_milestone(ledger) == nil
-
-    assert %{"reason" => "all_known_child_issues_terminal", "terminal_issue_ids" => ["issue-terminal-fetched"]} =
-             SymphonyElixir.PulseLedger.active_milestone_closure(ledger, "milestone-current")
+    assert MapSet.member?(new_state.closed_project_milestone_ids, "milestone-current")
   end
 
   test "non-exhausted active milestone with waiting child work does not release" do
-    path = Path.join(System.tmp_dir!(), "symphony-active-milestone-waiting-#{System.unique_integer([:positive])}.json")
-    on_exit(fn -> File.rm(path) end)
-    {:ok, ledger} = SymphonyElixir.PulseLedger.start_link(file_path: path)
-
-    on_exit(fn ->
-      if Process.alive?(ledger), do: GenServer.stop(ledger)
-    end)
-
-    assert :ok = SymphonyElixir.PulseLedger.set_active_milestone(ledger, "milestone-current", "Current")
     milestone = %{id: "milestone-current", name: "Current", description: "phase_state: todo"}
 
     waiting_issue = %Issue{
@@ -1736,7 +1835,6 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
 
     state = %Orchestrator.State{
       active_project_milestone_id: "milestone-current",
-      pulse_ledger: ledger,
       running: %{},
       blocked: %{},
       retry_attempts: %{}
@@ -1745,21 +1843,6 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     new_state = Orchestrator.maybe_release_active_project_milestone_for_test(state, [waiting_issue])
 
     assert new_state.active_project_milestone_id == "milestone-current"
-    assert SymphonyElixir.PulseLedger.active_milestone(ledger) != nil
-    assert SymphonyElixir.PulseLedger.active_milestone_closure(ledger, "milestone-current") == nil
-  end
-
-  test "orchestrator uses PulseLedger project-context naming contract" do
-    context =
-      SymphonyElixir.ProjectContext.new(%{
-        id: "project-ledger-name",
-        name: "Project ledger name",
-        enabled: true,
-        workflow_path: Workflow.workflow_file_path()
-      })
-
-    assert Orchestrator.pulse_ledger_name_for_test(context) ==
-             SymphonyElixir.PulseLedger.process_name_for_test(project_context: context)
   end
 
   test "missing Linear issue is not privileged during dispatch revalidation" do
@@ -2079,10 +2162,6 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     write_workflow_file!(Workflow.workflow_file_path(), codex_stall_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "codex.stall_timeout_ms"
-
-    write_workflow_file!(Workflow.workflow_file_path(), codex_max_total_tokens: "bad")
-    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.max_total_tokens"
 
     write_workflow_file!(Workflow.workflow_file_path(),
       runner_routes: %{"RCA Required" => "opencode"},

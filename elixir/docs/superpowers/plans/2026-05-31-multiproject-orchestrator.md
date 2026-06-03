@@ -404,7 +404,7 @@ mix test test/symphony_elixir/status_dashboard_snapshot_test.exs
 - OpenCode/Codex runners unless tests expose a context propagation bug.
 - Systemd units.
 
-- [ ] Preserve exact Project Milestone launch gate: first matching `phase_state: todo` line is required; `paused`, `needs-decision`, and unmarked milestones do not dispatch.
+- [x] Replace the legacy `phase_state:*` milestone-description launch gate with the configured `stewardship.active_milestone_id` pointer; milestone descriptions are product context only.
 - [ ] Ensure active/running/retrying/blocked `Need Owner Input` inside a project suppresses milestone discovery for that project.
 - [ ] Ensure owner-input polling focuses on issue/comment updates instead of milestone discovery.
 - [ ] Ensure one project waiting for owner input does not block other projects.

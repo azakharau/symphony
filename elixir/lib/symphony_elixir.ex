@@ -43,6 +43,7 @@ defmodule SymphonyElixir.Application do
       [
         {Phoenix.PubSub, name: SymphonyElixir.PubSub},
         SymphonyElixir.ProjectRegistry,
+        SymphonyElixir.RuntimeCache,
         {DynamicSupervisor, name: SymphonyElixir.ProjectSupervisor.DynamicSupervisor, strategy: :one_for_one},
         SymphonyElixir.RootConfigStore
       ]
@@ -50,6 +51,7 @@ defmodule SymphonyElixir.Application do
       [
         {Phoenix.PubSub, name: SymphonyElixir.PubSub},
         {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
+        SymphonyElixir.RuntimeCache,
         SymphonyElixir.WorkflowStore,
         SymphonyElixir.Orchestrator,
         SymphonyElixir.HttpServer,

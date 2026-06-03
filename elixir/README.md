@@ -84,6 +84,8 @@ Optional flags:
 
 - `--logs-root` tells Symphony to write logs under a different directory (default: `./log`)
 - `--port` also starts the Phoenix observability service (default: disabled)
+- `--projects-config` starts the multiproject root runtime from a YAML project inventory instead
+  of a single `WORKFLOW.md`; see [docs/multiproject_runtime.md](docs/multiproject_runtime.md)
 
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
 Codex session prompt.
@@ -171,6 +173,21 @@ codex:
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+
+## Multiproject runtime
+
+The root runtime can supervise multiple project workers from one `projects.yml` file:
+
+```bash
+./bin/symphony \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails \
+  --projects-config /home/agent/.symphony/config/projects.yml
+```
+
+Do not combine `--projects-config` with a positional `WORKFLOW.md` path. The root config owns the
+daemon inventory and project enablement gates; each project `WORKFLOW.md` remains the authority for
+that project's tracker, prompt, workspace, hooks, runner routes, and validation policy. Use
+[docs/multiproject_runtime.md](docs/multiproject_runtime.md) for the operator migration checklist.
 
 ## Web dashboard
 

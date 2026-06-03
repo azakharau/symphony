@@ -104,7 +104,7 @@ Each service must pass these gates before any owner-approved migration step:
 6. The operator has current read-only evidence for `systemctl list-units`, `systemctl show`, and scoped listening ports.
 7. The operator has a service-specific validation plan for post-change issue processing and log review.
 8. Dirty or unrelated repository changes are identified and preserved.
-9. Multiproject impact is understood and owner-visible: multiproject work remains blocked until migration completes or an owner-visible blocker is recorded.
+9. Multiproject impact is understood and owner-visible. If the service action interacts with the root multiproject runtime, also complete the checklist in [`multiproject_runtime.md`](multiproject_runtime.md).
 
 Readiness is blocked if any gate is unknown. Unknown readiness must be recorded as a risk or blocker, not treated as approval.
 
@@ -165,4 +165,4 @@ No cutover is authorized by this runbook. Until owner approval is explicit for a
 - At the 2026-05-31 inventory time, the active `openai-symphony-symphony.service` used `/home/agent/.symphony/vendor/openai-symphony/elixir/WORKFLOW.md` in its `ExecStart`, while the operator-visible repo path was `/home/agent/proj/symphony/elixir`. As of 2026-06-01, the vendor path is a compatibility symlink back to the physical `/home/agent/proj/symphony` checkout.
 - The scoped port check only proves listener state for `3000` and `4111` through `4115`; it intentionally does not claim anything about other ports.
 - `SYM-5` was retrying because no orchestrator slots were available in the 22:35Z state response, so capacity and scheduling behavior remain a residual risk for migration timing.
-- Multiproject work remains blocked until this migration completes or an owner-visible blocker is recorded.
+- Active-service migration and multiproject root-runtime cutover are separate operator actions. Use [`multiproject_runtime.md`](multiproject_runtime.md) for root-runtime config, validation, and cutover holds.

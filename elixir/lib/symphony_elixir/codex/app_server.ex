@@ -18,6 +18,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata: map(),
           approval_policy: String.t() | map(),
           auto_approve_requests: boolean(),
+          settings: Config.Schema.t(),
           thread_id: String.t(),
           thread_sandbox: String.t(),
           turn_sandbox_policy: map(),
@@ -39,19 +40,21 @@ defmodule SymphonyElixir.Codex.AppServer do
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
+    settings = runtime_settings(opts)
 
-    with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host) do
+    with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host, settings),
+         {:ok, port} <- start_port(expanded_workspace, worker_host, settings) do
       metadata = port_metadata(port, worker_host)
 
-      with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
-           {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
+      with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host, settings),
+           {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies, settings) do
         {:ok,
          %{
            port: port,
            metadata: metadata,
            approval_policy: session_policies.approval_policy,
            auto_approve_requests: session_policies.approval_policy == "never",
+           settings: settings,
            thread_sandbox: session_policies.thread_sandbox,
            turn_sandbox_policy: session_policies.turn_sandbox_policy,
            thread_id: thread_id,
@@ -73,6 +76,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata: metadata,
           approval_policy: approval_policy,
           auto_approve_requests: auto_approve_requests,
+          settings: settings,
           turn_sandbox_policy: turn_sandbox_policy,
           thread_id: thread_id,
           workspace: workspace
@@ -88,7 +92,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         DynamicTool.execute(tool, arguments)
       end)
 
-    case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+    case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy, settings) do
       {:ok, turn_id} ->
         session_id = "#{thread_id}-#{turn_id}"
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
@@ -104,7 +108,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata
         )
 
-        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests, settings) do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
@@ -144,9 +148,13 @@ defmodule SymphonyElixir.Codex.AppServer do
     stop_port(port)
   end
 
-  defp validate_workspace_cwd(workspace, nil) when is_binary(workspace) do
+  defp runtime_settings(opts) do
+    Keyword.get(opts, :settings) || Config.settings!(Keyword.get(opts, :project_context))
+  end
+
+  defp validate_workspace_cwd(workspace, nil, settings) when is_binary(workspace) do
     expanded_workspace = Path.expand(workspace)
-    expanded_root = Path.expand(Config.settings!().workspace.root)
+    expanded_root = Path.expand(settings.workspace.root)
     expanded_root_prefix = expanded_root <> "/"
 
     with {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded_workspace),
@@ -160,7 +168,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         String.starts_with?(canonical_workspace <> "/", canonical_root_prefix) ->
           {:ok, canonical_workspace}
 
-        codex_project_root_cwd?(canonical_workspace) ->
+        codex_project_root_cwd?(canonical_workspace, settings) ->
           {:ok, canonical_workspace}
 
         String.starts_with?(expanded_workspace <> "/", expanded_root_prefix) ->
@@ -175,7 +183,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp validate_workspace_cwd(workspace, worker_host)
+  defp validate_workspace_cwd(workspace, worker_host, _settings)
        when is_binary(workspace) and is_binary(worker_host) do
     cond do
       String.trim(workspace) == "" ->
@@ -189,8 +197,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp codex_project_root_cwd?(canonical_workspace) when is_binary(canonical_workspace) do
-    case Config.settings!().codex.project_root do
+  defp codex_project_root_cwd?(canonical_workspace, settings) when is_binary(canonical_workspace) do
+    case settings.codex.project_root do
       project_root when is_binary(project_root) and project_root != "" ->
         project_root
         |> Path.expand()
@@ -209,7 +217,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, nil) do
+  defp start_port(workspace, nil, settings) do
     executable = System.find_executable("bash")
 
     if is_nil(executable) do
@@ -222,7 +230,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             :binary,
             :exit_status,
             :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(Config.settings!().codex.command)],
+            args: [~c"-lc", String.to_charlist(settings.codex.command)],
             cd: String.to_charlist(workspace),
             line: @port_line_bytes
           ]
@@ -232,15 +240,15 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, worker_host) when is_binary(worker_host) do
-    remote_command = remote_launch_command(workspace)
+  defp start_port(workspace, worker_host, settings) when is_binary(worker_host) do
+    remote_command = remote_launch_command(workspace, settings)
     SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
   end
 
-  defp remote_launch_command(workspace) when is_binary(workspace) do
+  defp remote_launch_command(workspace, settings) when is_binary(workspace) do
     [
       "cd #{shell_escape(workspace)}",
-      "exec #{Config.settings!().codex.command}"
+      "exec #{settings.codex.command}"
     ]
     |> Enum.join(" && ")
   end
@@ -261,7 +269,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp send_initialize(port) do
+  defp send_initialize(port, settings) do
     payload = %{
       "method" => "initialize",
       "id" => @initialize_id,
@@ -279,33 +287,33 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     send_message(port, payload)
 
-    with {:ok, _} <- await_response(port, @initialize_id) do
+    with {:ok, _} <- await_response(port, @initialize_id, settings) do
       send_message(port, %{"method" => "initialized", "params" => %{}})
       :ok
     end
   end
 
-  defp session_policies(workspace, nil) do
-    Config.codex_runtime_settings(workspace)
+  defp session_policies(workspace, nil, settings) do
+    Config.codex_runtime_settings(workspace, settings: settings)
   end
 
-  defp session_policies(workspace, worker_host) when is_binary(worker_host) do
-    Config.codex_runtime_settings(workspace, remote: true)
+  defp session_policies(workspace, worker_host, settings) when is_binary(worker_host) do
+    Config.codex_runtime_settings(workspace, remote: true, settings: settings)
   end
 
-  defp do_start_session(port, workspace, session_policies) do
-    case send_initialize(port) do
-      :ok -> start_thread(port, workspace, session_policies)
+  defp do_start_session(port, workspace, session_policies, settings) do
+    case send_initialize(port, settings) do
+      :ok -> start_thread(port, workspace, session_policies, settings)
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp start_thread(port, workspace, %{thread_id: thread_id} = policies)
+  defp start_thread(port, workspace, %{thread_id: thread_id} = policies, settings)
        when is_binary(thread_id) and thread_id != "" do
-    resume_thread(port, workspace, policies)
+    resume_thread(port, workspace, policies, settings)
   end
 
-  defp start_thread(port, workspace, %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}) do
+  defp start_thread(port, workspace, %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}, settings) do
     send_message(port, %{
       "method" => "thread/start",
       "id" => @thread_start_id,
@@ -317,7 +325,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       }
     })
 
-    case await_response(port, @thread_start_id) do
+    case await_response(port, @thread_start_id, settings) do
       {:ok, %{"thread" => thread_payload}} ->
         case thread_payload do
           %{"id" => thread_id} -> {:ok, thread_id}
@@ -329,11 +337,16 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp resume_thread(port, workspace, %{
-         approval_policy: approval_policy,
-         thread_id: thread_id,
-         thread_sandbox: thread_sandbox
-       }) do
+  defp resume_thread(
+         port,
+         workspace,
+         %{
+           approval_policy: approval_policy,
+           thread_id: thread_id,
+           thread_sandbox: thread_sandbox
+         },
+         settings
+       ) do
     send_message(port, %{
       "method" => "thread/resume",
       "id" => @thread_start_id,
@@ -346,7 +359,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       }
     })
 
-    case await_response(port, @thread_start_id) do
+    case await_response(port, @thread_start_id, settings) do
       {:ok, %{"thread" => thread_payload}} ->
         case thread_payload do
           %{"id" => resumed_thread_id} -> {:ok, resumed_thread_id}
@@ -358,7 +371,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+  defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy, settings) do
     send_message(port, %{
       "method" => "turn/start",
       "id" => @turn_start_id,
@@ -377,17 +390,17 @@ defmodule SymphonyElixir.Codex.AppServer do
       }
     })
 
-    case await_response(port, @turn_start_id) do
+    case await_response(port, @turn_start_id, settings) do
       {:ok, %{"turn" => %{"id" => turn_id}}} -> {:ok, turn_id}
       other -> other
     end
   end
 
-  defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+  defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests, settings) do
     receive_loop(
       port,
       on_message,
-      Config.settings!().codex.turn_timeout_ms,
+      settings.codex.turn_timeout_ms,
       "",
       tool_executor,
       auto_approve_requests
@@ -976,8 +989,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     String.starts_with?(normalized_label, "approve") or String.starts_with?(normalized_label, "allow")
   end
 
-  defp await_response(port, request_id) do
-    with_timeout_response(port, request_id, Config.settings!().codex.read_timeout_ms, "")
+  defp await_response(port, request_id, settings) do
+    with_timeout_response(port, request_id, settings.codex.read_timeout_ms, "")
   end
 
   defp with_timeout_response(port, request_id, timeout_ms, pending_line) do

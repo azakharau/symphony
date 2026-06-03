@@ -10,7 +10,8 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
           {:ok, Runner.result()} | {:error, term()}
   def run(workspace, %Issue{} = issue, prompt, opts \\ [])
       when is_binary(workspace) and is_binary(prompt) do
-    opencode = Config.settings!().opencode
+    settings = settings_from_opts(opts)
+    opencode = settings.opencode
     command = Keyword.get(opts, :command, opencode.command)
     args = Keyword.get(opts, :args, opencode.args || ["acp"])
     client_module = Keyword.get(opts, :client, ACPClient)
@@ -39,7 +40,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
                  initialize_params(opencode),
                  opencode.read_timeout_ms
                ),
-             {:ok, existing_session_id} <- fetch_stored_session_id(session_store, issue, cwd, session_scope),
+             {:ok, existing_session_id} <- fetch_stored_session_id(session_store, issue, cwd, session_scope, settings),
              {:ok, session_result} <-
                open_session(client_module, client, existing_session_id, issue, cwd, title, opencode) do
           session_id = session_id(session_result) || existing_session_id
@@ -50,7 +51,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
               {:error, _reason} -> {:error, {:need_owner_input, {:opencode_acp_session_attached, session_id}}}
             end
           else
-            with :ok <- persist_new_session_id(session_store, issue, cwd, session_id, session_scope) do
+            with :ok <- persist_new_session_id(session_store, issue, cwd, session_id, session_scope, settings) do
               emit_session_started(on_event, session_id, [command | args], cwd, opencode)
 
               run_prompt(
@@ -398,23 +399,46 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
 
   defp opencode_project_root(_project_root, workspace), do: workspace
 
-  defp fetch_stored_session_id(session_store, issue, cwd, session_scope) do
-    case session_store.fetch(issue, cwd, session_scope) do
+  defp settings_from_opts(opts) do
+    case Keyword.get(opts, :settings) do
+      nil -> Config.settings!(Keyword.get(opts, :project_context))
+      settings -> settings
+    end
+  end
+
+  defp fetch_stored_session_id(session_store, issue, cwd, session_scope, settings) do
+    case session_store_fetch(session_store, issue, cwd, session_scope, settings) do
       {:ok, session_id} -> {:ok, session_id}
       {:error, reason} -> {:error, {:opencode_acp_session_store_failed, reason}}
     end
   end
 
-  defp persist_new_session_id(_session_store, _issue, _cwd, nil, _session_scope),
+  defp persist_new_session_id(_session_store, _issue, _cwd, nil, _session_scope, _settings),
     do: {:error, {:opencode_acp_session_store_failed, :missing_session_id}}
 
-  defp persist_new_session_id(_session_store, _issue, _cwd, "", _session_scope),
+  defp persist_new_session_id(_session_store, _issue, _cwd, "", _session_scope, _settings),
     do: {:error, {:opencode_acp_session_store_failed, :missing_session_id}}
 
-  defp persist_new_session_id(session_store, issue, cwd, session_id, session_scope) do
-    case session_store.put(issue, cwd, session_id, session_scope) do
+  defp persist_new_session_id(session_store, issue, cwd, session_id, session_scope, settings) do
+    case session_store_put(session_store, issue, cwd, session_id, session_scope, settings) do
       :ok -> :ok
       {:error, reason} -> {:error, {:opencode_acp_session_store_failed, reason}}
+    end
+  end
+
+  defp session_store_fetch(session_store, issue, cwd, session_scope, settings) do
+    if function_exported?(session_store, :fetch, 4) do
+      session_store.fetch(issue, cwd, session_scope, settings: settings)
+    else
+      session_store.fetch(issue, cwd, session_scope)
+    end
+  end
+
+  defp session_store_put(session_store, issue, cwd, session_id, session_scope, settings) do
+    if function_exported?(session_store, :put, 5) do
+      session_store.put(issue, cwd, session_id, session_scope, settings: settings)
+    else
+      session_store.put(issue, cwd, session_id, session_scope)
     end
   end
 

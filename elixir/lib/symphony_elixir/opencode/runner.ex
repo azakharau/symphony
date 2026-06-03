@@ -25,7 +25,8 @@ defmodule SymphonyElixir.OpenCode.Runner do
   def run(workspace, %Issue{} = issue, prompt_or_packet, opts \\ [])
       when is_binary(workspace) do
     packet = normalize_task_packet(prompt_or_packet)
-    opencode = Config.settings!().opencode
+    settings = Keyword.get(opts, :settings) || Config.settings!(Keyword.get(opts, :project_context))
+    opencode = settings.opencode
     command = Keyword.get(opts, :command, opencode.command)
     runner = Keyword.get(opts, :runner, &System.cmd/3)
     execution_dir = opencode_project_root(opencode.project_root, workspace)
@@ -39,6 +40,7 @@ defmodule SymphonyElixir.OpenCode.Runner do
         packet: packet,
         opts: opts,
         opencode: opencode,
+        settings: settings,
         command: command,
         runner: runner,
         execution_dir: execution_dir,
@@ -123,6 +125,7 @@ defmodule SymphonyElixir.OpenCode.Runner do
              command: context.command,
              args: args,
              cwd: context.execution_dir,
+             settings: context.settings,
              title: title,
              on_event: context.on_event
            )
@@ -200,7 +203,8 @@ defmodule SymphonyElixir.OpenCode.Runner do
       context.args,
       context.packet.prompt,
       context.execution_dir,
-      context.session_id
+      context.session_id,
+      context.settings
     )
   end
 
@@ -211,7 +215,8 @@ defmodule SymphonyElixir.OpenCode.Runner do
       context.args,
       incomplete_session_continuation_prompt(),
       context.execution_dir,
-      context.session_id
+      context.session_id,
+      context.settings
     )
   end
 
@@ -733,8 +738,8 @@ defmodule SymphonyElixir.OpenCode.Runner do
     "'" <> String.replace(value, "'", "''") <> "'"
   end
 
-  defp run_opencode_command(runner, command, args, prompt, execution_dir, _session_id) do
-    prompt_dir = opencode_prompt_dir(execution_dir)
+  defp run_opencode_command(runner, command, args, prompt, execution_dir, _session_id, settings) do
+    prompt_dir = opencode_prompt_dir(execution_dir, settings)
 
     prompt_path =
       Path.join(
@@ -766,9 +771,9 @@ defmodule SymphonyElixir.OpenCode.Runner do
     end
   end
 
-  defp opencode_prompt_dir(execution_dir) do
+  defp opencode_prompt_dir(execution_dir, settings) do
     execution_dir
-    |> prompt_dir_candidates()
+    |> prompt_dir_candidates(settings)
     |> Enum.find(&(not temp_path?(&1)))
     |> case do
       nil -> user_state_prompt_dir()
@@ -776,10 +781,10 @@ defmodule SymphonyElixir.OpenCode.Runner do
     end
   end
 
-  defp prompt_dir_candidates(execution_dir) do
+  defp prompt_dir_candidates(execution_dir, settings) do
     [
       scoped_prompt_dir(execution_dir),
-      scoped_prompt_dir(Config.settings!().opencode.project_root),
+      scoped_prompt_dir(settings.opencode.project_root),
       user_state_prompt_dir()
     ]
     |> Enum.reject(&is_nil/1)

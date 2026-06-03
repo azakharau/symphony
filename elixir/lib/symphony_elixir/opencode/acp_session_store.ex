@@ -5,9 +5,10 @@ defmodule SymphonyElixir.OpenCode.ACPSessionStore do
 
   @file_name "opencode_acp_sessions.json"
 
-  @spec path() :: Path.t()
-  def path do
-    Path.join([Config.settings!().workspace.root, ".symphony", @file_name])
+  @spec path(keyword()) :: Path.t()
+  def path(opts \\ []) do
+    settings = Keyword.get(opts, :settings) || Config.settings!(Keyword.get(opts, :project_context))
+    Path.join([settings.workspace.root, ".symphony", @file_name])
   end
 
   @spec fetch(Issue.t(), Path.t()) :: {:ok, String.t() | nil} | {:error, term()}
@@ -17,8 +18,13 @@ defmodule SymphonyElixir.OpenCode.ACPSessionStore do
 
   @spec fetch(Issue.t(), Path.t(), String.t() | nil) :: {:ok, String.t() | nil} | {:error, term()}
   def fetch(%Issue{} = issue, project_root, session_scope) when is_binary(project_root) do
+    fetch(issue, project_root, session_scope, [])
+  end
+
+  @spec fetch(Issue.t(), Path.t(), String.t() | nil, keyword()) :: {:ok, String.t() | nil} | {:error, term()}
+  def fetch(%Issue{} = issue, project_root, session_scope, opts) when is_binary(project_root) and is_list(opts) do
     with {:ok, key} <- session_key(issue, project_root, session_scope),
-         {:ok, sessions} <- read_sessions() do
+         {:ok, sessions} <- read_sessions(opts) do
       case Map.get(sessions, key) do
         %{"session_id" => session_id} when is_binary(session_id) and session_id != "" ->
           {:ok, session_id}
@@ -40,14 +46,22 @@ defmodule SymphonyElixir.OpenCode.ACPSessionStore do
   @spec put(Issue.t(), Path.t(), String.t(), String.t() | nil) :: :ok | {:error, term()}
   def put(%Issue{} = issue, project_root, session_id, session_scope)
       when is_binary(project_root) and is_binary(session_id) and session_id != "" do
-    with {:ok, key} <- session_key(issue, project_root, session_scope),
-         {:ok, canonical_root} <- PathSafety.canonicalize(project_root),
-         {:ok, sessions} <- read_sessions() do
-      write_sessions(Map.put(sessions, key, session_entry(issue, canonical_root, session_id, session_scope)))
-    end
+    put(issue, project_root, session_id, session_scope, [])
   end
 
   def put(_issue, _project_root, _session_id, _session_scope), do: :ok
+
+  @spec put(Issue.t(), Path.t(), String.t(), String.t() | nil, keyword()) :: :ok | {:error, term()}
+  def put(%Issue{} = issue, project_root, session_id, session_scope, opts)
+      when is_binary(project_root) and is_binary(session_id) and session_id != "" and is_list(opts) do
+    with {:ok, key} <- session_key(issue, project_root, session_scope),
+         {:ok, canonical_root} <- PathSafety.canonicalize(project_root),
+         {:ok, sessions} <- read_sessions(opts) do
+      write_sessions(Map.put(sessions, key, session_entry(issue, canonical_root, session_id, session_scope)), opts)
+    end
+  end
+
+  def put(_issue, _project_root, _session_id, _session_scope, _opts), do: :ok
 
   @spec prompt_scope(String.t()) :: String.t()
   def prompt_scope(prompt) when is_binary(prompt) do
@@ -98,15 +112,17 @@ defmodule SymphonyElixir.OpenCode.ACPSessionStore do
     }
   end
 
-  defp read_sessions do
-    case File.read(path()) do
+  defp read_sessions(opts) do
+    store_path = path(opts)
+
+    case File.read(store_path) do
       {:ok, content} ->
         case Jason.decode(content) do
           {:ok, sessions} when is_map(sessions) ->
             {:ok, sessions}
 
           {:ok, _other} ->
-            {:error, {:opencode_acp_session_store_invalid, path()}}
+            {:error, {:opencode_acp_session_store_invalid, store_path}}
 
           {:error, reason} ->
             {:error, {:opencode_acp_session_store_decode_failed, Exception.message(reason)}}
@@ -120,8 +136,8 @@ defmodule SymphonyElixir.OpenCode.ACPSessionStore do
     end
   end
 
-  defp write_sessions(sessions) when is_map(sessions) do
-    store_path = path()
+  defp write_sessions(sessions, opts) when is_map(sessions) do
+    store_path = path(opts)
     tmp_path = store_path <> ".tmp"
 
     with :ok <- File.mkdir_p(Path.dirname(store_path)),

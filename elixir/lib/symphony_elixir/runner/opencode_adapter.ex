@@ -16,6 +16,8 @@ defmodule SymphonyElixir.Runner.OpenCodeAdapter do
       |> Keyword.take([:command, :runner, :session_lister, :session_result_reader])
       |> Keyword.put(:on_event, emit_update)
       |> Keyword.put(:worker_host, Map.get(context, :worker_host))
+      |> Keyword.put(:settings, Map.get(context, :settings))
+      |> Keyword.put(:project_context, Map.get(context, :project_context))
 
     OpenCodeRunner.run(workspace, issue, task_packet, runner_opts)
   end

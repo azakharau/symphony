@@ -3,8 +3,9 @@ defmodule SymphonyElixir.Config do
   Runtime configuration loaded from `WORKFLOW.md`.
   """
 
-  alias SymphonyElixir.{ProjectContext, ProjectRegistry}
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.ProjectContext
+  alias SymphonyElixir.ProjectRegistry
   alias SymphonyElixir.Workflow
   alias SymphonyElixir.WorkflowStore
 
@@ -175,20 +176,25 @@ defmodule SymphonyElixir.Config do
   @spec codex_runtime_settings(Path.t() | nil, keyword()) ::
           {:ok, codex_runtime_settings()} | {:error, term()}
   def codex_runtime_settings(workspace \\ nil, opts \\ []) do
-    with {:ok, settings} <- settings() do
-      with {:ok, turn_sandbox_policy} <-
-             Schema.resolve_runtime_turn_sandbox_policy(settings, workspace, opts) do
-        {:ok,
-         %{
-           approval_policy: settings.codex.approval_policy,
-           project_root: settings.codex.project_root,
-           thread_id: settings.codex.thread_id,
-           thread_sandbox: settings.codex.thread_sandbox,
-           turn_sandbox_policy: turn_sandbox_policy
-         }}
-      end
+    settings = Keyword.get(opts, :settings)
+
+    with {:ok, settings} <- normalize_runtime_settings(settings),
+         {:ok, turn_sandbox_policy} <-
+           Schema.resolve_runtime_turn_sandbox_policy(settings, workspace, opts) do
+      {:ok,
+       %{
+         approval_policy: settings.codex.approval_policy,
+         project_root: settings.codex.project_root,
+         thread_id: settings.codex.thread_id,
+         thread_sandbox: settings.codex.thread_sandbox,
+         turn_sandbox_policy: turn_sandbox_policy
+       }}
     end
   end
+
+  defp normalize_runtime_settings(%Schema{} = settings), do: {:ok, settings}
+  defp normalize_runtime_settings(nil), do: settings()
+  defp normalize_runtime_settings(other), do: {:error, {:invalid_runtime_settings, other}}
 
   defp validate_semantics(settings) do
     cond do

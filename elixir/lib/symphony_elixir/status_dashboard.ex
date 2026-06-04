@@ -1198,9 +1198,16 @@ defmodule SymphonyElixir.StatusDashboard do
   @spec humanize_codex_message(term()) :: String.t()
   def humanize_codex_message(nil), do: "no runner message yet"
 
-  def humanize_codex_message(%{event: event} = message) when event in @runner_status_events do
-    (humanize_runner_event(event, message) || humanize_codex_payload(message))
-    |> truncate(140)
+  for runner_event <- @runner_status_events do
+    def humanize_codex_message(%{event: unquote(runner_event)} = message) do
+      message
+      |> humanize_runner_event()
+      |> truncate(140)
+    end
+  end
+
+  defp humanize_runner_event(%{event: event} = message) do
+    humanize_runner_event(event, message)
   end
 
   def humanize_codex_message(%{event: event, message: message}) do
@@ -1310,7 +1317,6 @@ defmodule SymphonyElixir.StatusDashboard do
   defp humanize_runner_event(:exit_failed, message), do: "runner exit failed: #{format_reason(map_value(message, ["failure", :failure]) || message)}"
   defp humanize_runner_event(:malformed_task_prompt_blocked, message), do: "runner policy blocked: #{format_reason(map_value(message, ["failure", :failure]) || message)}"
   defp humanize_runner_event(:loop_breaker_blocked, message), do: "runner policy blocked: #{format_reason(map_value(message, ["failure", :failure]) || message)}"
-  defp humanize_runner_event(_event, _message), do: nil
 
   defp runner_command_label(command) when is_list(command) do
     command

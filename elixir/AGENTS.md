@@ -6,7 +6,7 @@ This directory contains the Elixir agent orchestration service that polls Linear
 
 - Elixir: `1.19.x` (OTP 28) via `mise`.
 - Install deps: `mix setup`.
-- Main quality gate: `make all` (format check, lint, coverage, dialyzer).
+- Main quality gate: `make all` (format check, lint, coverage baseline, dialyzer).
 
 
 ## Codebase-Specific Conventions
@@ -31,6 +31,9 @@ Run targeted tests while iterating, then run full gates before handoff.
 ```bash
 make all
 ```
+
+Coverage is enforced by the baseline threshold in `mix.exs`. Do not lower that
+threshold to hide a regression; raise it only with matching coverage work.
 
 ## Required Rules
 

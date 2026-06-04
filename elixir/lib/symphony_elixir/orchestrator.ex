@@ -1418,8 +1418,6 @@ defmodule SymphonyElixir.Orchestrator do
     state_slots_available?(issue, %State{running: running})
   end
 
-  defp state_slots_available?(_issue, _running), do: false
-
   defp running_issue_count_for_state(running, issue_state) when is_map(running) do
     normalized_state = normalize_issue_state(issue_state)
 
@@ -1475,8 +1473,6 @@ defmodule SymphonyElixir.Orchestrator do
        ) do
     maybe_close_exhausted_active_project_milestone(state, issues, active_states, terminal_states)
   end
-
-  defp maybe_release_active_project_milestone(state, _issues, _active_states, _terminal_states), do: state
 
   defp maybe_release_active_project_milestone_from_poll(
          %State{active_project_milestone_id: nil} = state,

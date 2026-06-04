@@ -158,9 +158,11 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
   end
 
   defp collect_prompt_result(task, context, events, end_turn?) do
+    task_ref = task.ref
+
     receive do
-      {ref, {:ok, result}} when ref == task.ref ->
-        Process.demonitor(task.ref, [:flush])
+      {^task_ref, {:ok, result}} ->
+        demonitor_task(task)
 
         cond do
           user_input_required?(events) ->
@@ -193,16 +195,16 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
             {:error, {:opencode_acp_incomplete, result}}
         end
 
-      {ref, {:error, :timeout}} when ref == task.ref ->
-        Process.demonitor(task.ref, [:flush])
+      {^task_ref, {:error, :timeout}} ->
+        demonitor_task(task)
         maybe_cancel(context.client_module, context.client, context.session_id, context.opencode)
         {:error, {:opencode_timeout, context.opencode.timeout_ms}}
 
-      {ref, {:error, reason}} when ref == task.ref ->
-        Process.demonitor(task.ref, [:flush])
+      {^task_ref, {:error, reason}} ->
+        demonitor_task(task)
         {:error, reason}
 
-      {:DOWN, ref, :process, _pid, reason} when ref == task.ref ->
+      {:DOWN, ^task_ref, :process, _pid, reason} ->
         {:error, {:opencode_acp_prompt_failed, reason}}
 
       {:acp_notification, method, params} ->
@@ -224,6 +226,11 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
 
   defp stall_timeout(0), do: :infinity
   defp stall_timeout(timeout_ms), do: timeout_ms
+
+  @dialyzer {:no_opaque, demonitor_task: 1}
+  defp demonitor_task(%Task{ref: ref}) do
+    Process.demonitor(ref, [:flush])
+  end
 
   defp completed_session_result(session_result_reader, cwd, session_id, command, opencode)
        when is_function(session_result_reader, 2) and is_binary(session_id) and session_id != "" do

@@ -116,7 +116,8 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @spec create_comment(String.t(), String.t(), term()) :: :ok | {:error, term()}
   def create_comment(issue_id, body, context) when is_binary(issue_id) and is_binary(body) do
-    with {:ok, response} <- client_module().graphql(@create_comment_mutation, %{issueId: issue_id, body: body}, context: context),
+    with {:ok, response} <-
+           client_module().graphql(@create_comment_mutation, %{issueId: issue_id, body: body}, context: context),
          true <- get_in(response, ["data", "commentCreate", "success"]) == true do
       :ok
     else

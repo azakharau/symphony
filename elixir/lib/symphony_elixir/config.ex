@@ -100,6 +100,8 @@ defmodule SymphonyElixir.Config do
     )
   end
 
+  def max_concurrent_agents_for_state(_state_name), do: settings!().agent.max_concurrent_agents
+
   @spec max_concurrent_agents_for_state(term(), ProjectContext.t() | GenServer.server() | nil) :: pos_integer()
   def max_concurrent_agents_for_state(state_name, context_or_store) when is_binary(state_name) do
     config = settings!(context_or_store)
@@ -114,8 +116,6 @@ defmodule SymphonyElixir.Config do
   def max_concurrent_agents_for_state(_state_name, context_or_store) do
     settings!(context_or_store).agent.max_concurrent_agents
   end
-
-  def max_concurrent_agents_for_state(_state_name), do: settings!().agent.max_concurrent_agents
 
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do

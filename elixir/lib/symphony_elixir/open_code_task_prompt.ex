@@ -3,6 +3,8 @@ defmodule SymphonyElixir.OpenCode.TaskPrompt do
   Extracts the Codex architect-authored task packet that Symphony may hand to OpenCode.
   """
 
+  alias SymphonyElixir.Steward.ExecutionPacket
+
   defmodule Packet do
     @moduledoc false
     defstruct [:prompt, :slice_id, :fingerprint]
@@ -121,7 +123,7 @@ defmodule SymphonyElixir.OpenCode.TaskPrompt do
   end
 
   defp reject_forbidden_preamble(prompt) when is_binary(prompt) do
-    if SymphonyElixir.Steward.ExecutionPacket.forbidden_preamble?(prompt) do
+    if ExecutionPacket.forbidden_preamble?(prompt) do
       {:error, :opencode_task_prompt_forbidden_role_preamble}
     else
       :ok

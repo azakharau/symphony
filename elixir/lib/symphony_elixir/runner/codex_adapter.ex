@@ -47,21 +47,24 @@ defmodule SymphonyElixir.Runner.CodexAdapter do
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host, settings, project_context) do
     max_turns = Keyword.get(opts, :max_turns, settings.agent.max_turns)
-    issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, fn ids -> Tracker.fetch_issue_states_by_ids(ids, project_context) end)
-    codex_workspace = codex_project_root(workspace, settings)
 
-    with {:ok, session} <- AppServer.start_session(codex_workspace, worker_host: worker_host) do
+    issue_state_fetcher =
+      Keyword.get(opts, :issue_state_fetcher, fn ids -> Tracker.fetch_issue_states_by_ids(ids, project_context) end)
+
+    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
       try do
         do_run_codex_turns(
-          session,
-          codex_workspace,
+          %{
+            session: session,
+            workspace: workspace,
+            codex_update_recipient: codex_update_recipient,
+            opts: opts,
+            issue_state_fetcher: issue_state_fetcher,
+            max_turns: max_turns,
+            settings: settings
+          },
           issue,
-          codex_update_recipient,
-          opts,
-          issue_state_fetcher,
-          1,
-          max_turns,
-          settings
+          1
         )
       after
         AppServer.stop_session(session)
@@ -69,47 +72,44 @@ defmodule SymphonyElixir.Runner.CodexAdapter do
     end
   end
 
-  defp codex_project_root(default_workspace, settings) do
-    case settings.codex.project_root do
-      project_root when is_binary(project_root) and project_root != "" -> project_root
-      _ -> default_workspace
-    end
-  end
-
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns, settings) do
-    prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+  defp do_run_codex_turns(context, issue, turn_number) do
+    prompt = build_turn_prompt(issue, context.opts, turn_number, context.max_turns)
 
     with {:ok, turn_session} <-
            AppServer.run_turn(
-             app_session,
+             context.session,
              prompt,
              issue,
-             on_message: codex_message_handler(codex_update_recipient, issue)
+             on_message: codex_message_handler(context.codex_update_recipient, issue)
            ) do
-      Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
+      Logger.info(
+        "Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} " <>
+          "workspace=#{context.workspace} turn=#{turn_number}/#{context.max_turns}"
+      )
 
-      case continue_with_issue?(issue, issue_state_fetcher, settings) do
-        {:continue, refreshed_issue} when turn_number < max_turns ->
-          Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
-
-          do_run_codex_turns(
-            app_session,
-            workspace,
-            refreshed_issue,
-            codex_update_recipient,
-            opts,
-            issue_state_fetcher,
-            turn_number + 1,
-            max_turns,
-            settings
+      case continue_with_issue?(issue, context.issue_state_fetcher, context.settings) do
+        {:continue, refreshed_issue} when turn_number < context.max_turns ->
+          Logger.info(
+            "Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion " <>
+              "turn=#{turn_number}/#{context.max_turns}"
           )
 
+          do_run_codex_turns(context, refreshed_issue, turn_number + 1)
+
         {:continue, refreshed_issue} ->
-          Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+          Logger.info(
+            "Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; " <>
+              "returning control to orchestrator"
+          )
+
           :ok
 
         {:handoff, refreshed_issue, runner_kind} ->
-          Logger.info("Stopping Codex run for #{issue_context(refreshed_issue)} because refreshed issue now routes to #{runner_kind}")
+          Logger.info(
+            "Stopping Codex run for #{issue_context(refreshed_issue)} because refreshed issue now routes to " <>
+              "#{runner_kind}"
+          )
+
           :ok
 
         {:done, _refreshed_issue} ->

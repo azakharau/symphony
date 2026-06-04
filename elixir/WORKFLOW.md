@@ -15,7 +15,7 @@ tracker:
     - Duplicate
 polling:
   interval_ms: 30000
-  full_interval_ms: 60000
+  full_interval_ms: 30000
   fast_states:
     - Todo
     - "Need Owner Input"
@@ -64,14 +64,12 @@ process_policy:
   rca_required_state: "RCA Required"
   max_rejections_per_slice: 2
 stewardship:
-  active_milestone_id: null
-  active_milestone_name: null
+  active_milestone_id: "0b8b5a7e-d9a6-47df-a824-435cce359cb2"
+  active_milestone_name: "01. Multiproject runtime foundation"
 codex:
   command: /home/agent/.symphony/bin/codex-ws-stdio-proxy
-  project_root: /home/agent/proj/symphony
   read_timeout_ms: 10800000
   turn_timeout_ms: 10800000
-  max_total_tokens: 200000
   approval_policy: never
   thread_sandbox: danger-full-access
   turn_sandbox_policy:
@@ -98,9 +96,9 @@ Role boundary:
 
 Active milestone stewardship:
 
-- The CTO/owner selects exactly one active milestone pointer for this project by editing `stewardship.active_milestone_id` in this file; `stewardship.active_milestone_name` is optional display/ledger metadata.
+- The CTO/owner selects exactly one active milestone pointer for this project by editing `stewardship.active_milestone_id` in this file; `stewardship.active_milestone_name` is optional display metadata.
 - Work only issues that belong to the active milestone. If there is no active pointer, do not dispatch milestone work.
-- When all known child issues for the active milestone are terminal, Symphony clears the runtime and PulseLedger active pointer and waits for the CTO/owner to clear or replace the configured pointer before dispatching more milestone work.
+- When all known child issues for the active milestone are terminal, Symphony clears the runtime active pointer and records the closure in the in-memory runtime cache. It waits for the CTO/owner to clear or replace the configured pointer before dispatching more milestone work.
 - Milestone descriptions are product context only; never parse them as runtime state.
 - `phase_state:*` text has no runtime effect and must not gate dispatch.
 - Do not scan, rank, promote, or synthesize the next milestone. After active milestone closure, wait for the CTO/owner to set or replace the active pointer.

@@ -1438,52 +1438,8 @@ defmodule SymphonyElixir.StatusDashboard do
   defp humanize_codex_method("turn/cancelled", _payload), do: "turn cancelled"
 
   defp humanize_codex_method("session/update", payload) do
-    params =
-      map_path(payload, ["params"]) ||
-        map_path(payload, [:params]) ||
-        %{}
-
-    type = map_value(params, ["type", :type])
-
-    case type do
-      "agent_text" ->
-        text = map_value(params, ["text", :text, "message", :message])
-
-        if is_binary(text) and String.trim(text) != "" do
-          "agent message streaming: #{inline_text(text)}"
-        else
-          "agent message streaming"
-        end
-
-      "tool_plan" ->
-        tool = map_value(params, ["tool", :tool, "name", :name])
-
-        if is_binary(tool) and String.trim(tool) != "" do
-          "tool plan updated (#{tool})"
-        else
-          "tool plan updated"
-        end
-
-      "usage" ->
-        usage = map_value(params, ["usage", :usage])
-
-        case format_usage_counts(usage) do
-          nil -> "session usage updated"
-          usage_text -> "session usage updated (#{usage_text})"
-        end
-
-      type when type in ["end_turn", "stop"] ->
-        "turn completed (#{type})"
-
-      type when type in ["user_input_required", "permission"] ->
-        "turn blocked: waiting for user input"
-
-      type when is_binary(type) and type != "" ->
-        "session update (#{type})"
-
-      _type ->
-        "session update"
-    end
+    params = session_update_params(payload)
+    params |> map_value(["type", :type]) |> humanize_session_update(params)
   end
 
   defp humanize_codex_method("turn/diff/updated", payload) do
@@ -1634,6 +1590,55 @@ defmodule SymphonyElixir.StatusDashboard do
       method
     end
   end
+
+  defp session_update_params(payload) do
+    map_path(payload, ["params"]) ||
+      map_path(payload, [:params]) ||
+      %{}
+  end
+
+  defp humanize_session_update("agent_text", params) do
+    text = map_value(params, ["text", :text, "message", :message])
+
+    if is_binary(text) and String.trim(text) != "" do
+      "agent message streaming: #{inline_text(text)}"
+    else
+      "agent message streaming"
+    end
+  end
+
+  defp humanize_session_update("tool_plan", params) do
+    tool = map_value(params, ["tool", :tool, "name", :name])
+
+    if is_binary(tool) and String.trim(tool) != "" do
+      "tool plan updated (#{tool})"
+    else
+      "tool plan updated"
+    end
+  end
+
+  defp humanize_session_update("usage", params) do
+    usage = map_value(params, ["usage", :usage])
+
+    case format_usage_counts(usage) do
+      nil -> "session usage updated"
+      usage_text -> "session usage updated (#{usage_text})"
+    end
+  end
+
+  defp humanize_session_update(type, _params) when type in ["end_turn", "stop"] do
+    "turn completed (#{type})"
+  end
+
+  defp humanize_session_update(type, _params) when type in ["user_input_required", "permission"] do
+    "turn blocked: waiting for user input"
+  end
+
+  defp humanize_session_update(type, _params) when is_binary(type) and type != "" do
+    "session update (#{type})"
+  end
+
+  defp humanize_session_update(_type, _params), do: "session update"
 
   defp humanize_dynamic_tool_event(base, payload) do
     case dynamic_tool_name(payload) do

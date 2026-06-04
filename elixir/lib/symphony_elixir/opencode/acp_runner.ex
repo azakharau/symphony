@@ -14,6 +14,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
     opencode = settings.opencode
     command = Keyword.get(opts, :command, opencode.command)
     args = Keyword.get(opts, :args, opencode.args || ["acp"])
+    full_command = [command | args]
     client_module = Keyword.get(opts, :client, ACPClient)
     session_store = Keyword.get(opts, :session_store, ACPSessionStore)
     session_result_reader = Keyword.get(opts, :session_result_reader, &Runner.read_completed_session_result/2)
@@ -46,25 +47,27 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
           session_id = session_id(session_result) || existing_session_id
 
           if resumed_session?(session_result) do
-            case completed_session_result(session_result_reader, cwd, session_id, [command | args], opencode) do
+            case completed_session_result(session_result_reader, cwd, session_id, full_command, opencode) do
               {:ok, result} -> {:ok, result}
               {:error, _reason} -> {:error, {:need_owner_input, {:opencode_acp_session_attached, session_id}}}
             end
           else
             with :ok <- persist_new_session_id(session_store, issue, cwd, session_id, session_scope, settings) do
-              emit_session_started(on_event, session_id, [command | args], cwd, opencode)
+              emit_session_started(on_event, session_id, full_command, cwd, opencode)
 
               run_prompt(
-                client_module,
-                client,
-                session_id,
-                prompt,
-                opencode,
-                [command | args],
-                cwd,
-                on_event,
-                session_result_reader,
-                session_usage_reader
+                prompt_context(
+                  client_module: client_module,
+                  client: client,
+                  session_id: session_id,
+                  opencode: opencode,
+                  command: full_command,
+                  cwd: cwd,
+                  on_event: on_event,
+                  session_result_reader: session_result_reader,
+                  session_usage_reader: session_usage_reader
+                ),
+                prompt
               )
             end
           end
@@ -119,24 +122,27 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
 
   defp tag_resumed(other), do: other
 
-  defp run_prompt(
-         client_module,
-         client,
-         session_id,
-         prompt,
-         opencode,
-         command,
-         cwd,
-         on_event,
-         session_result_reader,
-         session_usage_reader
-       ) do
+  defp prompt_context(attrs) when is_list(attrs) do
+    %{
+      client_module: Keyword.fetch!(attrs, :client_module),
+      client: Keyword.fetch!(attrs, :client),
+      session_id: Keyword.fetch!(attrs, :session_id),
+      opencode: Keyword.fetch!(attrs, :opencode),
+      command: Keyword.fetch!(attrs, :command),
+      cwd: Keyword.fetch!(attrs, :cwd),
+      on_event: Keyword.fetch!(attrs, :on_event),
+      session_result_reader: Keyword.fetch!(attrs, :session_result_reader),
+      session_usage_reader: Keyword.fetch!(attrs, :session_usage_reader)
+    }
+  end
+
+  defp run_prompt(context, prompt) do
     task =
       Task.async(fn ->
-        client_module.prompt(
-          client,
+        context.client_module.prompt(
+          context.client,
           %{
-            "sessionId" => session_id,
+            "sessionId" => context.session_id,
             "prompt" => [
               %{
                 "type" => "text",
@@ -144,40 +150,14 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
               }
             ]
           },
-          opencode.timeout_ms
+          context.opencode.timeout_ms
         )
       end)
 
-    collect_prompt_result(
-      task,
-      client_module,
-      client,
-      session_id,
-      opencode,
-      command,
-      cwd,
-      on_event,
-      [],
-      false,
-      session_result_reader,
-      session_usage_reader
-    )
+    collect_prompt_result(task, context, [], false)
   end
 
-  defp collect_prompt_result(
-         task,
-         client_module,
-         client,
-         session_id,
-         opencode,
-         command,
-         cwd,
-         on_event,
-         events,
-         end_turn?,
-         session_result_reader,
-         session_usage_reader
-       ) do
+  defp collect_prompt_result(task, context, events, end_turn?) do
     receive do
       {ref, {:ok, result}} when ref == task.ref ->
         Process.demonitor(task.ref, [:flush])
@@ -187,7 +167,13 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
             {:error, {:need_owner_input, events}}
 
           end_turn? or end_turn_result?(result) ->
-            case completed_session_result(session_result_reader, cwd, session_id, command, opencode) do
+            case completed_session_result(
+                   context.session_result_reader,
+                   context.cwd,
+                   context.session_id,
+                   context.command,
+                   context.opencode
+                 ) do
               {:ok, result} ->
                 {:ok, result}
 
@@ -195,10 +181,10 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
                 {:ok,
                  %{
                    output: format_output(events, result),
-                   command: command,
-                   project_root: cwd,
-                   session_id: session_id,
-                   attach_url: opencode.server_url,
+                   command: context.command,
+                   project_root: context.cwd,
+                   session_id: context.session_id,
+                   attach_url: context.opencode.server_url,
                    runner_owner: "opencode"
                  }}
             end
@@ -209,8 +195,8 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
 
       {ref, {:error, :timeout}} when ref == task.ref ->
         Process.demonitor(task.ref, [:flush])
-        maybe_cancel(client_module, client, session_id, opencode)
-        {:error, {:opencode_timeout, opencode.timeout_ms}}
+        maybe_cancel(context.client_module, context.client, context.session_id, context.opencode)
+        {:error, {:opencode_timeout, context.opencode.timeout_ms}}
 
       {ref, {:error, reason}} when ref == task.ref ->
         Process.demonitor(task.ref, [:flush])
@@ -220,45 +206,19 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
         {:error, {:opencode_acp_prompt_failed, reason}}
 
       {:acp_notification, method, params} ->
-        emit_acp_update(on_event, :notification, method, params, session_id, command, cwd, opencode, session_usage_reader)
+        emit_acp_update(context, :notification, method, params)
 
-        collect_prompt_result(
-          task,
-          client_module,
-          client,
-          session_id,
-          opencode,
-          command,
-          cwd,
-          on_event,
-          [{method, params} | events],
-          end_turn? or end_turn_event?(method, params),
-          session_result_reader,
-          session_usage_reader
-        )
+        collect_prompt_result(task, context, [{method, params} | events], end_turn? or end_turn_event?(method, params))
 
       {:acp_request, method, params} ->
-        emit_acp_update(on_event, :request, method, params, session_id, command, cwd, opencode, session_usage_reader)
+        emit_acp_update(context, :request, method, params)
 
-        collect_prompt_result(
-          task,
-          client_module,
-          client,
-          session_id,
-          opencode,
-          command,
-          cwd,
-          on_event,
-          [{method, params} | events],
-          end_turn?,
-          session_result_reader,
-          session_usage_reader
-        )
+        collect_prompt_result(task, context, [{method, params} | events], end_turn?)
     after
-      stall_timeout(opencode.stall_timeout_ms) ->
-        maybe_cancel(client_module, client, session_id, opencode)
+      stall_timeout(context.opencode.stall_timeout_ms) ->
+        maybe_cancel(context.client_module, context.client, context.session_id, context.opencode)
         Task.shutdown(task, :brutal_kill)
-        {:error, {:opencode_acp_stalled, opencode.stall_timeout_ms}}
+        {:error, {:opencode_acp_stalled, context.opencode.stall_timeout_ms}}
     end
   end
 
@@ -316,7 +276,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
     })
   end
 
-  defp emit_acp_update(on_event, event, method, params, session_id, command, cwd, opencode, session_usage_reader) do
+  defp emit_acp_update(context, event, method, params) do
     payload = %{"method" => method, "params" => params}
 
     update =
@@ -325,16 +285,16 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
         phase: acp_update_phase(method, params),
         timestamp: DateTime.utc_now(),
         runner_owner: "opencode",
-        project_root: cwd,
-        command: command,
-        session_id: session_id,
-        attach_url: opencode.server_url,
+        project_root: context.cwd,
+        command: context.command,
+        session_id: context.session_id,
+        attach_url: context.opencode.server_url,
         payload: payload
       }
       |> maybe_put_usage(params)
-      |> maybe_put_persisted_usage(session_usage_reader, cwd, session_id)
+      |> maybe_put_persisted_usage(context.session_usage_reader, context.cwd, context.session_id)
 
-    on_event.(update)
+    context.on_event.(update)
   end
 
   defp acp_update_phase(_method, %{"type" => "usage"}), do: :usage

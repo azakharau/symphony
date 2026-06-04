@@ -22,10 +22,19 @@ defmodule SymphonyElixir.ProjectSupervisor do
   def init(%ProjectContext{} = context) do
     names = context.process_names
 
+    orchestrator_child_opts = [
+      name: ProjectRegistry.via_name(names.orchestrator),
+      dispatch_paused?: true,
+      project_context: context
+    ]
+
+    orchestrator_child =
+      {Orchestrator, orchestrator_child_opts}
+
     children = [
       {WorkflowStore, name: ProjectRegistry.via_name(names.workflow_store), workflow_path: context.workflow_path},
       {Task.Supervisor, name: ProjectRegistry.via_name(names.task_supervisor)},
-      {Orchestrator, name: ProjectRegistry.via_name(names.orchestrator), dispatch_paused?: true, project_context: context}
+      orchestrator_child
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

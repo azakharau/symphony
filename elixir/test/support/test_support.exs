@@ -83,7 +83,7 @@ defmodule SymphonyElixir.TestSupport do
   def ensure_application_started do
     case Process.whereis(SymphonyElixir.Supervisor) do
       supervisor when is_pid(supervisor) ->
-        :ok
+        ensure_default_workflow_store_started()
 
       nil ->
         ensure_started_with_application_controller()
@@ -135,14 +135,38 @@ defmodule SymphonyElixir.TestSupport do
   defp ensure_supervisor_started do
     case Process.whereis(SymphonyElixir.Supervisor) do
       supervisor when is_pid(supervisor) ->
-        :ok
+        ensure_default_workflow_store_started()
 
       nil ->
         case SymphonyElixir.Application.start(:normal, []) do
-          {:ok, _pid} -> :ok
-          {:error, {:already_started, _pid}} -> :ok
+          {:ok, _pid} -> ensure_default_workflow_store_started()
+          {:error, {:already_started, _pid}} -> ensure_default_workflow_store_started()
           {:error, reason} -> raise "failed to start SymphonyElixir.Supervisor: #{inspect(reason)}"
         end
+    end
+  end
+
+  defp ensure_default_workflow_store_started do
+    cond do
+      Application.get_env(:symphony_elixir, :root_config_path) ->
+        :ok
+
+      Process.whereis(SymphonyElixir.WorkflowStore) ->
+        :ok
+
+      true ->
+        restart_default_workflow_store()
+    end
+  end
+
+  defp restart_default_workflow_store do
+    case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore) do
+      {:ok, _pid} -> :ok
+      {:ok, _pid, _info} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+      {:error, :running} -> :ok
+      {:error, :not_found} -> :ok
+      {:error, reason} -> raise "failed to restart SymphonyElixir.WorkflowStore: #{inspect(reason)}"
     end
   end
 
@@ -180,7 +204,6 @@ defmodule SymphonyElixir.TestSupport do
           codex_turn_timeout_ms: 3_600_000,
           codex_read_timeout_ms: 5_000,
           codex_stall_timeout_ms: 300_000,
-          codex_max_total_tokens: 0,
           opencode_protocol: "cli",
           opencode_command: "opencode",
           opencode_args: nil,
@@ -243,7 +266,6 @@ defmodule SymphonyElixir.TestSupport do
     codex_turn_timeout_ms = Keyword.get(config, :codex_turn_timeout_ms)
     codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
-    codex_max_total_tokens = Keyword.get(config, :codex_max_total_tokens)
     opencode_protocol = Keyword.get(config, :opencode_protocol)
     opencode_command = Keyword.get(config, :opencode_command)
     opencode_args = Keyword.get(config, :opencode_args)
@@ -313,7 +335,6 @@ defmodule SymphonyElixir.TestSupport do
         "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
-        "  max_total_tokens: #{yaml_value(codex_max_total_tokens)}",
         "opencode:",
         "  protocol: #{yaml_value(opencode_protocol)}",
         "  command: #{yaml_value(opencode_command)}",

@@ -51,7 +51,15 @@ defmodule SymphonyElixir.AgentRunner do
 
         try do
           with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host, settings) do
-            run_issue_with_configured_runner(workspace, issue, update_recipient, opts, worker_host, settings, project_context)
+            run_issue_with_configured_runner(
+              workspace,
+              issue,
+              update_recipient,
+              opts,
+              worker_host,
+              settings,
+              project_context
+            )
           end
         after
           Workspace.run_after_run_hook(workspace, issue, worker_host, settings)

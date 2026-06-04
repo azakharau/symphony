@@ -7,9 +7,10 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, ProjectContext, ProjectRegistry, PulseLedger, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, ProjectContext, ProjectRegistry, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Runner.{CodexAdapter, OpenCodeDispatch, Outcome}
+  alias SymphonyElixir.Steward.ExecutionPacket
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
@@ -24,6 +25,8 @@ defmodule SymphonyElixir.Orchestrator do
   @empty_runner_runtime_totals %{
     seconds_running: 0
   }
+  @owner_wait_no_change "owner_wait_no_change"
+  @next_milestone_scan_suppressed "next_milestone_scan_suppressed"
 
   defmodule State do
     @moduledoc """
@@ -49,8 +52,8 @@ defmodule SymphonyElixir.Orchestrator do
       retry_attempts: %{},
       continuation_pulsed: MapSet.new(),
       owner_input_pulsed: MapSet.new(),
+      closed_project_milestone_ids: MapSet.new(),
       active_project_milestone_id: nil,
-      pulse_ledger: nil,
       suppression_counts: %{},
       codex_totals: nil,
       runner_runtime_totals: nil,
@@ -123,96 +126,38 @@ defmodule SymphonyElixir.Orchestrator do
       dispatch_paused?: false
     }
 
-    state = attach_pulse_ledger(state)
-    state = hydrate_active_milestone(state)
     state = apply_configured_active_milestone(state, config)
 
     run_terminal_workspace_cleanup(state)
+    run_runtime_cache_cleanup(state)
     schedule_tick(state, 0)
-  end
-
-  defp attach_pulse_ledger(%State{project_context: project_context} = state) do
-    workspace_root = Config.settings!(project_context).workspace.root
-    ledger_path = Path.join(workspace_root, "pulse_ledger.json")
-    ledger_opts = pulse_ledger_start_opts(project_context, ledger_path)
-
-    case PulseLedger.start_link(ledger_opts) do
-      {:ok, pid} ->
-        %{state | pulse_ledger: pid}
-
-      {:error, {:already_started, pid}} when is_pid(pid) ->
-        %{state | pulse_ledger: pid}
-
-      {:error, reason} ->
-        Logger.warning("Failed to start PulseLedger: #{inspect(reason)}")
-        state
-    end
-  end
-
-  defp pulse_ledger_start_opts(nil, ledger_path), do: [name: pulse_ledger_name(nil), file_path: ledger_path]
-  defp pulse_ledger_start_opts(project_context, ledger_path), do: [project_context: project_context, file_path: ledger_path]
-
-  defp pulse_ledger_name(nil), do: PulseLedger.process_name_for_test(name: :symphony_pulse_ledger_default)
-  defp pulse_ledger_name(project_context), do: PulseLedger.process_name_for_test(project_context: project_context)
-
-  defp hydrate_active_milestone(%State{pulse_ledger: nil} = state), do: state
-
-  defp hydrate_active_milestone(%State{pulse_ledger: ledger} = state) do
-    case PulseLedger.active_milestone(ledger) do
-      %{"milestone_id" => id} when is_binary(id) ->
-        Logger.info("Hydrated active milestone #{id} from PulseLedger on orchestrator restart")
-        %{state | active_project_milestone_id: id}
-
-      %{milestone_id: id} when is_binary(id) ->
-        Logger.info("Hydrated active milestone #{id} from PulseLedger on orchestrator restart")
-        %{state | active_project_milestone_id: id}
-
-      _ ->
-        state
-    end
   end
 
   defp apply_configured_active_milestone(%State{} = state, settings) do
     configured_id = settings.stewardship.active_milestone_id
     configured_name = settings.stewardship.active_milestone_name
 
-    cond do
-      is_binary(configured_id) ->
-        apply_configured_active_milestone_id(state, configured_id, configured_name)
-
-      true ->
-        clear_configured_active_milestone(state)
+    if is_binary(configured_id) do
+      apply_configured_active_milestone_id(state, configured_id, configured_name)
+    else
+      clear_configured_active_milestone(state)
     end
   end
 
-  defp apply_configured_active_milestone_id(%State{pulse_ledger: nil} = state, milestone_id, _milestone_name) do
-    %{state | active_project_milestone_id: milestone_id}
-  end
+  defp apply_configured_active_milestone_id(%State{} = state, milestone_id, _milestone_name) do
+    closed_ids = state.closed_project_milestone_ids || MapSet.new()
 
-  defp apply_configured_active_milestone_id(%State{pulse_ledger: ledger} = state, milestone_id, milestone_name) do
-    if PulseLedger.active_milestone_reactivation_blocked_id(ledger) == milestone_id and
+    if MapSet.member?(closed_ids, milestone_id) and
          not active_project_milestone_has_runtime_state?(state, milestone_id) do
-      PulseLedger.clear_active_milestone(ledger)
-      Logger.info("Configured active milestone #{milestone_id} is durably closed; waiting for owner to clear or replace the configured pointer")
+      Logger.info("Configured active milestone #{milestone_id} is closed in runtime cache; waiting for owner to clear or replace the configured pointer")
       %{state | active_project_milestone_id: nil}
     else
-      case PulseLedger.active_milestone(ledger) do
-        %{"milestone_id" => ^milestone_id, "milestone_name" => ^milestone_name} -> :ok
-        _active -> PulseLedger.set_active_milestone(ledger, milestone_id, milestone_name)
-      end
-
       %{state | active_project_milestone_id: milestone_id}
     end
   end
 
-  defp clear_configured_active_milestone(%State{pulse_ledger: nil} = state) do
-    %{state | active_project_milestone_id: nil}
-  end
-
-  defp clear_configured_active_milestone(%State{pulse_ledger: ledger} = state) do
-    PulseLedger.clear_active_milestone(ledger)
-    PulseLedger.clear_active_milestone_reactivation_block(ledger)
-    %{state | active_project_milestone_id: nil}
+  defp clear_configured_active_milestone(%State{} = state) do
+    %{state | active_project_milestone_id: nil, closed_project_milestone_ids: MapSet.new()}
   end
 
   @impl true
@@ -324,7 +269,7 @@ defmodule SymphonyElixir.Orchestrator do
           state
           |> apply_codex_token_delta(token_delta)
           |> apply_codex_rate_limits(update)
-          |> put_codex_running_entry_with_budget(issue_id, updated_running_entry)
+          |> put_codex_running_entry(issue_id, updated_running_entry)
 
         notify_dashboard()
         {:noreply, state}
@@ -451,6 +396,8 @@ defmodule SymphonyElixir.Orchestrator do
     with :ok <- validate_runtime_config(state),
          {:ok, issues} <- fetch_poll_candidate_issues(state, full_poll?),
          true <- available_slots(state) > 0 do
+      state = runtime_cache_gc(state, issues)
+
       issues
       |> choose_issues(state)
       |> maybe_dispatch_idle_pulse(issues, full_poll?)
@@ -659,7 +606,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @doc false
   @spec hydrate_active_milestone_for_test(State.t()) :: State.t()
-  def hydrate_active_milestone_for_test(%State{} = state), do: hydrate_active_milestone(state)
+  def hydrate_active_milestone_for_test(%State{} = state), do: state
 
   @doc false
   @spec apply_configured_active_milestone_for_test(State.t()) :: State.t()
@@ -691,9 +638,8 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
-  @doc false
-  @spec pulse_ledger_name_for_test(term()) :: GenServer.name() | nil
-  def pulse_ledger_name_for_test(project_context), do: pulse_ledger_name(project_context)
+  @spec runtime_cache_gc_for_test(State.t(), [Issue.t()]) :: State.t()
+  def runtime_cache_gc_for_test(%State{} = state, issues) when is_list(issues), do: runtime_cache_gc(state, issues)
 
   @doc false
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
@@ -742,7 +688,7 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, true)
+        terminate_terminal_running_issue(state, issue)
 
       !issue_routable_to_worker?(issue) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
@@ -777,7 +723,7 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Blocked issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; releasing block")
 
-        cleanup_issue_workspace(state, issue.identifier, blocked_issue_worker_host(state, issue.id))
+        cleanup_issue_runtime_cache(state, issue)
         release_issue_claim(state, issue.id)
 
       !issue_routable_to_worker?(issue) ->
@@ -913,6 +859,11 @@ defmodule SymphonyElixir.Orchestrator do
       _ ->
         release_issue_claim(state, issue_id)
     end
+  end
+
+  defp terminate_terminal_running_issue(%State{} = state, %Issue{} = issue) do
+    :ok = cleanup_issue_runtime_cache(state, issue)
+    terminate_running_issue(state, issue.id, false)
   end
 
   defp reconcile_stalled_running_issues(%State{} = state) do
@@ -1105,23 +1056,8 @@ defmodule SymphonyElixir.Orchestrator do
     block_issue_from_entry(state, issue_id, running_entry, error)
   end
 
-  defp put_codex_running_entry_with_budget(%State{} = state, issue_id, running_entry) do
-    max_total_tokens = settings_for_state(state).codex.max_total_tokens
-    total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
-
-    if is_integer(max_total_tokens) and max_total_tokens > 0 and total_tokens > max_total_tokens do
-      error = "codex token budget exceeded: total_tokens=#{total_tokens} max_total_tokens=#{max_total_tokens}"
-      identifier = Map.get(running_entry, :identifier, issue_id)
-      session_id = running_entry_session_id(running_entry)
-
-      Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id}; #{error}")
-
-      state
-      |> put_in([Access.key!(:running), issue_id], running_entry)
-      |> stop_and_block_issue(issue_id, running_entry, error)
-    else
-      %{state | running: Map.put(state.running, issue_id, running_entry)}
-    end
+  defp put_codex_running_entry(%State{} = state, issue_id, running_entry) do
+    %{state | running: Map.put(state.running, issue_id, running_entry)}
   end
 
   defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error) do
@@ -1200,24 +1136,65 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp record_disabled_next_milestone_scan_suppression(%State{} = state, _active_issues, full_poll?) when is_boolean(full_poll?) do
-    if full_poll? and state.pulse_ledger do
-      PulseLedger.record_suppression(
-        state.pulse_ledger,
-        PulseLedger.next_milestone_scan_suppressed(),
-        nil,
-        nil,
-        state.active_project_milestone_id,
-        nil,
-        "autonomous next-milestone scan disabled"
-      )
-
-      %{state | suppression_counts: increment_suppression(state.suppression_counts, PulseLedger.next_milestone_scan_suppressed())}
+    if full_poll? do
+      %{state | suppression_counts: increment_suppression(state.suppression_counts, @next_milestone_scan_suppressed)}
     else
       state
     end
   end
 
   defp record_disabled_next_milestone_scan_suppression(state, _active_issues, _full_poll?), do: state
+
+  defp runtime_cache_gc(%State{} = state, issues) when is_list(issues) do
+    retained_issue_ids =
+      issues
+      |> visible_issue_ids()
+      |> MapSet.union(MapSet.new(Map.keys(state.running || %{})))
+      |> MapSet.union(MapSet.new(Map.keys(state.retry_attempts || %{})))
+      |> MapSet.union(MapSet.new(Map.keys(state.blocked || %{})))
+
+    %{
+      state
+      | completed: prune_issue_id_set(state.completed, retained_issue_ids),
+        claimed: prune_issue_id_set(state.claimed, retained_issue_ids),
+        continuation_pulsed: prune_fingerprint_set(state.continuation_pulsed, retained_issue_ids),
+        owner_input_pulsed: prune_fingerprint_set(state.owner_input_pulsed, retained_issue_ids)
+    }
+  end
+
+  defp visible_issue_ids(issues) when is_list(issues) do
+    issues
+    |> Enum.flat_map(fn
+      %Issue{id: id} when is_binary(id) -> [id]
+      _issue -> []
+    end)
+    |> MapSet.new()
+  end
+
+  defp prune_issue_id_set(%MapSet{} = ids, retained_issue_ids) do
+    MapSet.filter(ids, &MapSet.member?(retained_issue_ids, &1))
+  end
+
+  defp prune_issue_id_set(_ids, _retained_issue_ids), do: MapSet.new()
+
+  defp prune_fingerprint_set(%MapSet{} = fingerprints, retained_issue_ids) do
+    MapSet.filter(fingerprints, fn fingerprint ->
+      case fingerprint_issue_id(fingerprint) do
+        id when is_binary(id) -> MapSet.member?(retained_issue_ids, id)
+        _ -> false
+      end
+    end)
+  end
+
+  defp prune_fingerprint_set(_fingerprints, _retained_issue_ids), do: MapSet.new()
+
+  defp fingerprint_issue_id(fingerprint) when is_binary(fingerprint) do
+    fingerprint
+    |> String.split(":", parts: 2)
+    |> List.first()
+  end
+
+  defp fingerprint_issue_id(_fingerprint), do: nil
 
   defp active_issues_blocking_idle_pulse(issues) when is_list(issues) do
     Enum.reject(issues, fn
@@ -1253,56 +1230,25 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp dispatch_owner_input_pulse_candidate(nil, %State{} = state), do: {:none, state}
 
-  defp dispatch_owner_input_pulse_candidate(%Issue{} = issue, %State{pulse_ledger: nil} = state) do
-    dispatch_owner_input_pulse_candidate_no_ledger(issue, state)
-  end
-
   defp dispatch_owner_input_pulse_candidate(%Issue{} = issue, %State{} = state) do
     fingerprint = owner_input_pulse_fingerprint(issue)
+    owner_input_pulsed = state.owner_input_pulsed || MapSet.new()
 
-    if PulseLedger.owner_input_processed?(state.pulse_ledger, fingerprint) do
+    if MapSet.member?(owner_input_pulsed, fingerprint) do
       Logger.info("Suppressing owner-input pulse for #{issue_context(issue)}: already processed")
-
-      PulseLedger.record_suppression(
-        state.pulse_ledger,
-        PulseLedger.owner_wait_no_change(),
-        issue.id,
-        issue.identifier,
-        nil,
-        nil,
-        "fingerprint already in durable ledger"
-      )
-
-      {:none, %{state | suppression_counts: increment_suppression(state.suppression_counts, PulseLedger.owner_wait_no_change())}}
+      {:none, %{state | suppression_counts: increment_suppression(state.suppression_counts, @owner_wait_no_change)}}
     else
-      PulseLedger.pending_owner_input(state.pulse_ledger, fingerprint)
-
-      pre_dispatch_state = mark_owner_input_pulsed(state, fingerprint)
-
       Logger.info("Dispatching Codex owner-input pulse from updated issue: #{issue_context(issue)}")
 
-      new_state = do_dispatch_issue(pre_dispatch_state, issue, nil, nil, :owner_input)
+      new_state = do_dispatch_issue(state, issue, nil, nil, :owner_input)
 
       if Map.has_key?(new_state.running, issue.id) do
-        PulseLedger.commit_pending_owner_input(state.pulse_ledger, fingerprint)
-        {:dispatched, new_state}
+        {:dispatched, mark_owner_input_pulsed(new_state, fingerprint)}
       else
-        PulseLedger.rollback_pending(state.pulse_ledger)
-        Logger.warning("Owner-input dispatch failed for #{issue_context(issue)}; fingerprint NOT durably committed")
+        Logger.warning("Owner-input dispatch failed for #{issue_context(issue)}; fingerprint was not marked in runtime cache")
         {:none, new_state}
       end
     end
-  end
-
-  defp dispatch_owner_input_pulse_candidate_no_ledger(%Issue{} = issue, %State{} = state) do
-    fingerprint = owner_input_pulse_fingerprint(issue)
-
-    Logger.info("Dispatching Codex owner-input pulse from updated issue: #{issue_context(issue)}")
-
-    {:dispatched,
-     state
-     |> mark_owner_input_pulsed(fingerprint)
-     |> do_dispatch_issue(issue, nil, nil, :owner_input)}
   end
 
   defp latest_owner_input_issue_for_pulse(issues, %State{} = state) when is_list(issues) do
@@ -1643,30 +1589,13 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  defp close_active_project_milestone(%State{active_project_milestone_id: milestone_id, pulse_ledger: ledger} = state, issues, _active_states, terminal_states) do
-    summary = active_milestone_closure_summary(milestone_id, issues, terminal_states)
-
-    if ledger do
-      PulseLedger.record_active_milestone_closure(ledger, summary)
-      PulseLedger.clear_active_milestone(ledger)
-    end
-
+  defp close_active_project_milestone(%State{active_project_milestone_id: milestone_id} = state, _issues, _active_states, _terminal_states) do
     Logger.info("Active milestone #{milestone_id} exhausted; clearing active pointer until owner selects the next milestone")
-    %{state | active_project_milestone_id: nil}
-  end
-
-  defp active_milestone_closure_summary(milestone_id, issues, terminal_states) do
-    terminal_issue_ids =
-      issues
-      |> Enum.filter(&terminal_issue_state?(&1.state, terminal_states))
-      |> Enum.map(& &1.id)
-      |> Enum.sort()
 
     %{
-      "milestone_id" => milestone_id,
-      "reason" => "all_known_child_issues_terminal",
-      "terminal_issue_count" => length(terminal_issue_ids),
-      "terminal_issue_ids" => terminal_issue_ids
+      state
+      | active_project_milestone_id: nil,
+        closed_project_milestone_ids: MapSet.put(state.closed_project_milestone_ids || MapSet.new(), milestone_id)
     }
   end
 
@@ -1706,16 +1635,6 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp issue_project_milestone_id(_issue), do: nil
-
-  defp milestone_name(%{} = milestone) do
-    case Map.get(milestone, :name) || Map.get(milestone, "name") do
-      name when is_binary(name) and name != "" -> name
-      _ -> "Project Milestone"
-    end
-  end
-
-  defp issue_project_milestone_name(%Issue{project_milestone: milestone}) when is_map(milestone), do: milestone_name(milestone)
-  defp issue_project_milestone_name(_issue), do: nil
 
   defp owner_input_issue_state?(state_name) when is_binary(state_name) do
     normalize_issue_state(state_name) == "need owner input"
@@ -1837,13 +1756,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp execution_packet_dispatch_opts(%State{} = state, %Issue{} = issue) do
-    packet = SymphonyElixir.Steward.ExecutionPacket.build(issue, state.project_context)
+    packet = ExecutionPacket.build(issue, state.project_context)
 
-    if state.pulse_ledger do
-      :ok = PulseLedger.record_execution_packet(state.pulse_ledger, packet)
-    end
-
-    case SymphonyElixir.Steward.ExecutionPacket.prompt(packet) do
+    case ExecutionPacket.prompt(packet) do
       {:ok, prompt} -> {state, [steward_execution_packet: packet, steward_execution_prompt: prompt]}
       {:error, reason} -> raise RuntimeError, "invalid steward execution packet prompt: #{inspect(reason)}"
     end
@@ -1919,18 +1834,6 @@ defmodule SymphonyElixir.Orchestrator do
             retry_attempts: Map.delete(state.retry_attempts, issue.id),
             active_project_milestone_id: state.active_project_milestone_id
         }
-
-        if updated_state.pulse_ledger do
-          milestone_id = state.active_project_milestone_id
-
-          if milestone_id do
-            PulseLedger.set_active_milestone(
-              updated_state.pulse_ledger,
-              milestone_id,
-              issue_project_milestone_name(issue)
-            )
-          end
-        end
 
         updated_state
 
@@ -2019,15 +1922,19 @@ defmodule SymphonyElixir.Orchestrator do
       error: pick_retry_error(previous_retry, metadata),
       worker_host: pick_retry_worker_host(previous_retry, metadata),
       workspace_path: pick_retry_workspace_path(previous_retry, metadata),
-      runner_kind: metadata[:runner_kind] || Map.get(previous_retry, :runner_kind),
-      runner_owner: metadata[:runner_owner] || Map.get(previous_retry, :runner_owner),
-      runner_phase: metadata[:runner_phase] || Map.get(previous_retry, :runner_phase),
-      runner_project_root: metadata[:runner_project_root] || Map.get(previous_retry, :runner_project_root),
-      runner_command: metadata[:runner_command] || Map.get(previous_retry, :runner_command),
-      runner_result_state: metadata[:runner_result_state] || Map.get(previous_retry, :runner_result_state),
-      runner_failure: metadata[:runner_failure] || Map.get(previous_retry, :runner_failure),
-      project_context: metadata[:project_context] || Map.get(previous_retry, :project_context)
+      runner_kind: retry_metadata_value(:runner_kind, previous_retry, metadata),
+      runner_owner: retry_metadata_value(:runner_owner, previous_retry, metadata),
+      runner_phase: retry_metadata_value(:runner_phase, previous_retry, metadata),
+      runner_project_root: retry_metadata_value(:runner_project_root, previous_retry, metadata),
+      runner_command: retry_metadata_value(:runner_command, previous_retry, metadata),
+      runner_result_state: retry_metadata_value(:runner_result_state, previous_retry, metadata),
+      runner_failure: retry_metadata_value(:runner_failure, previous_retry, metadata),
+      project_context: retry_metadata_value(:project_context, previous_retry, metadata)
     }
+  end
+
+  defp retry_metadata_value(key, previous_retry, metadata) do
+    metadata[key] || Map.get(previous_retry, key)
   end
 
   defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token)
@@ -2083,7 +1990,7 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
-        cleanup_issue_workspace(state, issue.identifier, metadata[:worker_host])
+        cleanup_issue_runtime_cache(state, issue)
         {:noreply, release_issue_claim(state, issue_id)}
 
       retry_candidate_issue?(issue, state, terminal_states) ->
@@ -2113,10 +2020,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp cleanup_issue_workspace(_state_or_identifier, _identifier_or_worker_host, _worker_host), do: :ok
 
-  defp blocked_issue_worker_host(%State{} = state, issue_id) do
-    state.blocked
-    |> Map.get(issue_id, %{})
-    |> Map.get(:worker_host)
+  defp cleanup_issue_runtime_cache(%State{} = state, %Issue{} = issue) do
+    Workspace.cleanup_issue_runtime_cache(issue, settings_for_state(state))
   end
 
   defp run_terminal_workspace_cleanup(%State{} = state) do
@@ -2124,8 +2029,8 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, issues} ->
         issues
         |> Enum.each(fn
-          %Issue{identifier: identifier} when is_binary(identifier) ->
-            cleanup_issue_workspace(state, identifier, nil)
+          %Issue{} = issue ->
+            Workspace.cleanup_issue_runtime_cache(issue, settings_for_state(state))
 
           _ ->
             :ok
@@ -2133,6 +2038,28 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues: #{inspect(reason)}")
+    end
+  end
+
+  defp run_runtime_cache_cleanup(%State{} = state) do
+    settings = settings_for_state(state)
+    :ok = Workspace.remove_legacy_runtime_cache(settings)
+
+    case Tracker.fetch_candidate_issues(state.project_context) do
+      {:ok, issues} ->
+        active_identifiers =
+          issues
+          |> Enum.reject(&terminal_issue_state?(&1.state, terminal_state_set(state)))
+          |> Enum.map(& &1.identifier)
+          |> Enum.filter(&is_binary/1)
+
+        case Workspace.sweep_abandoned_runtime_cache(active_identifiers, settings) do
+          {:ok, _removed} -> :ok
+          {:error, reason} -> Logger.warning("Skipping abandoned runtime cache cleanup: #{inspect(reason)}")
+        end
+
+      {:error, reason} ->
+        Logger.warning("Skipping abandoned runtime cache cleanup; failed to fetch active issues: #{inspect(reason)}")
     end
   end
 
@@ -2452,12 +2379,8 @@ defmodule SymphonyElixir.Orchestrator do
        codex_totals: state.codex_totals,
        runner_runtime_totals: state.runner_runtime_totals || @empty_runner_runtime_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
-       suppression_events: if(state.pulse_ledger, do: PulseLedger.suppression_events(state.pulse_ledger), else: []),
-       suppression_counts:
-         if(state.pulse_ledger,
-           do: PulseLedger.suppression_counts(state.pulse_ledger),
-           else: state.suppression_counts || %{}
-         ),
+       suppression_events: [],
+       suppression_counts: state.suppression_counts || %{},
        polling: %{
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
@@ -2661,27 +2584,8 @@ defmodule SymphonyElixir.Orchestrator do
     :ok
   end
 
-  defp active_milestone_snapshot(%State{pulse_ledger: nil}), do: nil
-
-  defp active_milestone_snapshot(%State{pulse_ledger: ledger, active_project_milestone_id: milestone_id}) when is_binary(milestone_id) do
-    case PulseLedger.active_milestone(ledger) do
-      %{"milestone_id" => id} = info when is_binary(id) ->
-        %{
-          milestone_id: milestone_id,
-          milestone_name: Map.get(info, "milestone_name"),
-          locked_at: Map.get(info, "locked_at")
-        }
-
-      %{milestone_id: id} = info when is_binary(id) ->
-        %{
-          milestone_id: milestone_id,
-          milestone_name: Map.get(info, :milestone_name),
-          locked_at: Map.get(info, :locked_at)
-        }
-
-      _ ->
-        %{milestone_id: milestone_id}
-    end
+  defp active_milestone_snapshot(%State{active_project_milestone_id: milestone_id} = state) when is_binary(milestone_id) do
+    %{milestone_id: milestone_id, milestone_name: settings_for_state(state).stewardship.active_milestone_name}
   end
 
   defp active_milestone_snapshot(_state), do: nil

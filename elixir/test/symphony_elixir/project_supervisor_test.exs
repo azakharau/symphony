@@ -1,7 +1,17 @@
 defmodule SymphonyElixir.ProjectSupervisorTest do
   use ExUnit.Case
 
-  alias SymphonyElixir.{Config, Orchestrator, ProjectRegistry, PromptBuilder, RootConfigStore, Tracker, WorkflowStore, Workspace}
+  alias SymphonyElixir.{
+    Config,
+    Orchestrator,
+    ProjectRegistry,
+    PromptBuilder,
+    RootConfigStore,
+    Tracker,
+    WorkflowStore,
+    Workspace
+  }
+
   alias SymphonyElixir.Linear.Issue
 
   setup do
@@ -357,6 +367,69 @@ defmodule SymphonyElixir.ProjectSupervisorTest do
     assert String.starts_with?(beta_workspace, beta_workspace_root)
     refute String.starts_with?(alpha_workspace, beta_workspace_root)
     refute String.starts_with?(beta_workspace, alpha_workspace_root)
+  end
+
+  test "enabled projects keep memory tracker reads and writes local", %{
+    root: root,
+    config_path: config_path
+  } do
+    alpha_workflow =
+      write_project_runtime_workflow!(root, "alpha",
+        tracker_project_slug: "alpha-slug",
+        workspace_root: Path.join(root, "alpha-workspaces"),
+        max_concurrent_agents: 1,
+        runner_default: "codex",
+        codex_project_root: Path.join(root, "alpha-codex"),
+        opencode_project_root: Path.join(root, "alpha-opencode"),
+        prompt: "alpha prompt {{ issue.identifier }}"
+      )
+
+    beta_workflow =
+      write_project_runtime_workflow!(root, "beta",
+        tracker_project_slug: "beta-slug",
+        workspace_root: Path.join(root, "beta-workspaces"),
+        max_concurrent_agents: 1,
+        runner_default: "codex",
+        codex_project_root: Path.join(root, "beta-codex"),
+        opencode_project_root: Path.join(root, "beta-opencode"),
+        prompt: "beta prompt {{ issue.identifier }}"
+      )
+
+    write_projects_config!(config_path, [
+      %{id: "alpha", enabled: true, workflow_path: alpha_workflow},
+      %{id: "beta", enabled: true, workflow_path: beta_workflow}
+    ])
+
+    start_supervised!({RootConfigStore, path: config_path})
+
+    %{alpha: alpha_context, beta: beta_context} = project_contexts_by_id()
+
+    assert alpha_context.project_id == "alpha"
+    assert beta_context.project_id == "beta"
+
+    alpha_issue = %Issue{id: "issue-alpha", identifier: "ALPHA-1", title: "Alpha work", state: "Todo"}
+    beta_issue = %Issue{id: "issue-beta", identifier: "BETA-1", title: "Beta work", state: "Todo"}
+
+    Application.put_env(:symphony_elixir, :memory_tracker_project_issues, %{
+      "alpha" => [alpha_issue],
+      "beta" => [beta_issue]
+    })
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    assert {:ok, [%Issue{identifier: "ALPHA-1"}]} = Tracker.fetch_issues_by_states(["Todo"], alpha_context)
+    assert {:ok, [%Issue{identifier: "BETA-1"}]} = Tracker.fetch_issues_by_states(["Todo"], beta_context)
+    assert {:ok, [%Issue{identifier: "ALPHA-1"}]} = Tracker.fetch_issue_states_by_ids(["issue-alpha"], alpha_context)
+    assert {:ok, []} = Tracker.fetch_issue_states_by_ids(["issue-alpha"], beta_context)
+
+    assert :ok = Tracker.create_comment("issue-alpha", "alpha comment", alpha_context)
+    assert :ok = Tracker.update_issue_state("issue-beta", "In Progress", beta_context)
+
+    assert_receive {:memory_tracker_comment, "alpha", "issue-alpha", "alpha comment"}
+    assert_receive {:memory_tracker_state_update, "beta", "issue-beta", "In Progress"}
+  after
+    Application.delete_env(:symphony_elixir, :memory_tracker_project_issues)
+    Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
   end
 
   test "default orchestrator startup remains unpaused and schedules polling" do

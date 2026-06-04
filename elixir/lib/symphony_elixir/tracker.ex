@@ -128,6 +128,8 @@ defmodule SymphonyElixir.Tracker do
   defp call_adapter(context, function, args) do
     module = adapter(context)
 
+    Code.ensure_loaded(module)
+
     if function_exported?(module, function, length(args) + 1) do
       apply(module, function, args ++ [context])
     else

@@ -2,8 +2,8 @@ defmodule SymphonyElixir.Steward.ExecutionPacket do
   @moduledoc """
   Builds the durable steward packet recorded before worker dispatch.
 
-  The packet is intentionally plain data so PulseLedger can persist it without
-  depending on runner internals or external Mnemesh APIs.
+  The packet is intentionally plain data so it can move across runner boundaries
+  without depending on runner internals or external Mnemesh APIs.
   """
 
   alias SymphonyElixir.Linear.Issue

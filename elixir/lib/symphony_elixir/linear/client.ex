@@ -247,11 +247,21 @@ defmodule SymphonyElixir.Linear.Client do
         {:ok, []}
 
       ids ->
-        with {:ok, assignee_filter} <- routing_assignee_filter(context) do
-          settings = Config.settings!(context)
-          do_fetch_issue_states(ids, assignee_filter, fn query, variables -> graphql(query, variables, settings: settings) end)
+        case routing_assignee_filter(context) do
+          {:ok, assignee_filter} ->
+            settings = Config.settings!(context)
+            fetch_issue_states_with_settings(ids, assignee_filter, settings)
+
+          {:error, reason} ->
+            {:error, reason}
         end
     end
+  end
+
+  defp fetch_issue_states_with_settings(ids, assignee_filter, settings) do
+    do_fetch_issue_states(ids, assignee_filter, fn query, variables ->
+      graphql(query, variables, settings: settings)
+    end)
   end
 
   @spec graphql(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -259,7 +269,11 @@ defmodule SymphonyElixir.Linear.Client do
       when is_binary(query) and is_map(variables) and is_list(opts) do
     payload = build_graphql_payload(query, variables, Keyword.get(opts, :operation_name))
     settings = Keyword.get(opts, :settings) || Config.settings!(Keyword.get(opts, :context))
-    request_fun = Keyword.get(opts, :request_fun, fn payload, headers -> post_graphql_request(payload, headers, settings) end)
+
+    request_fun =
+      Keyword.get(opts, :request_fun, fn payload, headers ->
+        post_graphql_request(payload, headers, settings)
+      end)
 
     with {:ok, headers} <- graphql_headers(settings),
          {:ok, %{status: 200, body: body}} <- request_fun.(payload, headers) do
@@ -349,7 +363,7 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp do_fetch_by_states(project_slug, state_names, assignee_filter, settings \\ Config.settings!()) do
+  defp do_fetch_by_states(project_slug, state_names, assignee_filter, settings) do
     do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [], settings)
   end
 
@@ -402,10 +416,6 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp finalize_paginated_issues(acc_issues) when is_list(acc_issues),
     do: Enum.reverse(acc_issues)
-
-  defp do_fetch_issue_states(ids, assignee_filter) do
-    do_fetch_issue_states(ids, assignee_filter, &graphql/2)
-  end
 
   defp do_fetch_issue_states(ids, assignee_filter, graphql_fun)
        when is_list(ids) and is_function(graphql_fun, 2) do
@@ -531,7 +541,7 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp graphql_headers(settings \\ Config.settings!()) do
+  defp graphql_headers(settings) do
     case settings.tracker.api_key do
       nil ->
         {:error, :missing_linear_api_token}
@@ -543,10 +553,6 @@ defmodule SymphonyElixir.Linear.Client do
            {"Content-Type", "application/json"}
          ]}
     end
-  end
-
-  defp post_graphql_request(payload, headers) do
-    post_graphql_request(payload, headers, Config.settings!())
   end
 
   defp post_graphql_request(payload, headers, settings) do
@@ -694,10 +700,6 @@ defmodule SymphonyElixir.Linear.Client do
   defp assigned_to_worker?(_assignee, _assignee_filter), do: false
 
   defp assignee_id(%{} = assignee), do: normalize_assignee_match_value(assignee["id"])
-
-  defp routing_assignee_filter do
-    routing_assignee_filter(nil)
-  end
 
   defp routing_assignee_filter(context) do
     case Config.settings!(context).tracker.assignee do

@@ -5,9 +5,9 @@ defmodule SymphonyElixir.OpenCode.ACPSessionStore do
 
   @file_name "opencode_acp_sessions.json"
 
-  @spec path(keyword()) :: Path.t()
-  def path(opts \\ []) do
-    settings = Keyword.get(opts, :settings) || Config.settings!(Keyword.get(opts, :project_context))
+  @spec path(term()) :: Path.t()
+  def path(store \\ []) do
+    settings = settings_from_store(store)
     Path.join([settings.workspace.root, ".symphony", @file_name])
   end
 
@@ -63,6 +63,16 @@ defmodule SymphonyElixir.OpenCode.ACPSessionStore do
 
   def put(_issue, _project_root, _session_id, _session_scope, _opts), do: :ok
 
+  @spec remove_issue(Issue.t(), term()) :: :ok | {:error, term()}
+  def remove_issue(%Issue{} = issue, store \\ []) do
+    with {:ok, sessions} <- read_sessions(store) do
+      sessions
+      |> Enum.reject(fn {_key, entry} -> session_entry_matches_issue?(entry, issue) end)
+      |> Map.new()
+      |> write_sessions(store)
+    end
+  end
+
   @spec prompt_scope(String.t()) :: String.t()
   def prompt_scope(prompt) when is_binary(prompt) do
     :crypto.hash(:sha256, prompt) |> Base.encode16(case: :lower)
@@ -112,8 +122,18 @@ defmodule SymphonyElixir.OpenCode.ACPSessionStore do
     }
   end
 
-  defp read_sessions(opts) do
-    store_path = path(opts)
+  defp session_entry_matches_issue?(%{"issue_id" => issue_id}, %Issue{id: issue_id})
+       when is_binary(issue_id) and issue_id != "",
+       do: true
+
+  defp session_entry_matches_issue?(%{"issue_identifier" => identifier}, %Issue{identifier: identifier})
+       when is_binary(identifier) and identifier != "",
+       do: true
+
+  defp session_entry_matches_issue?(_entry, _issue), do: false
+
+  defp read_sessions(store) do
+    store_path = path(store)
 
     case File.read(store_path) do
       {:ok, content} ->
@@ -136,8 +156,8 @@ defmodule SymphonyElixir.OpenCode.ACPSessionStore do
     end
   end
 
-  defp write_sessions(sessions, opts) when is_map(sessions) do
-    store_path = path(opts)
+  defp write_sessions(sessions, store) when is_map(sessions) do
+    store_path = path(store)
     tmp_path = store_path <> ".tmp"
 
     with :ok <- File.mkdir_p(Path.dirname(store_path)),
@@ -148,4 +168,10 @@ defmodule SymphonyElixir.OpenCode.ACPSessionStore do
       {:error, reason} -> {:error, {:opencode_acp_session_store_write_failed, reason}}
     end
   end
+
+  defp settings_from_store(opts) when is_list(opts) do
+    Keyword.get(opts, :settings) || Config.settings!(Keyword.get(opts, :project_context))
+  end
+
+  defp settings_from_store(settings), do: settings
 end

@@ -84,6 +84,11 @@ Optional flags:
 
 - `--logs-root` tells Symphony to write logs under a different directory (default: `./log`)
 - `--port` also starts the Phoenix observability service (default: disabled)
+- `--projects-config` starts root multiproject mode from a `projects.yml` file.
+  In the current foundation this validates project config and starts
+  project-local infrastructure with per-project dispatch paused; it is not a
+  live-service cutover by itself. See
+  [`docs/multiproject_runtime_operator_checklist.md`](docs/multiproject_runtime_operator_checklist.md).
 
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
 Codex session prompt.
@@ -126,9 +131,6 @@ Notes:
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
   Symphony validation.
-- `codex.max_total_tokens` defaults to `0`, which disables the token budget guard. When set to a
-  positive value, Symphony blocks a running Codex issue without retry once reported cumulative
-  `totalTokens` exceeds the budget.
 - `opencode.protocol` defaults to `cli`, preserving the existing OpenCode CLI runner. To opt in to
   ACP stdio transport, set `opencode.protocol: acp` and use an `opencode.command` that supports ACP;
   rollback is changing `protocol` back to `cli`.
@@ -171,6 +173,37 @@ codex:
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+- `stewardship.active_milestone_id` selects the only Project Milestone eligible for dispatch in a
+  project workflow. Milestone description text such as `phase_state:*` is not parsed as runtime
+  state and must not be used as a dispatch gate.
+
+### Root Projects Config
+
+Root multiproject mode reads a YAML file whose durable operator path is expected to be
+`/home/agent/.symphony/config/projects.yml`:
+
+```yaml
+server:
+  host: 127.0.0.1
+  port: 4110
+
+projects:
+  - id: mnemesh
+    name: Mnemesh
+    enabled: false
+    workflow_path: /home/agent/proj/mnemesh/WORKFLOW.md
+    repo_root: /home/agent/proj/mnemesh
+    dashboard_order: 10
+    execution:
+      enabled: true
+    gates:
+      dispatch_enabled: false
+```
+
+Each project id must be unique lower-case URL-safe text. `workflow_path` is required. Disabled,
+missing, or invalid projects are isolated to that project context so other configured projects can
+remain visible. Keep `enabled: false` or `gates.dispatch_enabled: false` during migration
+preparation until an owner-approved cutover explicitly allows dispatch.
 
 ## Web dashboard
 

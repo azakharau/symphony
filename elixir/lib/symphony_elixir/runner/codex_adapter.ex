@@ -47,16 +47,17 @@ defmodule SymphonyElixir.Runner.CodexAdapter do
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host, settings, project_context) do
     max_turns = Keyword.get(opts, :max_turns, settings.agent.max_turns)
+    codex_workspace = codex_workspace(workspace, settings)
 
     issue_state_fetcher =
       Keyword.get(opts, :issue_state_fetcher, fn ids -> Tracker.fetch_issue_states_by_ids(ids, project_context) end)
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+    with {:ok, session} <- AppServer.start_session(codex_workspace, worker_host: worker_host, settings: settings) do
       try do
         do_run_codex_turns(
           %{
             session: session,
-            workspace: workspace,
+            workspace: codex_workspace,
             codex_update_recipient: codex_update_recipient,
             opts: opts,
             issue_state_fetcher: issue_state_fetcher,
@@ -69,6 +70,13 @@ defmodule SymphonyElixir.Runner.CodexAdapter do
       after
         AppServer.stop_session(session)
       end
+    end
+  end
+
+  defp codex_workspace(workspace, settings) do
+    case settings.codex.project_root do
+      project_root when is_binary(project_root) and project_root != "" -> project_root
+      _ -> workspace
     end
   end
 

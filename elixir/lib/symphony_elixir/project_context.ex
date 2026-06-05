@@ -58,29 +58,29 @@ defmodule SymphonyElixir.ProjectContext do
 
   @spec new(map()) :: t()
   def new(attrs) when is_map(attrs) do
-    id = Map.get(attrs, :id) || Map.fetch!(attrs, :project_id)
-    enabled = Map.get(attrs, :enabled, false)
-    errors = Map.get(attrs, :errors, [])
-    status = Map.get(attrs, :status) || default_status(enabled, errors)
+    id = project_id!(attrs)
+    enabled = get_attr(attrs, :enabled, false)
+    errors = get_attr(attrs, :errors, [])
+    status = get_attr(attrs, :status) || default_status(enabled, errors)
 
     %__MODULE__{
       id: id,
       project_id: id,
-      name: Map.get(attrs, :name) || id,
+      name: get_attr(attrs, :name) || id,
       enabled: enabled,
       status: status,
-      repo_root: Map.get(attrs, :repo_root),
-      app_root: Map.get(attrs, :app_root),
-      workflow_path: Map.fetch!(attrs, :workflow_path),
-      dashboard_order: Map.get(attrs, :dashboard_order),
-      logs_root: Map.get(attrs, :logs_root),
-      linear: Map.get(attrs, :linear, %{}),
-      mnemesh: Map.get(attrs, :mnemesh, %{}),
-      runner: Map.get(attrs, :runner, %{}),
-      execution: Map.get(attrs, :execution, %{"enabled" => true}),
-      gates: Map.get(attrs, :gates, %{"dispatch_enabled" => true}),
+      repo_root: get_attr(attrs, :repo_root),
+      app_root: get_attr(attrs, :app_root),
+      workflow_path: fetch_attr!(attrs, :workflow_path),
+      dashboard_order: get_attr(attrs, :dashboard_order),
+      logs_root: get_attr(attrs, :logs_root),
+      linear: get_attr(attrs, :linear, %{}),
+      mnemesh: get_attr(attrs, :mnemesh, %{}),
+      runner: get_attr(attrs, :runner, %{}),
+      execution: get_attr(attrs, :execution, %{"enabled" => true}),
+      gates: get_attr(attrs, :gates, %{"dispatch_enabled" => true}),
       errors: errors,
-      process_names: Map.get(attrs, :process_names) || process_names(id)
+      process_names: get_attr(attrs, :process_names) || process_names(id)
     }
   end
 
@@ -104,10 +104,14 @@ defmodule SymphonyElixir.ProjectContext do
   def dispatch_blocker(%__MODULE__{status: :disabled}), do: :disabled
 
   def dispatch_blocker(%__MODULE__{execution: execution, gates: gates, workflow_path: workflow_path}) do
+    work_path = workflow_path
+    exec = execution || %{}
+    gt = gates || %{}
+
     cond do
-      not File.regular?(workflow_path) -> {:missing_workflow_file, workflow_path}
-      not map_enabled?(execution, "enabled", true) -> :execution_disabled
-      not map_enabled?(gates, "dispatch_enabled", true) -> :gate_disabled
+      not File.regular?(work_path) -> {:missing_workflow_file, work_path}
+      not map_enabled?(exec, "enabled", true) -> :execution_disabled
+      not map_enabled?(gt, "dispatch_enabled", true) -> :gate_disabled
       true -> nil
     end
   end
@@ -126,6 +130,23 @@ defmodule SymphonyElixir.ProjectContext do
   defp default_status(false, _errors), do: :disabled
   defp default_status(true, []), do: :valid
   defp default_status(true, _errors), do: :invalid
+
+  defp project_id!(attrs) do
+    get_attr(attrs, :id) ||
+      get_attr(attrs, :project_id) ||
+      raise ArgumentError, "ProjectContext requires :id or :project_id"
+  end
+
+  defp get_attr(attrs, key, default \\ nil) when is_atom(key) do
+    Map.get(attrs, key, Map.get(attrs, Atom.to_string(key), default))
+  end
+
+  defp fetch_attr!(attrs, key) when is_atom(key) do
+    case get_attr(attrs, key, :__missing__) do
+      :__missing__ -> raise KeyError, key: key, term: attrs
+      value -> value
+    end
+  end
 
   defp map_enabled?(map, key, default) when is_map(map) do
     Map.get(map, key, default) not in [false, "false"]

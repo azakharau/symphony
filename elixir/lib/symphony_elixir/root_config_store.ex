@@ -5,6 +5,8 @@ defmodule SymphonyElixir.RootConfigStore do
 
   use GenServer
 
+  require Logger
+
   alias SymphonyElixir.{ProjectContext, ProjectSupervisor, RootConfig}
 
   defmodule State do
@@ -29,8 +31,16 @@ defmodule SymphonyElixir.RootConfigStore do
     path = Keyword.get(opts, :path) || Application.fetch_env!(:symphony_elixir, :root_config_path)
 
     case load_and_reconcile(path, %{}) do
-      {:ok, config, project_states} -> {:ok, %State{path: path, config: config, project_states: project_states}}
-      {:error, reason} -> {:stop, reason}
+      {:ok, config, project_states} ->
+        {:ok, %State{path: path, config: config, project_states: project_states}}
+
+      {:error, reason} ->
+        Logger.error("Root config store failed to load initial root config at #{path}: #{inspect(reason)}",
+          path: path,
+          reason: inspect(reason)
+        )
+
+        {:stop, reason}
     end
   end
 
@@ -41,6 +51,11 @@ defmodule SymphonyElixir.RootConfigStore do
         {:reply, {:ok, config}, %{state | config: config, project_states: project_states}}
 
       {:error, reason} ->
+        Logger.error("Root config store reload failed for #{state.path}; keeping previous project state: #{inspect(reason)}",
+          path: state.path,
+          reason: inspect(reason)
+        )
+
         {:reply, {:error, reason}, state}
     end
   end
@@ -107,17 +122,37 @@ defmodule SymphonyElixir.RootConfigStore do
     spec = ProjectSupervisor.child_spec(context)
 
     case DynamicSupervisor.start_child(SymphonyElixir.ProjectSupervisor.DynamicSupervisor, spec) do
-      {:ok, pid} -> %{status: :running, context: context, pid: pid, error: nil}
-      {:error, {:already_started, pid}} -> %{status: :running, context: context, pid: pid, error: nil}
-      {:error, reason} -> %{status: :error, context: context, pid: nil, error: reason}
+      {:ok, pid} ->
+        %{status: :running, context: context, pid: pid, error: nil}
+
+      {:error, {:already_started, pid}} ->
+        %{status: :running, context: context, pid: pid, error: nil}
+
+      {:error, reason} ->
+        Logger.error("Root config store failed to start project supervisor for #{context.project_id}: #{inspect(reason)}",
+          project_id: context.project_id,
+          reason: inspect(reason)
+        )
+
+        %{status: :error, context: context, pid: nil, error: reason}
     end
   end
 
   defp stop_project(project_id) do
     case SymphonyElixir.ProjectRegistry.whereis({:project_supervisor, project_id}) do
       pid when is_pid(pid) ->
-        with :ok <- DynamicSupervisor.terminate_child(SymphonyElixir.ProjectSupervisor.DynamicSupervisor, pid) do
-          await_project_stopped(project_id, 50)
+        case DynamicSupervisor.terminate_child(SymphonyElixir.ProjectSupervisor.DynamicSupervisor, pid) do
+          :ok ->
+            await_project_stopped(project_id, 50)
+
+          {:error, reason} ->
+            Logger.warning("Root config store failed to stop project supervisor for #{project_id}; continuing reconciliation: #{inspect(reason)}",
+              project_id: project_id,
+              pid: inspect(pid),
+              reason: inspect(reason)
+            )
+
+            :ok
         end
 
       nil ->

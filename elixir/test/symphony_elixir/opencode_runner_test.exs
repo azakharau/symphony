@@ -1487,7 +1487,7 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
     assert length(Regex.scan(~r/turn\/start/, trace)) == 1
   end
 
-  test "codex adapter uses issue workspace and handles refresh empty or error outcomes" do
+  test "codex adapter uses configured project root and handles refresh empty or error outcomes" do
     workspace_root = Path.join(System.tmp_dir!(), "symphony-codex-adapter-#{System.unique_integer([:positive])}")
     codex_project_root = Path.join(workspace_root, "project")
     issue_workspace = Path.join([workspace_root, "workspaces", "issue-codex"])
@@ -1522,8 +1522,8 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
              })
 
     trace = File.read!(trace_file)
-    assert trace =~ issue_workspace
-    refute trace =~ codex_project_root
+    assert trace =~ codex_project_root
+    refute trace =~ "PWD:#{issue_workspace} "
 
     assert {:error, {:issue_state_refresh_failed, :linear_down}} =
              CodexAdapter.run(%{

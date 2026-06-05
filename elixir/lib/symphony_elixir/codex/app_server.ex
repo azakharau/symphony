@@ -20,6 +20,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           auto_approve_requests: boolean(),
           settings: Config.Schema.t(),
           thread_id: String.t(),
+          thread_resumed?: boolean(),
           thread_sandbox: String.t(),
           turn_sandbox_policy: map(),
           workspace: Path.t(),
@@ -58,6 +59,7 @@ defmodule SymphonyElixir.Codex.AppServer do
            thread_sandbox: session_policies.thread_sandbox,
            turn_sandbox_policy: session_policies.turn_sandbox_policy,
            thread_id: thread_id,
+           thread_resumed?: resumed_thread?(session_policies),
            workspace: expanded_workspace,
            worker_host: worker_host
          }}
@@ -79,6 +81,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           settings: settings,
           turn_sandbox_policy: turn_sandbox_policy,
           thread_id: thread_id,
+          thread_resumed?: thread_resumed?,
           workspace: workspace
         },
         prompt,
@@ -103,7 +106,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           %{
             session_id: session_id,
             thread_id: thread_id,
-            turn_id: turn_id
+            turn_id: turn_id,
+            thread_resumed?: thread_resumed?
           },
           metadata
         )
@@ -336,6 +340,9 @@ defmodule SymphonyElixir.Codex.AppServer do
         other
     end
   end
+
+  defp resumed_thread?(%{thread_id: thread_id}) when is_binary(thread_id) and thread_id != "", do: true
+  defp resumed_thread?(_policies), do: false
 
   defp resume_thread(
          port,

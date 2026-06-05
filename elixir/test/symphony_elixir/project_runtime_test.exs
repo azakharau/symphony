@@ -56,10 +56,10 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
       }
 
       assert {:ok, %{thread_id: "thread-alpha"}} =
-               AppServer.run(alpha_workspace, "Use alpha settings", issue, settings: alpha_settings)
+               AppServer.run(alpha_codex, "Use alpha settings", issue, settings: alpha_settings)
 
       trace = File.read!(trace_file)
-      assert trace =~ "PWD:#{alpha_workspace} "
+      assert trace =~ "PWD:#{alpha_codex} "
       refute trace =~ "global-codex-command-that-must-not-run"
     after
       File.rm_rf(test_root)

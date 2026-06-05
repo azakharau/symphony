@@ -233,6 +233,7 @@ defmodule SymphonyElixir.AppServerTest do
       """)
 
       File.chmod!(codex_binary, 0o755)
+      parent = self()
 
       issue = %Issue{
         id: "issue-thread-resume",
@@ -251,7 +252,14 @@ defmodule SymphonyElixir.AppServerTest do
       )
 
       assert {:ok, %{thread_id: "architect-thread-1002"}} =
-               AppServer.run(workspace, "Resume the architect session", issue)
+               AppServer.run(workspace, "Resume the architect session", issue, on_message: fn message -> send(parent, {:codex_message, message}) end)
+
+      assert_receive {:codex_message,
+                      %{
+                        event: :session_started,
+                        thread_id: "architect-thread-1002",
+                        thread_resumed?: true
+                      }}
 
       trace = File.read!(trace_file)
       lines = String.split(trace, "\n", trim: true)

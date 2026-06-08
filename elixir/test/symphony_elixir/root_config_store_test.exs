@@ -29,7 +29,8 @@ defmodule SymphonyElixir.RootConfigStoreTest do
 
     log =
       capture_log(fn ->
-        assert {:error, {:missing_root_config_file, expanded_path, :enoent}} = RootConfigStore.start_link(path: missing_path)
+        assert {:error, {:missing_root_config_file, expanded_path, :enoent}} =
+                 RootConfigStore.start_link(path: missing_path)
 
         assert expanded_path == Path.expand(missing_path)
       end)

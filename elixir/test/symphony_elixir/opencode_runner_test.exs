@@ -882,24 +882,27 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
     assert packet.slice_id == "quoted-slice"
   end
 
-  test "task prompt rejects forbidden role declaration preambles" do
-    assert {:error, :opencode_task_prompt_forbidden_role_preamble} =
+  test "task prompt allows the workflow-mandated OpenCode orchestrator preamble" do
+    assert {:ok, packet} =
              TaskPrompt.extract_packet("""
-             <!-- symphony:opencode-task-prompt:v1 slice_id=role-preamble -->
+             <!-- symphony:opencode-task-prompt:v1 slice_id=opencode-preamble -->
              ```text
              You are the OpenCode build orchestrator for this repository.
 
              Implement the bounded slice.
              ```
              """)
+
+    assert packet.slice_id == "opencode-preamble"
+    assert packet.prompt =~ "You are the OpenCode build orchestrator"
   end
 
-  test "task prompt rejects any generated role declaration preamble starting with you are" do
+  test "task prompt rejects Codex-owned role declaration preambles" do
     assert {:error, :opencode_task_prompt_forbidden_role_preamble} =
              TaskPrompt.extract_packet("""
-             <!-- symphony:opencode-task-prompt:v1 slice_id=generic-role-preamble -->
+             <!-- symphony:opencode-task-prompt:v1 slice_id=codex-role-preamble -->
              ```text
-             You are a bounded implementation worker.
+             You are the Machine Architect for this repository.
 
              Implement the bounded slice.
              ```
@@ -995,17 +998,18 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
     )
 
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
-    Application.put_env(:symphony_elixir, :memory_tracker_opencode_comments, %{"issue-fp" => []})
+
+    Application.put_env(:symphony_elixir, :memory_tracker_opencode_comments, %{
+      "issue-fp" => [opencode_task_prompt_comment("same-slice", "same architect-authored OpenCode prompt")]
+    })
 
     issue = %Issue{id: "issue-fp", identifier: "NER-FP", title: "Fingerprint", state: "In Progress"}
-    packet = %TaskPrompt.Packet{prompt: "same steward task prompt", slice_id: "issue-fp", fingerprint: String.duplicate("a", 64)}
     RuntimeCache.clear_issue(nil, issue)
     on_exit(fn -> RuntimeCache.clear_issue(nil, issue) end)
 
     base_context = %{
       workspace: workspace_root,
       issue: issue,
-      task_packet: packet,
       emit_update: fn update ->
         send(self(), {:runner_update, update})
         :ok
@@ -1132,7 +1136,7 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
              OpenCodeDispatch.run(%{workspace: workspace, issue: issue, opts: [], emit_update: fn _ -> :ok end})
   end
 
-  test "OpenCode dispatch reroutes ACP stall failures to RCA Required" do
+  test "OpenCode dispatch parks ACP stall failures without spawning Codex RCA" do
     workspace =
       Path.join(System.tmp_dir!(), "symphony-opencode-stall-reroute-#{System.unique_integer([:positive])}")
 
@@ -1156,7 +1160,7 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
     assert %Outcome{
              kind: :rerouted,
              reason: :opencode_acp_stalled,
-             result_state: "RCA Required",
+             result_state: "Need Owner Input",
              failure: %{reason: :opencode_acp_stalled, timeout_ms: 300_000}
            } =
              OpenCodeDispatch.run(%{
@@ -1171,15 +1175,16 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
 
     assert_receive {:runner_update,
                     %{
-                      event: :runner_failure_rerouted,
-                      result_state: "RCA Required",
+                      event: :runner_failure_parked,
+                      result_state: "Need Owner Input",
                       failure: %{reason: :opencode_acp_stalled, timeout_ms: 300_000}
                     }}
 
     assert_receive {:memory_tracker_comment, "issue-stall-reroute", comment}
-    assert comment =~ "OpenCode Runner Diagnostic"
+    assert comment =~ "OpenCode Runner Parked"
     assert comment =~ "produced no runner events for 300000ms"
-    assert_receive {:memory_tracker_state_update, "issue-stall-reroute", "RCA Required"}
+    refute comment =~ "Codex Architect RCA"
+    assert_receive {:memory_tracker_state_update, "issue-stall-reroute", "Need Owner Input"}
   end
 
   test "OpenCode dispatch rejects non-Issue fallback" do
@@ -1486,7 +1491,7 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
 
       case "$count" in
         1) printf '%s\n' '{"id":1,"result":{}}' ;;
-        2) printf '%s\n' '{"id":2,"result":{"thread":{"id":"architect-thread"}}}' ;;
+        2) printf '%s\n' '{"id":2,"result":{"thread":{"id":"test-architect-thread"}}}' ;;
         3) printf '%s\n' '{"id":3,"result":{"turn":{"id":"architect-turn"}}}' ;;
         4) printf '%s\n' '{"method":"turn/completed"}'; exit 0 ;;
         *) printf '%s\n' '{"id":999,"error":{"message":"unexpected continuation"}}'; exit 2 ;;
@@ -1664,9 +1669,8 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
     assert_receive {:memory_tracker_comment, "issue-1", comment}
     assert comment =~ "## OpenCode Handoff"
     assert comment =~ "opencode completed"
-    assert comment =~ "symphony:execution-packet:v1"
-    refute comment =~ ~r/^\s*You are\b/
-    refute comment =~ "Architect-authored full OpenCode prompt"
+    assert comment =~ "Architect-authored full OpenCode prompt"
+    refute comment =~ "symphony:execution-packet:v1"
     refute comment =~ "OpenCode prompt for NER-42"
 
     assert_receive {:memory_tracker_state_update, "issue-1", "In Review"}
@@ -2269,7 +2273,7 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
 
       case "$count" in
         1) printf '%s\n' '{"id":1,"result":{}}' ;;
-        2) printf '%s\n' '{"id":2,"result":{"thread":{"id":"codex-thread"}}}' ;;
+        2) printf '%s\n' '{"id":2,"result":{"thread":{"id":"test-architect-thread"}}}' ;;
         3) printf '%s\n' '{"id":3,"result":{"turn":{"id":"codex-turn"}}}' ;;
         4) printf '%s\n' '{"method":"turn/completed"}'; exit 0 ;;
         *) printf '%s\n' '{"id":999,"error":{"message":"unexpected"}}'; exit 2 ;;

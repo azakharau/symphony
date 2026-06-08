@@ -101,8 +101,9 @@ Important boundary:
 6. `Agent Runner`
    - Creates workspace.
    - Builds prompt from issue + workflow template.
-   - Launches the coding agent app-server client.
-   - Streams agent updates back to the orchestrator.
+   - Selects the configured runner for the issue state.
+   - Launches the selected coding-agent client.
+   - Streams runner updates back to the orchestrator.
 
 7. `Status Surface` (OPTIONAL)
    - Presents human-readable runtime status (for example terminal output, dashboard, or other
@@ -140,7 +141,8 @@ Symphony is easiest to port when kept in these layers:
 - Issue tracker API (Linear for `tracker.kind: linear` in this specification version).
 - Local filesystem for workspaces and logs.
 - OPTIONAL workspace population tooling (for example Git CLI, if used).
-- Coding-agent executable that supports the targeted Codex app-server mode.
+- Coding-agent executable for each configured runner. Codex-compatible runners use the targeted
+  Codex app-server mode; OpenCode-compatible runners use the configured OpenCode protocol.
 - Host environment authentication for the issue tracker and coding agent.
 
 ## 4. Core Domain Model
@@ -221,6 +223,7 @@ Fields (logical):
 - `started_at`
 - `status`
 - `error` (OPTIONAL)
+- `runner_kind` (`codex` or `opencode`)
 
 #### 4.1.6 Live Session (Agent Session Metadata)
 
@@ -228,16 +231,22 @@ State tracked while a coding-agent subprocess is running.
 
 Fields:
 
-- `session_id` (string, `<thread_id>-<turn_id>`)
-- `thread_id` (string)
-- `turn_id` (string)
-- `codex_app_server_pid` (string or null)
-- `last_codex_event` (string/enum or null)
-- `last_codex_timestamp` (timestamp or null)
-- `last_codex_message` (summarized payload)
-- `codex_input_tokens` (integer)
-- `codex_output_tokens` (integer)
-- `codex_total_tokens` (integer)
+- `session_id` (string)
+- `runner_kind` (`codex` or `opencode`)
+- `runner_owner` (string or null)
+- `runner_phase` (string or null)
+- `runner_command` (string or null)
+- `runner_project_root` (absolute path or null)
+- `runner_attach_url` (string or null)
+- `thread_id` (string or null)
+- `turn_id` (string or null)
+- `runner_process_id` (string or null)
+- `last_runner_event` (string/enum or null)
+- `last_runner_timestamp` (timestamp or null)
+- `last_runner_message` (summarized payload)
+- `runner_input_tokens` (integer)
+- `runner_output_tokens` (integer)
+- `runner_total_tokens` (integer)
 - `last_reported_input_tokens` (integer)
 - `last_reported_output_tokens` (integer)
 - `last_reported_total_tokens` (integer)
@@ -269,8 +278,8 @@ Fields:
 - `claimed` (set of issue IDs reserved/running/retrying)
 - `retry_attempts` (map `issue_id -> RetryEntry`)
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
-- `codex_totals` (aggregate tokens + runtime seconds)
-- `codex_rate_limits` (latest rate-limit snapshot from agent events)
+- `runner_totals` (aggregate tokens + runtime seconds)
+- `runner_rate_limits` (latest rate-limit snapshot from runner events)
 
 ### 4.2 Stable Identifiers and Normalization Rules
 
@@ -332,7 +341,9 @@ Top-level keys:
 - `workspace`
 - `hooks`
 - `agent`
+- `runner`
 - `codex`
+- `opencode`
 
 Unknown keys SHOULD be ignored for forward compatibility.
 
@@ -370,6 +381,15 @@ Fields:
 - `interval_ms` (integer)
   - Default: `30000`
   - Changes SHOULD be re-applied at runtime and affect future tick scheduling without restart.
+- `full_interval_ms` (integer)
+  - Default: `60000`
+  - Used for expensive full-project polling when an implementation distinguishes fast and full polls.
+  - Implementations MAY set this to `30000` for projects where all active states need fast reaction.
+- `fast_states` (list of strings)
+  - Default: `Todo`, `Need Owner Input`
+  - States listed here SHOULD be checked on the fast `interval_ms` cadence.
+  - When `In Progress` is routed to OpenCode, `In Progress` SHOULD be included so runner progress,
+    handoffs, and state changes are observed without waiting for a full poll.
 
 #### 5.3.3 `workspace` (object)
 
@@ -424,7 +444,27 @@ Fields:
   - State keys are normalized (`lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
 
-#### 5.3.6 `codex` (object)
+#### 5.3.6 `runner` (object)
+
+Fields:
+
+- `default` (string)
+  - Default: `codex`
+  - Supported values: `codex`, `opencode`
+- `routes` (map `state_name -> runner_name`)
+  - Default: empty map.
+  - State keys are tracker state names. Runner names use the same supported values as `default`.
+  - Route lookup SHOULD be exact on tracker state name after the implementation's documented state
+    normalization.
+
+Runner route intent:
+
+- `Todo` is typically routed to Codex/steward work that prepares the implementation packet.
+- `In Progress` MAY be routed to OpenCode for first-class implementation execution.
+- `In Review` SHOULD remain dispatch-eligible when the review/acceptance agent owns validation.
+- `Need Owner Input` SHOULD NOT launch implementation work unless a newer owner-visible answer exists.
+
+#### 5.3.7 `codex` (object)
 
 Fields:
 
@@ -440,6 +480,15 @@ fields locally if they want stricter startup checks.
   - Default: `codex app-server`
   - The runtime launches this command via `bash -lc` in the workspace directory.
   - The launched process MUST speak a compatible app-server protocol over stdio.
+- `project_root` (path string or `$VAR`, OPTIONAL)
+  - Canonical project root used as the Codex app-server `cwd` when configured.
+  - Projects that route stewardship, acceptance, or RCA work to a pinned architect thread SHOULD set
+    this to the canonical checkout so Codex turns continue in the intended project context instead of
+    per-issue workspaces.
+- `thread_id` (string, OPTIONAL)
+  - Configured Codex architect thread to resume before starting a turn.
+  - If configured, the runner MUST use `thread/resume` and MUST NOT fall back to `thread/start` for
+    that run. A mismatched resumed thread id is a hard runner error.
 - `approval_policy` (Codex `AskForApproval` value)
   - Default: implementation-defined.
 - `thread_sandbox` (Codex `SandboxMode` value)
@@ -453,6 +502,49 @@ fields locally if they want stricter startup checks.
 - `stall_timeout_ms` (integer)
   - Default: `300000` (5 minutes)
   - If `<= 0`, stall detection is disabled.
+
+#### 5.3.8 `opencode` (object)
+
+Fields:
+
+- `protocol` (string)
+  - Default: `cli`
+  - Supported values: `cli`, `acp`
+- `command` (string command path)
+  - Default: `opencode`
+  - In ACP mode this is the executable path, not an HTTP endpoint.
+- `args` (list of strings, OPTIONAL)
+  - In ACP stdio mode, use `["acp"]` unless the targeted OpenCode version documents another stdio
+    entrypoint.
+- `project_root` (path string or `$VAR`, OPTIONAL)
+  - Canonical project root used by OpenCode sessions and persisted session keys.
+  - If omitted, the per-issue workspace path MAY be used.
+- `server_url` (string, OPTIONAL)
+  - Operator-facing OpenCode Web URL or attach metadata.
+  - In ACP stdio mode this MUST NOT be treated as the ACP transport.
+- `agent` (string)
+  - Default: `build`
+- `model` (string, OPTIONAL)
+  - Provider/model identifier passed to OpenCode when supported by the targeted protocol.
+- `format` (string)
+  - Default: `json`
+- `result_state` (string)
+  - Default: `In Review`
+  - State to move the issue to after a successful OpenCode implementation handoff.
+- `timeout_ms` (integer)
+  - Default: `3600000`
+  - Total runner runtime timeout. Long implementation sessions MAY set this to multiple hours.
+- `read_timeout_ms` (integer)
+  - Default: `5000`; ACP mode default SHOULD be at least `120000` unless explicitly configured.
+  - Request/handshake timeout, not the implementation runtime limit.
+- `stall_timeout_ms` (integer)
+  - Default: `300000`; ACP mode default MUST be `0` unless explicitly configured.
+  - If `<= 0`, idle-event stall detection is disabled.
+  - A nonzero stall timeout is a runner liveness policy. It MUST NOT create an automatic Codex RCA
+    loop merely because OpenCode emitted no events for that interval.
+- `permission_policy` (string)
+  - Default: `reject`
+  - Passed to OpenCode when supported by the targeted protocol.
 
 ### 5.4 Prompt Template Contract
 
@@ -562,7 +654,9 @@ Validation checks:
 - `tracker.kind` is present and supported.
 - `tracker.api_key` is present after `$` resolution.
 - `tracker.project_slug` is present when REQUIRED by the selected tracker kind.
-- `codex.command` is present and non-empty.
+- `runner.default` and configured `runner.routes` reference supported runners.
+- `codex.command` is present and non-empty when any eligible state can route to `codex`.
+- `opencode.command` is present and non-empty when any eligible state can route to `opencode`.
 
 ### 6.4 Core Config Fields Summary (Cheat Sheet)
 
@@ -577,6 +671,8 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
 - `polling.interval_ms`: integer, default `30000`
+- `polling.full_interval_ms`: integer, default `60000`
+- `polling.fast_states`: list of strings, default `["Todo", "Need Owner Input"]`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
 - `hooks.after_create`: shell script or null
 - `hooks.before_run`: shell script or null
@@ -587,13 +683,30 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
+- `runner.default`: string, default `codex`
+- `runner.routes`: map of tracker state name to runner name, default `{}`
 - `codex.command`: shell command string, default `codex app-server`
+- `codex.project_root`: path resolved to absolute or null
+- `codex.thread_id`: pinned architect thread id or null
 - `codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
 - `codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
 - `codex.turn_sandbox_policy`: Codex `SandboxPolicy` value, default implementation-defined
 - `codex.turn_timeout_ms`: integer, default `3600000`
 - `codex.read_timeout_ms`: integer, default `5000`
 - `codex.stall_timeout_ms`: integer, default `300000`
+- `opencode.protocol`: string, default `cli`
+- `opencode.command`: command path, default `opencode`
+- `opencode.args`: list of strings or null; ACP stdio usually `["acp"]`
+- `opencode.project_root`: path resolved to absolute or null
+- `opencode.server_url`: optional OpenCode Web attach URL; not ACP transport in stdio mode
+- `opencode.agent`: string, default `build`
+- `opencode.model`: string or null
+- `opencode.format`: string, default `json`
+- `opencode.result_state`: string, default `In Review`
+- `opencode.timeout_ms`: integer, default `3600000`
+- `opencode.read_timeout_ms`: integer, default `5000`; ACP default SHOULD be `120000`
+- `opencode.stall_timeout_ms`: integer, default `300000`; ACP default MUST be `0`
+- `opencode.permission_policy`: string, default `reject`
 
 ## 7. Orchestration State Machine
 
@@ -726,6 +839,13 @@ An issue is dispatch-eligible only if all are true:
 - Per-state concurrency slots are available.
 - Blocker rule for `Todo` state passes:
   - If the issue state is `Todo`, do not dispatch when any blocker is non-terminal.
+- Runner route exists:
+  - Use `runner.routes[issue.state]` when present, otherwise `runner.default`.
+  - If the selected runner is unavailable or lacks required config, do not dispatch the issue.
+- State-specific stop rules pass:
+  - `Need Owner Input` is eligible only when there is new owner-visible input that has not already
+    been processed by the implementation's idempotency policy.
+  - `In Review` remains eligible when review/acceptance is owned by the steward/review runner.
 
 Sorting order (stable intent):
 
@@ -780,13 +900,16 @@ Note:
 
 Reconciliation runs every tick and has two parts.
 
-Part A: Stall detection
+Part A: Runner idle detection
 
 - For each running issue, compute `elapsed_ms` since:
-  - `last_codex_timestamp` if any event has been seen, else
+  - the selected runner's last observed event timestamp if any event has been seen, else
   - `started_at`
-- If `elapsed_ms > codex.stall_timeout_ms`, terminate the worker and queue a retry.
-- If `stall_timeout_ms <= 0`, skip stall detection entirely.
+- Use the selected runner's idle timeout (`codex.stall_timeout_ms` or `opencode.stall_timeout_ms`).
+- If the selected timeout is `<= 0`, skip idle detection entirely for that run.
+- If an OpenCode ACP run hits a nonzero idle timeout, treat it as a runner liveness condition. The
+  implementation MUST surface a bounded diagnostic and park/retry according to policy, but MUST NOT
+  launch repeated Codex RCA work that consumes tokens while the OpenCode session state is unchanged.
 
 Part B: Tracker state refresh
 
@@ -994,12 +1117,14 @@ Transport handling requirements:
 
 ### 10.4 Emitted Runtime Events (Upstream to Orchestrator)
 
-The app-server client emits structured events to the orchestrator callback. Each event SHOULD
+The selected runner client emits structured events to the orchestrator callback. Each event SHOULD
 include:
 
 - `event` (enum/string)
 - `timestamp` (UTC timestamp)
-- `codex_app_server_pid` (if available)
+- `runner_kind` (`codex` or `opencode`)
+- `runner_process_id` (if available)
+- `session_id` (if available)
 - OPTIONAL `usage` map (token counts)
 - payload fields as needed
 
@@ -1101,10 +1226,14 @@ Timeouts:
 - `codex.read_timeout_ms`: request/response timeout during startup and sync requests
 - `codex.turn_timeout_ms`: total turn stream timeout
 - `codex.stall_timeout_ms`: enforced by orchestrator based on event inactivity
+- `opencode.read_timeout_ms`: ACP request/handshake timeout or CLI read timeout
+- `opencode.timeout_ms`: total OpenCode runner runtime timeout
+- `opencode.stall_timeout_ms`: selected-runner idle-event timeout; ACP defaults to disabled
 
 Error mapping (RECOMMENDED normalized categories):
 
 - `codex_not_found`
+- `opencode_not_found`
 - `invalid_workspace_cwd`
 - `response_timeout`
 - `turn_timeout`
@@ -1113,22 +1242,82 @@ Error mapping (RECOMMENDED normalized categories):
 - `turn_failed`
 - `turn_cancelled`
 - `turn_input_required`
+- `missing_opencode_task_prompt`
+- `opencode_acp_start_failed`
+- `opencode_acp_stalled`
+- `opencode_provider_limited`
 
 ### 10.7 Agent Runner Contract
 
-The `Agent Runner` wraps workspace + prompt + app-server client.
+The `Agent Runner` wraps workspace + prompt + selected coding-agent client.
 
 Behavior:
 
 1. Create/reuse workspace for issue.
 2. Build prompt from workflow template.
-3. Start app-server session.
-4. Forward app-server events to orchestrator.
-5. On any error, fail the worker attempt (the orchestrator will retry).
+3. Resolve selected runner from `runner.routes` / `runner.default`.
+4. Start the selected runner session.
+5. Forward runner events to orchestrator.
+6. Persist runner session identity when the selected runner supports session resume.
+7. On successful implementation handoff, move to the runner's configured result state when policy
+   requires a state transition.
+8. On any error, fail the worker attempt or park the issue according to the selected runner's
+   documented error mapping.
 
 Note:
 
 - Workspaces are intentionally preserved after successful runs.
+
+### 10.8 OpenCode ACP Runner Contract
+
+OpenCode MUST be implementable as a first-class runner, not only as a shell command invoked by a
+Codex prompt.
+
+ACP transport:
+
+- `opencode.protocol: acp` launches `opencode.command` with `opencode.args` as a stdio child process.
+- The child process cwd MUST be `opencode.project_root` when configured; otherwise it MUST be the
+  per-issue workspace path.
+- `opencode.server_url` is optional operator-facing attach metadata only. It MUST NOT be used as the
+  ACP transport in stdio mode.
+- The runner MUST stream ACP session updates, assistant/tool messages when available, result state,
+  session id, usage/tokens when available, and terminal handoff status into orchestrator events.
+
+Prompt and handoff:
+
+- OpenCode implementation work is dispatched from a complete owner/steward packet, normally posted as
+  `<!-- symphony:opencode-task-prompt:v1 ... -->`.
+- If the required task prompt is missing or malformed, the runner MUST stop with a policy error rather
+  than inventing an implementation prompt.
+- Generated worker prompts MUST NOT rely on role declarations such as `You are ...` as the first-line
+  contract. The packet content and schema are the contract.
+- A successful OpenCode implementation MUST return an operator-visible handoff with changed files,
+  validation commands/results, unresolved risks, and any session id or attach URL known to Symphony.
+
+Session persistence and resume:
+
+- ACP session identity SHOULD be persisted under the workspace root, for example
+  `<workspace.root>/.symphony/opencode_acp_sessions.json`.
+- The persistence key MUST include the canonical project root, tracker issue id, and prompt/session
+  scope so sessions from different projects or prompt generations do not collide.
+- When a persisted OpenCode ACP session exists and no completed handoff has been processed, Symphony
+  MUST resume or continue that session instead of creating duplicate sessions for the same issue.
+- When a persisted OpenCode ACP session exists and its completed handoff has already been processed,
+  Symphony MUST suppress duplicate state/comment mutations.
+- `OpenCode Session Attached` is not a completion handoff and MUST NOT be used as an owner-input
+  request. A session-attachment guard MAY be logged for operators, but it MUST NOT move an issue to
+  `Need Owner Input` by itself and MUST NOT replace session resume.
+
+Timeout and quota behavior:
+
+- `opencode.timeout_ms` is the total implementation runtime limit and MAY be long; production
+  implementation work can legitimately run for tens of minutes.
+- `opencode.read_timeout_ms` is only for request/handshake operations.
+- For ACP, `opencode.stall_timeout_ms` defaults to `0` so lack of incremental ACP events does not
+  create repeated RCA transitions while the session is still active.
+- Provider quota/rate-limit failures before the first useful runner event MUST be surfaced as
+  infrastructure failure evidence. Re-dispatch SHOULD be delayed or parked according to retry policy
+  instead of repeatedly recreating sessions.
 
 ## 11. Issue Tracker Integration Contract (Linear-Compatible)
 
@@ -1281,7 +1470,7 @@ SHOULD return:
 - `running` (list of running session rows)
 - each running row SHOULD include `turn_count`
 - `retrying` (list of retry queue rows)
-- `codex_totals`
+- `runner_totals`
   - `input_tokens`
   - `output_tokens`
   - `total_tokens`
@@ -1402,6 +1591,15 @@ Minimum endpoints:
           "issue_identifier": "MT-649",
           "state": "In Progress",
           "session_id": "thread-1-turn-1",
+          "runner": {
+            "kind": "opencode",
+            "owner": "opencode",
+            "phase": "running",
+            "command": "/usr/local/bin/opencode acp",
+            "session_id": "ses_example",
+            "project_root": "/home/agent/proj/example",
+            "attach_url": "http://127.0.0.1:3000"
+          },
           "turn_count": 7,
           "last_event": "turn_completed",
           "last_message": "",
@@ -1423,7 +1621,7 @@ Minimum endpoints:
           "error": "no available orchestrator slots"
         }
       ],
-      "codex_totals": {
+      "runner_totals": {
         "input_tokens": 5000,
         "output_tokens": 2400,
         "total_tokens": 7400,
@@ -1452,6 +1650,15 @@ Minimum endpoints:
       },
       "running": {
         "session_id": "thread-1-turn-1",
+        "runner": {
+          "kind": "opencode",
+          "owner": "opencode",
+          "phase": "running",
+          "command": "/usr/local/bin/opencode acp",
+          "session_id": "ses_example",
+          "project_root": "/home/agent/proj/example",
+          "attach_url": "http://127.0.0.1:3000"
+        },
         "turn_count": 7,
         "state": "In Progress",
         "started_at": "2026-02-24T20:10:12Z",
@@ -1466,10 +1673,10 @@ Minimum endpoints:
       },
       "retry": null,
       "logs": {
-        "codex_session_logs": [
+        "runner_session_logs": [
           {
             "label": "latest",
-            "path": "/var/log/symphony/codex/MT-649/latest.log",
+            "path": "/var/log/symphony/opencode/MT-649/latest.log",
             "url": null
           }
         ]
@@ -1690,8 +1897,8 @@ function start_service():
     claimed: set(),
     retry_attempts: {},
     completed: set(),
-    codex_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-    codex_rate_limits: null
+    runner_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+    runner_rate_limits: null
   }
 
   validation = validate_dispatch_config()
@@ -1783,13 +1990,16 @@ function dispatch_issue(issue, state, attempt):
     identifier: issue.identifier,
     issue,
     session_id: null,
-    codex_app_server_pid: null,
-    last_codex_message: null,
-    last_codex_event: null,
-    last_codex_timestamp: null,
-    codex_input_tokens: 0,
-    codex_output_tokens: 0,
-    codex_total_tokens: 0,
+    runner_kind: selected_runner_for(issue.state),
+    runner_owner: null,
+    runner_phase: null,
+    runner_process_id: null,
+    last_runner_message: null,
+    last_runner_event: null,
+    last_runner_timestamp: null,
+    runner_input_tokens: 0,
+    runner_output_tokens: 0,
+    runner_total_tokens: 0,
     last_reported_input_tokens: 0,
     last_reported_output_tokens: 0,
     last_reported_total_tokens: 0,
@@ -1945,7 +2155,15 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - `$VAR` resolution works for tracker API key and path values
 - `~` path expansion works
 - `codex.command` is preserved as a shell command string
+- `runner.default` rejects unsupported runner names
+- `runner.routes` normalizes state routes and rejects unsupported runner names
 - Per-state concurrency override map normalizes state names and ignores invalid values
+- `opencode.protocol` accepts `cli` and `acp`
+- `opencode.command`, `args`, `project_root`, `server_url`, `agent`, `model`, `format`,
+  `result_state`, `timeout_ms`, `read_timeout_ms`, `stall_timeout_ms`, and `permission_policy` are
+  parsed and exposed through typed config
+- `opencode.protocol: acp` defaults `read_timeout_ms` to a long handshake timeout and
+  `stall_timeout_ms` to `0` unless explicitly configured
 - Prompt template renders `issue` and `attempt`
 - Prompt rendering fails on unknown variables (strict mode)
 
@@ -1981,6 +2199,10 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Dispatch sort order is priority then oldest creation time
 - `Todo` issue with non-terminal blockers is not eligible
 - `Todo` issue with terminal blockers is eligible
+- `Need Owner Input` without newer owner-visible input is not eligible for repeated processing
+- `In Review` remains eligible when review/acceptance is routed to the steward runner
+- State runner route selects the configured runner and falls back to `runner.default`
+- `In Progress` can route to OpenCode without Codex app-server dispatch
 - Active-state issue refresh updates running entry state
 - Non-active state stops running agent without workspace cleanup
 - Terminal state stops running agent and cleans workspace
@@ -1989,13 +2211,16 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Abnormal worker exit increments retries with 10s-based exponential backoff
 - Retry backoff cap uses configured `agent.max_retry_backoff_ms`
 - Retry queue entries include attempt, due time, identifier, and error
-- Stall detection kills stalled sessions and schedules retry
+- Runner idle detection uses the selected runner's configured stall timeout
+- OpenCode ACP with `stall_timeout_ms <= 0` is not killed for lack of incremental events
+- OpenCode ACP nonzero idle timeout parks or retries according to runner policy without launching a
+  repeated Codex RCA loop
 - Slot exhaustion requeues retries with explicit error reason
 - If a snapshot API is implemented, it returns running rows, retry rows, token totals, and rate
   limits
 - If a snapshot API is implemented, timeout/unavailable cases are surfaced
 
-### 17.5 Coding-Agent App-Server Client
+### 17.5 Coding-Agent Runner Clients
 
 - Launch command uses workspace cwd and invokes `bash -lc <codex.command>`
 - Session startup follows the targeted Codex app-server protocol.
@@ -2023,6 +2248,18 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   - top-level GraphQL `errors` produce `success=false` while preserving the GraphQL body
   - invalid arguments, missing auth, and transport failures return structured failure payloads
   - unsupported tool names still fail without stalling the session
+- OpenCode ACP launch uses `opencode.command` plus `opencode.args` as a stdio process
+- OpenCode ACP cwd is the canonical `opencode.project_root` when configured
+- OpenCode ACP `server_url` is recorded only as attach metadata, not transport
+- OpenCode ACP runner emits session id, runner phase, messages/events, usage when available, and final
+  handoff into orchestrator state
+- OpenCode ACP persisted session identity is scoped by canonical project root, issue id, and prompt
+  scope
+- Existing incomplete OpenCode ACP sessions are resumed/continued rather than duplicated
+- Existing completed OpenCode ACP handoffs are idempotent and do not create duplicate comments or
+  state transitions
+- `OpenCode Session Attached` does not move an issue to `Need Owner Input` and is not accepted as a
+  completion handoff
 
 ### 17.6 Observability
 
@@ -2030,6 +2267,10 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Structured logging includes issue/session context fields
 - Logging sink failures do not crash orchestration
 - Token/rate-limit aggregation remains correct across repeated agent updates
+- Status surfaces expose selected runner kind, owner, phase, command, session id, project root, attach
+  URL, last runner event/message, and tokens/usage when available
+- Status surfaces humanize runner updates and MUST NOT display raw internal maps as the primary
+  operator-facing update text
 - If a human-readable status surface is implemented, it is driven from orchestrator state and does
   not affect correctness
 - If humanized event summaries are implemented, they cover key wrapper/agent event classes without

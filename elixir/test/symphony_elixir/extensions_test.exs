@@ -754,6 +754,11 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "state" => "In Progress",
                  "worker_host" => nil,
                  "workspace_path" => nil,
+                 "project" => %{
+                   "id" => nil,
+                   "name" => nil,
+                   "root" => "/home/agent/proj/symphony"
+                 },
                  "runner" => %{
                    "kind" => "opencode",
                    "owner" => "opencode",
@@ -793,7 +798,8 @@ defmodule SymphonyElixir.ExtensionsTest do
                    "session_id" => nil
                  },
                  "worker_host" => nil,
-                 "workspace_path" => nil
+                 "workspace_path" => nil,
+                 "project" => %{"id" => nil, "name" => nil, "root" => nil}
                }
              ],
              "blocked" => [
@@ -804,6 +810,11 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "error" => "codex turn requires operator input",
                  "worker_host" => "dm-dev2",
                  "workspace_path" => "/workspaces/MT-BLOCKED",
+                 "project" => %{
+                   "id" => nil,
+                   "name" => nil,
+                   "root" => "/workspaces/MT-BLOCKED"
+                 },
                  "runner" => %{
                    "kind" => "codex",
                    "owner" => "codex",
@@ -851,10 +862,20 @@ defmodule SymphonyElixir.ExtensionsTest do
                "path" => Path.join(Config.settings!().workspace.root, "MT-HTTP"),
                "host" => nil
              },
+             "project" => %{
+               "id" => nil,
+               "name" => nil,
+               "root" => "/home/agent/proj/symphony"
+             },
              "attempts" => %{"restart_count" => 0, "current_retry_attempt" => 0},
              "running" => %{
                "worker_host" => nil,
                "workspace_path" => nil,
+               "project" => %{
+                 "id" => nil,
+                 "name" => nil,
+                 "root" => "/home/agent/proj/symphony"
+               },
                "runner" => %{
                  "kind" => "opencode",
                  "owner" => "opencode",
@@ -878,6 +899,31 @@ defmodule SymphonyElixir.ExtensionsTest do
              "retry" => nil,
              "blocked" => nil,
              "logs" => %{"codex_session_logs" => []},
+             "matches" => [
+               %{
+                 "issue_id" => "issue-http",
+                 "issue_identifier" => "MT-HTTP",
+                 "project" => %{
+                   "id" => nil,
+                   "name" => nil,
+                   "root" => "/home/agent/proj/symphony"
+                 },
+                 "runner" => %{
+                   "kind" => "opencode",
+                   "owner" => "opencode",
+                   "phase" => "command",
+                   "project_root" => "/home/agent/proj/symphony",
+                   "command" => ["opencode", "run", "--session", "thread-http"],
+                   "attach_url" => "http://127.0.0.1:3000",
+                   "result_state" => "running",
+                   "failure" => nil,
+                   "session_id" => "thread-http"
+                 },
+                 "session_id" => "thread-http",
+                 "status" => "running",
+                 "workspace_path" => nil
+               }
+             ],
              "recent_events" => [],
              "last_error" => nil,
              "tracked" => %{}

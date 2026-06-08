@@ -43,6 +43,7 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
           workspace_root: alpha_workspace_root,
           codex_command: "#{codex_binary} app-server",
           codex_project_root: alpha_codex,
+          codex_thread_id: "thread-alpha",
           prompt: "alpha prompt"
         )
 
@@ -186,6 +187,7 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
     codex:
       command: "#{opts[:codex_command] || "codex app-server"}"
       project_root: #{yaml_string(opts[:codex_project_root])}
+      thread_id: #{yaml_string(opts[:codex_thread_id])}
       turn_timeout_ms: 1000
       read_timeout_ms: 1000
     opencode:

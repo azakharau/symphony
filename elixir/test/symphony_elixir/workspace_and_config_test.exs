@@ -1029,6 +1029,53 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     assert Orchestrator.active_issues_blocking_idle_pulse_for_test([owner_input, normal_work]) == [normal_work]
   end
 
+  test "blocked todo issues do not block idle owner pulse dispatch" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_active_states: ["Todo", "Need Owner Input"],
+      tracker_terminal_states: ["Done"],
+      max_concurrent_agents: 2,
+      stewardship_active_milestone_id: "milestone-1",
+      stewardship_active_milestone_name: "Approved phase"
+    )
+
+    owner_input = %Issue{
+      id: "owner-input-1",
+      identifier: "NER-38",
+      title: "Owner answer",
+      state: "Need Owner Input",
+      project_milestone: %{id: "milestone-1", name: "Approved phase"}
+    }
+
+    blocked_work = %Issue{
+      id: "blocked-work-1",
+      identifier: "NER-41",
+      title: "Blocked work",
+      state: "Todo",
+      project_milestone: %{id: "milestone-1", name: "Approved phase"},
+      blocked_by: [%{id: "dependency", state: "Todo"}]
+    }
+
+    dispatchable_work = %Issue{
+      id: "normal-work-1",
+      identifier: "NER-42",
+      title: "Normal work",
+      state: "Todo",
+      project_milestone: %{id: "milestone-1", name: "Approved phase"}
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      retry_attempts: %{},
+      active_project_milestone_id: "milestone-1",
+      max_concurrent_agents: 2
+    }
+
+    assert Orchestrator.active_issues_blocking_idle_pulse_for_test([owner_input, blocked_work], state) == []
+    assert Orchestrator.active_issues_blocking_idle_pulse_for_test([owner_input, dispatchable_work], state) == [dispatchable_work]
+  end
+
   test "runtime cache GC prunes stale pulse and claim entries while preserving visible and active issue ids" do
     state = %Orchestrator.State{
       completed: MapSet.new(["stale-completed", "visible-done"]),
@@ -1150,6 +1197,21 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     assert new_state.suppression_counts == %{}
   end
 
+  test "checked-in Symphony workflow keeps Codex acceptance issue-scoped" do
+    workflow_path =
+      __DIR__
+      |> Path.join("../../WORKFLOW.md")
+      |> Path.expand()
+
+    assert {:ok, %{config: config}} = SymphonyElixir.Workflow.load(workflow_path)
+    assert {:ok, settings} = SymphonyElixir.Config.Schema.parse(config)
+
+    assert settings.codex.thread_id == nil
+    assert settings.codex.project_root == nil
+    assert settings.runner.routes["in review"] == "codex"
+    assert settings.runner.routes["rca required"] == "codex"
+  end
+
   test "todo issue with non-terminal blocker is not dispatch-eligible" do
     state = %Orchestrator.State{
       max_concurrent_agents: 3,
@@ -1168,6 +1230,38 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
       blocked_by: [%{id: "blocker-1", identifier: "MT-1002", state: "In Progress"}]
     }
 
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "non-todo issue with non-terminal blocker is not dispatch-eligible" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_active_states: ["Todo", "In Review"],
+      tracker_terminal_states: ["Done"]
+    )
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      active_project_milestone_id: "milestone-ready-1",
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "blocked-review-1",
+      identifier: "MT-1008",
+      title: "Blocked review",
+      state: "In Review",
+      project_milestone: %{
+        id: "milestone-ready-1",
+        name: "Ready milestone",
+        description: "phase_state: todo"
+      },
+      blocked_by: [%{id: "blocker-1", identifier: "MT-1002", state: "In Progress"}]
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(%{issue | blocked_by: []}, state)
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
@@ -1593,6 +1687,52 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     assert Orchestrator.should_dispatch_issue_for_test(matching_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(non_matching_issue, state)
     refute Orchestrator.should_dispatch_issue_for_test(matching_issue, %Orchestrator.State{})
+  end
+
+  test "active milestone dispatch allows only one active issue lane" do
+    running_issue = %Issue{
+      id: "issue-running",
+      identifier: "SYM-20",
+      title: "Running milestone issue",
+      state: "In Progress",
+      project_milestone: %{id: "milestone-active", name: "Active"}
+    }
+
+    next_issue = %Issue{
+      id: "issue-next",
+      identifier: "SYM-21",
+      title: "Next milestone issue",
+      state: "Todo",
+      project_milestone: %{id: "milestone-active", name: "Active"}
+    }
+
+    base_state = %Orchestrator.State{
+      active_project_milestone_id: "milestone-active",
+      max_concurrent_agents: 6,
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      retry_attempts: %{},
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(next_issue, base_state)
+
+    refute Orchestrator.should_dispatch_issue_for_test(next_issue, %{
+             base_state
+             | running: %{"issue-running" => %{issue: running_issue}},
+               claimed: MapSet.new(["issue-running"])
+           })
+
+    refute Orchestrator.should_dispatch_issue_for_test(next_issue, %{
+             base_state
+             | retry_attempts: %{"issue-running" => %{issue: running_issue}}
+           })
+
+    refute Orchestrator.should_dispatch_issue_for_test(next_issue, %{
+             base_state
+             | blocked: %{"issue-running" => %{issue: running_issue}}
+           })
   end
 
   test "configured milestone pointer can be cleared and reselected" do
@@ -2235,7 +2375,7 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     assert Config.settings!().codex.command == "codex app-server"
   end
 
-  test "opencode acp defaults to no idle stall watchdog when stall timeout is omitted" do
+  test "opencode acp disables idle stall watchdog when stall timeout is omitted" do
     File.write!(
       Workflow.workflow_file_path(),
       """

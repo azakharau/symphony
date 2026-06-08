@@ -218,6 +218,8 @@ defmodule SymphonyElixir.TestSupport do
           opencode_permission_policy: "reject",
           process_policy_rca_required_state: "RCA Required",
           process_policy_max_rejections_per_slice: 2,
+          process_policy_timeout_state: "Need Owner Input",
+          process_policy_state_timeouts_ms: %{},
           stewardship_active_milestone_id: nil,
           stewardship_active_milestone_name: nil,
           hook_after_create: nil,
@@ -283,6 +285,11 @@ defmodule SymphonyElixir.TestSupport do
 
     process_policy_max_rejections_per_slice =
       Keyword.get(config, :process_policy_max_rejections_per_slice)
+
+    process_policy_timeout_state = Keyword.get(config, :process_policy_timeout_state)
+
+    process_policy_state_timeouts_ms =
+      Keyword.get(config, :process_policy_state_timeouts_ms)
 
     stewardship_active_milestone_id = Keyword.get(config, :stewardship_active_milestone_id)
     stewardship_active_milestone_name = Keyword.get(config, :stewardship_active_milestone_name)
@@ -352,6 +359,8 @@ defmodule SymphonyElixir.TestSupport do
         "process_policy:",
         "  rca_required_state: #{yaml_value(process_policy_rca_required_state)}",
         "  max_rejections_per_slice: #{yaml_value(process_policy_max_rejections_per_slice)}",
+        "  timeout_state: #{yaml_value(process_policy_timeout_state)}",
+        "  state_timeouts_ms: #{yaml_value(process_policy_state_timeouts_ms)}",
         stewardship_yaml(stewardship_active_milestone_id, stewardship_active_milestone_name),
         hooks_yaml(
           hook_after_create,

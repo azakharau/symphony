@@ -10,8 +10,7 @@ defmodule SymphonyElixir.Steward.ExecutionPacket do
 
   @forbidden_preambles [
     "You are the coding orchestrator",
-    "You are the Machine Architect",
-    "You are the OpenCode build orchestrator"
+    "You are the Machine Architect"
   ]
 
   @spec build(Issue.t(), term()) :: map()
@@ -73,8 +72,7 @@ defmodule SymphonyElixir.Steward.ExecutionPacket do
   def forbidden_preamble?(prompt) when is_binary(prompt) do
     trimmed = String.trim_leading(prompt)
 
-    String.starts_with?(trimmed, "You are ") or
-      Enum.any?(@forbidden_preambles, &String.starts_with?(trimmed, &1))
+    Enum.any?(@forbidden_preambles, &String.starts_with?(trimmed, &1))
   end
 
   def forbidden_preamble?(_prompt), do: false

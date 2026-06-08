@@ -46,14 +46,18 @@ defmodule SymphonyElixirWeb.Presenter do
   def issue_payload(issue_identifier, orchestrator, snapshot_timeout_ms) when is_binary(issue_identifier) do
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
       %{} = snapshot ->
-        running = Enum.find(snapshot.running, &(&1.identifier == issue_identifier))
-        retry = Enum.find(snapshot.retrying, &(&1.identifier == issue_identifier))
-        blocked = Enum.find(Map.get(snapshot, :blocked, []), &(&1.identifier == issue_identifier))
+        running_entries = Enum.filter(snapshot.running, &(&1.identifier == issue_identifier))
+        retry_entries = Enum.filter(snapshot.retrying, &(&1.identifier == issue_identifier))
+        blocked_entries = Enum.filter(Map.get(snapshot, :blocked, []), &(&1.identifier == issue_identifier))
+
+        running = List.first(running_entries)
+        retry = List.first(retry_entries)
+        blocked = List.first(blocked_entries)
 
         if is_nil(running) and is_nil(retry) and is_nil(blocked) do
           {:error, :issue_not_found}
         else
-          {:ok, issue_payload_body(issue_identifier, running, retry, blocked)}
+          {:ok, issue_payload_body(issue_identifier, running, retry, blocked, running_entries, retry_entries, blocked_entries)}
         end
 
       _ ->
@@ -72,30 +76,43 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
-  defp issue_payload_body(issue_identifier, running, retry, blocked) do
+  defp issue_payload_body(issue_identifier, running, retry, blocked, running_entries, retry_entries, blocked_entries) do
+    selected_entry = running || retry || blocked
+
     %{
       issue_identifier: issue_identifier,
       issue_id: issue_id_from_entries(running, retry, blocked),
+      project: project_payload(selected_entry),
       status: issue_status(running, retry, blocked),
-      workspace: %{
-        path: workspace_path(issue_identifier, running, retry, blocked),
-        host: workspace_host(running, retry, blocked)
-      },
-      attempts: %{
-        restart_count: restart_count(retry),
-        current_retry_attempt: retry_attempt(retry)
-      },
-      running: running && running_issue_payload(running),
-      retry: retry && retry_issue_payload(retry),
-      blocked: blocked && blocked_issue_payload(blocked),
-      logs: %{
-        codex_session_logs: []
-      },
+      workspace: workspace_payload(issue_identifier, running, retry, blocked),
+      attempts: retry_attempts_payload(retry),
+      running: optional_issue_payload(running, &running_issue_payload/1),
+      retry: optional_issue_payload(retry, &retry_issue_payload/1),
+      blocked: optional_issue_payload(blocked, &blocked_issue_payload/1),
+      matches: issue_matches_payload(running_entries, retry_entries, blocked_entries),
+      logs: %{codex_session_logs: []},
       recent_events: recent_events_payload(running || blocked),
       last_error: (blocked && blocked.error) || (retry && retry.error),
       tracked: %{}
     }
   end
+
+  defp workspace_payload(issue_identifier, running, retry, blocked) do
+    %{
+      path: workspace_path(issue_identifier, running, retry, blocked),
+      host: workspace_host(running, retry, blocked)
+    }
+  end
+
+  defp retry_attempts_payload(retry) do
+    %{
+      restart_count: restart_count(retry),
+      current_retry_attempt: retry_attempt(retry)
+    }
+  end
+
+  defp optional_issue_payload(nil, _payload_fun), do: nil
+  defp optional_issue_payload(entry, payload_fun), do: payload_fun.(entry)
 
   defp issue_id_from_entries(running, retry, blocked),
     do: (running && running.issue_id) || (retry && retry.issue_id) || (blocked && blocked.issue_id)
@@ -112,6 +129,7 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
+      project: project_payload(entry),
       state: entry.state,
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path),
@@ -134,6 +152,7 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
+      project: project_payload(entry),
       attempt: entry.attempt,
       due_at: due_at_iso8601(entry.due_in_ms),
       error: entry.error,
@@ -147,6 +166,7 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
+      project: project_payload(entry),
       state: entry.state,
       error: entry.error,
       runner: runner_payload(entry),
@@ -164,6 +184,7 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       worker_host: Map.get(running, :worker_host),
       workspace_path: Map.get(running, :workspace_path),
+      project: project_payload(running),
       runner: runner_payload(running),
       session_id: running.session_id,
       turn_count: Map.get(running, :turn_count, 0),
@@ -187,7 +208,8 @@ defmodule SymphonyElixirWeb.Presenter do
       error: retry.error,
       runner: runner_payload(retry),
       worker_host: Map.get(retry, :worker_host),
-      workspace_path: Map.get(retry, :workspace_path)
+      workspace_path: Map.get(retry, :workspace_path),
+      project: project_payload(retry)
     }
   end
 
@@ -195,6 +217,7 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       worker_host: Map.get(blocked, :worker_host),
       workspace_path: Map.get(blocked, :workspace_path),
+      project: project_payload(blocked),
       runner: runner_payload(blocked),
       session_id: blocked.session_id,
       state: blocked.state,
@@ -234,6 +257,34 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp runner_payload(_entry), do: %{}
+
+  defp issue_matches_payload(running_entries, retry_entries, blocked_entries) do
+    Enum.map(running_entries, &issue_match_payload(&1, "running")) ++
+      Enum.map(retry_entries, &issue_match_payload(&1, "retrying")) ++
+      Enum.map(blocked_entries, &issue_match_payload(&1, "blocked"))
+  end
+
+  defp issue_match_payload(entry, status) do
+    %{
+      issue_id: entry.issue_id,
+      issue_identifier: entry.identifier,
+      status: status,
+      project: project_payload(entry),
+      workspace_path: Map.get(entry, :workspace_path),
+      runner: runner_payload(entry),
+      session_id: Map.get(entry, :session_id)
+    }
+  end
+
+  defp project_payload(entry) when is_map(entry) do
+    %{
+      id: Map.get(entry, :project_id),
+      name: Map.get(entry, :project_name),
+      root: Map.get(entry, :project_root) || Map.get(entry, :runner_project_root)
+    }
+  end
+
+  defp project_payload(_entry), do: %{id: nil, name: nil, root: nil}
 
   defp recent_events_payload(nil), do: []
 

@@ -1,7 +1,6 @@
 ---
 tracker:
   kind: linear
-  api_key: $LINEAR_API_KEY
   project_slug: "87b3b7431580"
   active_states:
     - Todo
@@ -18,6 +17,7 @@ polling:
   full_interval_ms: 30000
   fast_states:
     - Todo
+    - In Progress
     - "Need Owner Input"
 workspace:
   root: /home/agent/.symphony/workspaces/codex/symphony
@@ -43,12 +43,12 @@ opencode:
   project_root: /home/agent/proj/symphony
   server_url: null
   agent: build
-  model: null
+  model: openai/gpt-5.5
   format: json
   result_state: "In Review"
   timeout_ms: 10800000
   read_timeout_ms: 30000
-  stall_timeout_ms: 300000
+  stall_timeout_ms: 0
   permission_policy: reject
 
 OpenCode live validation gate:
@@ -63,6 +63,10 @@ OpenCode live validation gate:
 process_policy:
   rca_required_state: "RCA Required"
   max_rejections_per_slice: 2
+  timeout_state: "Need Owner Input"
+  state_timeouts_ms:
+    "In Review": 1800000
+    "RCA Required": 1800000
 stewardship:
   active_milestone_id: "0b8b5a7e-d9a6-47df-a824-435cce359cb2"
   active_milestone_name: "01. Multiproject runtime foundation"
@@ -77,6 +81,13 @@ codex:
 ---
 
 Symphony steward workflow for the Symphony project.
+
+Codex session contract:
+
+- Symphony must start issue-scoped Codex threads from the per-issue workspace.
+- Do not resume the main project Machine Architect thread for Symphony execution packets.
+- Run Codex turns with the issue workspace as cwd/project root, not `/home/agent/proj/symphony`.
+- Keep canonical repo paths as task context only; do not let Codex UI sessions accumulate under the main project.
 
 Project identity:
 

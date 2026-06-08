@@ -53,7 +53,7 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
     assert output =~ "ACP result"
   end
 
-  test "opencode acp runner reuses persisted issue session id" do
+  test "opencode acp runner resumes persisted issue session id and continues work" do
     {python, script} = fake_acp_server!()
     issue = issue()
     workspace_root = workspace_root!()
@@ -67,8 +67,10 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
       workspace_root: workspace_root
     )
 
-    assert {:error, {:need_owner_input, {:opencode_acp_session_attached, "existing-session"}}} =
+    assert {:ok, %{output: output, session_id: "existing-session"}} =
              Runner.run("/tmp/workspace", issue, "prompt body")
+
+    assert output =~ "ACP result"
   end
 
   test "opencode acp runner attaches completed persisted session handoff instead of parking" do
@@ -142,7 +144,7 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
     refute output =~ "ACP result"
   end
 
-  test "opencode acp runner does not resend initial prompt after resume" do
+  test "opencode acp runner sends continuation prompt after resume when no completed handoff exists" do
     {python, script} = fake_acp_server!()
     issue = issue()
     workspace_root = workspace_root!()
@@ -158,16 +160,18 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
     write_workflow_file!(Workflow.workflow_file_path(),
       opencode_protocol: "acp",
       opencode_command: python,
-      opencode_args: [script, "no-prompt-after-resume"],
+      opencode_args: [script, "runner"],
       opencode_project_root: File.cwd!(),
       workspace_root: workspace_root
     )
 
-    assert {:error, {:need_owner_input, {:opencode_acp_session_attached, "existing-session"}}} =
+    assert {:ok, %{output: output, session_id: "existing-session"}} =
              Runner.run("/tmp/workspace", issue, "initial prompt must not be sent")
+
+    assert output =~ "ACP result"
   end
 
-  test "opencode acp dispatch records attached session diagnostic instead of handoff" do
+  test "opencode acp dispatch resumes attached session instead of parking owner input" do
     {python, script} = fake_acp_server!()
     issue = issue()
     workspace_root = workspace_root!()
@@ -207,12 +211,11 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
     assert :ok = AgentRunner.run(issue, self())
 
     assert_receive {:memory_tracker_comment, "issue-1", comment}
-    assert comment =~ "## OpenCode Session Attached"
-    assert comment =~ "Session ID: `existing-session`"
-    refute comment =~ "## OpenCode Handoff"
+    assert comment =~ "## OpenCode Handoff"
+    refute comment =~ "## OpenCode Session Attached"
     refute comment =~ "OpenCode requested owner input"
 
-    assert_receive {:memory_tracker_state_update, "issue-1", "Need Owner Input"}
+    assert_receive {:memory_tracker_state_update, "issue-1", "In Review"}
   end
 
   test "opencode acp runner durable session mapping survives runner process restart" do
@@ -231,8 +234,10 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
     assert {:ok, %{output: output}} = Runner.run("/tmp/workspace", issue, "initial prompt")
     assert output =~ "ACP result"
 
-    assert {:error, {:need_owner_input, {:opencode_acp_session_attached, "new-session"}}} =
+    assert {:ok, %{output: output, session_id: "new-session"}} =
              Runner.run("/tmp/workspace", issue, "initial prompt")
+
+    assert output =~ "ACP result"
   end
 
   test "opencode acp runner prevents duplicate sessions for same issue and project" do
@@ -250,8 +255,10 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
 
     assert {:ok, _result} = Runner.run("/tmp/workspace", issue, "initial prompt")
 
-    assert {:error, {:need_owner_input, {:opencode_acp_session_attached, "new-session"}}} =
+    assert {:ok, %{output: output, session_id: "new-session"}} =
              Runner.run("/tmp/workspace", issue, "initial prompt")
+
+    assert output =~ "ACP result"
   end
 
   test "opencode acp runner does not prompt when durable session write fails" do
@@ -512,8 +519,6 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
             send({"jsonrpc":"2.0","id":mid,"result":{"sessionId":params.get("sessionId"),"resumed":True}})
         elif method == "session/load":
             send({"jsonrpc":"2.0","id":mid,"result":{"sessionId":params.get("sessionId"),"loaded":True}})
-        elif method == "session/prompt" and scenario == "no-prompt-after-resume":
-            send({"jsonrpc":"2.0","id":mid,"error":{"message":"prompt replayed"}})
         elif method == "session/prompt" and scenario == "user-input":
             send({"jsonrpc":"2.0","method":"session/update","params":{"type":"user_input_required","message":"permission needed"}})
             send({"jsonrpc":"2.0","id":mid,"result":{"stopReason":"user_input_required"}})

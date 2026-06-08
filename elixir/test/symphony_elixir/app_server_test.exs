@@ -110,7 +110,8 @@ defmodule SymphonyElixir.AppServerTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         codex_project_root: project_root,
-        codex_command: "#{codex_binary} app-server"
+        codex_command: "#{codex_binary} app-server",
+        codex_thread_id: "thread-project-root"
       )
 
       assert {:ok, %{thread_id: "thread-project-root"}} =
@@ -172,6 +173,86 @@ defmodule SymphonyElixir.AppServerTest do
 
       assert {:error, {:invalid_workspace_cwd, :symlink_escape, ^symlink_workspace, _root}} =
                AppServer.run(symlink_workspace, "guard", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server starts a new thread when architect thread id is not configured" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-missing-thread-id-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-1004")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-new-thread.trace")
+      previous_trace = System.get_env("SYMP_TEST_CODEX_MISSING_THREAD_TRACE")
+
+      on_exit(fn ->
+        if is_binary(previous_trace) do
+          System.put_env("SYMP_TEST_CODEX_MISSING_THREAD_TRACE", previous_trace)
+        else
+          System.delete_env("SYMP_TEST_CODEX_MISSING_THREAD_TRACE")
+        end
+      end)
+
+      System.put_env("SYMP_TEST_CODEX_MISSING_THREAD_TRACE", trace_file)
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEX_MISSING_THREAD_TRACE:-/tmp/codex-new-thread.trace}"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\n' "$line" >> "$trace_file"
+        case "$count" in
+          1)
+            printf '%s\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-1004"}}}'
+            ;;
+          3)
+            printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-1004"}}}'
+            ;;
+          4)
+            printf '%s\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      issue = %Issue{
+        id: "issue-new-thread",
+        identifier: "MT-1004",
+        title: "Start new thread",
+        description: "Ensure Codex can start without a configured architect thread",
+        state: "Todo",
+        url: "https://example.org/issues/MT-1004",
+        labels: ["architecture"]
+      }
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_thread_id: nil
+      )
+
+      assert {:ok, %{thread_id: "thread-1004"}} =
+               AppServer.run(workspace, "Start a new thread", issue)
+
+      trace = File.read!(trace_file)
+      assert trace =~ "\"method\":\"thread/start\""
+      refute trace =~ "\"method\":\"thread/resume\""
     after
       File.rm_rf(test_root)
     end
@@ -258,7 +339,8 @@ defmodule SymphonyElixir.AppServerTest do
                       %{
                         event: :session_started,
                         thread_id: "architect-thread-1002",
-                        thread_resumed?: true
+                        thread_resumed?: true,
+                        project_root: ^workspace
                       }}
 
       trace = File.read!(trace_file)
@@ -289,6 +371,90 @@ defmodule SymphonyElixir.AppServerTest do
                  |> String.trim_leading("JSON:")
                  |> Jason.decode!()
                  |> Map.get("method") == "thread/start"
+             end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server rejects resumed codex thread that differs from configured architect thread" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-thread-mismatch-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-1005")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-thread-mismatch.trace")
+      previous_trace = System.get_env("SYMP_TEST_CODEX_MISMATCH_TRACE")
+
+      on_exit(fn ->
+        if is_binary(previous_trace) do
+          System.put_env("SYMP_TEST_CODEX_MISMATCH_TRACE", previous_trace)
+        else
+          System.delete_env("SYMP_TEST_CODEX_MISMATCH_TRACE")
+        end
+      end)
+
+      System.put_env("SYMP_TEST_CODEX_MISMATCH_TRACE", trace_file)
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEX_MISMATCH_TRACE:-/tmp/codex-thread-mismatch.trace}"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\n' '{"id":2,"result":{"thread":{"id":"other-thread-1005"}}}'
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      issue = %Issue{
+        id: "issue-thread-mismatch",
+        identifier: "MT-1005",
+        title: "Reject mismatched architect thread",
+        description: "Ensure Codex cannot resume a different thread than configured",
+        state: "Todo",
+        url: "https://example.org/issues/MT-1005",
+        labels: ["architecture"]
+      }
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_thread_id: "architect-thread-1005"
+      )
+
+      assert {:error, {:codex_thread_id_mismatch, "architect-thread-1005", "other-thread-1005"}} =
+               AppServer.run(workspace, "Resume only the configured architect session", issue)
+
+      trace = File.read!(trace_file)
+      lines = String.split(trace, "\n", trim: true)
+
+      refute Enum.any?(lines, fn line ->
+               String.starts_with?(line, "JSON:") &&
+                 line
+                 |> String.trim_leading("JSON:")
+                 |> Jason.decode!()
+                 |> Map.get("method") == "turn/start"
              end)
     after
       File.rm_rf(test_root)
@@ -334,7 +500,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
           2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-1001"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"test-architect-thread"}}}'
             ;;
           3)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-1001"}}}'
@@ -440,7 +606,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{\"id\":1,\"result\":{}}'
             ;;
           2)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-88\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"test-architect-thread\"}}}'
             ;;
           3)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-88\"}}}'
@@ -505,7 +671,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
           2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-188"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"test-architect-thread"}}}'
             ;;
           3)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-188"}}}'
@@ -570,7 +736,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
           2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-89"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"test-architect-thread"}}}'
             ;;
           3)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-89"}}}'
@@ -649,7 +815,7 @@ defmodule SymphonyElixir.AppServerTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-89\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"test-architect-thread\"}}}'
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-89\"}}}'
@@ -786,7 +952,7 @@ defmodule SymphonyElixir.AppServerTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-717\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"test-architect-thread\"}}}'
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-717\"}}}'
@@ -871,7 +1037,7 @@ defmodule SymphonyElixir.AppServerTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-718"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"test-architect-thread"}}}'
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-718"}}}'
@@ -961,7 +1127,7 @@ defmodule SymphonyElixir.AppServerTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-719\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"test-architect-thread\"}}}'
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-719\"}}}'
@@ -1061,7 +1227,7 @@ defmodule SymphonyElixir.AppServerTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-90\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"test-architect-thread\"}}}'
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-90\"}}}'
@@ -1162,7 +1328,7 @@ defmodule SymphonyElixir.AppServerTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-90a\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"test-architect-thread\"}}}'
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-90a\"}}}'
@@ -1284,7 +1450,7 @@ defmodule SymphonyElixir.AppServerTest do
           2)
             ;;
           3)
-            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-90b\"}}}'
+            printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"test-architect-thread\"}}}'
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-90b\"}}}'
@@ -1375,7 +1541,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '{"id":1,"result":{},"padding":"%s"}\\n' "$padding"
             ;;
           2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-91"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"test-architect-thread"}}}'
             ;;
           3)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-91"}}}'
@@ -1438,7 +1604,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
           2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-92"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"test-architect-thread"}}}'
             ;;
           3)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-92"}}}'
@@ -1513,7 +1679,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
           2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-93"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"test-architect-thread"}}}'
             ;;
           3)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-93"}}}'
@@ -1599,7 +1765,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
           2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-remote"}}}'
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"test-architect-thread"}}}'
             ;;
           3)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-remote"}}}'

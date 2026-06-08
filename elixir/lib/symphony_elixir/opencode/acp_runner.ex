@@ -71,7 +71,22 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
                   {:ok, result}
 
                 {:error, _reason} ->
-                  {:error, {:need_owner_input, {:opencode_acp_session_attached, session_id}}}
+                  emit_session_started(on_event, session_id, full_command, cwd, opencode)
+
+                  run_prompt(
+                    prompt_context(
+                      client_module: client_module,
+                      client: client,
+                      session_id: session_id,
+                      opencode: opencode,
+                      command: full_command,
+                      cwd: cwd,
+                      on_event: on_event,
+                      session_result_reader: session_result_reader,
+                      session_usage_reader: session_usage_reader
+                    ),
+                    prompt
+                  )
               end
             else
               with :ok <-

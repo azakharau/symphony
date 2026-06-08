@@ -11,3 +11,4 @@ exclude = if explicit_opencode_live?, do: [], else: [opencode_live: true]
 ExUnit.start(exclude: exclude, fail_if_no_tests: false)
 Code.require_file("support/snapshot_support.exs", __DIR__)
 Code.require_file("support/test_support.exs", __DIR__)
+Code.require_file("support/isolation_regression_support.exs", __DIR__)

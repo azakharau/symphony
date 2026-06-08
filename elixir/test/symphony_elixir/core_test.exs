@@ -638,6 +638,45 @@ defmodule SymphonyElixir.CoreTest do
     assert_due_scheduled_between(due_at_ms, before_retry_ms, after_retry_ms, 1_000)
   end
 
+  test "normal owner-input pulse exit does not schedule continuation retry" do
+    issue_id = "issue-owner-pulse"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :OwnerInputPulseExitOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-Owner",
+      issue: %Issue{id: issue_id, identifier: "MT-Owner", state: "Need Owner Input"},
+      pulse_kind: :owner_input,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    assert MapSet.member?(state.completed, issue_id)
+    refute MapSet.member?(state.claimed, issue_id)
+    assert state.retry_attempts == %{}
+  end
+
   test "abnormal worker exit increments retry attempt progressively" do
     issue_id = "issue-crash"
     ref = make_ref()

@@ -297,7 +297,7 @@ defmodule SymphonyElixir.Config.Schema do
 
     defp default_acp_stall_timeout(changeset, false) do
       case get_field(changeset, :protocol) do
-        "acp" -> put_change(changeset, :stall_timeout_ms, 300_000)
+        "acp" -> put_change(changeset, :stall_timeout_ms, 0)
         _protocol -> changeset
       end
     end
@@ -322,18 +322,29 @@ defmodule SymphonyElixir.Config.Schema do
     use Ecto.Schema
     import Ecto.Changeset
 
+    alias SymphonyElixir.Config.Schema
+
+    @default_state_timeouts_ms %{
+      "in review" => 1_800_000,
+      "rca required" => 1_800_000
+    }
+
     @primary_key false
     embedded_schema do
       field(:rca_required_state, :string, default: "RCA Required")
       field(:max_rejections_per_slice, :integer, default: 2)
+      field(:timeout_state, :string, default: "Need Owner Input")
+      field(:state_timeouts_ms, :map, default: @default_state_timeouts_ms)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:rca_required_state, :max_rejections_per_slice], empty_values: [])
-      |> validate_required([:rca_required_state])
+      |> cast(attrs, [:rca_required_state, :max_rejections_per_slice, :timeout_state, :state_timeouts_ms], empty_values: [])
+      |> validate_required([:rca_required_state, :timeout_state])
       |> validate_number(:max_rejections_per_slice, greater_than: 0)
+      |> update_change(:state_timeouts_ms, &Schema.normalize_state_limits/1)
+      |> Schema.validate_state_limits(:state_timeouts_ms)
     end
   end
 

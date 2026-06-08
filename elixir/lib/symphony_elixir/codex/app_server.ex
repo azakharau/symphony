@@ -107,7 +107,8 @@ defmodule SymphonyElixir.Codex.AppServer do
             session_id: session_id,
             thread_id: thread_id,
             turn_id: turn_id,
-            thread_resumed?: thread_resumed?
+            thread_resumed?: thread_resumed?,
+            project_root: workspace
           },
           metadata
         )
@@ -369,7 +370,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     case await_response(port, @thread_start_id, settings) do
       {:ok, %{"thread" => thread_payload}} ->
         case thread_payload do
-          %{"id" => resumed_thread_id} -> {:ok, resumed_thread_id}
+          %{"id" => ^thread_id} -> {:ok, thread_id}
+          %{"id" => resumed_thread_id} -> {:error, {:codex_thread_id_mismatch, thread_id, resumed_thread_id}}
           _ -> {:error, {:invalid_thread_payload, thread_payload}}
         end
 

@@ -92,6 +92,70 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot.suppression_counts == %{}
   end
 
+  test "owner-input pulse ignores machine-generated parked owner questions" do
+    state = %Orchestrator.State{
+      active_project_milestone_id: "milestone-current",
+      owner_input_pulsed: MapSet.new()
+    }
+
+    issue = %Issue{
+      id: "issue-owner-parked",
+      identifier: "MNE-38",
+      title: "Parked owner question",
+      state: "Need Owner Input",
+      project_milestone: %{id: "milestone-current"},
+      comments: [
+        %{
+          body: "MNE-38 owner-review update after the dependency-unblocked pulse:\n\nQuestion: Should MNE-38 remain parked while the Mnemesh MCP create_task timeout is fixed?",
+          created_at: ~U[2026-06-05 13:37:47Z],
+          parent_id: nil
+        }
+      ]
+    }
+
+    assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([issue], state) == nil
+  end
+
+  test "owner-input pulse ignores machine-generated replies but accepts concise owner replies" do
+    state = %Orchestrator.State{
+      active_project_milestone_id: "milestone-current",
+      owner_input_pulsed: MapSet.new()
+    }
+
+    machine_reply_issue = %Issue{
+      id: "issue-machine-reply",
+      identifier: "MNE-38",
+      title: "Machine reply",
+      state: "Need Owner Input",
+      project_milestone: %{id: "milestone-current"},
+      comments: [
+        %{
+          body: "MNE-38 status after Codex continuation: no repo files were changed. Should MNE-38 stay parked until MNE-37 is completed?",
+          created_at: ~U[2026-06-05 12:47:39Z],
+          parent_id: "parent-comment"
+        }
+      ]
+    }
+
+    owner_reply_issue = %Issue{
+      id: "issue-owner-reply",
+      identifier: "MNE-39",
+      title: "Owner reply",
+      state: "Need Owner Input",
+      project_milestone: %{id: "milestone-current"},
+      comments: [
+        %{
+          body: "yes, continue",
+          created_at: ~U[2026-06-05 13:47:39Z],
+          parent_id: "parent-comment"
+        }
+      ]
+    }
+
+    assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([machine_reply_issue], state) == nil
+    assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([owner_reply_issue], state) == owner_reply_issue
+  end
+
   test "orchestrator snapshot reflects last codex update and session id" do
     issue_id = "issue-snapshot"
 
@@ -516,6 +580,83 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert MapSet.member?(updated_state.claimed, issue_id)
     assert updated_state.codex_totals.total_tokens == 125
     assert updated_state.blocked == %{}
+  end
+
+  test "codex state runtime timeout blocks long active review despite fresh activity" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      tracker_active_states: ["Todo", "In Review", "RCA Required"],
+      runner_routes: %{"Todo" => "codex", "In Review" => "codex", "RCA Required" => "codex"},
+      process_policy_timeout_state: "Need Owner Input",
+      process_policy_state_timeouts_ms: %{"In Review" => 1_000}
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue_id = "issue-review-runaway"
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    worker_ref = Process.monitor(worker_pid)
+
+    on_exit(fn ->
+      Process.demonitor(worker_ref, [:flush])
+
+      if Process.alive?(worker_pid) do
+        Process.exit(worker_pid, :kill)
+      end
+    end)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: worker_pid,
+          ref: worker_ref,
+          identifier: "SYM-15",
+          issue: %Issue{id: issue_id, identifier: "SYM-15", state: "In Review"},
+          runner_kind: "codex",
+          runner_owner: "codex",
+          runner_phase: :session,
+          session_id: "thread-review-runaway",
+          last_codex_message: %{event: :notification},
+          last_codex_timestamp: DateTime.utc_now(),
+          last_codex_event: :notification,
+          codex_input_tokens: 1_300_000,
+          codex_output_tokens: 6_000,
+          codex_total_tokens: 1_306_000,
+          codex_last_reported_input_tokens: 1_300_000,
+          codex_last_reported_output_tokens: 6_000,
+          codex_last_reported_total_tokens: 1_306_000,
+          started_at: DateTime.add(DateTime.utc_now(), -2, :second)
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      blocked: %{},
+      retry_attempts: %{},
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      runner_runtime_totals: %{seconds_running: 0}
+    }
+
+    updated_state = Orchestrator.reconcile_stalled_running_issues_for_test(state)
+
+    assert updated_state.running == %{}
+    assert updated_state.retry_attempts == %{}
+    assert Map.has_key?(updated_state.blocked, issue_id)
+    assert updated_state.blocked[issue_id].error =~ "In Review"
+    assert updated_state.blocked[issue_id].error =~ "state runtime timeout"
+    assert_receive {:memory_tracker_comment, ^issue_id, comment_body}
+    assert comment_body =~ "## Symphony Stop Rule"
+    assert comment_body =~ "SYM-15"
+    assert comment_body =~ "state runtime timeout"
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Need Owner Input"}
+    refute Process.alive?(worker_pid)
   end
 
   test "completed OpenCode runtime is tracked separately from Codex token totals" do

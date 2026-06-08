@@ -124,7 +124,7 @@ defmodule SymphonyElixir.WorkflowStore do
   defp reload_path(path, state) do
     case load_state(path) do
       {:ok, new_state} ->
-        {:ok, new_state}
+        {:ok, %{new_state | fixed_path: state.fixed_path}}
 
       {:error, reason} ->
         log_reload_error(path, reason)

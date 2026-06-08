@@ -9,7 +9,7 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
 
   require Logger
 
-  alias SymphonyElixir.{Config, Linear.Issue, OpenCode.TaskPrompt, ProcessPolicy, RuntimeCache, Tracker}
+  alias SymphonyElixir.{Config, Linear.Issue, ProcessPolicy, RuntimeCache, Tracker}
   alias SymphonyElixir.OpenCode.Runner, as: OpenCodeRunner
   alias SymphonyElixir.Runner.{OpenCodeAdapter, Outcome}
 
@@ -23,7 +23,7 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
   def run(%{workspace: workspace, issue: issue, opts: opts, emit_update: emit_update} = context) do
     project_context = Map.get(context, :project_context)
 
-    case steward_task_packet(context) || latest_opencode_task_packet_or_reroute(issue, project_context, emit_update) do
+    case latest_opencode_task_packet_or_reroute(issue, project_context, emit_update) do
       {:ok, packet} ->
         with {:ok, decisions} <- Tracker.review_decisions(issue.id, project_context) do
           dispatch_opencode_packet(context, workspace, issue, packet, decisions, opts, emit_update, project_context)
@@ -51,14 +51,11 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
           {:error, {:opencode_remote_worker_host_unsupported, details}} ->
             block_remote_opencode_worker_host(issue, details, emit_update, project_context)
 
-          {:error, {:need_owner_input, {:opencode_acp_session_attached, session_id}}} ->
-            record_opencode_attached_session(issue, session_id, emit_update, project_context)
-
           {:error, {:need_owner_input, reason}} ->
             record_opencode_owner_input(issue, reason, emit_update, project_context)
 
           {:error, {:opencode_acp_stalled, timeout_ms}} ->
-            record_opencode_runner_failure_rca(
+            record_opencode_runner_stall(
               issue,
               {:opencode_acp_stalled, timeout_ms},
               emit_update,
@@ -99,31 +96,6 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
   end
 
   defp latest_opencode_task_packet_or_reroute(_issue, _project_context, _emit_update), do: {:error, :opencode_task_prompt_not_found}
-
-  defp steward_task_packet(%{task_packet: %TaskPrompt.Packet{} = packet}), do: {:ok, packet}
-
-  defp steward_task_packet(%{opts: opts}) when is_list(opts) do
-    with prompt when is_binary(prompt) <- Keyword.get(opts, :steward_execution_prompt),
-         packet when is_map(packet) <- Keyword.get(opts, :steward_execution_packet),
-         {:ok, built} <- steward_task_packet_from_prompt(packet, prompt) do
-      {:ok, built}
-    else
-      _ -> nil
-    end
-  end
-
-  defp steward_task_packet(_context), do: nil
-
-  defp steward_task_packet_from_prompt(%{"issue" => %{"id" => issue_id}}, prompt) when is_binary(issue_id) do
-    {:ok,
-     %TaskPrompt.Packet{
-       prompt: prompt,
-       slice_id: issue_id,
-       fingerprint: packet_fingerprint(prompt)
-     }}
-  end
-
-  defp steward_task_packet_from_prompt(_packet, _prompt), do: {:error, :missing_issue_id}
 
   defp block_malformed_opencode_task_prompt(%Issue{id: issue_id} = issue, reason, project_context, emit_update)
        when is_binary(issue_id) do
@@ -226,11 +198,6 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
     Outcome.completed(result_state: result_state)
   end
 
-  defp packet_fingerprint(prompt) do
-    :crypto.hash(:sha256, prompt)
-    |> Base.encode16(case: :lower)
-  end
-
   defp handoff_fingerprint(_packet, result) do
     :crypto.hash(
       :sha256,
@@ -261,42 +228,23 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
     end
   end
 
-  defp record_opencode_attached_session(issue, session_id, emit_update, project_context) do
+  defp record_opencode_runner_stall(issue, reason, emit_update, project_context) do
     emit_update.(%{
-      event: :session_attached,
+      event: :runner_failure_parked,
       phase: :blocked,
       outcome: :rerouted,
       timestamp: DateTime.utc_now(),
       result_state: "Need Owner Input",
-      session_id: session_id,
-      failure: %{reason: :opencode_acp_session_attached}
-    })
-
-    with :ok <- Tracker.create_comment(issue.id, opencode_attached_session_comment(issue, session_id), project_context),
-         :ok <- Tracker.update_issue_state(issue.id, "Need Owner Input", project_context) do
-      Outcome.rerouted(
-        reason: :opencode_acp_session_attached,
-        result_state: "Need Owner Input",
-        failure: %{reason: :opencode_acp_session_attached, session_id: session_id}
-      )
-    end
-  end
-
-  defp record_opencode_runner_failure_rca(issue, reason, emit_update, project_context) do
-    {:ok, rca_required_state} = ProcessPolicy.codex_owned_rca_required_state(project_context)
-
-    emit_update.(%{
-      event: :runner_failure_rerouted,
-      phase: :policy_reroute,
-      outcome: :rerouted,
-      timestamp: DateTime.utc_now(),
-      result_state: rca_required_state,
       failure: runner_failure_payload(reason)
     })
 
-    with :ok <- Tracker.create_comment(issue.id, opencode_runner_failure_comment(issue, reason, rca_required_state), project_context),
-         :ok <- Tracker.update_issue_state(issue.id, rca_required_state, project_context) do
-      Outcome.rerouted(reason: runner_failure_reason(reason), result_state: rca_required_state, failure: runner_failure_payload(reason))
+    with :ok <- Tracker.create_comment(issue.id, opencode_runner_stall_comment(issue, reason), project_context),
+         :ok <- Tracker.update_issue_state(issue.id, "Need Owner Input", project_context) do
+      Outcome.rerouted(
+        reason: runner_failure_reason(reason),
+        result_state: "Need Owner Input",
+        failure: runner_failure_payload(reason)
+      )
     end
   end
 
@@ -353,19 +301,16 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
     """
   end
 
-  defp opencode_runner_failure_comment(%Issue{} = issue, reason, target_state) do
+  defp opencode_runner_stall_comment(%Issue{} = issue, reason) do
     """
-    ## Symphony OpenCode Runner Diagnostic
+    ## OpenCode Runner Parked
 
-    OpenCode runner failed for #{issue_context(issue)} and Symphony moved the issue to `#{target_state}` for Codex Architect RCA.
+    OpenCode runner stopped for #{issue_context(issue)} and Symphony parked the issue in `Need Owner Input` without routing to Codex RCA.
 
     Failure:
     - #{runner_failure_human(reason)}
 
-    Required Codex action:
-    - Inspect the OpenCode session and repository state.
-    - Decide whether to issue a corrected implementation prompt, request owner input, or reject/escalate the slice.
-    - Do not leave this issue in `In Progress` without an active OpenCode session.
+    This is an OpenCode runner liveness/timeout condition, not implementation RCA evidence. Increase or disable `opencode.stall_timeout_ms`, inspect the OpenCode session if needed, then move the issue back to `In Progress` when the runner should continue.
     """
     |> String.trim()
   end
@@ -413,21 +358,6 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
     ```text
     #{inspect(reason)}
     ```
-    """
-  end
-
-  defp opencode_attached_session_comment(%Issue{} = issue, session_id) do
-    """
-    ## OpenCode Session Attached
-
-    Issue: #{issue.identifier}
-    Runner: OpenCode ACP
-    Status: session attached
-    Session ID: `#{session_id}`
-
-    Symphony found an existing persisted OpenCode ACP session for this issue and did not resend the task prompt. This is a session attachment guard, not a completed OpenCode handoff and not an owner-input request emitted by OpenCode.
-
-    Inspect or continue the session in OpenCode, then move the issue back to `In Progress` when it is ready to run again, or provide owner direction in this issue.
     """
   end
 

@@ -2554,15 +2554,17 @@ defmodule SymphonyElixir.Orchestrator do
   defp turn_count_for_update(_existing_count, _existing_session_id, _update), do: 0
 
   defp codex_usage_baseline_pending_for_update(running_entry, update, token_delta) do
+    baseline_pending? = Map.get(running_entry, :codex_usage_baseline_pending, false)
+
     cond do
       Map.get(update, :thread_resumed?) == true ->
         true
 
-      Map.get(running_entry || %{}, :codex_usage_baseline_pending, false) and Map.get(token_delta, :baseline_applied, false) ->
+      baseline_pending? and Map.get(token_delta, :baseline_applied, false) ->
         false
 
       true ->
-        Map.get(running_entry || %{}, :codex_usage_baseline_pending, false)
+        baseline_pending?
     end
   end
 

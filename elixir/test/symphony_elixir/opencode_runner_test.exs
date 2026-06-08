@@ -1132,6 +1132,56 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
              OpenCodeDispatch.run(%{workspace: workspace, issue: issue, opts: [], emit_update: fn _ -> :ok end})
   end
 
+  test "OpenCode dispatch reroutes ACP stall failures to RCA Required" do
+    workspace =
+      Path.join(System.tmp_dir!(), "symphony-opencode-stall-reroute-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    issue = %Issue{id: "issue-stall-reroute", identifier: "NER-STALL", title: "Stalled runner", state: "In Progress"}
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      runner_routes: %{"In Progress" => "opencode", "RCA Required" => "codex"},
+      opencode_command: "fake-opencode"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    Application.put_env(:symphony_elixir, :memory_tracker_opencode_comments, %{
+      "issue-stall-reroute" => [opencode_task_prompt_comment("stall-slice", "dispatch prompt")]
+    })
+
+    assert %Outcome{
+             kind: :rerouted,
+             reason: :opencode_acp_stalled,
+             result_state: "RCA Required",
+             failure: %{reason: :opencode_acp_stalled, timeout_ms: 300_000}
+           } =
+             OpenCodeDispatch.run(%{
+               workspace: workspace,
+               issue: issue,
+               opts: [runner: fn _command, _args, _opts -> {:error, {:opencode_acp_stalled, 300_000}} end],
+               emit_update: fn update ->
+                 send(self(), {:runner_update, update})
+                 :ok
+               end
+             })
+
+    assert_receive {:runner_update,
+                    %{
+                      event: :runner_failure_rerouted,
+                      result_state: "RCA Required",
+                      failure: %{reason: :opencode_acp_stalled, timeout_ms: 300_000}
+                    }}
+
+    assert_receive {:memory_tracker_comment, "issue-stall-reroute", comment}
+    assert comment =~ "OpenCode Runner Diagnostic"
+    assert comment =~ "produced no runner events for 300000ms"
+    assert_receive {:memory_tracker_state_update, "issue-stall-reroute", "RCA Required"}
+  end
+
   test "OpenCode dispatch rejects non-Issue fallback" do
     assert {:error, :opencode_task_prompt_not_found} =
              OpenCodeDispatch.run(%{workspace: "/tmp/workspace", issue: %{id: "not-an-issue"}, opts: [], emit_update: fn _ -> :ok end})

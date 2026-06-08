@@ -17,7 +17,10 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
     full_command = [command | args]
     client_module = Keyword.get(opts, :client, ACPClient)
     session_store = Keyword.get(opts, :session_store, ACPSessionStore)
-    session_result_reader = Keyword.get(opts, :session_result_reader, &Runner.read_completed_session_result/2)
+
+    session_result_reader =
+      Keyword.get(opts, :session_result_reader, &Runner.read_completed_session_result/2)
+
     session_usage_reader = Keyword.get(opts, :session_usage_reader, &Runner.read_session_usage/2)
     session_scope = session_store.prompt_scope(prompt)
     cwd = Keyword.get(opts, :cwd, opencode_project_root(opencode.project_root, workspace))
@@ -41,34 +44,62 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
                  initialize_params(opencode),
                  opencode.read_timeout_ms
                ),
-             {:ok, existing_session_id} <- fetch_stored_session_id(session_store, issue, cwd, session_scope, settings),
+             {:ok, existing_session_id} <-
+               fetch_stored_session_id(session_store, issue, cwd, session_scope, settings),
              {:ok, session_result} <-
-               open_session(client_module, client, existing_session_id, issue, cwd, title, opencode) do
+               open_session(
+                 client_module,
+                 client,
+                 existing_session_id,
+                 issue,
+                 cwd,
+                 title,
+                 opencode
+               ) do
           session_id = session_id(session_result) || existing_session_id
 
-          if resumed_session?(session_result) do
-            case completed_session_result(session_result_reader, cwd, session_id, full_command, opencode) do
-              {:ok, result} -> {:ok, result}
-              {:error, _reason} -> {:error, {:need_owner_input, {:opencode_acp_session_attached, session_id}}}
-            end
-          else
-            with :ok <- persist_new_session_id(session_store, issue, cwd, session_id, session_scope, settings) do
-              emit_session_started(on_event, session_id, full_command, cwd, opencode)
+          with :ok <- configure_session(client_module, client, session_id, opencode) do
+            if resumed_session?(session_result) do
+              case completed_session_result(
+                     session_result_reader,
+                     cwd,
+                     session_id,
+                     full_command,
+                     opencode
+                   ) do
+                {:ok, result} ->
+                  {:ok, result}
 
-              run_prompt(
-                prompt_context(
-                  client_module: client_module,
-                  client: client,
-                  session_id: session_id,
-                  opencode: opencode,
-                  command: full_command,
-                  cwd: cwd,
-                  on_event: on_event,
-                  session_result_reader: session_result_reader,
-                  session_usage_reader: session_usage_reader
-                ),
-                prompt
-              )
+                {:error, _reason} ->
+                  {:error, {:need_owner_input, {:opencode_acp_session_attached, session_id}}}
+              end
+            else
+              with :ok <-
+                     persist_new_session_id(
+                       session_store,
+                       issue,
+                       cwd,
+                       session_id,
+                       session_scope,
+                       settings
+                     ) do
+                emit_session_started(on_event, session_id, full_command, cwd, opencode)
+
+                run_prompt(
+                  prompt_context(
+                    client_module: client_module,
+                    client: client,
+                    session_id: session_id,
+                    opencode: opencode,
+                    command: full_command,
+                    cwd: cwd,
+                    on_event: on_event,
+                    session_result_reader: session_result_reader,
+                    session_usage_reader: session_usage_reader
+                  ),
+                  prompt
+                )
+              end
             end
           end
         end
@@ -121,6 +152,61 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
     do: {:ok, Map.put(result, "symphony_resumed", true)}
 
   defp tag_resumed(other), do: other
+
+  defp configure_session(_client_module, _client, nil, _opencode),
+    do: {:error, :opencode_session_id_missing}
+
+  defp configure_session(_client_module, _client, "", _opencode),
+    do: {:error, :opencode_session_id_missing}
+
+  defp configure_session(client_module, client, session_id, opencode) do
+    with :ok <-
+           set_session_config_option(client_module, client, session_id, "mode", opencode.agent, opencode),
+         :ok <-
+           set_session_config_option(client_module, client, session_id, "model", opencode.model, opencode) do
+      :ok
+    end
+  end
+
+  defp set_session_config_option(_client_module, _client, _session_id, _config_id, nil, _opencode),
+    do: :ok
+
+  defp set_session_config_option(_client_module, _client, _session_id, _config_id, "", _opencode),
+    do: :ok
+
+  defp set_session_config_option(client_module, client, session_id, config_id, value, opencode) do
+    if function_exported?(client_module, :set_config_option, 3) do
+      case client_module.set_config_option(
+             client,
+             %{"sessionId" => session_id, "configId" => config_id, "value" => value},
+             opencode.read_timeout_ms
+           ) do
+        {:ok, _result} ->
+          :ok
+
+        {:error, reason} ->
+          if unsupported_config_option_reason?(reason) do
+            :ok
+          else
+            {:error, {:opencode_acp_config_option_failed, config_id, reason}}
+          end
+      end
+    else
+      :ok
+    end
+  end
+
+  defp unsupported_config_option_reason?({:unsupported_acp_method, "session/set_config_option"}), do: true
+
+  defp unsupported_config_option_reason?(%{"code" => -32601}), do: true
+
+  defp unsupported_config_option_reason?(%{"message" => message}) when is_binary(message) do
+    message
+    |> String.downcase()
+    |> String.contains?("method not found")
+  end
+
+  defp unsupported_config_option_reason?(_reason), do: false
 
   defp prompt_context(attrs) when is_list(attrs) do
     %{
@@ -210,7 +296,12 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
       {:acp_notification, method, params} ->
         emit_acp_update(context, :notification, method, params)
 
-        collect_prompt_result(task, context, [{method, params} | events], end_turn? or end_turn_event?(method, params))
+        collect_prompt_result(
+          task,
+          context,
+          [{method, params} | events],
+          end_turn? or end_turn_event?(method, params)
+        )
 
       {:acp_request, method, params} ->
         emit_acp_update(context, :request, method, params)
@@ -314,10 +405,17 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
     end
   end
 
-  defp maybe_put_usage(update, %{"usage" => usage}) when is_map(usage), do: Map.put(update, :usage, usage)
+  defp maybe_put_usage(update, %{"usage" => usage}) when is_map(usage),
+    do: Map.put(update, :usage, usage)
+
   defp maybe_put_usage(update, _params), do: update
 
-  defp maybe_put_persisted_usage(%{usage: usage} = update, _session_usage_reader, _cwd, _session_id)
+  defp maybe_put_persisted_usage(
+         %{usage: usage} = update,
+         _session_usage_reader,
+         _cwd,
+         _session_id
+       )
        when is_map(usage),
        do: update
 

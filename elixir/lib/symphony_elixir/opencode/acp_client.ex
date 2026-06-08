@@ -55,6 +55,10 @@ defmodule SymphonyElixir.OpenCode.ACPClient do
   def cancel(client, params, timeout \\ 5_000),
     do: gated_request(client, "session/cancel", params, timeout)
 
+  @spec set_config_option(t(), map(), timeout()) :: {:ok, map()} | {:error, term()}
+  def set_config_option(client, params, timeout \\ 5_000),
+    do: gated_request(client, "session/set_config_option", params, timeout)
+
   @spec capabilities(t()) :: map()
   def capabilities(client), do: GenServer.call(client, :capabilities)
 
@@ -290,7 +294,8 @@ defmodule SymphonyElixir.OpenCode.ACPClient do
   end
 
   defp put_capability_entry(acc, key, value)
-       when key in ["promptCapabilities", "prompt_capabilities"] and is_map(value) and value != %{} do
+       when key in ["promptCapabilities", "prompt_capabilities"] and is_map(value) and
+              value != %{} do
     Map.put(acc, "session/prompt", true)
   end
 

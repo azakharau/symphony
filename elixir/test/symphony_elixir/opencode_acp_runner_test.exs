@@ -35,6 +35,24 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
     assert output =~ project_root
   end
 
+  test "opencode acp runner skips unadvertised set config option support" do
+    {python, script} = fake_acp_server!()
+    workspace_root = workspace_root!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      opencode_command: python,
+      opencode_args: [script, "no-config-capability"],
+      opencode_project_root: File.cwd!(),
+      opencode_agent: "build",
+      opencode_model: "test-model",
+      workspace_root: workspace_root
+    )
+
+    assert {:ok, %{output: output}} = Runner.run("/tmp/workspace", issue(), "prompt body")
+    assert output =~ "ACP result"
+  end
+
   test "opencode acp runner reuses persisted issue session id" do
     {python, script} = fake_acp_server!()
     issue = issue()
@@ -128,7 +146,14 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
     {python, script} = fake_acp_server!()
     issue = issue()
     workspace_root = workspace_root!()
-    write_session_store!(workspace_root, issue, File.cwd!(), "existing-session", "initial prompt must not be sent")
+
+    write_session_store!(
+      workspace_root,
+      issue,
+      File.cwd!(),
+      "existing-session",
+      "initial prompt must not be sent"
+    )
 
     write_workflow_file!(Workflow.workflow_file_path(),
       opencode_protocol: "acp",
@@ -148,7 +173,13 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
     workspace_root = workspace_root!()
     project_root = File.cwd!()
 
-    write_session_store!(workspace_root, issue, project_root, "existing-session", "Existing session should not replay this prompt.")
+    write_session_store!(
+      workspace_root,
+      issue,
+      project_root,
+      "existing-session",
+      "Existing session should not replay this prompt."
+    )
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -275,6 +306,7 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
     assert output =~ "streamed text"
 
     assert_receive {:opencode_event, %{event: :command_prepared, phase: :command}}
+
     assert_receive {:opencode_event, %{event: :session_started, session_id: "new-session", phase: :session}}
 
     assert_receive {:opencode_event,
@@ -296,7 +328,11 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
                         "method" => "session/update",
                         "params" => %{
                           "type" => "usage",
-                          "usage" => %{"inputTokens" => 12, "outputTokens" => 4, "totalTokens" => 16}
+                          "usage" => %{
+                            "inputTokens" => 12,
+                            "outputTokens" => 4,
+                            "totalTokens" => 16
+                          }
                         }
                       }
                     }}
@@ -330,7 +366,11 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
                     %{
                       event: :notification,
                       phase: :running,
-                      usage: %{"inputTokens" => 81_069, "outputTokens" => 4_799, "totalTokens" => 85_868},
+                      usage: %{
+                        "inputTokens" => 81_069,
+                        "outputTokens" => 4_799,
+                        "totalTokens" => 85_868
+                      },
                       payload: %{
                         "method" => "session/update",
                         "params" => %{"type" => "agent_text", "text" => "streamed text"}
@@ -432,7 +472,9 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
 
   defp write_session_store!(workspace_root, issue, project_root, session_id, prompt) do
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
-    :ok = ACPSessionStore.put(issue, project_root, session_id, ACPSessionStore.prompt_scope(prompt))
+
+    :ok =
+      ACPSessionStore.put(issue, project_root, session_id, ACPSessionStore.prompt_scope(prompt))
   end
 
   defp fake_acp_server! do
@@ -455,10 +497,17 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
         method = msg["method"]
         params = msg.get("params", {})
         caps = {"session/new": True, "session/load": True, "session/resume": True, "session/prompt": True, "session/cancel": True}
+        if scenario != "no-config-capability":
+            caps["session/set_config_option"] = True
         if method == "initialize":
             send({"jsonrpc":"2.0","id":mid,"result":{"capabilities":caps}})
         elif method == "session/new":
             send({"jsonrpc":"2.0","id":mid,"result":{"sessionId":"new-session","cwd":params.get("cwd"),"processCwd":os.getcwd()}})
+        elif method == "session/set_config_option":
+            if scenario == "no-config-capability":
+                send({"jsonrpc":"2.0","id":mid,"error":{"code":-32601,"message":"Method not found"}})
+            else:
+                send({"jsonrpc":"2.0","id":mid,"result":{"configOptions":[{"id":params.get("configId"),"currentValue":params.get("value")}]}})
         elif method == "session/resume":
             send({"jsonrpc":"2.0","id":mid,"result":{"sessionId":params.get("sessionId"),"resumed":True}})
         elif method == "session/load":

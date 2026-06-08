@@ -297,7 +297,7 @@ defmodule SymphonyElixir.Config.Schema do
 
     defp default_acp_stall_timeout(changeset, false) do
       case get_field(changeset, :protocol) do
-        "acp" -> put_change(changeset, :stall_timeout_ms, 0)
+        "acp" -> put_change(changeset, :stall_timeout_ms, 300_000)
         _protocol -> changeset
       end
     end

@@ -57,6 +57,14 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
           {:error, {:need_owner_input, reason}} ->
             record_opencode_owner_input(issue, reason, emit_update, project_context)
 
+          {:error, {:opencode_acp_stalled, timeout_ms}} ->
+            record_opencode_runner_failure_rca(
+              issue,
+              {:opencode_acp_stalled, timeout_ms},
+              emit_update,
+              project_context
+            )
+
           {:error, reason} ->
             {:error, reason}
         end
@@ -274,6 +282,24 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
     end
   end
 
+  defp record_opencode_runner_failure_rca(issue, reason, emit_update, project_context) do
+    {:ok, rca_required_state} = ProcessPolicy.codex_owned_rca_required_state(project_context)
+
+    emit_update.(%{
+      event: :runner_failure_rerouted,
+      phase: :policy_reroute,
+      outcome: :rerouted,
+      timestamp: DateTime.utc_now(),
+      result_state: rca_required_state,
+      failure: runner_failure_payload(reason)
+    })
+
+    with :ok <- Tracker.create_comment(issue.id, opencode_runner_failure_comment(issue, reason, rca_required_state), project_context),
+         :ok <- Tracker.update_issue_state(issue.id, rca_required_state, project_context) do
+      Outcome.rerouted(reason: runner_failure_reason(reason), result_state: rca_required_state, failure: runner_failure_payload(reason))
+    end
+  end
+
   defp reroute_missing_opencode_task_prompt(%Issue{id: issue_id} = issue, project_context, emit_update)
        when is_binary(issue_id) do
     target_state = codex_reroute_state(project_context)
@@ -326,6 +352,39 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
     OpenCode was not started. Symphony is moving this issue back to `#{target_state}` so Codex/Machine Architect can create the required task packet or move the issue to the correct workflow state.
     """
   end
+
+  defp opencode_runner_failure_comment(%Issue{} = issue, reason, target_state) do
+    """
+    ## Symphony OpenCode Runner Diagnostic
+
+    OpenCode runner failed for #{issue_context(issue)} and Symphony moved the issue to `#{target_state}` for Codex Architect RCA.
+
+    Failure:
+    - #{runner_failure_human(reason)}
+
+    Required Codex action:
+    - Inspect the OpenCode session and repository state.
+    - Decide whether to issue a corrected implementation prompt, request owner input, or reject/escalate the slice.
+    - Do not leave this issue in `In Progress` without an active OpenCode session.
+    """
+    |> String.trim()
+  end
+
+  defp runner_failure_payload({:opencode_acp_stalled, timeout_ms}) do
+    %{reason: :opencode_acp_stalled, timeout_ms: timeout_ms}
+  end
+
+  defp runner_failure_payload(reason), do: %{reason: runner_failure_reason(reason)}
+
+  defp runner_failure_reason({reason, _detail}) when is_atom(reason), do: reason
+  defp runner_failure_reason(reason) when is_atom(reason), do: reason
+  defp runner_failure_reason(_reason), do: :opencode_runner_failed
+
+  defp runner_failure_human({:opencode_acp_stalled, timeout_ms}) do
+    "OpenCode ACP session produced no runner events for #{timeout_ms}ms."
+  end
+
+  defp runner_failure_human(reason), do: inspect(reason)
 
   defp malformed_opencode_task_prompt_comment(%Issue{} = issue, reason, rca_required_state) do
     """

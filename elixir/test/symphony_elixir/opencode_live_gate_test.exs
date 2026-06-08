@@ -11,8 +11,9 @@ defmodule SymphonyElixir.OpenCodeLiveGateTest do
 
   test "live OpenCode gate routes In Progress through OpenCode and records In Review handoff" do
     command = required_live_opencode_command!()
+    project_root = live_project_root!()
     server_url = live_server_url()
-    before_status = repo_status!()
+    before_status = repo_status!(project_root)
 
     workspace_root = Path.join(System.tmp_dir!(), "symphony-opencode-live-#{System.unique_integer([:positive])}")
 
@@ -23,7 +24,7 @@ defmodule SymphonyElixir.OpenCodeLiveGateTest do
       opencode_command: command,
       opencode_protocol: "acp",
       opencode_args: ["acp"],
-      opencode_project_root: @project_root,
+      opencode_project_root: project_root,
       opencode_server_url: server_url,
       opencode_agent: "build",
       opencode_format: "json",
@@ -57,7 +58,7 @@ defmodule SymphonyElixir.OpenCodeLiveGateTest do
     assert command_update.event == :command_prepared
     assert command_update.runner_kind == "opencode"
     assert command_update.runner_owner == "opencode"
-    assert command_update.project_root == @project_root
+    assert command_update.project_root == project_root
     assert command_update.workspace_path == workspace_path
     assert command_update.command == [command, "acp"]
     assert command_update.protocol == "acp"
@@ -67,14 +68,14 @@ defmodule SymphonyElixir.OpenCodeLiveGateTest do
     assert session_update.event == :session_started
     assert session_update.runner_kind == "opencode"
     assert session_update.runner_owner == "opencode"
-    assert session_update.project_root == @project_root
+    assert session_update.project_root == project_root
     assert session_update.command == [command, "acp"]
     assert_session_id_shape(session_update.session_id)
 
     assert_receive {:memory_tracker_comment, "issue-opencode-live", comment}, 600_000
     assert comment =~ "## OpenCode Handoff"
     assert comment =~ "Runner: OpenCode"
-    assert comment =~ @project_root
+    assert comment =~ project_root
     assert comment =~ "SYMLIVE-12"
     refute comment =~ "Fallback prompt must not be used"
 
@@ -91,11 +92,11 @@ defmodule SymphonyElixir.OpenCodeLiveGateTest do
     assert handoff_update.runner_kind == "opencode"
     assert handoff_update.runner_owner == "opencode"
     assert handoff_update.result_state == "In Review"
-    assert handoff_update.project_root == @project_root
+    assert handoff_update.project_root == project_root
     assert handoff_update.attach_url == server_url
     assert_session_id_shape(handoff_update.session_id)
 
-    assert repo_status!() == before_status
+    assert repo_status!(project_root) == before_status
   end
 
   defp receive_runner_update(issue_id, target_event, expected_prior_events, timeout \\ 600_000) do
@@ -150,6 +151,16 @@ defmodule SymphonyElixir.OpenCodeLiveGateTest do
     end
   end
 
+  defp live_project_root! do
+    project_root = System.get_env("OPENCODE_LIVE_PROJECT_ROOT", @project_root)
+
+    unless File.dir?(project_root) do
+      flunk("#{project_root} does not exist")
+    end
+
+    project_root
+  end
+
   defp assert_session_id_shape(nil), do: :ok
 
   defp assert_session_id_shape(session_id) when is_binary(session_id) do
@@ -158,6 +169,10 @@ defmodule SymphonyElixir.OpenCodeLiveGateTest do
   end
 
   defp live_task_packet do
+    live_task_packet(live_project_root!())
+  end
+
+  defp live_task_packet(project_root) do
     """
     <!-- symphony:opencode-task-prompt:v1 slice_id=live-gate -->
     ```text
@@ -169,15 +184,15 @@ defmodule SymphonyElixir.OpenCodeLiveGateTest do
     Report only concise visible evidence that the real OpenCode build route ran:
     - title: SYMLIVE-12 Validate OpenCode live gate [slice=live-gate fp=<12hex>]
     - agent: build
-    - directory: /home/agent/proj/symphony
+    - directory: #{project_root}
     - session id if available to you
     - final status suitable for Symphony handoff
     ```
     """
   end
 
-  defp repo_status! do
-    {status, 0} = System.cmd("git", ["-C", @project_root, "status", "--short"], stderr_to_stdout: true)
+  defp repo_status!(project_root) do
+    {status, 0} = System.cmd("git", ["-C", project_root, "status", "--short"], stderr_to_stdout: true)
     status
   end
 end

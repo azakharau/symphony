@@ -48,7 +48,7 @@ opencode:
   result_state: "In Review"
   timeout_ms: 10800000
   read_timeout_ms: 30000
-  stall_timeout_ms: 0
+  stall_timeout_ms: 300000
   permission_policy: reject
 
 OpenCode live validation gate:

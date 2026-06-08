@@ -1,6 +1,26 @@
 defmodule SymphonyElixir.OrchestratorStatusTest do
   use SymphonyElixir.TestSupport
 
+  test "select_worker_host_for_test ignores preferred ssh host for OpenCode" do
+    write_workflow_file!(Workflow.workflow_file_path(), worker_ssh_hosts: ["worker-a"])
+
+    state = %Orchestrator.State{running: %{}}
+
+    assert Orchestrator.select_worker_host_for_test(state, "worker-a", "opencode") == nil
+  end
+
+  test "select_worker_host_for_test preserves Codex ssh host capacity limits" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["worker-a", "worker-b"],
+      worker_max_concurrent_agents_per_host: 1
+    )
+
+    state = %Orchestrator.State{running: %{"issue-1" => %{worker_host: "worker-a"}}}
+
+    assert Orchestrator.select_worker_host_for_test(state, nil, "codex") == "worker-b"
+    assert Orchestrator.select_worker_host_for_test(state, "worker-a", "codex") == "worker-b"
+  end
+
   test "snapshot returns :timeout when snapshot server is unresponsive" do
     server_name = Module.concat(__MODULE__, :UnresponsiveSnapshotServer)
     parent = self()
@@ -19,6 +39,57 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert Orchestrator.snapshot(server_name, 10) == :timeout
 
     send(pid, :stop)
+  end
+
+  test "snapshot exposes in-memory suppression counts without stale suppression events" do
+    orchestrator_name = Module.concat(__MODULE__, :SuppressionProjectionOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, dispatch_paused?: true)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      %{state | suppression_counts: %{"owner_wait_no_change" => 1}}
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+
+    assert snapshot.suppression_events == []
+    assert %{"owner_wait_no_change" => 1} = snapshot.suppression_counts
+  end
+
+  test "orchestrator snapshot exposes configured active milestone runtime context" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      stewardship_active_milestone_id: "milestone-current",
+      stewardship_active_milestone_name: "Current"
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :ActiveMilestoneProjectionOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, dispatch_paused?: true)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      %{state | active_project_milestone_id: "milestone-current"}
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+
+    assert snapshot.active_project_milestone_id == "milestone-current"
+
+    assert %{
+             milestone_id: "milestone-current",
+             milestone_name: "Current"
+           } = snapshot.active_milestone
+
+    assert snapshot.suppression_counts == %{}
   end
 
   test "orchestrator snapshot reflects last codex update and session id" do
@@ -93,12 +164,181 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot_entry.session_id == "thread-live-turn-live"
     assert snapshot_entry.turn_count == 1
     assert snapshot_entry.last_codex_timestamp == now
+    assert snapshot_entry.runner_kind == "codex"
+    assert snapshot_entry.runner_owner == "codex"
+    assert snapshot_entry.runner_phase == :session
 
     assert snapshot_entry.last_codex_message == %{
              event: :notification,
              message: %{method: "some-event"},
              timestamp: now
            }
+  end
+
+  test "orchestrator snapshot reflects peer runner command and session details" do
+    issue_id = "issue-opencode-runner-snapshot"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-244",
+      title: "Snapshot OpenCode runner state",
+      description: "Capture OpenCode command state",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-244"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :OpenCodeRunnerSnapshotOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    started_at = DateTime.utc_now()
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      runner_kind: "opencode",
+      runner_owner: "opencode",
+      runner_phase: :starting,
+      session_id: nil,
+      turn_count: 0,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    now = DateTime.utc_now()
+
+    send(
+      pid,
+      {:runner_worker_update, issue_id,
+       %{
+         event: :command_prepared,
+         timestamp: now,
+         runner_kind: "opencode",
+         runner_owner: "opencode",
+         phase: :command,
+         project_root: "/home/agent/proj/symphony",
+         command: ["opencode", "run", "--session", "ses-visible"],
+         session_id: "ses-visible",
+         attach_url: "http://127.0.0.1:3000"
+       }}
+    )
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+    assert snapshot_entry.runner_kind == "opencode"
+    assert snapshot_entry.runner_owner == "opencode"
+    assert snapshot_entry.runner_phase == :command
+    assert snapshot_entry.runner_project_root == "/home/agent/proj/symphony"
+    assert snapshot_entry.runner_command == ["opencode", "run", "--session", "ses-visible"]
+    assert snapshot_entry.runner_attach_url == "http://127.0.0.1:3000"
+    assert snapshot_entry.session_id == "ses-visible"
+    assert snapshot_entry.last_codex_event == :command_prepared
+  end
+
+  test "orchestrator snapshot tracks OpenCode ACP usage updates as running session tokens" do
+    issue_id = "issue-opencode-usage-snapshot"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-247",
+      title: "OpenCode usage snapshot",
+      description: "Capture OpenCode ACP token usage",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-247"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :OpenCodeUsageOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      runner_kind: "opencode",
+      runner_owner: "opencode",
+      runner_phase: :command,
+      session_id: "ses-opencode-usage",
+      turn_count: 1,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    now = DateTime.utc_now()
+
+    send(
+      pid,
+      {:runner_worker_update, issue_id,
+       %{
+         event: :notification,
+         phase: :usage,
+         timestamp: now,
+         runner_kind: "opencode",
+         runner_owner: "opencode",
+         session_id: "ses-opencode-usage",
+         usage: %{"inputTokens" => 12, "outputTokens" => 4, "totalTokens" => 16},
+         payload: %{
+           "method" => "session/update",
+           "params" => %{
+             "type" => "usage",
+             "usage" => %{"inputTokens" => 12, "outputTokens" => 4, "totalTokens" => 16}
+           }
+         }
+       }}
+    )
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+    assert snapshot_entry.codex_input_tokens == 12
+    assert snapshot_entry.codex_output_tokens == 4
+    assert snapshot_entry.codex_total_tokens == 16
+    assert snapshot_entry.runner_phase == :usage
+    assert snapshot_entry.last_codex_event == :notification
+    assert snapshot_entry.last_codex_message.message["method"] == "session/update"
+
+    assert StatusDashboard.humanize_codex_message(snapshot_entry.last_codex_message) ==
+             "session usage updated (in 12, out 4, total 16)"
   end
 
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do
@@ -197,6 +437,268 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert completed_state.codex_totals.output_tokens == 4
     assert completed_state.codex_totals.total_tokens == 16
     assert is_integer(completed_state.codex_totals.seconds_running)
+    assert is_integer(completed_state.runner_runtime_totals.seconds_running)
+  end
+
+  test "codex token telemetry does not block useful running sessions" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+
+    issue_id = "issue-codex-token-telemetry"
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    worker_ref = Process.monitor(worker_pid)
+
+    on_exit(fn ->
+      Process.demonitor(worker_ref, [:flush])
+
+      if Process.alive?(worker_pid) do
+        Process.exit(worker_pid, :kill)
+      end
+    end)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: worker_pid,
+          ref: worker_ref,
+          identifier: "MT-TOKENS",
+          issue: %Issue{id: issue_id, identifier: "MT-TOKENS", state: "RCA Required"},
+          runner_kind: "codex",
+          runner_owner: "codex",
+          session_id: "thread-token-telemetry",
+          last_codex_message: nil,
+          last_codex_timestamp: nil,
+          last_codex_event: nil,
+          codex_input_tokens: 0,
+          codex_output_tokens: 0,
+          codex_total_tokens: 0,
+          codex_last_reported_input_tokens: 0,
+          codex_last_reported_output_tokens: 0,
+          codex_last_reported_total_tokens: 0,
+          started_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      blocked: %{},
+      retry_attempts: %{},
+      completed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      runner_runtime_totals: %{seconds_running: 0}
+    }
+
+    now = DateTime.utc_now()
+
+    update = %{
+      event: :notification,
+      payload: %{
+        "method" => "thread/tokenUsage/updated",
+        "params" => %{
+          "tokenUsage" => %{
+            "total" => %{"inputTokens" => 120, "outputTokens" => 5, "totalTokens" => 125}
+          }
+        }
+      },
+      timestamp: now
+    }
+
+    assert {:noreply, updated_state} =
+             Orchestrator.handle_info({:codex_worker_update, issue_id, update}, state)
+
+    assert Process.alive?(worker_pid)
+    assert %{codex_total_tokens: 125, codex_input_tokens: 120, codex_output_tokens: 5} = updated_state.running[issue_id]
+    refute Map.has_key?(updated_state.retry_attempts, issue_id)
+    assert MapSet.member?(updated_state.claimed, issue_id)
+    assert updated_state.codex_totals.total_tokens == 125
+    assert updated_state.blocked == %{}
+  end
+
+  test "completed OpenCode runtime is tracked separately from Codex token totals" do
+    issue_id = "issue-opencode-runtime"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-245",
+      title: "OpenCode runtime semantics",
+      description: "Do not mix OpenCode elapsed runtime into Codex totals",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-245"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :OpenCodeRuntimeTotalsOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      runner_kind: "opencode",
+      runner_owner: "opencode",
+      runner_phase: :completed,
+      session_id: "ses-opencode-runtime",
+      turn_count: 0,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      started_at: DateTime.add(DateTime.utc_now(), -5, :second)
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, process_ref, :process, self(), :normal})
+    completed_state = :sys.get_state(pid)
+
+    assert completed_state.codex_totals.seconds_running == 0
+    assert completed_state.runner_runtime_totals.seconds_running >= 5
+  end
+
+  test "normal policy-blocked runner exit becomes blocked without retry or continuation" do
+    issue_id = "issue-opencode-policy-blocked"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-246",
+      title: "OpenCode missing prompt",
+      description: "Missing prompt should durably block",
+      state: "In Progress"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :OpenCodePolicyBlockedOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      runner_kind: "opencode",
+      runner_owner: "opencode",
+      runner_phase: :policy_blocked,
+      runner_outcome: :policy_blocked,
+      runner_failure: %{reason: :opencode_task_prompt_not_found, detail: :no_codex_reroute_state},
+      session_id: nil,
+      turn_count: 0,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, process_ref, :process, self(), :normal})
+    completed_state = :sys.get_state(pid)
+
+    assert completed_state.running == %{}
+    assert completed_state.retry_attempts == %{}
+    assert Map.has_key?(completed_state.blocked, issue_id)
+    refute MapSet.member?(completed_state.completed, issue_id)
+
+    blocked = completed_state.blocked[issue_id]
+    assert blocked.runner_kind == "opencode"
+    assert blocked.runner_phase == :policy_blocked
+    assert blocked.runner_failure == %{reason: :opencode_task_prompt_not_found, detail: :no_codex_reroute_state}
+    assert blocked.error =~ "opencode_task_prompt_not_found"
+    assert blocked.error =~ "no_codex_reroute_state"
+  end
+
+  test "normal rerouted runner exit with policy-blocked phase does not enter durable blocked" do
+    issue_id = "issue-opencode-rca-rerouted"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-247",
+      title: "OpenCode malformed prompt",
+      description: "Malformed prompt should route to RCA Required",
+      state: "In Progress"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :OpenCodePolicyReroutedOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      runner_kind: "opencode",
+      runner_owner: "opencode",
+      runner_phase: :policy_blocked,
+      runner_outcome: :rerouted,
+      runner_result_state: "RCA Required",
+      runner_failure: %{reason: :opencode_task_prompt_malformed_fence},
+      session_id: nil,
+      turn_count: 0,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, process_ref, :process, self(), :normal})
+    completed_state = :sys.get_state(pid)
+
+    assert completed_state.running == %{}
+    assert completed_state.retry_attempts == %{}
+    assert completed_state.blocked == %{}
+    assert MapSet.member?(completed_state.completed, issue_id)
+    refute MapSet.member?(completed_state.claimed, issue_id)
   end
 
   test "orchestrator snapshot tracks turn completed usage when present" do
@@ -628,6 +1130,122 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot_entry.codex_input_tokens == 10
     assert snapshot_entry.codex_output_tokens == 4
     assert snapshot_entry.codex_total_tokens == 14
+  end
+
+  test "orchestrator token accounting baselines resumed Codex thread totals" do
+    issue_id = "issue-resumed-thread-token-usage"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-224",
+      title: "Resumed thread token usage",
+      description: "Do not show historical thread usage as current issue tokens",
+      state: "Todo",
+      url: "https://example.org/issues/MT-224"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :ResumedThreadTokenUsageOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      codex_last_reported_input_tokens: 0,
+      codex_last_reported_output_tokens: 0,
+      codex_last_reported_total_tokens: 0,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :session_started,
+         session_id: "old-thread-turn-1",
+         thread_id: "old-thread",
+         turn_id: "turn-1",
+         thread_resumed?: true,
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{
+           "method" => "thread/tokenUsage/updated",
+           "params" => %{
+             "tokenUsage" => %{
+               "total" => %{
+                 "input_tokens" => 2_364_509_861,
+                 "output_tokens" => 5_980_143,
+                 "total_tokens" => 2_370_490_004
+               }
+             }
+           }
+         },
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+    assert snapshot_entry.codex_input_tokens == 0
+    assert snapshot_entry.codex_output_tokens == 0
+    assert snapshot_entry.codex_total_tokens == 0
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{
+           "method" => "thread/tokenUsage/updated",
+           "params" => %{
+             "tokenUsage" => %{
+               "total" => %{
+                 "input_tokens" => 2_364_509_891,
+                 "output_tokens" => 5_980_153,
+                 "total_tokens" => 2_370_490_044
+               }
+             }
+           }
+         },
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+    assert snapshot_entry.codex_input_tokens == 30
+    assert snapshot_entry.codex_output_tokens == 10
+    assert snapshot_entry.codex_total_tokens == 40
   end
 
   test "orchestrator token accounting ignores last_token_usage without cumulative totals" do
@@ -1227,6 +1845,26 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert checking_rendered =~ "checking now…"
   end
 
+  test "status dashboard renders active milestone lock context" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil,
+         active_milestone: %{milestone_id: "milestone-current", milestone_name: "Current"},
+         active_project_milestone_id: "milestone-current",
+         suppression_counts: %{"active_milestone_locked" => 2}
+       }}
+
+    rendered = StatusDashboard.format_snapshot_content_for_test(snapshot_data, 0.0)
+    plain = Regex.replace(~r/\e\[[0-9;]*m/, rendered, "")
+
+    assert plain =~ "Milestone: Current"
+    assert plain =~ "active_milestone_locked: 2"
+  end
+
   test "status dashboard adds a spacer line before backoff queue when no agents are active" do
     snapshot_data =
       {:ok,
@@ -1639,6 +2277,23 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert StatusDashboard.humanize_codex_message(message) == "git status --short"
   end
 
+  test "status dashboard humanizes OpenCode runner command updates without dumping maps" do
+    message = %{
+      event: :command_prepared,
+      runner_kind: "opencode",
+      phase: :command,
+      command: ["/usr/local/bin/opencode", "acp"],
+      project_root: "/home/agent/proj/symphony",
+      session_id: nil
+    }
+
+    humanized = StatusDashboard.humanize_codex_message(message)
+
+    assert humanized == "command prepared (opencode acp)"
+    refute humanized =~ "%{"
+    refute humanized =~ "/usr/local/bin/opencode"
+  end
+
   test "status dashboard formats auto-approval updates from codex" do
     message = %{
       event: :approval_auto_approved,
@@ -1716,6 +2371,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "application stop renders offline status" do
+    on_exit(fn ->
+      SymphonyElixir.TestSupport.ensure_application_started()
+    end)
+
     rendered =
       ExUnit.CaptureIO.capture_io(fn ->
         assert :ok = SymphonyElixir.Application.stop(:normal)

@@ -25,6 +25,17 @@ defmodule SymphonyElixir.StatusDashboard do
   @running_event_min_width 12
   @running_row_chrome_width 10
   @default_terminal_columns 115
+  @runner_status_events [
+    :command_prepared,
+    :session_started,
+    :completed,
+    :failed,
+    :timeout,
+    :exit_failed,
+    :malformed_task_prompt_blocked,
+    :loop_breaker_blocked
+  ]
+  @active_milestone_locked "active_milestone_locked"
 
   @ansi_reset IO.ANSI.reset()
   @ansi_bold IO.ANSI.bright()
@@ -315,9 +326,14 @@ defmodule SymphonyElixir.StatusDashboard do
            %{
              running: running,
              retrying: retrying,
+             blocked: Map.get(snapshot, :blocked, []),
              codex_totals: codex_totals,
+             runner_runtime_totals: runner_runtime_totals(snapshot, codex_totals),
              rate_limits: Map.get(snapshot, :rate_limits),
-             polling: Map.get(snapshot, :polling)
+             polling: Map.get(snapshot, :polling),
+             active_milestone: Map.get(snapshot, :active_milestone),
+             active_project_milestone_id: Map.get(snapshot, :active_project_milestone_id),
+             suppression_counts: Map.get(snapshot, :suppression_counts, %{})
            }},
           update_token_samples(token_samples, now_ms, total_tokens)
         }
@@ -333,19 +349,23 @@ defmodule SymphonyElixir.StatusDashboard do
   defp format_snapshot_content(snapshot_data, tps, terminal_columns_override \\ nil) do
     case snapshot_data do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
+        blocked = Map.get(snapshot, :blocked, [])
         rate_limits = Map.get(snapshot, :rate_limits)
+        active_milestone = Map.get(snapshot, :active_milestone)
+        active_project_milestone_id = Map.get(snapshot, :active_project_milestone_id)
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
         codex_input_tokens = Map.get(codex_totals, :input_tokens, 0)
         codex_output_tokens = Map.get(codex_totals, :output_tokens, 0)
         codex_total_tokens = Map.get(codex_totals, :total_tokens, 0)
-        codex_seconds_running = Map.get(codex_totals, :seconds_running, 0)
+        runner_seconds_running = runner_runtime_seconds(snapshot, codex_totals)
         agent_count = length(running)
         max_agents = Config.settings!().agent.max_concurrent_agents
         running_event_width = running_event_width(terminal_columns_override)
         running_rows = format_running_rows(running, running_event_width)
         running_to_backoff_spacer = if(running == [], do: [], else: ["│"])
         backoff_rows = format_retry_rows(retrying)
+        policy_block_section = format_blocked_section(blocked)
 
         ([
            colorize("╭─ SYMPHONY STATUS", @ansi_bold),
@@ -355,7 +375,7 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize("#{max_agents}", @ansi_gray),
            colorize("│ Throughput: ", @ansi_bold) <> colorize("#{format_tps(tps)} tps", @ansi_cyan),
            colorize("│ Runtime: ", @ansi_bold) <>
-             colorize(format_runtime_seconds(codex_seconds_running), @ansi_magenta),
+             colorize(format_runtime_seconds(runner_seconds_running), @ansi_magenta),
            colorize("│ Tokens: ", @ansi_bold) <>
              colorize("in #{format_count(codex_input_tokens)}", @ansi_yellow) <>
              colorize(" | ", @ansi_gray) <>
@@ -363,6 +383,7 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize(" | ", @ansi_gray) <>
              colorize("total #{format_count(codex_total_tokens)}", @ansi_yellow),
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
+           List.wrap(format_milestone_line(active_milestone, active_project_milestone_id, snapshot)),
            project_link_lines,
            project_refresh_line,
            colorize("├─ Running", @ansi_bold),
@@ -374,6 +395,7 @@ defmodule SymphonyElixir.StatusDashboard do
            running_to_backoff_spacer ++
            [colorize("├─ Backoff queue", @ansi_bold), "│"] ++
            backoff_rows ++
+           policy_block_section ++
            [closing_border()])
         |> List.flatten()
         |> Enum.join("\n")
@@ -390,6 +412,16 @@ defmodule SymphonyElixir.StatusDashboard do
         |> List.flatten()
         |> Enum.join("\n")
     end
+  end
+
+  defp runner_runtime_totals(snapshot, codex_totals) when is_map(snapshot) do
+    Map.get(snapshot, :runner_runtime_totals) || %{seconds_running: Map.get(codex_totals || %{}, :seconds_running, 0)}
+  end
+
+  defp runner_runtime_seconds(snapshot, codex_totals) do
+    snapshot
+    |> runner_runtime_totals(codex_totals)
+    |> Map.get(:seconds_running, 0)
   end
 
   defp format_project_link_lines do
@@ -412,6 +444,28 @@ defmodule SymphonyElixir.StatusDashboard do
         [project_line]
     end
   end
+
+  defp format_milestone_line(nil, _milestone_id, _snapshot), do: nil
+
+  defp format_milestone_line(%{milestone_name: name}, _milestone_id, snapshot) when not is_nil(name) do
+    locked_count =
+      snapshot
+      |> Map.get(:suppression_counts, %{})
+      |> Map.get(@active_milestone_locked, 0)
+
+    lock_suffix =
+      if locked_count > 0 do
+        " │ #{@active_milestone_locked}: #{locked_count}"
+      else
+        ""
+      end
+
+    colorize("│ Milestone: ", @ansi_bold) <>
+      colorize(to_string(name), @ansi_cyan) <>
+      colorize(lock_suffix, @ansi_red)
+  end
+
+  defp format_milestone_line(_milestone, _milestone_id, _snapshot), do: nil
 
   defp format_project_refresh_line(%{checking?: true}) do
     colorize("│ Next refresh: ", @ansi_bold) <> colorize("checking now…", @ansi_cyan)
@@ -560,7 +614,9 @@ defmodule SymphonyElixir.StatusDashboard do
            %{
              running: running,
              retrying: retrying,
+             blocked: Map.get(snapshot, :blocked, []),
              codex_totals: codex_totals,
+             runner_runtime_totals: runner_runtime_totals(snapshot, codex_totals),
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling)
            }}
@@ -700,6 +756,77 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp format_retry_error(_), do: ""
+
+  defp format_blocked_section([]), do: []
+
+  defp format_blocked_section(blocked) do
+    ["│", colorize("├─ Policy blocks", @ansi_bold), "│"] ++ format_blocked_rows(blocked)
+  end
+
+  defp format_blocked_rows(blocked) do
+    blocked
+    |> Enum.sort_by(&(map_value(&1, [:identifier, "identifier", :issue_id, "issue_id"]) || ""))
+    |> Enum.map(&format_blocked_summary/1)
+  end
+
+  defp format_blocked_summary(blocked_entry) do
+    identifier = map_value(blocked_entry, [:identifier, "identifier", :issue_id, "issue_id"]) || "unknown"
+    state = map_value(blocked_entry, [:state, "state"]) || "blocked"
+    runner = format_blocked_runner(blocked_entry)
+    error = format_blocked_error(blocked_entry)
+
+    "│  #{colorize("■", @ansi_red)} " <>
+      colorize(to_string(identifier), @ansi_red) <>
+      " " <>
+      colorize("state=#{state}", @ansi_yellow) <>
+      " " <>
+      colorize("runner=#{runner}", @ansi_cyan) <>
+      error
+  end
+
+  defp format_blocked_runner(blocked_entry) do
+    runner = map_value(blocked_entry, [:runner, "runner"])
+    owner = runner_map_value(runner, [:owner, "owner"]) || map_value(blocked_entry, [:runner_owner, "runner_owner"])
+    kind = runner_map_value(runner, [:kind, "kind"]) || map_value(blocked_entry, [:runner_kind, "runner_kind"])
+    phase = runner_map_value(runner, [:phase, "phase"]) || map_value(blocked_entry, [:runner_phase, "runner_phase"])
+
+    [owner || kind || "n/a", phase]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map_join("/", &to_string/1)
+  end
+
+  defp runner_map_value(runner, keys) when is_map(runner), do: map_value(runner, keys)
+  defp runner_map_value(_runner, _keys), do: nil
+
+  defp format_blocked_error(blocked_entry) do
+    error =
+      map_value(blocked_entry, [:error, "error"]) ||
+        blocked_entry
+        |> map_value([:runner_failure, "runner_failure", :failure, "failure"])
+        |> inspect_failure()
+
+    case sanitized_error(error) do
+      "" -> ""
+      sanitized -> " " <> colorize("error=#{truncate(sanitized, 96)}", @ansi_dim)
+    end
+  end
+
+  defp inspect_failure(nil), do: nil
+  defp inspect_failure(failure), do: inspect(failure)
+
+  defp sanitized_error(error) when is_binary(error) do
+    error
+    |> String.replace("\\r\\n", " ")
+    |> String.replace("\\r", " ")
+    |> String.replace("\\n", " ")
+    |> String.replace("\r\n", " ")
+    |> String.replace("\r", " ")
+    |> String.replace("\n", " ")
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+  end
+
+  defp sanitized_error(_), do: ""
 
   defp format_runtime_seconds(seconds) when is_integer(seconds) do
     mins = div(seconds, 60)
@@ -1069,7 +1196,19 @@ defmodule SymphonyElixir.StatusDashboard do
 
   @doc false
   @spec humanize_codex_message(term()) :: String.t()
-  def humanize_codex_message(nil), do: "no codex message yet"
+  def humanize_codex_message(nil), do: "no runner message yet"
+
+  for runner_event <- @runner_status_events do
+    def humanize_codex_message(%{event: unquote(runner_event)} = message) do
+      message
+      |> humanize_runner_event()
+      |> truncate(140)
+    end
+  end
+
+  defp humanize_runner_event(%{event: event} = message) do
+    humanize_runner_event(event, message)
+  end
 
   def humanize_codex_message(%{event: event, message: message}) do
     payload = unwrap_codex_message_payload(message)
@@ -1151,6 +1290,50 @@ defmodule SymphonyElixir.StatusDashboard do
   defp humanize_codex_event(:turn_cancelled, _message, _payload), do: "turn cancelled"
   defp humanize_codex_event(:malformed, _message, _payload), do: "malformed JSON event from codex"
   defp humanize_codex_event(_event, _message, _payload), do: nil
+
+  defp humanize_runner_event(:command_prepared, message) do
+    case runner_command_label(map_value(message, ["command", :command])) do
+      nil -> "command prepared"
+      command -> "command prepared (#{command})"
+    end
+  end
+
+  defp humanize_runner_event(:session_started, message) do
+    case map_value(message, ["session_id", :session_id]) do
+      session_id when is_binary(session_id) and session_id != "" -> "session started (#{session_id})"
+      _session_id -> "session started"
+    end
+  end
+
+  defp humanize_runner_event(:completed, message) do
+    case map_value(message, ["session_id", :session_id]) do
+      session_id when is_binary(session_id) and session_id != "" -> "runner completed (#{session_id})"
+      _session_id -> "runner completed"
+    end
+  end
+
+  defp humanize_runner_event(:failed, message), do: "runner failed: #{format_reason(map_value(message, ["failure", :failure]) || message)}"
+  defp humanize_runner_event(:timeout, message), do: "runner timeout: #{format_reason(map_value(message, ["failure", :failure]) || message)}"
+  defp humanize_runner_event(:exit_failed, message), do: "runner exit failed: #{format_reason(map_value(message, ["failure", :failure]) || message)}"
+  defp humanize_runner_event(:malformed_task_prompt_blocked, message), do: "runner policy blocked: #{format_reason(map_value(message, ["failure", :failure]) || message)}"
+  defp humanize_runner_event(:loop_breaker_blocked, message), do: "runner policy blocked: #{format_reason(map_value(message, ["failure", :failure]) || message)}"
+
+  defp runner_command_label(command) when is_list(command) do
+    command
+    |> Enum.take(4)
+    |> Enum.map(fn
+      value when is_binary(value) -> Path.basename(value)
+      value -> to_string(value)
+    end)
+    |> Enum.reject(&(&1 == ""))
+    |> case do
+      [] -> nil
+      parts -> Enum.join(parts, " ")
+    end
+  end
+
+  defp runner_command_label(command) when is_binary(command), do: Path.basename(command)
+  defp runner_command_label(_command), do: nil
 
   defp unwrap_codex_message_payload(%{} = message) do
     cond do
@@ -1259,6 +1442,11 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp humanize_codex_method("turn/cancelled", _payload), do: "turn cancelled"
+
+  defp humanize_codex_method("session/update", payload) do
+    params = session_update_params(payload)
+    params |> map_value(["type", :type]) |> humanize_session_update(params)
+  end
 
   defp humanize_codex_method("turn/diff/updated", payload) do
     diff =
@@ -1408,6 +1596,55 @@ defmodule SymphonyElixir.StatusDashboard do
       method
     end
   end
+
+  defp session_update_params(payload) do
+    map_path(payload, ["params"]) ||
+      map_path(payload, [:params]) ||
+      %{}
+  end
+
+  defp humanize_session_update("agent_text", params) do
+    text = map_value(params, ["text", :text, "message", :message])
+
+    if is_binary(text) and String.trim(text) != "" do
+      "agent message streaming: #{inline_text(text)}"
+    else
+      "agent message streaming"
+    end
+  end
+
+  defp humanize_session_update("tool_plan", params) do
+    tool = map_value(params, ["tool", :tool, "name", :name])
+
+    if is_binary(tool) and String.trim(tool) != "" do
+      "tool plan updated (#{tool})"
+    else
+      "tool plan updated"
+    end
+  end
+
+  defp humanize_session_update("usage", params) do
+    usage = map_value(params, ["usage", :usage])
+
+    case format_usage_counts(usage) do
+      nil -> "session usage updated"
+      usage_text -> "session usage updated (#{usage_text})"
+    end
+  end
+
+  defp humanize_session_update(type, _params) when type in ["end_turn", "stop"] do
+    "turn completed (#{type})"
+  end
+
+  defp humanize_session_update(type, _params) when type in ["user_input_required", "permission"] do
+    "turn blocked: waiting for user input"
+  end
+
+  defp humanize_session_update(type, _params) when is_binary(type) and type != "" do
+    "session update (#{type})"
+  end
+
+  defp humanize_session_update(_type, _params), do: "session update"
 
   defp humanize_dynamic_tool_event(base, payload) do
     case dynamic_tool_name(payload) do

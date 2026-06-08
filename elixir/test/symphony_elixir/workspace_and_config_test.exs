@@ -4,6 +4,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.OpenCode.ACPSessionStore
+  alias SymphonyElixir.PromptBuilder
+  alias SymphonyElixir.RuntimeCache
+  alias SymphonyElixir.Steward.ExecutionPacket
 
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
@@ -85,7 +89,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert File.read!(Path.join(second_workspace, "README.md")) == "changed\n"
       assert File.read!(Path.join(second_workspace, "local-progress.txt")) == "in progress\n"
       assert File.read!(Path.join([second_workspace, "deps", "cache.txt"])) == "cached deps\n"
-      assert File.read!(Path.join([second_workspace, "_build", "artifact.txt"])) == "compiled artifact\n"
+
+      assert File.read!(Path.join([second_workspace, "_build", "artifact.txt"])) ==
+               "compiled artifact\n"
+
       assert File.read!(Path.join([second_workspace, "tmp", "scratch.txt"])) == "remove me\n"
     after
       File.rm_rf(workspace_root)
@@ -134,7 +141,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
       assert {:ok, canonical_outside_root} = SymphonyElixir.PathSafety.canonicalize(outside_root)
-      assert {:ok, canonical_workspace_root} = SymphonyElixir.PathSafety.canonicalize(workspace_root)
+
+      assert {:ok, canonical_workspace_root} =
+               SymphonyElixir.PathSafety.canonicalize(workspace_root)
 
       assert {:error, {:workspace_outside_root, ^canonical_outside_root, ^canonical_workspace_root}} =
                Workspace.create_for_issue("MT-SYM")
@@ -186,6 +195,29 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert {:error, {:workspace_equals_root, ^canonical_workspace_root, ^canonical_workspace_root}, ""} =
                Workspace.remove(workspace_root)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "workspace remove rejects the current working tree" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-current-remove-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(workspace_root)
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-CWD")
+
+      File.cd!(workspace, fn ->
+        assert {:error, {:workspace_contains_current_working_directory, ^workspace, ^workspace}, ""} = Workspace.remove(workspace)
+      end)
+
+      assert File.dir?(workspace)
     after
       File.rm_rf(workspace_root)
     end
@@ -262,7 +294,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     try do
       target_workspace = Path.join(workspace_root, "S_1")
-      untouched_workspace = Path.join(workspace_root, "OTHER-#{System.unique_integer([:positive])}")
+
+      untouched_workspace =
+        Path.join(workspace_root, "OTHER-#{System.unique_integer([:positive])}")
 
       File.mkdir_p!(target_workspace)
       File.mkdir_p!(untouched_workspace)
@@ -295,6 +329,179 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert :ok = Workspace.remove_issue_workspaces(nil)
   end
 
+  test "runtime cache cleanup removes terminal issue workspace and ACP session" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-runtime-cache-terminal-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-terminal-cache",
+        identifier: "SYM-CACHE",
+        state: "Done"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      File.write!(Path.join(workspace, "artifact.txt"), "stale")
+
+      project_root = File.cwd!()
+      session_scope = ACPSessionStore.prompt_scope("prompt")
+      assert :ok = ACPSessionStore.put(issue, project_root, "ses-stale", session_scope)
+      assert {:ok, "ses-stale"} = ACPSessionStore.fetch(issue, project_root, session_scope)
+
+      assert :ok = Workspace.cleanup_issue_runtime_cache(issue, Config.settings!())
+
+      refute File.exists?(workspace)
+      assert {:ok, nil} = ACPSessionStore.fetch(issue, project_root, session_scope)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "runtime handoff cache survives the worker process that records it" do
+    issue = %Issue{id: "issue-runtime-cache-worker", identifier: "SYM-RUNTIME-CACHE"}
+    fingerprint = "fingerprint-#{System.unique_integer([:positive])}"
+    parent = self()
+
+    {worker, ref} =
+      spawn_monitor(fn ->
+        :ok = RuntimeCache.record_handoff_fingerprint(nil, issue.id, fingerprint)
+        send(parent, :runtime_cache_recorded)
+      end)
+
+    assert_receive :runtime_cache_recorded
+    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}
+
+    assert RuntimeCache.handoff_fingerprint_seen?(nil, issue.id, fingerprint)
+
+    :ok = RuntimeCache.clear_issue(nil, issue)
+    refute RuntimeCache.handoff_fingerprint_seen?(nil, issue.id, fingerprint)
+  end
+
+  test "runtime cache sweep deletes stale abandoned workspaces and preserves active workspaces" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-runtime-cache-sweep-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      active_workspace = Path.join(workspace_root, "SYM-ACTIVE")
+      abandoned_workspace = Path.join(workspace_root, "SYM-ABANDONED")
+      fresh_workspace = Path.join(workspace_root, "SYM-FRESH")
+
+      Enum.each([active_workspace, abandoned_workspace, fresh_workspace], fn path ->
+        File.mkdir_p!(path)
+        File.write!(Path.join(path, "marker.txt"), Path.basename(path))
+      end)
+
+      old_mtime = {{2024, 1, 1}, {0, 0, 0}}
+      File.touch!(abandoned_workspace, old_mtime)
+      File.touch!(active_workspace, old_mtime)
+
+      assert {:ok, removed} =
+               Workspace.sweep_abandoned_runtime_cache(["SYM-ACTIVE"], Config.settings!(), 60_000)
+
+      assert abandoned_workspace in removed
+      refute File.exists?(abandoned_workspace)
+      assert File.exists?(active_workspace)
+      assert File.exists?(fresh_workspace)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "legacy pulse ledger file is deleted during runtime cache cleanup" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-runtime-cache-ledger-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      File.mkdir_p!(workspace_root)
+      ledger_path = Path.join(workspace_root, "pulse_ledger.json")
+      File.write!(ledger_path, Jason.encode!(%{"suppression_counts" => %{"stale" => 1}}))
+
+      assert :ok = Workspace.remove_legacy_runtime_cache(Config.settings!())
+      refute File.exists?(ledger_path)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "live terminal reconciliation removes workspace, ACP session, and runtime cache" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-runtime-cache-live-terminal-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        tracker_terminal_states: ["Done"]
+      )
+
+      issue = %Issue{
+        id: "issue-live-terminal-cache",
+        identifier: "SYM-LIVE-CACHE",
+        state: "Done"
+      }
+
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      File.write!(Path.join(workspace, "artifact.txt"), "stale")
+
+      project_root = File.cwd!()
+      session_scope = ACPSessionStore.prompt_scope("prompt")
+      assert :ok = ACPSessionStore.put(issue, project_root, "ses-live-stale", session_scope)
+      assert :ok = RuntimeCache.record_handoff_fingerprint(nil, issue.id, "fp-live-stale")
+
+      worker_pid =
+        spawn(fn ->
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      worker_ref = Process.monitor(worker_pid)
+
+      state = %Orchestrator.State{
+        running: %{
+          issue.id => %{
+            pid: worker_pid,
+            ref: worker_ref,
+            identifier: issue.identifier,
+            issue: %{issue | state: "In Progress"},
+            started_at: DateTime.utc_now()
+          }
+        },
+        claimed: MapSet.new([issue.id]),
+        blocked: %{},
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        runner_runtime_totals: %{seconds_running: 0}
+      }
+
+      new_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+      refute Map.has_key?(new_state.running, issue.id)
+      refute MapSet.member?(new_state.claimed, issue.id)
+      refute File.exists?(workspace)
+      assert {:ok, nil} = ACPSessionStore.fetch(issue, project_root, session_scope)
+      refute RuntimeCache.handoff_fingerprint_seen?(nil, issue.id, "fp-live-stale")
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "linear issue helpers" do
     issue = %Issue{
       id: "abc",
@@ -320,6 +527,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       "assignee" => %{
         "id" => "user-1"
       },
+      "projectMilestone" => %{
+        "id" => "milestone-1",
+        "name" => "P1 hardening",
+        "description" => "Owner-approved phase",
+        "status" => "started",
+        "targetDate" => "2026-06-15"
+      },
       "labels" => %{"nodes" => [%{"name" => "Backend"}]},
       "inverseRelations" => %{
         "nodes" => [
@@ -341,6 +555,22 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
           }
         ]
       },
+      "comments" => %{
+        "nodes" => [
+          %{
+            "body" => "first owner note",
+            "createdAt" => "2026-01-01T01:00:00Z",
+            "user" => %{"name" => "Alex"},
+            "parent" => nil
+          },
+          %{
+            "body" => "latest owner answer",
+            "createdAt" => "2026-01-03T01:00:00Z",
+            "user" => %{"name" => "Owner"},
+            "parent" => %{"id" => "comment-question-1"}
+          }
+        ]
+      },
       "createdAt" => "2026-01-01T00:00:00Z",
       "updatedAt" => "2026-01-02T00:00:00Z"
     }
@@ -352,7 +582,27 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.priority == 2
     assert issue.state == "Todo"
     assert issue.assignee_id == "user-1"
+
+    assert issue.project_milestone == %{
+             id: "milestone-1",
+             name: "P1 hardening",
+             description: "Owner-approved phase",
+             status: "started",
+             target_date: "2026-06-15"
+           }
+
     assert issue.assigned_to_worker
+    assert issue.latest_comment_at == ~U[2026-01-03 01:00:00Z]
+
+    assert issue.comments == [
+             %{body: "first owner note", created_at: ~U[2026-01-01 01:00:00Z], author: "Alex", parent_id: nil},
+             %{
+               body: "latest owner answer",
+               created_at: ~U[2026-01-03 01:00:00Z],
+               author: "Owner",
+               parent_id: "comment-question-1"
+             }
+           ]
   end
 
   test "linear client marks explicitly unassigned issues as not routed to worker" do
@@ -424,6 +674,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Enum.map(issues, & &1.id) == issue_ids
 
     assert_receive {:fetch_issue_states_page, query, %{ids: ^first_batch_ids, first: 50, relationFirst: 50}}
+
     assert query =~ "SymphonyLinearIssuesById"
 
     assert_receive {:fetch_issue_states_page, ^query, %{ids: ^second_batch_ids, first: 5, relationFirst: 50}}
@@ -496,11 +747,415 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Enum.map(sorted, & &1.identifier) == ["MT-200", "MT-201", "MT-199"]
   end
 
+  test "owner-input pulse selects the latest unhandled owner question update" do
+    older = %Issue{
+      id: "owner-old",
+      identifier: "MT-300",
+      title: "Older owner question",
+      state: "Need Owner Input",
+      updated_at: ~U[2026-01-01 00:00:00Z],
+      latest_comment_at: ~U[2026-01-03 00:00:00Z],
+      comments: [%{body: "old reply", created_at: ~U[2026-01-03 00:00:00Z], parent_id: "question-old"}]
+    }
+
+    latest = %Issue{
+      id: "owner-latest",
+      identifier: "MT-301",
+      title: "Latest owner answer",
+      state: "Need Owner Input",
+      updated_at: ~U[2026-01-02 00:00:00Z],
+      latest_comment_at: ~U[2026-01-04 00:00:00Z],
+      project_milestone: %{
+        id: "milestone-1",
+        name: "Approved phase",
+        description: "phase_state: todo"
+      },
+      comments: [%{body: "latest reply", created_at: ~U[2026-01-04 00:00:00Z], parent_id: "question-latest"}]
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      active_project_milestone_id: "milestone-1",
+      owner_input_pulsed: MapSet.new(["owner-old:2026-01-03T00:00:00Z"])
+    }
+
+    assert %Issue{id: "owner-latest"} =
+             Orchestrator.latest_owner_input_issue_for_pulse_for_test([older, latest], state)
+
+    handled_state = %{
+      state
+      | owner_input_pulsed: MapSet.put(state.owner_input_pulsed, "owner-latest:2026-01-04T00:00:00Z")
+    }
+
+    assert Orchestrator.latest_owner_input_issue_for_pulse_for_test(
+             [older, latest],
+             handled_state
+           ) == nil
+  end
+
+  test "owner-input pulse ignores agent top-level comments newer than owner replies" do
+    issue = %Issue{
+      id: "owner-report-after-reply",
+      identifier: "NER-26",
+      title: "Agent report left for owner review",
+      state: "Need Owner Input",
+      latest_comment_at: ~U[2026-01-05 00:00:00Z],
+      project_milestone: %{
+        id: "milestone-1",
+        name: "Approved phase",
+        description: "phase_state: todo"
+      },
+      comments: [
+        %{body: "owner reply", created_at: ~U[2026-01-04 00:00:00Z], parent_id: "question-1"},
+        %{body: "## Benchmark report
+
+Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
+      ]
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      active_project_milestone_id: "milestone-1",
+      owner_input_pulsed: MapSet.new()
+    }
+
+    assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([issue], state) == nil
+  end
+
+  test "owner-input pulse accepts top-level owner answers" do
+    issue = %Issue{
+      id: "owner-top-level-answer",
+      identifier: "NER-38",
+      title: "Owner review: benchmark runner?",
+      state: "Need Owner Input",
+      latest_comment_at: ~U[2026-01-04 00:00:00Z],
+      project_milestone: %{
+        id: "milestone-1",
+        name: "Approved phase",
+        description: "phase_state: todo"
+      },
+      comments: [%{body: "yes", created_at: ~U[2026-01-04 00:00:00Z], parent_id: nil}]
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      active_project_milestone_id: "milestone-1",
+      owner_input_pulsed: MapSet.new()
+    }
+
+    assert %Issue{id: "owner-top-level-answer"} =
+             Orchestrator.latest_owner_input_issue_for_pulse_for_test([issue], state)
+  end
+
+  test "owner-input pulse ignores generated top-level reports without owner reply parent" do
+    agent_report = %Issue{
+      id: "owner-report",
+      identifier: "NER-26",
+      title: "Agent report left for owner review",
+      state: "Need Owner Input",
+      latest_comment_at: ~U[2026-01-04 00:00:00Z],
+      project_milestone: %{
+        id: "milestone-1",
+        name: "Approved phase",
+        description: "phase_state: todo"
+      },
+      comments: [%{body: "## Benchmark report\n\nValidation results...", created_at: ~U[2026-01-04 00:00:00Z], parent_id: nil}]
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      owner_input_pulsed: MapSet.new()
+    }
+
+    assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([agent_report], state) == nil
+  end
+
+  test "owner-input pulse ignores OpenCode ACP session attachment guards" do
+    session_attached = %Issue{
+      id: "opencode-attached-session",
+      identifier: "MNE-32",
+      title: "OpenCode stalled session",
+      state: "Need Owner Input",
+      latest_comment_at: ~U[2026-06-02 16:24:27Z],
+      project_milestone: %{
+        id: "milestone-1",
+        name: "Approved phase",
+        description: "phase_state: todo"
+      },
+      comments: [
+        %{
+          body: """
+          ## OpenCode Session Attached
+
+          Issue: MNE-32
+          Runner: OpenCode ACP
+          Status: session attached
+          Session ID: `ses_176fbd743ffeY4UlNcPj3AGAD5`
+          """,
+          created_at: ~U[2026-06-02 16:24:27Z],
+          parent_id: nil
+        }
+      ]
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      owner_input_pulsed: MapSet.new()
+    }
+
+    assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([session_attached], state) == nil
+  end
+
+  test "owner-input pulse ignores generated top-level questions without owner reply parent" do
+    agent_question = %Issue{
+      id: "owner-question",
+      identifier: "NER-39",
+      title: "Agent question left for owner review",
+      state: "Need Owner Input",
+      latest_comment_at: ~U[2026-01-04 00:00:00Z],
+      project_milestone: %{
+        id: "milestone-1",
+        name: "Approved phase",
+        description: "phase_state: todo"
+      },
+      comments: [
+        %{
+          body: "Which benchmark gate should run next after this accepted slice: diagnostic-only, claim-safe, or stop and wait?",
+          created_at: ~U[2026-01-04 00:00:00Z],
+          parent_id: nil
+        }
+      ]
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      owner_input_pulsed: MapSet.new()
+    }
+
+    assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([agent_question], state) == nil
+  end
+
+  test "owner-input pulse ignores issue without todo project milestone" do
+    issue = %Issue{
+      id: "owner-unscoped",
+      identifier: "NER-30",
+      title: "Owner question",
+      state: "Need Owner Input",
+      latest_comment_at: ~U[2026-01-04 00:00:00Z],
+      comments: [%{body: "owner reply", created_at: ~U[2026-01-04 00:00:00Z], parent_id: "question-1"}]
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      owner_input_pulsed: MapSet.new()
+    }
+
+    assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([issue], state) == nil
+  end
+
+  test "done continuation pulse ignores issue without todo project milestone" do
+    done_issue = %Issue{
+      id: "done-without-milestone",
+      identifier: "NER-17",
+      title: "Closed work",
+      state: "Done",
+      updated_at: ~U[2026-01-04 00:00:00Z]
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      continuation_pulsed: MapSet.new()
+    }
+
+    assert Orchestrator.latest_done_issue_for_continuation_for_test([done_issue], state) == nil
+  end
+
+  test "done continuation pulse ignores issue inside todo project milestone" do
+    done_issue = %Issue{
+      id: "done-with-todo-milestone",
+      identifier: "NER-18",
+      title: "Closed work",
+      state: "Done",
+      updated_at: ~U[2026-01-04 00:00:00Z],
+      project_milestone: %{
+        id: "milestone-1",
+        name: "Approved phase",
+        description: "phase_state: todo"
+      }
+    }
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      continuation_pulsed: MapSet.new()
+    }
+
+    assert Orchestrator.latest_done_issue_for_continuation_for_test([done_issue], state) == nil
+  end
+
+  test "owner-input issues do not block idle owner pulse dispatch" do
+    owner_input = %Issue{
+      id: "owner-input-1",
+      identifier: "NER-28",
+      title: "Owner answer",
+      state: "Need Owner Input"
+    }
+
+    normal_work = %Issue{
+      id: "normal-work-1",
+      identifier: "NER-29",
+      title: "Normal work",
+      state: "Todo"
+    }
+
+    assert Orchestrator.active_issues_blocking_idle_pulse_for_test([owner_input]) == []
+    assert Orchestrator.active_issues_blocking_idle_pulse_for_test([owner_input, normal_work]) == [normal_work]
+  end
+
+  test "runtime cache GC prunes stale pulse and claim entries while preserving visible and active issue ids" do
+    state = %Orchestrator.State{
+      completed: MapSet.new(["stale-completed", "visible-done"]),
+      claimed: MapSet.new(["stale-claimed", "visible-owner", "running-id", "retry-id", "blocked-id"]),
+      continuation_pulsed: MapSet.new(["stale-done:2026-01-01T00:00:00Z", "visible-done:2026-01-02T00:00:00Z"]),
+      owner_input_pulsed: MapSet.new(["stale-owner:2026-01-01T00:00:00Z", "visible-owner:2026-01-02T00:00:00Z", "running-id:2026-01-02T00:00:00Z"]),
+      running: %{"running-id" => %{}},
+      retry_attempts: %{"retry-id" => %{}},
+      blocked: %{"blocked-id" => %{}}
+    }
+
+    visible_issues = [
+      %Issue{id: "visible-owner", identifier: "SYM-OWNER", state: "Need Owner Input"},
+      %Issue{id: "visible-done", identifier: "SYM-DONE", state: "Done"}
+    ]
+
+    pruned = Orchestrator.runtime_cache_gc_for_test(state, visible_issues)
+
+    assert pruned.completed == MapSet.new(["visible-done"])
+    assert pruned.claimed == MapSet.new(["visible-owner", "running-id", "retry-id", "blocked-id"])
+    assert pruned.continuation_pulsed == MapSet.new(["visible-done:2026-01-02T00:00:00Z"])
+
+    assert pruned.owner_input_pulsed ==
+             MapSet.new(["visible-owner:2026-01-02T00:00:00Z", "running-id:2026-01-02T00:00:00Z"])
+  end
+
+  test "unchanged owner-input pulse suppresses from runtime cache without spawning a worker" do
+    fingerprint = "owner-unchanged:2026-01-04T00:00:00Z"
+
+    issue = %Issue{
+      id: "owner-unchanged",
+      identifier: "SYM-13",
+      title: "Owner parked question",
+      state: "Need Owner Input",
+      comments: [
+        %{body: "continue", created_at: ~U[2026-01-04 00:00:00Z], parent_id: nil}
+      ],
+      project_milestone: %{
+        id: "milestone-owner",
+        name: "Owner milestone",
+        description: "phase_state: todo"
+      }
+    }
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 1,
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      retry_attempts: %{},
+      owner_input_pulsed: MapSet.new([fingerprint]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    assert {:none, new_state} = Orchestrator.dispatch_owner_input_pulse_candidate_for_test(issue, state)
+    assert new_state.running == %{}
+    assert new_state.retry_attempts == %{}
+    assert %{"owner_wait_no_change" => 1} = new_state.suppression_counts
+  end
+
+  test "owner-input dispatch failure does not mark runtime pulse cache" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["worker-a"],
+      worker_max_concurrent_agents_per_host: 1
+    )
+
+    issue = %Issue{
+      id: "owner-dispatch-fails",
+      identifier: "SYM-13",
+      title: "Owner answered",
+      state: "Need Owner Input",
+      comments: [
+        %{body: "continue", created_at: ~U[2026-01-04 00:00:00Z], parent_id: nil}
+      ],
+      project_milestone: %{
+        id: "milestone-owner",
+        name: "Owner milestone",
+        description: "phase_state: todo"
+      }
+    }
+
+    occupied = %Issue{
+      id: "occupied",
+      identifier: "SYM-0",
+      title: "Occupies worker",
+      state: "Todo",
+      project_milestone: issue.project_milestone
+    }
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 2,
+      running: %{"occupied" => %{worker_host: "worker-a", issue: occupied}},
+      claimed: MapSet.new(),
+      blocked: %{},
+      retry_attempts: %{},
+      owner_input_pulsed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    assert {:none, new_state} = Orchestrator.dispatch_owner_input_pulse_candidate_for_test(issue, state)
+    refute Map.has_key?(new_state.running, issue.id)
+    refute MapSet.member?(new_state.owner_input_pulsed, "owner-dispatch-fails:2026-01-04T00:00:00Z")
+  end
+
+  test "full idle pulse ignores Done continuation entirely" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 1,
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      retry_attempts: %{},
+      owner_input_pulsed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    new_state = Orchestrator.dispatch_idle_pulse_for_test(state, true)
+
+    assert new_state.running == %{}
+    assert new_state.suppression_counts == %{}
+  end
+
   test "todo issue with non-terminal blocker is not dispatch-eligible" do
     state = %Orchestrator.State{
       max_concurrent_agents: 3,
       running: %{},
       claimed: MapSet.new(),
+      active_project_milestone_id: "milestone-ready-1",
       codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
     }
@@ -523,6 +1178,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       max_concurrent_agents: 3,
       running: %{},
       claimed: MapSet.new(),
+      active_project_milestone_id: "milestone-ready-1",
       codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
     }
@@ -543,6 +1199,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       max_concurrent_agents: 3,
       running: %{},
       claimed: MapSet.new(),
+      active_project_milestone_id: "milestone-ready-1",
       codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
     }
@@ -552,10 +1209,679 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       identifier: "MT-1003",
       title: "Ready work",
       state: "Todo",
+      project_milestone: %{
+        id: "milestone-ready-1",
+        name: "Ready milestone",
+        description: "phase_state: todo"
+      },
       blocked_by: [%{id: "blocker-2", identifier: "MT-1004", state: "Closed"}]
     }
 
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "issue without project milestone is not dispatch-eligible" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "no-milestone-1",
+      identifier: "MT-1009",
+      title: "Unscoped work",
+      state: "Todo"
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "issue inside unmarked project milestone is not dispatch-eligible" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-unmarked-1",
+      identifier: "MT-1010",
+      title: "Milestone work",
+      state: "Todo",
+      project_milestone: %{
+        id: "milestone-1",
+        name: "Unmarked milestone",
+        description: "Product direction draft"
+      }
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "active milestone is selected from explicit active pointer, not description text" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      active_project_milestone_id: "milestone-2",
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-todo-1",
+      identifier: "MT-1011",
+      title: "Milestone work",
+      state: "Todo",
+      project_milestone: %{
+        id: "milestone-2",
+        name: "todo milestone",
+        description: "phase_state: todo\n\nProduct direction"
+      }
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "milestone description containing phase_state todo has no runtime effect" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      active_project_milestone_id: "milestone-2",
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-todo-control-1",
+      identifier: "MT-1011A",
+      title: "Milestone work",
+      state: "In Progress",
+      project_milestone: %{
+        id: "milestone-2",
+        name: "todo milestone",
+        description:
+          "phase_state: todo\n\n" <>
+            "launch_gate: change the first line to `phase_state: todo` only after explicit owner decision\n" <>
+            "pause_gate: use `phase_state: paused` to keep this milestone dormant\n" <>
+            "decision_gate: use `phase_state: needs-decision` when owner review is required\n"
+      }
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "milestone phase marker later in description does not allow dispatch" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-later-todo-1",
+      identifier: "MT-1011B",
+      title: "Milestone work",
+      state: "Todo",
+      project_milestone: %{
+        id: "milestone-later-todo",
+        name: "Later todo milestone",
+        description: "Product direction\nphase_state: todo"
+      }
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "paused first-line milestone marker with later todo does not allow dispatch" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-paused-later-todo-1",
+      identifier: "MT-1011C",
+      title: "Milestone work",
+      state: "Todo",
+      project_milestone: %{
+        id: "milestone-paused-later-todo",
+        name: "Paused milestone",
+        description: "phase_state: paused\nphase_state: todo"
+      }
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "needs-decision first-line milestone marker with later todo does not allow dispatch" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-needs-later-todo-1",
+      identifier: "MT-1011D",
+      title: "Milestone work",
+      state: "Todo",
+      project_milestone: %{
+        id: "milestone-needs-later-todo",
+        name: "Needs decision milestone",
+        description: "phase_state: needs-decision\nphase_state: todo"
+      }
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "missing first-line milestone marker does not allow dispatch even with later guidance" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-no-first-line-marker-1",
+      identifier: "MT-1011E",
+      title: "Milestone work",
+      state: "Todo",
+      project_milestone: %{
+        id: "milestone-no-first-line-marker",
+        name: "Draft milestone",
+        description: "Product direction\nUse phase_state: todo only after approval"
+      }
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "issue outside active project milestone is not dispatch-eligible" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      active_project_milestone_id: "milestone-active",
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-other-1",
+      identifier: "MT-1013",
+      title: "Other milestone work",
+      state: "Todo",
+      project_milestone: %{
+        id: "milestone-other",
+        name: "Other milestone",
+        description: "phase_state: todo"
+      }
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "issue inside active project milestone remains dispatch-eligible" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      active_project_milestone_id: "milestone-active",
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-active-1",
+      identifier: "MT-1014",
+      title: "Active milestone work",
+      state: "Todo",
+      project_milestone: %{
+        id: "milestone-active",
+        name: "Active milestone",
+        description: "phase_state: todo"
+      }
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "issue inside paused project milestone is not dispatch-eligible" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "milestone-paused-1",
+      identifier: "MT-1012",
+      title: "Milestone work",
+      state: "Todo",
+      project_milestone: %{
+        id: "milestone-3",
+        name: "Paused milestone",
+        description: "phase_state: paused\n\nProduct direction"
+      }
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "full poll with no eligible active-milestone task does not dispatch planning or worker" do
+    previous_milestones = Application.get_env(:symphony_elixir, :memory_tracker_project_milestones)
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-milestone-planning-dispatch-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: test_root,
+        tracker_active_states: ["Todo", "In Progress", "Need Owner Input"],
+        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
+        poll_fast_states: ["Todo"],
+        runner_default: "opencode",
+        runner_routes: %{"In Review" => "codex", "RCA Required" => "codex"}
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+      Application.put_env(:symphony_elixir, :memory_tracker_project_milestones, [
+        %{
+          id: "milestone-planning-1",
+          name: "Planning boundary",
+          description: "phase_state: todo\n\nDispatch one planning task."
+        }
+      ])
+
+      initial_state = %Orchestrator.State{
+        poll_interval_ms: 30_000,
+        full_poll_interval_ms: 60_000,
+        last_full_poll_at_ms: nil,
+        fast_poll_states: ["Todo"],
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        blocked: %{},
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        runner_runtime_totals: %{seconds_running: 0}
+      }
+
+      assert {:noreply, state} = Orchestrator.handle_info(:run_poll_cycle, initial_state)
+
+      assert state.running == %{}
+      assert state.claimed == MapSet.new()
+      assert state.active_project_milestone_id == nil
+
+      if is_reference(state.tick_timer_ref), do: Process.cancel_timer(state.tick_timer_ref)
+    after
+      restore_app_env(:memory_tracker_project_milestones, previous_milestones)
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "legacy synthetic milestone planning paths are not present" do
+    orchestrator_source = File.read!(Path.expand("../../lib/symphony_elixir/orchestrator.ex", __DIR__))
+    issue_source = File.read!(Path.expand("../../lib/symphony_elixir/linear/issue.ex", __DIR__))
+
+    refute orchestrator_source =~ "MILESTONE-"
+    refute orchestrator_source =~ "project_milestone_planning"
+    refute orchestrator_source =~ "synthetic_milestone"
+    refute orchestrator_source =~ "phase_state"
+    refute function_exported?(Orchestrator, :milestone_planning_issues_for_test, 3)
+    refute issue_source =~ "synthetic_kind"
+  end
+
+  test "active milestone pointer is set only by stewardship config" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      stewardship_active_milestone_id: " milestone-configured ",
+      stewardship_active_milestone_name: " Configured Milestone "
+    )
+
+    assert Config.settings!().stewardship.active_milestone_id == "milestone-configured"
+    assert Config.settings!().stewardship.active_milestone_name == "Configured Milestone"
+
+    state = %Orchestrator.State{running: %{}, blocked: %{}, retry_attempts: %{}}
+
+    state = Orchestrator.apply_configured_active_milestone_for_test(state)
+    assert state.active_project_milestone_id == "milestone-configured"
+  end
+
+  test "milestone dispatch gate follows active pointer match and blocks nil pointer" do
+    matching_issue = %Issue{
+      id: "issue-matching",
+      identifier: "SYM-20",
+      title: "Matching milestone",
+      state: "Todo",
+      project_milestone: %{id: "milestone-active", name: "Active"}
+    }
+
+    non_matching_issue = %Issue{
+      id: "issue-other",
+      identifier: "SYM-21",
+      title: "Other milestone",
+      state: "Todo",
+      project_milestone: %{id: "milestone-other", name: "Other"}
+    }
+
+    state = %Orchestrator.State{active_project_milestone_id: "milestone-active"}
+
+    assert Orchestrator.should_dispatch_issue_for_test(matching_issue, state)
+    refute Orchestrator.should_dispatch_issue_for_test(non_matching_issue, state)
+    refute Orchestrator.should_dispatch_issue_for_test(matching_issue, %Orchestrator.State{})
+  end
+
+  test "configured milestone pointer can be cleared and reselected" do
+    write_workflow_file!(Workflow.workflow_file_path(), stewardship_active_milestone_id: "milestone-closed")
+
+    closed_state =
+      %Orchestrator.State{running: %{}, blocked: %{}, retry_attempts: %{}}
+      |> Orchestrator.apply_configured_active_milestone_for_test()
+
+    assert closed_state.active_project_milestone_id == "milestone-closed"
+
+    write_workflow_file!(Workflow.workflow_file_path(), stewardship_active_milestone_id: "milestone-replacement")
+    replacement_state = Orchestrator.apply_configured_active_milestone_for_test(closed_state)
+    assert replacement_state.active_project_milestone_id == "milestone-replacement"
+
+    write_workflow_file!(Workflow.workflow_file_path())
+    cleared_state = Orchestrator.apply_configured_active_milestone_for_test(replacement_state)
+    assert cleared_state.active_project_milestone_id == nil
+
+    write_workflow_file!(Workflow.workflow_file_path(), stewardship_active_milestone_id: "milestone-closed")
+    reselected_state = Orchestrator.apply_configured_active_milestone_for_test(cleared_state)
+    assert reselected_state.active_project_milestone_id == "milestone-closed"
+  end
+
+  test "runtime closed milestone does not reactivate until owner clears or replaces pointer" do
+    write_workflow_file!(Workflow.workflow_file_path(), stewardship_active_milestone_id: "milestone-closed")
+
+    closed_state =
+      %Orchestrator.State{
+        running: %{},
+        blocked: %{},
+        retry_attempts: %{},
+        closed_project_milestone_ids: MapSet.new(["milestone-closed"])
+      }
+      |> Orchestrator.apply_configured_active_milestone_for_test()
+
+    assert closed_state.active_project_milestone_id == nil
+
+    write_workflow_file!(Workflow.workflow_file_path(), stewardship_active_milestone_id: "milestone-replacement")
+    replacement_state = Orchestrator.apply_configured_active_milestone_for_test(closed_state)
+    assert replacement_state.active_project_milestone_id == "milestone-replacement"
+
+    write_workflow_file!(Workflow.workflow_file_path())
+    cleared_state = Orchestrator.apply_configured_active_milestone_for_test(replacement_state)
+    assert cleared_state.active_project_milestone_id == nil
+    assert cleared_state.closed_project_milestone_ids == MapSet.new()
+  end
+
+  test "non-full poll does not dispatch project milestone planning issue" do
+    previous_milestones = Application.get_env(:symphony_elixir, :memory_tracker_project_milestones)
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-milestone-planning-fast-poll-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: test_root,
+        tracker_active_states: ["Todo", "In Progress", "Need Owner Input"],
+        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
+        poll_fast_states: ["Todo"],
+        runner_default: "opencode",
+        runner_routes: %{"In Review" => "codex", "RCA Required" => "codex"}
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+      Application.put_env(:symphony_elixir, :memory_tracker_project_milestones, [
+        %{
+          id: "milestone-fast-poll",
+          name: "Fast poll skipped",
+          description: "phase_state: todo"
+        }
+      ])
+
+      initial_state = %Orchestrator.State{
+        poll_interval_ms: 30_000,
+        full_poll_interval_ms: 60_000,
+        last_full_poll_at_ms: System.monotonic_time(:millisecond),
+        fast_poll_states: ["Todo"],
+        max_concurrent_agents: 1,
+        running: %{},
+        claimed: MapSet.new(),
+        blocked: %{},
+        retry_attempts: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        runner_runtime_totals: %{seconds_running: 0}
+      }
+
+      assert {:noreply, state} = Orchestrator.handle_info(:run_poll_cycle, initial_state)
+
+      assert state.running == %{}
+      assert state.claimed == MapSet.new()
+      assert state.active_project_milestone_id == nil
+
+      if is_reference(state.tick_timer_ref), do: Process.cancel_timer(state.tick_timer_ref)
+    after
+      restore_app_env(:memory_tracker_project_milestones, previous_milestones)
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "generated worker prompts do not contain orchestration role declaration preambles" do
+    issue = %Issue{id: "issue-prompt", identifier: "SYM-900", title: "Implement slice", state: "Todo"}
+    prompt = PromptBuilder.build_prompt(issue)
+
+    refute prompt =~ "You are the coding orchestrator"
+    refute prompt =~ "You are the Machine Architect"
+    refute prompt =~ "You are the OpenCode build orchestrator"
+    refute prompt =~ ~r/^\s*You are\b/
+  end
+
+  test "execution packet records active milestone docs and closure requirements" do
+    issue = %Issue{
+      id: "issue-packet",
+      identifier: "SYM-901",
+      title: "Implement steward slice",
+      state: "Todo",
+      project_milestone: %{id: "milestone-current", name: "Current", description: "phase_state: todo\n\nOwner scope"},
+      description: "- acceptance: durable packet before dispatch"
+    }
+
+    packet = ExecutionPacket.build(issue)
+
+    assert packet["packet_version"] == "symphony:execution-packet:v1"
+    assert packet["active_milestone"] == %{"id" => "milestone-current", "name" => "Current"}
+    assert packet["issue"]["identifier"] == "SYM-901"
+    assert packet["documentation_requirement"] =~ "docs"
+    assert "return exact validation commands and outcomes" in packet["handoff_requirements"]
+
+    assert {:ok, prompt} = ExecutionPacket.prompt(packet)
+    refute prompt =~ ~r/^\s*You are\b/
+  end
+
+  test "active child work keeps milestone lock without fetching milestone phase or writing suppressions" do
+    milestone = %{id: "milestone-current", name: "Current", description: "phase_state: todo"}
+
+    active_issue = %Issue{
+      id: "issue-active",
+      identifier: "SYM-13",
+      title: "Active work",
+      state: "Todo",
+      project_milestone: milestone
+    }
+
+    state = %Orchestrator.State{
+      active_project_milestone_id: "milestone-current",
+      running: %{},
+      blocked: %{},
+      retry_attempts: %{}
+    }
+
+    new_state = Orchestrator.maybe_release_active_project_milestone_for_test(state, [active_issue])
+
+    assert new_state.active_project_milestone_id == "milestone-current"
+    refute_received :milestone_fetch_called
+    assert new_state.suppression_counts == %{}
+  end
+
+  test "open active milestone without child work stays locked without durable suppression churn" do
+    state = %Orchestrator.State{
+      active_project_milestone_id: "milestone-current",
+      running: %{},
+      blocked: %{},
+      retry_attempts: %{}
+    }
+
+    new_state = Orchestrator.maybe_release_active_project_milestone_for_test(state, [])
+
+    assert new_state.active_project_milestone_id == "milestone-current"
+    assert new_state.suppression_counts == %{}
+  end
+
+  test "active milestone exhaustion clears runtime closure state" do
+    milestone = %{id: "milestone-current", name: "Current", description: "phase_state: todo"}
+
+    terminal_issue = %Issue{
+      id: "issue-terminal",
+      identifier: "SYM-14",
+      title: "Finished work",
+      state: "Closed",
+      project_milestone: milestone
+    }
+
+    state = %Orchestrator.State{
+      active_project_milestone_id: "milestone-current",
+      running: %{},
+      blocked: %{},
+      retry_attempts: %{}
+    }
+
+    new_state = Orchestrator.maybe_release_active_project_milestone_for_test(state, [terminal_issue])
+
+    assert new_state.active_project_milestone_id == nil
+    assert MapSet.member?(new_state.closed_project_milestone_ids, "milestone-current")
+  end
+
+  test "active milestone poll closure records runtime closure state" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    milestone = %{id: "milestone-current", name: "Current", description: "phase_state: todo"}
+
+    terminal_issue = %Issue{
+      id: "issue-terminal-fetched",
+      identifier: "SYM-16",
+      title: "Finished work fetched from tracker",
+      state: "Closed",
+      project_milestone: milestone
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [terminal_issue])
+
+    state = %Orchestrator.State{
+      active_project_milestone_id: "milestone-current",
+      running: %{},
+      blocked: %{},
+      retry_attempts: %{},
+      fast_poll_states: ["Need Owner Input"]
+    }
+
+    new_state = Orchestrator.maybe_release_active_project_milestone_from_poll_for_test(state, [])
+
+    assert new_state.active_project_milestone_id == nil
+    assert MapSet.member?(new_state.closed_project_milestone_ids, "milestone-current")
+  end
+
+  test "non-exhausted active milestone with waiting child work does not release" do
+    milestone = %{id: "milestone-current", name: "Current", description: "phase_state: todo"}
+
+    waiting_issue = %Issue{
+      id: "issue-waiting",
+      identifier: "SYM-15",
+      title: "Owner review",
+      state: "Need Owner Input",
+      project_milestone: milestone
+    }
+
+    state = %Orchestrator.State{
+      active_project_milestone_id: "milestone-current",
+      running: %{},
+      blocked: %{},
+      retry_attempts: %{}
+    }
+
+    new_state = Orchestrator.maybe_release_active_project_milestone_for_test(state, [waiting_issue])
+
+    assert new_state.active_project_milestone_id == "milestone-current"
+  end
+
+  test "missing Linear issue is not privileged during dispatch revalidation" do
+    issue = %Issue{
+      id: "issue-missing",
+      identifier: "NER-MISSING",
+      title: "Missing issue",
+      state: "Todo",
+      project_milestone: %{id: "milestone-1", name: "Milestone", description: "phase_state: todo"}
+    }
+
+    assert {:skip, :missing} =
+             Orchestrator.revalidate_issue_for_dispatch_for_test(issue, fn ["issue-missing"] ->
+               {:ok, []}
+             end)
+  end
+
+  test "need owner input issue is parked instead of normal dispatch-eligible" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_active_states: ["Todo", "In Progress", "In Review", "Need Owner Input"]
+    )
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "owner-input-1",
+      identifier: "NER-17",
+      title: "Owner question",
+      state: "Need Owner Input"
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
   test "dispatch revalidation skips stale todo issue once a non-terminal blocker appears" do
@@ -581,7 +1907,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              Orchestrator.revalidate_issue_for_dispatch_for_test(stale_issue, fetcher)
 
     assert skipped_issue.identifier == "MT-1005"
-    assert skipped_issue.blocked_by == [%{id: "blocker-3", identifier: "MT-1006", state: "In Progress"}]
+
+    assert skipped_issue.blocked_by == [
+             %{id: "blocker-3", identifier: "MT-1006", state: "In Progress"}
+           ]
   end
 
   test "workspace remove returns error information for missing directory" do
@@ -835,6 +2164,25 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert message =~ "codex.stall_timeout_ms"
 
     write_workflow_file!(Workflow.workflow_file_path(),
+      runner_routes: %{"RCA Required" => "opencode"},
+      process_policy_rca_required_state: "RCA Required"
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.settings()
+    assert message =~ "process_policy.rca_required_state"
+    assert message =~ "must route to codex"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      runner_routes: %{"In Review" => "opencode", "RCA Required" => "codex"},
+      opencode_result_state: "In Review",
+      process_policy_rca_required_state: "RCA Required"
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.settings()
+    assert message =~ "opencode.result_state"
+    assert message =~ "must route to codex"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
       tracker_active_states: %{todo: true},
       tracker_terminal_states: %{done: true},
       poll_interval_ms: %{bad: true},
@@ -885,6 +2233,53 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server")
     assert Config.settings!().codex.command == "codex app-server"
+  end
+
+  test "opencode acp defaults to no idle stall watchdog when stall timeout is omitted" do
+    File.write!(
+      Workflow.workflow_file_path(),
+      """
+      ---
+      opencode:
+        protocol: acp
+        command: opencode
+        timeout_ms: 10800000
+      ---
+
+      prompt
+      """
+    )
+
+    config = Config.settings!()
+    assert config.opencode.timeout_ms == 10_800_000
+    assert config.opencode.read_timeout_ms == 120_000
+    assert config.opencode.stall_timeout_ms == 0
+  end
+
+  test "config resolves optional project roots from missing and blank environment tokens" do
+    missing_env = "SYMPHONY_TEST_MISSING_ROOT"
+    blank_env = "SYMPHONY_TEST_BLANK_ROOT"
+    previous_missing = System.get_env(missing_env)
+    previous_blank = System.get_env(blank_env)
+
+    on_exit(fn ->
+      restore_env(missing_env, previous_missing)
+      restore_env(blank_env, previous_blank)
+    end)
+
+    System.delete_env(missing_env)
+    System.put_env(blank_env, "")
+
+    assert %{} = Schema.normalize_runner_routes(nil)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_project_root: "$#{missing_env}",
+      opencode_project_root: "$#{blank_env}"
+    )
+
+    config = Config.settings!()
+    assert config.codex.project_root == nil
+    assert config.opencode.project_root == nil
   end
 
   test "config resolves $VAR references for env-backed secret and path values" do
@@ -1205,7 +2600,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       read_only_settings = %{
         settings
-        | codex: %{settings.codex | turn_sandbox_policy: %{"type" => "readOnly", "networkAccess" => true}}
+        | codex: %{
+            settings.codex
+            | turn_sandbox_policy: %{"type" => "readOnly", "networkAccess" => true}
+          }
       }
 
       assert {:ok, %{"type" => "readOnly", "networkAccess" => true}} =
@@ -1213,7 +2611,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       future_settings = %{
         settings
-        | codex: %{settings.codex | turn_sandbox_policy: %{"type" => "futureSandbox", "nested" => %{"flag" => true}}}
+        | codex: %{
+            settings.codex
+            | turn_sandbox_policy: %{"type" => "futureSandbox", "nested" => %{"flag" => true}}
+          }
       }
 
       assert {:ok, %{"type" => "futureSandbox", "nested" => %{"flag" => true}}} =
@@ -1303,4 +2704,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       File.rm_rf(test_root)
     end
   end
+
+  defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
+  defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 end

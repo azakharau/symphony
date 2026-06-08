@@ -26,6 +26,13 @@ defmodule SymphonyElixir.Linear.Client do
         assignee {
           id
         }
+        projectMilestone {
+          id
+          name
+          description
+          status
+          targetDate
+        }
         labels {
           nodes {
             name
@@ -40,6 +47,18 @@ defmodule SymphonyElixir.Linear.Client do
               state {
                 name
               }
+            }
+          }
+        }
+        comments(first: 10) {
+          nodes {
+            body
+            createdAt
+            user {
+              name
+            }
+            parent {
+              id
             }
           }
         }
@@ -71,6 +90,13 @@ defmodule SymphonyElixir.Linear.Client do
         assignee {
           id
         }
+        projectMilestone {
+          id
+          name
+          description
+          status
+          targetDate
+        }
         labels {
           nodes {
             name
@@ -85,6 +111,18 @@ defmodule SymphonyElixir.Linear.Client do
               state {
                 name
               }
+            }
+          }
+        }
+        comments(first: 10) {
+          nodes {
+            body
+            createdAt
+            user {
+              name
+            }
+            parent {
+              id
             }
           }
         }
@@ -103,9 +141,32 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
-  @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_candidate_issues do
-    tracker = Config.settings!().tracker
+  @project_milestones_query """
+  query SymphonyLinearProjectMilestones($projectSlug: String!, $first: Int!) {
+    projects(filter: {slugId: {eq: $projectSlug}}, first: 1) {
+      nodes {
+        projectMilestones(first: $first) {
+          nodes {
+            id
+            name
+            description
+            status
+            targetDate
+          }
+        }
+      }
+    }
+  }
+  """
+
+  @spec fetch_project_milestones() :: {:ok, [map()]} | {:error, term()}
+  def fetch_project_milestones do
+    fetch_project_milestones(nil)
+  end
+
+  @spec fetch_project_milestones(term()) :: {:ok, [map()]} | {:error, term()}
+  def fetch_project_milestones(context) do
+    tracker = Config.settings!(context).tracker
     project_slug = tracker.project_slug
 
     cond do
@@ -116,20 +177,47 @@ defmodule SymphonyElixir.Linear.Client do
         {:error, :missing_linear_project_slug}
 
       true ->
-        with {:ok, assignee_filter} <- routing_assignee_filter() do
-          do_fetch_by_states(project_slug, tracker.active_states, assignee_filter)
+        do_fetch_project_milestones(project_slug, Config.settings!(context))
+    end
+  end
+
+  @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_candidate_issues do
+    fetch_candidate_issues(nil)
+  end
+
+  @spec fetch_candidate_issues(term()) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_candidate_issues(context) do
+    tracker = Config.settings!(context).tracker
+    project_slug = tracker.project_slug
+
+    cond do
+      is_nil(tracker.api_key) ->
+        {:error, :missing_linear_api_token}
+
+      is_nil(project_slug) ->
+        {:error, :missing_linear_project_slug}
+
+      true ->
+        with {:ok, assignee_filter} <- routing_assignee_filter(context) do
+          do_fetch_by_states(project_slug, tracker.active_states, assignee_filter, Config.settings!(context))
         end
     end
   end
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(state_names) when is_list(state_names) do
+    fetch_issues_by_states(state_names, nil)
+  end
+
+  @spec fetch_issues_by_states([String.t()], term()) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_by_states(state_names, context) when is_list(state_names) do
     normalized_states = Enum.map(state_names, &to_string/1) |> Enum.uniq()
 
     if normalized_states == [] do
       {:ok, []}
     else
-      tracker = Config.settings!().tracker
+      tracker = Config.settings!(context).tracker
       project_slug = tracker.project_slug
 
       cond do
@@ -140,13 +228,18 @@ defmodule SymphonyElixir.Linear.Client do
           {:error, :missing_linear_project_slug}
 
         true ->
-          do_fetch_by_states(project_slug, normalized_states, nil)
+          do_fetch_by_states(project_slug, normalized_states, nil, Config.settings!(context))
       end
     end
   end
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issue_states_by_ids(issue_ids) when is_list(issue_ids) do
+    fetch_issue_states_by_ids(issue_ids, nil)
+  end
+
+  @spec fetch_issue_states_by_ids([String.t()], term()) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issue_states_by_ids(issue_ids, context) when is_list(issue_ids) do
     ids = Enum.uniq(issue_ids)
 
     case ids do
@@ -154,19 +247,35 @@ defmodule SymphonyElixir.Linear.Client do
         {:ok, []}
 
       ids ->
-        with {:ok, assignee_filter} <- routing_assignee_filter() do
-          do_fetch_issue_states(ids, assignee_filter)
+        case routing_assignee_filter(context) do
+          {:ok, assignee_filter} ->
+            settings = Config.settings!(context)
+            fetch_issue_states_with_settings(ids, assignee_filter, settings)
+
+          {:error, reason} ->
+            {:error, reason}
         end
     end
+  end
+
+  defp fetch_issue_states_with_settings(ids, assignee_filter, settings) do
+    do_fetch_issue_states(ids, assignee_filter, fn query, variables ->
+      graphql(query, variables, settings: settings)
+    end)
   end
 
   @spec graphql(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def graphql(query, variables \\ %{}, opts \\ [])
       when is_binary(query) and is_map(variables) and is_list(opts) do
     payload = build_graphql_payload(query, variables, Keyword.get(opts, :operation_name))
-    request_fun = Keyword.get(opts, :request_fun, &post_graphql_request/2)
+    settings = Keyword.get(opts, :settings) || Config.settings!(Keyword.get(opts, :context))
 
-    with {:ok, headers} <- graphql_headers(),
+    request_fun =
+      Keyword.get(opts, :request_fun, fn payload, headers ->
+        post_graphql_request(payload, headers, settings)
+      end)
+
+    with {:ok, headers} <- graphql_headers(settings),
          {:ok, %{status: 200, body: body}} <- request_fun.(payload, headers) do
       {:ok, body}
     else
@@ -221,7 +330,8 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   @doc false
-  @spec fetch_issue_states_by_ids_for_test([String.t()], (String.t(), map() -> {:ok, map()} | {:error, term()})) ::
+  @spec fetch_issue_states_by_ids_for_test([String.t()], (String.t(), map() ->
+                                                            {:ok, map()} | {:error, term()})) ::
           {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun)
       when is_list(issue_ids) and is_function(graphql_fun, 2) do
@@ -236,25 +346,60 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp do_fetch_by_states(project_slug, state_names, assignee_filter) do
-    do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [])
+  defp do_fetch_project_milestones(project_slug, settings) when is_binary(project_slug) do
+    with {:ok, response} <-
+           graphql(@project_milestones_query, %{projectSlug: project_slug, first: 50}, settings: settings) do
+      milestones =
+        response
+        |> get_in(["data", "projects", "nodes"])
+        |> List.wrap()
+        |> List.first()
+        |> case do
+          %{"projectMilestones" => %{"nodes" => nodes}} when is_list(nodes) -> nodes
+          _ -> []
+        end
+
+      {:ok, Enum.map(milestones, &normalize_project_milestone/1)}
+    end
   end
 
-  defp do_fetch_by_states_page(project_slug, state_names, assignee_filter, after_cursor, acc_issues) do
+  defp do_fetch_by_states(project_slug, state_names, assignee_filter, settings) do
+    do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [], settings)
+  end
+
+  defp do_fetch_by_states_page(
+         project_slug,
+         state_names,
+         assignee_filter,
+         after_cursor,
+         acc_issues,
+         settings
+       ) do
     with {:ok, body} <-
-           graphql(@query, %{
-             projectSlug: project_slug,
-             stateNames: state_names,
-             first: @issue_page_size,
-             relationFirst: @issue_page_size,
-             after: after_cursor
-           }),
+           graphql(
+             @query,
+             %{
+               projectSlug: project_slug,
+               stateNames: state_names,
+               first: @issue_page_size,
+               relationFirst: @issue_page_size,
+               after: after_cursor
+             },
+             settings: settings
+           ),
          {:ok, issues, page_info} <- decode_linear_page_response(body, assignee_filter) do
       updated_acc = prepend_page_issues(issues, acc_issues)
 
       case next_page_cursor(page_info) do
         {:ok, next_cursor} ->
-          do_fetch_by_states_page(project_slug, state_names, assignee_filter, next_cursor, updated_acc)
+          do_fetch_by_states_page(
+            project_slug,
+            state_names,
+            assignee_filter,
+            next_cursor,
+            updated_acc,
+            settings
+          )
 
         :done ->
           {:ok, finalize_paginated_issues(updated_acc)}
@@ -269,11 +414,8 @@ defmodule SymphonyElixir.Linear.Client do
     Enum.reverse(issues, acc_issues)
   end
 
-  defp finalize_paginated_issues(acc_issues) when is_list(acc_issues), do: Enum.reverse(acc_issues)
-
-  defp do_fetch_issue_states(ids, assignee_filter) do
-    do_fetch_issue_states(ids, assignee_filter, &graphql/2)
-  end
+  defp finalize_paginated_issues(acc_issues) when is_list(acc_issues),
+    do: Enum.reverse(acc_issues)
 
   defp do_fetch_issue_states(ids, assignee_filter, graphql_fun)
        when is_list(ids) and is_function(graphql_fun, 2) do
@@ -281,14 +423,26 @@ defmodule SymphonyElixir.Linear.Client do
     do_fetch_issue_states_page(ids, assignee_filter, graphql_fun, [], issue_order_index)
   end
 
-  defp do_fetch_issue_states_page([], _assignee_filter, _graphql_fun, acc_issues, issue_order_index) do
+  defp do_fetch_issue_states_page(
+         [],
+         _assignee_filter,
+         _graphql_fun,
+         acc_issues,
+         issue_order_index
+       ) do
     acc_issues
     |> finalize_paginated_issues()
     |> sort_issues_by_requested_ids(issue_order_index)
     |> then(&{:ok, &1})
   end
 
-  defp do_fetch_issue_states_page(ids, assignee_filter, graphql_fun, acc_issues, issue_order_index) do
+  defp do_fetch_issue_states_page(
+         ids,
+         assignee_filter,
+         graphql_fun,
+         acc_issues,
+         issue_order_index
+       ) do
     {batch_ids, rest_ids} = Enum.split(ids, @issue_page_size)
 
     case graphql_fun.(@query_by_ids, %{
@@ -299,7 +453,14 @@ defmodule SymphonyElixir.Linear.Client do
       {:ok, body} ->
         with {:ok, issues} <- decode_linear_response(body, assignee_filter) do
           updated_acc = prepend_page_issues(issues, acc_issues)
-          do_fetch_issue_states_page(rest_ids, assignee_filter, graphql_fun, updated_acc, issue_order_index)
+
+          do_fetch_issue_states_page(
+            rest_ids,
+            assignee_filter,
+            graphql_fun,
+            updated_acc,
+            issue_order_index
+          )
         end
 
       {:error, reason} ->
@@ -380,8 +541,8 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp graphql_headers do
-    case Config.settings!().tracker.api_key do
+  defp graphql_headers(settings) do
+    case settings.tracker.api_key do
       nil ->
         {:error, :missing_linear_api_token}
 
@@ -394,8 +555,8 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp post_graphql_request(payload, headers) do
-    Req.post(Config.settings!().tracker.endpoint,
+  defp post_graphql_request(payload, headers, settings) do
+    Req.post(settings.tracker.endpoint,
       headers: headers,
       json: payload,
       connect_options: [timeout: 30_000]
@@ -430,12 +591,17 @@ defmodule SymphonyElixir.Linear.Client do
          },
          assignee_filter
        ) do
-    with {:ok, issues} <- decode_linear_response(%{"data" => %{"issues" => %{"nodes" => nodes}}}, assignee_filter) do
+    with {:ok, issues} <-
+           decode_linear_response(
+             %{"data" => %{"issues" => %{"nodes" => nodes}}},
+             assignee_filter
+           ) do
       {:ok, issues, %{has_next_page: has_next_page == true, end_cursor: end_cursor}}
     end
   end
 
-  defp decode_linear_page_response(response, assignee_filter), do: decode_linear_response(response, assignee_filter)
+  defp decode_linear_page_response(response, assignee_filter),
+    do: decode_linear_response(response, assignee_filter)
 
   defp next_page_cursor(%{has_next_page: true, end_cursor: end_cursor})
        when is_binary(end_cursor) and byte_size(end_cursor) > 0 do
@@ -458,6 +624,9 @@ defmodule SymphonyElixir.Linear.Client do
       branch_name: issue["branchName"],
       url: issue["url"],
       assignee_id: assignee_field(assignee, "id"),
+      project_milestone: normalize_project_milestone(issue["projectMilestone"]),
+      latest_comment_at: latest_comment_at(issue),
+      comments: extract_comments(issue),
       blocked_by: extract_blockers(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
@@ -467,6 +636,51 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp normalize_issue(_issue, _assignee_filter), do: nil
+
+  defp normalize_project_milestone(%{} = milestone) do
+    %{
+      id: milestone["id"],
+      name: milestone["name"],
+      description: milestone["description"],
+      status: milestone["status"],
+      target_date: milestone["targetDate"]
+    }
+  end
+
+  defp normalize_project_milestone(_milestone), do: nil
+
+  defp latest_comment_at(issue) when is_map(issue) do
+    issue
+    |> get_in(["comments", "nodes"])
+    |> List.wrap()
+    |> Enum.map(&parse_datetime(&1["createdAt"]))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.sort(DateTime)
+    |> List.last()
+  end
+
+  defp extract_comments(issue) when is_map(issue) do
+    issue
+    |> get_in(["comments", "nodes"])
+    |> List.wrap()
+    |> Enum.map(&normalize_comment/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.sort_by(&comment_sort_key/1)
+  end
+
+  defp normalize_comment(%{"body" => body} = comment) when is_binary(body) do
+    %{
+      body: body,
+      created_at: parse_datetime(comment["createdAt"]),
+      author: get_in(comment, ["user", "name"]),
+      parent_id: get_in(comment, ["parent", "id"])
+    }
+  end
+
+  defp normalize_comment(_comment), do: nil
+
+  defp comment_sort_key(%{created_at: %DateTime{} = created_at}), do: DateTime.to_unix(created_at, :microsecond)
+  defp comment_sort_key(_comment), do: 0
 
   defp assignee_field(%{} = assignee, field) when is_binary(field), do: assignee[field]
   defp assignee_field(_assignee, _field), do: nil
@@ -487,31 +701,31 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp assignee_id(%{} = assignee), do: normalize_assignee_match_value(assignee["id"])
 
-  defp routing_assignee_filter do
-    case Config.settings!().tracker.assignee do
+  defp routing_assignee_filter(context) do
+    case Config.settings!(context).tracker.assignee do
       nil ->
         {:ok, nil}
 
       assignee ->
-        build_assignee_filter(assignee)
+        build_assignee_filter(assignee, context)
     end
   end
 
-  defp build_assignee_filter(assignee) when is_binary(assignee) do
+  defp build_assignee_filter(assignee, context \\ nil) when is_binary(assignee) do
     case normalize_assignee_match_value(assignee) do
       nil ->
         {:ok, nil}
 
       "me" ->
-        resolve_viewer_assignee_filter()
+        resolve_viewer_assignee_filter(context)
 
       normalized ->
         {:ok, %{configured_assignee: assignee, match_values: MapSet.new([normalized])}}
     end
   end
 
-  defp resolve_viewer_assignee_filter do
-    case graphql(@viewer_query, %{}) do
+  defp resolve_viewer_assignee_filter(context) do
+    case graphql(@viewer_query, %{}, context: context) do
       {:ok, %{"data" => %{"viewer" => viewer}}} when is_map(viewer) ->
         case assignee_id(viewer) do
           nil ->

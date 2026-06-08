@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.TestSupport do
-  @workflow_prompt "You are an agent for this repository."
+  @workflow_prompt "Repository execution request."
 
   defmacro __using__(_opts) do
     quote do
@@ -22,9 +22,16 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Workspace
 
       import SymphonyElixir.TestSupport,
-        only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0]
+        only: [
+          write_workflow_file!: 1,
+          write_workflow_file!: 2,
+          restore_env: 2,
+          stop_default_http_server: 0
+        ]
 
       setup do
+        SymphonyElixir.TestSupport.ensure_application_started()
+
         workflow_root =
           Path.join(
             System.tmp_dir!(),
@@ -35,7 +42,10 @@ defmodule SymphonyElixir.TestSupport do
         workflow_file = Path.join(workflow_root, "WORKFLOW.md")
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
-        if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+
+        if Process.whereis(SymphonyElixir.WorkflowStore),
+          do: SymphonyElixir.WorkflowStore.force_reload()
+
         stop_default_http_server()
 
         on_exit(fn ->
@@ -43,6 +53,7 @@ defmodule SymphonyElixir.TestSupport do
           Application.delete_env(:symphony_elixir, :server_port_override)
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+          Application.delete_env(:symphony_elixir, :memory_tracker_opencode_comments)
           File.rm_rf(workflow_root)
         end)
 
@@ -69,22 +80,93 @@ defmodule SymphonyElixir.TestSupport do
   def restore_env(key, nil), do: System.delete_env(key)
   def restore_env(key, value), do: System.put_env(key, value)
 
+  def ensure_application_started do
+    case Process.whereis(SymphonyElixir.Supervisor) do
+      supervisor when is_pid(supervisor) ->
+        ensure_default_workflow_store_started()
+
+      nil ->
+        ensure_started_with_application_controller()
+    end
+  end
+
   def stop_default_http_server do
-    case Enum.find(Supervisor.which_children(SymphonyElixir.Supervisor), fn
-           {SymphonyElixir.HttpServer, _pid, _type, _modules} -> true
-           _child -> false
-         end) do
-      {SymphonyElixir.HttpServer, pid, _type, _modules} when is_pid(pid) ->
-        :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer)
+    with supervisor when is_pid(supervisor) <- Process.whereis(SymphonyElixir.Supervisor),
+         {SymphonyElixir.HttpServer, pid, _type, _modules} when is_pid(pid) <- http_server_child(supervisor) do
+      terminate_default_http_server_child(pid)
+    else
+      _ -> :ok
+    end
+  end
 
-        if Process.alive?(pid) do
-          Process.exit(pid, :normal)
+  defp terminate_default_http_server_child(pid) when is_pid(pid) do
+    case Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer) do
+      :ok ->
+        stop_http_server_process(pid)
+
+      {:error, :not_found} ->
+        :ok
+    end
+  end
+
+  defp stop_http_server_process(pid) when is_pid(pid) do
+    if Process.alive?(pid) do
+      Process.exit(pid, :normal)
+    end
+
+    :ok
+  end
+
+  defp http_server_child(supervisor) when is_pid(supervisor) do
+    Enum.find(Supervisor.which_children(supervisor), fn
+      {SymphonyElixir.HttpServer, _pid, _type, _modules} -> true
+      _child -> false
+    end)
+  end
+
+  defp ensure_started_with_application_controller do
+    case Application.ensure_all_started(:symphony_elixir) do
+      {:ok, _started} -> ensure_supervisor_started()
+      {:error, {:already_started, :symphony_elixir}} -> ensure_supervisor_started()
+      {:error, reason} -> raise "failed to start :symphony_elixir for test setup: #{inspect(reason)}"
+    end
+  end
+
+  defp ensure_supervisor_started do
+    case Process.whereis(SymphonyElixir.Supervisor) do
+      supervisor when is_pid(supervisor) ->
+        ensure_default_workflow_store_started()
+
+      nil ->
+        case SymphonyElixir.Application.start(:normal, []) do
+          {:ok, _pid} -> ensure_default_workflow_store_started()
+          {:error, {:already_started, _pid}} -> ensure_default_workflow_store_started()
+          {:error, reason} -> raise "failed to start SymphonyElixir.Supervisor: #{inspect(reason)}"
         end
+    end
+  end
 
+  defp ensure_default_workflow_store_started do
+    cond do
+      Application.get_env(:symphony_elixir, :root_config_path) ->
         :ok
 
-      _ ->
+      Process.whereis(SymphonyElixir.WorkflowStore) ->
         :ok
+
+      true ->
+        restart_default_workflow_store()
+    end
+  end
+
+  defp restart_default_workflow_store do
+    case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore) do
+      {:ok, _pid} -> :ok
+      {:ok, _pid, _info} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+      {:error, :running} -> :ok
+      {:error, :not_found} -> :ok
+      {:error, reason} -> raise "failed to restart SymphonyElixir.WorkflowStore: #{inspect(reason)}"
     end
   end
 
@@ -100,6 +182,8 @@ defmodule SymphonyElixir.TestSupport do
           tracker_active_states: ["Todo", "In Progress"],
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
           poll_interval_ms: 30_000,
+          poll_full_interval_ms: 60_000,
+          poll_fast_states: ["Todo", "Need Owner Input"],
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           worker_ssh_hosts: [],
           worker_max_concurrent_agents_per_host: nil,
@@ -107,13 +191,35 @@ defmodule SymphonyElixir.TestSupport do
           max_turns: 20,
           max_retry_backoff_ms: 300_000,
           max_concurrent_agents_by_state: %{},
+          runner_default: "codex",
+          runner_routes: %{},
           codex_command: "codex app-server",
-          codex_approval_policy: %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}},
+          codex_project_root: nil,
+          codex_thread_id: nil,
+          codex_approval_policy: %{
+            reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}
+          },
           codex_thread_sandbox: "workspace-write",
           codex_turn_sandbox_policy: nil,
           codex_turn_timeout_ms: 3_600_000,
           codex_read_timeout_ms: 5_000,
           codex_stall_timeout_ms: 300_000,
+          opencode_protocol: "cli",
+          opencode_command: "opencode",
+          opencode_args: nil,
+          opencode_project_root: nil,
+          opencode_agent: "build",
+          opencode_model: nil,
+          opencode_format: "json",
+          opencode_result_state: "In Review",
+          opencode_timeout_ms: 3_600_000,
+          opencode_read_timeout_ms: 5_000,
+          opencode_stall_timeout_ms: 300_000,
+          opencode_permission_policy: "reject",
+          process_policy_rca_required_state: "RCA Required",
+          process_policy_max_rejections_per_slice: 2,
+          stewardship_active_milestone_id: nil,
+          stewardship_active_milestone_name: nil,
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
@@ -137,20 +243,50 @@ defmodule SymphonyElixir.TestSupport do
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
+    poll_full_interval_ms = Keyword.get(config, :poll_full_interval_ms)
+    poll_fast_states = Keyword.get(config, :poll_fast_states)
     workspace_root = Keyword.get(config, :workspace_root)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
-    worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
+
+    worker_max_concurrent_agents_per_host =
+      Keyword.get(config, :worker_max_concurrent_agents_per_host)
+
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_turns = Keyword.get(config, :max_turns)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
     max_concurrent_agents_by_state = Keyword.get(config, :max_concurrent_agents_by_state)
+    runner_default = Keyword.get(config, :runner_default)
+    runner_routes = Keyword.get(config, :runner_routes)
     codex_command = Keyword.get(config, :codex_command)
+    codex_project_root = Keyword.get(config, :codex_project_root)
+    codex_thread_id = Keyword.get(config, :codex_thread_id)
     codex_approval_policy = Keyword.get(config, :codex_approval_policy)
     codex_thread_sandbox = Keyword.get(config, :codex_thread_sandbox)
     codex_turn_sandbox_policy = Keyword.get(config, :codex_turn_sandbox_policy)
     codex_turn_timeout_ms = Keyword.get(config, :codex_turn_timeout_ms)
     codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
+    opencode_protocol = Keyword.get(config, :opencode_protocol)
+    opencode_command = Keyword.get(config, :opencode_command)
+    opencode_args = Keyword.get(config, :opencode_args)
+    opencode_project_root = Keyword.get(config, :opencode_project_root)
+    opencode_server_url = Keyword.get(config, :opencode_server_url)
+    opencode_agent = Keyword.get(config, :opencode_agent)
+    opencode_model = Keyword.get(config, :opencode_model)
+    opencode_format = Keyword.get(config, :opencode_format)
+    opencode_result_state = Keyword.get(config, :opencode_result_state)
+    opencode_timeout_ms = Keyword.get(config, :opencode_timeout_ms)
+    opencode_read_timeout_ms = Keyword.get(config, :opencode_read_timeout_ms)
+    opencode_stall_timeout_ms = Keyword.get(config, :opencode_stall_timeout_ms)
+    opencode_permission_policy = Keyword.get(config, :opencode_permission_policy)
+    process_policy_rca_required_state = Keyword.get(config, :process_policy_rca_required_state)
+
+    process_policy_max_rejections_per_slice =
+      Keyword.get(config, :process_policy_max_rejections_per_slice)
+
+    stewardship_active_milestone_id = Keyword.get(config, :stewardship_active_milestone_id)
+    stewardship_active_milestone_name = Keyword.get(config, :stewardship_active_milestone_name)
+
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
@@ -176,6 +312,8 @@ defmodule SymphonyElixir.TestSupport do
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",
         "polling:",
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
+        "  full_interval_ms: #{yaml_value(poll_full_interval_ms)}",
+        "  fast_states: #{yaml_value(poll_fast_states)}",
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
         worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
@@ -184,16 +322,49 @@ defmodule SymphonyElixir.TestSupport do
         "  max_turns: #{yaml_value(max_turns)}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",
+        "runner:",
+        "  default: #{yaml_value(runner_default)}",
+        "  routes: #{yaml_value(runner_routes)}",
         "codex:",
         "  command: #{yaml_value(codex_command)}",
+        "  project_root: #{yaml_value(codex_project_root)}",
+        "  thread_id: #{yaml_value(codex_thread_id)}",
         "  approval_policy: #{yaml_value(codex_approval_policy)}",
         "  thread_sandbox: #{yaml_value(codex_thread_sandbox)}",
         "  turn_sandbox_policy: #{yaml_value(codex_turn_sandbox_policy)}",
         "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
-        hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
-        observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
+        "opencode:",
+        "  protocol: #{yaml_value(opencode_protocol)}",
+        "  command: #{yaml_value(opencode_command)}",
+        "  args: #{yaml_value(opencode_args)}",
+        "  project_root: #{yaml_value(opencode_project_root)}",
+        "  server_url: #{yaml_value(opencode_server_url)}",
+        "  agent: #{yaml_value(opencode_agent)}",
+        "  model: #{yaml_value(opencode_model)}",
+        "  format: #{yaml_value(opencode_format)}",
+        "  result_state: #{yaml_value(opencode_result_state)}",
+        "  timeout_ms: #{yaml_value(opencode_timeout_ms)}",
+        "  read_timeout_ms: #{yaml_value(opencode_read_timeout_ms)}",
+        "  stall_timeout_ms: #{yaml_value(opencode_stall_timeout_ms)}",
+        "  permission_policy: #{yaml_value(opencode_permission_policy)}",
+        "process_policy:",
+        "  rca_required_state: #{yaml_value(process_policy_rca_required_state)}",
+        "  max_rejections_per_slice: #{yaml_value(process_policy_max_rejections_per_slice)}",
+        stewardship_yaml(stewardship_active_milestone_id, stewardship_active_milestone_name),
+        hooks_yaml(
+          hook_after_create,
+          hook_before_run,
+          hook_after_run,
+          hook_before_remove,
+          hook_timeout_ms
+        ),
+        observability_yaml(
+          observability_enabled,
+          observability_refresh_ms,
+          observability_render_interval_ms
+        ),
         server_yaml(server_port, server_host),
         "---",
         prompt
@@ -225,9 +396,27 @@ defmodule SymphonyElixir.TestSupport do
 
   defp yaml_value(value), do: yaml_value(to_string(value))
 
-  defp hooks_yaml(nil, nil, nil, nil, timeout_ms), do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
+  defp stewardship_yaml(nil, nil), do: nil
 
-  defp hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, timeout_ms) do
+  defp stewardship_yaml(active_milestone_id, active_milestone_name) do
+    [
+      "stewardship:",
+      "  active_milestone_id: #{yaml_value(active_milestone_id)}",
+      "  active_milestone_name: #{yaml_value(active_milestone_name)}"
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp hooks_yaml(nil, nil, nil, nil, timeout_ms),
+    do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
+
+  defp hooks_yaml(
+         hook_after_create,
+         hook_before_run,
+         hook_after_run,
+         hook_before_remove,
+         timeout_ms
+       ) do
     [
       "hooks:",
       "  timeout_ms: #{yaml_value(timeout_ms)}",

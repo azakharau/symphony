@@ -1,24 +1,40 @@
 defmodule SymphonyElixir.AgentRunner do
   @moduledoc """
-  Executes a single Linear issue in its workspace with Codex.
+  Executes a single Linear issue in its workspace with the configured runner adapter.
   """
 
   require Logger
-  alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+
+  alias SymphonyElixir.{Config, Linear.Issue, Workspace}
+  alias SymphonyElixir.Runner.{CodexAdapter, OpenCodeDispatch, Outcome}
 
   @type worker_host :: String.t() | nil
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
-  def run(issue, codex_update_recipient \\ nil, opts \\ []) do
+  def run(issue, update_recipient \\ nil, opts \\ []) do
+    project_context = Keyword.get(opts, :project_context)
+    settings = Keyword.get(opts, :settings) || Config.settings!(project_context)
+
     # The orchestrator owns host retries so one worker lifetime never hops machines.
-    worker_host = selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
+    case adapter_for_runner_kind(runner_kind_for_issue(issue, settings)) do
+      {:ok, adapter} ->
+        worker_host =
+          selected_worker_host(
+            Keyword.get(opts, :worker_host),
+            settings.worker.ssh_hosts,
+            adapter.capabilities()
+          )
 
-    Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
+        Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
-    case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
-      :ok ->
-        :ok
+        case run_on_worker_host(issue, update_recipient, opts, worker_host, settings, project_context) do
+          success when success == :ok or is_struct(success, Outcome) ->
+            :ok
+
+          {:error, reason} ->
+            Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
+            raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+        end
 
       {:error, reason} ->
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
@@ -26,39 +42,33 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
+  defp run_on_worker_host(issue, update_recipient, opts, worker_host, settings, project_context) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
-    case Workspace.create_for_issue(issue, worker_host) do
+    case Workspace.create_for_issue(issue, worker_host, settings) do
       {:ok, workspace} ->
-        send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
+        send_worker_runtime_info(update_recipient, issue, worker_host, workspace)
 
         try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
-            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host, settings) do
+            run_issue_with_configured_runner(
+              workspace,
+              issue,
+              update_recipient,
+              opts,
+              worker_host,
+              settings,
+              project_context
+            )
           end
         after
-          Workspace.run_after_run_hook(workspace, issue, worker_host)
+          Workspace.run_after_run_hook(workspace, issue, worker_host, settings)
         end
 
       {:error, reason} ->
         {:error, reason}
     end
   end
-
-  defp codex_message_handler(recipient, issue) do
-    fn message ->
-      send_codex_update(recipient, issue, message)
-    end
-  end
-
-  defp send_codex_update(recipient, %Issue{id: issue_id}, message)
-       when is_binary(issue_id) and is_pid(recipient) do
-    send(recipient, {:codex_worker_update, issue_id, message})
-    :ok
-  end
-
-  defp send_codex_update(_recipient, _issue, _message), do: :ok
 
   defp send_worker_runtime_info(recipient, %Issue{id: issue_id}, worker_host, workspace)
        when is_binary(issue_id) and is_pid(recipient) and is_binary(workspace) do
@@ -76,105 +86,57 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
-  defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
-    max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
-    issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+  defp run_issue_with_configured_runner(workspace, issue, update_recipient, opts, worker_host, settings, project_context) do
+    runner_kind = runner_kind_for_issue(issue, settings)
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
-      try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
-      after
-        AppServer.stop_session(session)
-      end
-    end
-  end
-
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
-    prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
-
-    with {:ok, turn_session} <-
-           AppServer.run_turn(
-             app_session,
-             prompt,
-             issue,
-             on_message: codex_message_handler(codex_update_recipient, issue)
-           ) do
-      Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
-
-      case continue_with_issue?(issue, issue_state_fetcher) do
-        {:continue, refreshed_issue} when turn_number < max_turns ->
-          Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
-
-          do_run_codex_turns(
-            app_session,
-            workspace,
-            refreshed_issue,
-            codex_update_recipient,
-            opts,
-            issue_state_fetcher,
-            turn_number + 1,
-            max_turns
-          )
-
-        {:continue, refreshed_issue} ->
-          Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
-
-          :ok
-
-        {:done, _refreshed_issue} ->
-          :ok
-
-        {:error, reason} ->
-          {:error, reason}
-      end
-    end
-  end
-
-  defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
-
-  defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
-    """
-    Continuation guidance:
-
-    - The previous Codex turn completed normally, but the Linear issue is still in an active state.
-    - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
-    - Resume from the current workspace and workpad state instead of restarting from scratch.
-    - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
-    - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
-    """
-  end
-
-  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
-    case issue_state_fetcher.([issue_id]) do
-      {:ok, [%Issue{} = refreshed_issue | _]} ->
-        if active_issue_state?(refreshed_issue.state) do
-          {:continue, refreshed_issue}
-        else
-          {:done, refreshed_issue}
-        end
-
-      {:ok, []} ->
-        {:done, issue}
+    case adapter_for_runner_kind(runner_kind) do
+      {:ok, adapter} ->
+        adapter.run(%{
+          workspace: workspace,
+          issue: issue,
+          update_recipient: update_recipient,
+          opts: opts,
+          settings: settings,
+          project_context: project_context,
+          worker_host: worker_host,
+          emit_update: runner_update_emitter(update_recipient, issue, runner_kind)
+        })
 
       {:error, reason} ->
-        {:error, {:issue_state_refresh_failed, reason}}
+        {:error, reason}
     end
   end
 
-  defp continue_with_issue?(issue, _issue_state_fetcher), do: {:done, issue}
+  defp adapter_for_runner_kind("codex"), do: {:ok, CodexAdapter}
+  defp adapter_for_runner_kind("opencode"), do: {:ok, OpenCodeDispatch}
+  defp adapter_for_runner_kind(other), do: {:error, {:unsupported_runner_kind, other}}
 
-  defp active_issue_state?(state_name) when is_binary(state_name) do
-    normalized_state = normalize_issue_state(state_name)
-
-    Config.settings!().tracker.active_states
-    |> Enum.any?(fn active_state -> normalize_issue_state(active_state) == normalized_state end)
+  defp runner_update_emitter(recipient, %Issue{id: issue_id}, runner_kind)
+       when is_pid(recipient) and is_binary(issue_id) do
+    fn update ->
+      update = Map.put(update, :runner_kind, runner_kind)
+      send(recipient, {:runner_worker_update, issue_id, update})
+      :ok
+    end
   end
 
-  defp active_issue_state?(_state_name), do: false
+  defp runner_update_emitter(_recipient, _issue, _runner_kind), do: fn _update -> :ok end
 
-  defp selected_worker_host(nil, []), do: nil
+  defp runner_kind_for_issue(%Issue{state: state_name}, settings) when is_binary(state_name) do
+    Map.get(
+      settings.runner.routes,
+      normalize_issue_state(state_name),
+      settings.runner.default
+    )
+  end
 
-  defp selected_worker_host(preferred_host, configured_hosts) when is_list(configured_hosts) do
+  defp runner_kind_for_issue(_issue, settings), do: settings.runner.default
+
+  defp selected_worker_host(_preferred_host, _configured_hosts, %{remote_worker_hosts: false}), do: nil
+
+  defp selected_worker_host(nil, [], _capabilities), do: nil
+
+  defp selected_worker_host(preferred_host, configured_hosts, _capabilities) when is_list(configured_hosts) do
     hosts =
       configured_hosts
       |> Enum.map(&String.trim/1)

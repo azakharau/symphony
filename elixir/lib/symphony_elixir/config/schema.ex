@@ -73,13 +73,16 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:interval_ms, :integer, default: 30_000)
+      field(:full_interval_ms, :integer, default: 60_000)
+      field(:fast_states, {:array, :string}, default: ["Todo", "Need Owner Input"])
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:interval_ms], empty_values: [])
+      |> cast(attrs, [:interval_ms, :full_interval_ms, :fast_states], empty_values: [])
       |> validate_number(:interval_ms, greater_than: 0)
+      |> validate_number(:full_interval_ms, greater_than: 0)
     end
   end
 
@@ -90,7 +93,7 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     embedded_schema do
-      field(:root, :string, default: Path.join(System.tmp_dir!(), "symphony_workspaces"))
+      field(:root, :string)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -150,6 +153,30 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Runner do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema
+
+    @primary_key false
+    embedded_schema do
+      field(:default, :string, default: "codex")
+      field(:routes, :map, default: %{})
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:default, :routes], empty_values: [])
+      |> validate_required([:default])
+      |> validate_inclusion(:default, ["codex", "opencode"])
+      |> update_change(:routes, &Schema.normalize_runner_routes/1)
+      |> Schema.validate_runner_routes(:routes)
+    end
+  end
+
   defmodule Codex do
     @moduledoc false
     use Ecto.Schema
@@ -158,6 +185,7 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:command, :string, default: "codex app-server")
+      field(:project_root, :string)
 
       field(:approval_policy, StringOrMap,
         default: %{
@@ -169,6 +197,7 @@ defmodule SymphonyElixir.Config.Schema do
         }
       )
 
+      field(:thread_id, :string)
       field(:thread_sandbox, :string, default: "workspace-write")
       field(:turn_sandbox_policy, :map)
       field(:turn_timeout_ms, :integer, default: 3_600_000)
@@ -183,7 +212,9 @@ defmodule SymphonyElixir.Config.Schema do
         attrs,
         [
           :command,
+          :project_root,
           :approval_policy,
+          :thread_id,
           :thread_sandbox,
           :turn_sandbox_policy,
           :turn_timeout_ms,
@@ -196,6 +227,131 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+    end
+  end
+
+  defmodule OpenCode do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:protocol, :string, default: "cli")
+      field(:command, :string, default: "opencode")
+      field(:args, {:array, :string})
+      field(:project_root, :string)
+      field(:server_url, :string)
+      field(:agent, :string, default: "build")
+      field(:model, :string)
+      field(:format, :string, default: "json")
+      field(:result_state, :string, default: "In Review")
+      field(:timeout_ms, :integer, default: 3_600_000)
+      field(:read_timeout_ms, :integer, default: 5_000)
+      field(:stall_timeout_ms, :integer, default: 300_000)
+      field(:permission_policy, :string, default: "reject")
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      read_timeout_present? = read_timeout_present?(attrs)
+      stall_timeout_present? = stall_timeout_present?(attrs)
+
+      schema
+      |> cast(
+        attrs,
+        [
+          :protocol,
+          :command,
+          :args,
+          :project_root,
+          :server_url,
+          :agent,
+          :model,
+          :format,
+          :result_state,
+          :timeout_ms,
+          :read_timeout_ms,
+          :stall_timeout_ms,
+          :permission_policy
+        ],
+        empty_values: []
+      )
+      |> default_acp_read_timeout(read_timeout_present?)
+      |> default_acp_stall_timeout(stall_timeout_present?)
+      |> validate_required([:command, :agent, :format, :result_state])
+      |> validate_inclusion(:protocol, ["cli", "acp"])
+      |> validate_number(:timeout_ms, greater_than: 0)
+      |> validate_number(:read_timeout_ms, greater_than: 0)
+      |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+    end
+
+    defp default_acp_read_timeout(changeset, false) do
+      case get_field(changeset, :protocol) do
+        "acp" -> put_change(changeset, :read_timeout_ms, 120_000)
+        _protocol -> changeset
+      end
+    end
+
+    defp default_acp_read_timeout(changeset, _read_timeout_present?), do: changeset
+
+    defp default_acp_stall_timeout(changeset, false) do
+      case get_field(changeset, :protocol) do
+        "acp" -> put_change(changeset, :stall_timeout_ms, 0)
+        _protocol -> changeset
+      end
+    end
+
+    defp default_acp_stall_timeout(changeset, _stall_timeout_present?), do: changeset
+
+    defp read_timeout_present?(attrs) when is_map(attrs) do
+      Map.has_key?(attrs, :read_timeout_ms) or Map.has_key?(attrs, "read_timeout_ms")
+    end
+
+    defp read_timeout_present?(_attrs), do: false
+
+    defp stall_timeout_present?(attrs) when is_map(attrs) do
+      Map.has_key?(attrs, :stall_timeout_ms) or Map.has_key?(attrs, "stall_timeout_ms")
+    end
+
+    defp stall_timeout_present?(_attrs), do: false
+  end
+
+  defmodule ProcessPolicy do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:rca_required_state, :string, default: "RCA Required")
+      field(:max_rejections_per_slice, :integer, default: 2)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:rca_required_state, :max_rejections_per_slice], empty_values: [])
+      |> validate_required([:rca_required_state])
+      |> validate_number(:max_rejections_per_slice, greater_than: 0)
+    end
+  end
+
+  defmodule Stewardship do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:active_milestone_id, :string)
+      field(:active_milestone_name, :string)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:active_milestone_id, :active_milestone_name], empty_values: [])
     end
   end
 
@@ -267,7 +423,11 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:runner, Runner, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:opencode, OpenCode, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:process_policy, ProcessPolicy, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:stewardship, Stewardship, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
@@ -282,7 +442,12 @@ defmodule SymphonyElixir.Config.Schema do
     |> apply_action(:validate)
     |> case do
       {:ok, settings} ->
-        {:ok, finalize_settings(settings)}
+        settings = finalize_settings(settings)
+
+        with :ok <- validate_rca_required_state_routes_to_codex(settings),
+             :ok <- validate_opencode_result_state_routes_to_codex(settings) do
+          {:ok, settings}
+        end
 
       {:error, changeset} ->
         {:error, {:invalid_workflow_config, format_errors(changeset)}}
@@ -333,6 +498,16 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   @doc false
+  @spec normalize_runner_routes(nil | map()) :: map()
+  def normalize_runner_routes(nil), do: %{}
+
+  def normalize_runner_routes(routes) when is_map(routes) do
+    Enum.reduce(routes, %{}, fn {state_name, runner_kind}, acc ->
+      Map.put(acc, normalize_issue_state(to_string(state_name)), to_string(runner_kind))
+    end)
+  end
+
+  @doc false
   @spec validate_state_limits(Ecto.Changeset.t(), atom()) :: Ecto.Changeset.t()
   def validate_state_limits(changeset, field) do
     validate_change(changeset, field, fn ^field, limits ->
@@ -351,6 +526,25 @@ defmodule SymphonyElixir.Config.Schema do
     end)
   end
 
+  @doc false
+  @spec validate_runner_routes(Ecto.Changeset.t(), atom()) :: Ecto.Changeset.t()
+  def validate_runner_routes(changeset, field) do
+    validate_change(changeset, field, fn ^field, routes ->
+      Enum.flat_map(routes, fn {state_name, runner_kind} ->
+        cond do
+          to_string(state_name) == "" ->
+            [{field, "state names must not be blank"}]
+
+          runner_kind not in ["codex", "opencode"] ->
+            [{field, "runner kinds must be codex or opencode"}]
+
+          true ->
+            []
+        end
+      end)
+    end)
+  end
+
   defp changeset(attrs) do
     %__MODULE__{}
     |> cast(attrs, [])
@@ -359,7 +553,11 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
+    |> cast_embed(:runner, with: &Runner.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
+    |> cast_embed(:opencode, with: &OpenCode.changeset/2)
+    |> cast_embed(:process_policy, with: &ProcessPolicy.changeset/2)
+    |> cast_embed(:stewardship, with: &Stewardship.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
@@ -380,10 +578,48 @@ defmodule SymphonyElixir.Config.Schema do
     codex = %{
       settings.codex
       | approval_policy: normalize_keys(settings.codex.approval_policy),
+        project_root: resolve_optional_path_value(settings.codex.project_root),
         turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
     }
 
-    %{settings | tracker: tracker, workspace: workspace, codex: codex}
+    opencode = %{
+      settings.opencode
+      | project_root: resolve_optional_path_value(settings.opencode.project_root)
+    }
+
+    stewardship = %{
+      settings.stewardship
+      | active_milestone_id: normalize_optional_string(settings.stewardship.active_milestone_id),
+        active_milestone_name: normalize_optional_string(settings.stewardship.active_milestone_name)
+    }
+
+    %{settings | tracker: tracker, workspace: workspace, codex: codex, opencode: opencode, stewardship: stewardship}
+  end
+
+  defp validate_rca_required_state_routes_to_codex(settings) do
+    rca_required_state = settings.process_policy.rca_required_state
+    runner_kind = runner_kind_for_state(rca_required_state, settings)
+
+    if runner_kind == "codex" do
+      :ok
+    else
+      {:error, {:invalid_workflow_config, "process_policy.rca_required_state #{inspect(rca_required_state)} must route to codex, got #{inspect(runner_kind)}"}}
+    end
+  end
+
+  defp validate_opencode_result_state_routes_to_codex(settings) do
+    result_state = settings.opencode.result_state
+    runner_kind = runner_kind_for_state(result_state, settings)
+
+    if runner_kind == "codex" do
+      :ok
+    else
+      {:error, {:invalid_workflow_config, "opencode.result_state #{inspect(result_state)} must route to codex, got #{inspect(runner_kind)}"}}
+    end
+  end
+
+  defp runner_kind_for_state(state_name, settings) when is_binary(state_name) do
+    Map.get(settings.runner.routes, normalize_issue_state(state_name), settings.runner.default)
   end
 
   defp normalize_keys(value) when is_map(value) do
@@ -422,6 +658,8 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defp resolve_path_value(nil, default), do: default
+
   defp resolve_path_value(value, default) when is_binary(value) do
     case normalize_path_token(value) do
       :missing ->
@@ -434,6 +672,16 @@ defmodule SymphonyElixir.Config.Schema do
         path
     end
   end
+
+  defp resolve_optional_path_value(value) when is_binary(value) do
+    case normalize_path_token(value) do
+      :missing -> nil
+      "" -> nil
+      path -> Path.expand(path)
+    end
+  end
+
+  defp resolve_optional_path_value(_value), do: nil
 
   defp resolve_env_value(value, fallback) when is_binary(value) do
     case env_reference_name(value) do
@@ -478,6 +726,17 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp normalize_secret_value(_value), do: nil
+
+  defp normalize_optional_string(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> case do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp normalize_optional_string(_value), do: nil
 
   defp default_turn_sandbox_policy(workspace) do
     %{

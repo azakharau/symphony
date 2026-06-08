@@ -25,6 +25,11 @@ defmodule SymphonyElixir.ExtensionsTest do
       {:ok, issue_ids}
     end
 
+    def fetch_project_milestones do
+      send(self(), :fetch_project_milestones_called)
+      {:ok, [%{"name" => "SYM-5"}]}
+    end
+
     def graphql(query, variables) do
       send(self(), {:graphql_called, query, variables})
 
@@ -103,7 +108,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   test "workflow store reloads changes, keeps last good workflow, and falls back when stopped" do
     ensure_workflow_store_running()
-    assert {:ok, %{prompt: "You are an agent for this repository."}} = Workflow.current()
+    assert {:ok, %{prompt: "Repository execution request."}} = Workflow.current()
 
     write_workflow_file!(Workflow.workflow_file_path(), prompt: "Second prompt")
     send(WorkflowStore, :poll)
@@ -158,18 +163,18 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:noreply, returned_state} = WorkflowStore.handle_info(:poll, state)
     assert returned_state.workflow.prompt == "Manual workflow prompt"
     refute returned_state.stamp == nil
-    assert_receive :poll, 1_100
+    assert_receive :poll, 2_000
 
     Workflow.set_workflow_file_path(missing_path)
     assert {:noreply, path_error_state} = WorkflowStore.handle_info(:poll, returned_state)
     assert path_error_state.workflow.prompt == "Manual workflow prompt"
-    assert_receive :poll, 1_100
+    assert_receive :poll, 2_000
 
     Workflow.set_workflow_file_path(manual_path)
     File.rm!(manual_path)
     assert {:noreply, removed_state} = WorkflowStore.handle_info(:poll, path_error_state)
     assert removed_state.workflow.prompt == "Manual workflow prompt"
-    assert_receive :poll, 1_100
+    assert_receive :poll, 2_000
 
     Process.exit(manual_pid, :normal)
     restart_result = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
@@ -319,6 +324,405 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, :issue_update_failed} = Adapter.update_issue_state("issue-1", "Odd")
   end
 
+  test "linear adapter selects task prompt from newest comment page" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "comments" => %{
+               "nodes" => [
+                 %{
+                   "body" => opencode_task_prompt_comment("old-slice", "old prompt"),
+                   "createdAt" => "2026-01-01T00:00:00Z"
+                 },
+                 %{"body" => "plain newest chatter", "createdAt" => "2026-01-03T00:00:00Z"},
+                 %{
+                   "body" => opencode_task_prompt_comment("new-slice", "new prompt"),
+                   "createdAt" => "2026-01-02T00:00:00Z"
+                 }
+               ],
+               "pageInfo" => %{"hasNextPage" => false, "endCursor" => "cursor-1"}
+             }
+           }
+         }
+       }}
+    )
+
+    assert {:ok, packet} = Adapter.latest_opencode_task_packet("issue-1")
+    assert packet.prompt == "new prompt"
+    assert packet.slice_id == "new-slice"
+
+    assert_receive {:graphql_called, query, %{issueId: "issue-1", first: 50, after: nil}}
+    assert query =~ "comments(first: $first, after: $after, orderBy: createdAt)"
+    assert query =~ "pageInfo"
+    refute query =~ "comments(last:"
+  end
+
+  test "linear adapter paginates task prompts so older marked packets are not missed" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "comments" => %{
+                 "nodes" => [%{"body" => "newest chatter", "createdAt" => "2026-01-03T00:00:00Z"}],
+                 "pageInfo" => %{"hasNextPage" => true, "endCursor" => "cursor-page-1"}
+               }
+             }
+           }
+         }},
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "comments" => %{
+                 "nodes" => [
+                   %{
+                     "body" => opencode_task_prompt_comment("older-slice", "older prompt"),
+                     "createdAt" => "2026-01-01T00:00:00Z"
+                   }
+                 ],
+                 "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+               }
+             }
+           }
+         }}
+      ]
+    )
+
+    assert {:ok, packet} = Adapter.latest_opencode_task_packet("issue-1")
+    assert packet.slice_id == "older-slice"
+    assert packet.prompt == "older prompt"
+
+    assert_receive {:graphql_called, query, %{issueId: "issue-1", first: 50, after: nil}}
+    assert query =~ "pageInfo"
+    assert_receive {:graphql_called, _query, %{issueId: "issue-1", first: 50, after: "cursor-page-1"}}
+  end
+
+  test "linear adapter reports task-prompt pagination cursor and page-limit errors" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "comments" => %{
+               "nodes" => [%{"body" => "newest chatter", "createdAt" => "2026-01-03T00:00:00Z"}],
+               "pageInfo" => %{"hasNextPage" => true, "endCursor" => nil}
+             }
+           }
+         }
+       }}
+    )
+
+    assert {:error, :opencode_task_prompt_missing_end_cursor} = Adapter.latest_opencode_task_packet("issue-1")
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      List.duplicate(
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "comments" => %{
+                 "nodes" => [%{"body" => "older chatter", "createdAt" => "2026-01-01T00:00:00Z"}],
+                 "pageInfo" => %{"hasNextPage" => true, "endCursor" => "same-cursor"}
+               }
+             }
+           }
+         }},
+        20
+      )
+    )
+
+    assert {:error, :opencode_task_prompt_comment_page_limit_exceeded} = Adapter.latest_opencode_task_packet("issue-1")
+  end
+
+  test "linear adapter delegates project milestones and prompt text extraction" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "comments" => %{
+               "nodes" => [
+                 %{
+                   "body" => opencode_task_prompt_comment("prompt-slice", "prompt text"),
+                   "createdAt" => "2026-01-01T00:00:00Z"
+                 }
+               ],
+               "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+             }
+           }
+         }
+       }}
+    )
+
+    assert {:ok, [%{"name" => "SYM-5"}]} = Adapter.fetch_project_milestones()
+    assert {:ok, "prompt text"} = Adapter.latest_opencode_task_prompt("issue-1")
+    assert_receive :fetch_project_milestones_called
+  end
+
+  test "memory tracker finds OpenCode task prompts in comments and issue descriptions" do
+    Application.put_env(:symphony_elixir, :memory_tracker_opencode_comments, %{
+      "comment-issue" => [nil, opencode_task_prompt_comment("comment-slice", "comment prompt")],
+      "plain-issue" => ["plain comment"]
+    })
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{
+        id: "description-issue",
+        identifier: "SYM-5",
+        title: "Prompt in description",
+        description: opencode_task_prompt_comment("description-slice", "description prompt"),
+        state: "In Progress"
+      }
+    ])
+
+    assert {:ok, "comment prompt"} = Memory.latest_opencode_task_prompt("comment-issue")
+    assert {:ok, packet} = Memory.latest_opencode_task_packet("description-issue")
+    assert packet.slice_id == "description-slice"
+    assert {:error, :opencode_task_prompt_not_found} = Memory.latest_opencode_task_packet("plain-issue")
+  end
+
+  test "memory tracker ignores non-binary prompt comments" do
+    Application.put_env(:symphony_elixir, :memory_tracker_opencode_comments, %{
+      "mixed-issue" => [opencode_task_prompt_comment("mixed-slice", "mixed prompt"), %{bad: :shape}]
+    })
+
+    assert {:ok, packet} = Memory.latest_opencode_task_packet("mixed-issue")
+    assert packet.slice_id == "mixed-slice"
+  end
+
+  test "tracker facade delegates latest OpenCode prompt to memory adapter" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    Application.put_env(:symphony_elixir, :memory_tracker_opencode_comments, %{
+      "issue-1" => [opencode_task_prompt_comment("facade-slice", "facade prompt")]
+    })
+
+    assert {:ok, "facade prompt"} = Tracker.latest_opencode_task_prompt("issue-1")
+  end
+
+  test "linear adapter surfaces task packet and review decision lookup errors" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :rate_limited})
+    assert {:error, :rate_limited} = Adapter.latest_opencode_task_packet("issue-1")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"data" => %{"issue" => nil}}})
+    assert {:error, :opencode_task_prompt_not_found} = Adapter.latest_opencode_task_packet("issue-1")
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "comments" => %{
+               "nodes" => [%{"body" => "<!-- symphony:opencode-task-prompt:v1 slice_id=bad -->"}],
+               "pageInfo" => %{"hasNextPage" => false}
+             }
+           }
+         }
+       }}
+    )
+
+    assert {:error, :opencode_task_prompt_malformed_fence} = Adapter.latest_opencode_task_packet("issue-1")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :review_api_down})
+    assert {:error, :review_api_down} = Adapter.review_decisions("issue-1")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"data" => %{"issue" => nil}}})
+    assert {:error, :review_decisions_not_found} = Adapter.review_decisions("issue-1")
+  end
+
+  test "linear adapter ignores unmarked and malformed comment shapes while finding task packets" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "comments" => %{
+               "nodes" => [
+                 %{"createdAt" => "2026-01-04T00:00:00Z"},
+                 %{"body" => "plain comment", "createdAt" => "2026-01-03T00:00:00Z"},
+                 %{"body" => opencode_task_prompt_comment("shape-slice", "shape prompt"), "createdAt" => "2026-01-02T00:00:00Z"}
+               ],
+               "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+             }
+           }
+         }
+       }}
+    )
+
+    assert {:ok, packet} = Adapter.latest_opencode_task_packet("issue-1")
+    assert packet.slice_id == "shape-slice"
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "comments" => %{
+               "nodes" => [%{"createdAt" => "2026-01-04T00:00:00Z"}, %{"body" => "plain comment", "createdAt" => "2026-01-03T00:00:00Z"}],
+               "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+             }
+           }
+         }
+       }}
+    )
+
+    assert {:error, :opencode_task_prompt_not_found} = Adapter.latest_opencode_task_packet("issue-1")
+  end
+
+  test "linear adapter reports review-decision pagination cursor and page-limit errors" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "comments" => %{
+               "nodes" => [%{"body" => "newest chatter", "createdAt" => "2026-01-03T00:00:00Z"}],
+               "pageInfo" => %{"hasNextPage" => true, "endCursor" => ""}
+             }
+           }
+         }
+       }}
+    )
+
+    assert {:error, :review_decisions_missing_end_cursor} = Adapter.review_decisions("issue-1")
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      List.duplicate(
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "comments" => %{
+                 "nodes" => [%{"body" => "older chatter", "createdAt" => "2026-01-01T00:00:00Z"}],
+                 "pageInfo" => %{"hasNextPage" => true, "endCursor" => "same-cursor"}
+               }
+             }
+           }
+         }},
+        20
+      )
+    )
+
+    assert {:error, :review_decisions_comment_page_limit_exceeded} = Adapter.review_decisions("issue-1")
+  end
+
+  test "linear adapter extracts review decisions from newest comment page" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "comments" => %{
+               "nodes" => [
+                 %{"body" => "older unmarked comment", "createdAt" => "2026-01-01T00:00:00Z"},
+                 %{
+                   "body" => review_decision_comment("rejected", "same-slice", "first miss"),
+                   "createdAt" => "2026-01-02T00:00:00Z"
+                 },
+                 %{
+                   "body" => review_decision_comment("rejected", "same-slice", "second miss"),
+                   "createdAt" => "2026-01-03T00:00:00Z"
+                 }
+               ]
+             }
+           }
+         }
+       }}
+    )
+
+    assert {:ok, decisions} = Adapter.review_decisions("issue-1")
+    assert Enum.count(decisions, &(&1.status == "rejected" and &1.slice_id == "same-slice")) == 2
+
+    assert_receive {:graphql_called, query, %{issueId: "issue-1", first: 100, after: nil}}
+    assert query =~ "comments(first: $first, after: $after, orderBy: createdAt)"
+    refute query =~ "comments(last:"
+  end
+
+  test "linear adapter paginates review decisions so older same-slice rejections are not missed" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "comments" => %{
+                 "nodes" => [
+                   %{"body" => "newest chatter", "createdAt" => "2026-01-03T00:00:00Z"}
+                 ],
+                 "pageInfo" => %{"hasNextPage" => true, "endCursor" => "cursor-page-1"}
+               }
+             }
+           }
+         }},
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "comments" => %{
+                 "nodes" => [
+                   %{
+                     "body" => review_decision_comment("rejected", "sym-5-opencode-runner-contract-redesign-v1", "older first rejection"),
+                     "createdAt" => "2026-01-01T00:00:00Z"
+                   },
+                   %{
+                     "body" => review_decision_comment("rejected", "sym-5-opencode-runner-contract-redesign-v1", "older second rejection"),
+                     "createdAt" => "2026-01-02T00:00:00Z"
+                   }
+                 ],
+                 "pageInfo" => %{"hasNextPage" => false, "endCursor" => "cursor-page-2"}
+               }
+             }
+           }
+         }}
+      ]
+    )
+
+    assert {:ok, decisions} = Adapter.review_decisions("issue-1")
+
+    assert Enum.count(
+             decisions,
+             &(&1.status == "rejected" and &1.slice_id == "sym-5-opencode-runner-contract-redesign-v1")
+           ) == 2
+
+    assert_receive {:graphql_called, query, %{issueId: "issue-1", first: 100, after: nil}}
+    assert query =~ "pageInfo"
+    assert_receive {:graphql_called, _query, %{issueId: "issue-1", first: 100, after: "cursor-page-1"}}
+  end
+
   test "phoenix observability api preserves state, issue, and refresh responses" do
     snapshot = static_snapshot()
     orchestrator_name = Module.concat(__MODULE__, :ObservabilityApiOrchestrator)
@@ -350,12 +754,23 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "state" => "In Progress",
                  "worker_host" => nil,
                  "workspace_path" => nil,
+                 "runner" => %{
+                   "kind" => "opencode",
+                   "owner" => "opencode",
+                   "phase" => "command",
+                   "project_root" => "/home/agent/proj/symphony",
+                   "command" => ["opencode", "run", "--session", "thread-http"],
+                   "attach_url" => "http://127.0.0.1:3000",
+                   "result_state" => "running",
+                   "failure" => nil,
+                   "session_id" => "thread-http"
+                 },
                  "session_id" => "thread-http",
                  "turn_count" => 7,
-                 "last_event" => "notification",
-                 "last_message" => "rendered",
+                 "last_runner_event" => "notification",
+                 "last_runner_message" => "rendered",
                  "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
-                 "last_event_at" => nil,
+                 "last_runner_event_at" => nil,
                  "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
                }
              ],
@@ -366,6 +781,17 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "attempt" => 2,
                  "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
                  "error" => "boom",
+                 "runner" => %{
+                   "kind" => "codex",
+                   "owner" => "codex",
+                   "phase" => "retry_wait",
+                   "project_root" => nil,
+                   "command" => nil,
+                   "attach_url" => nil,
+                   "result_state" => "retrying",
+                   "failure" => "boom",
+                   "session_id" => nil
+                 },
                  "worker_host" => nil,
                  "workspace_path" => nil
                }
@@ -378,11 +804,22 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "error" => "codex turn requires operator input",
                  "worker_host" => "dm-dev2",
                  "workspace_path" => "/workspaces/MT-BLOCKED",
+                 "runner" => %{
+                   "kind" => "codex",
+                   "owner" => "codex",
+                   "phase" => "blocked",
+                   "project_root" => "/workspaces/MT-BLOCKED",
+                   "command" => nil,
+                   "attach_url" => nil,
+                   "result_state" => "blocked",
+                   "failure" => "codex turn requires operator input",
+                   "session_id" => "thread-blocked"
+                 },
                  "session_id" => "thread-blocked",
                  "blocked_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("blocked_at"),
-                 "last_event" => "turn_input_required",
-                 "last_message" => "turn blocked: waiting for user input",
-                 "last_event_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("last_event_at")
+                 "last_runner_event" => "turn_input_required",
+                 "last_runner_message" => "turn blocked: waiting for user input",
+                 "last_runner_event_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("last_runner_event_at")
                }
              ],
              "codex_totals" => %{
@@ -391,7 +828,16 @@ defmodule SymphonyElixir.ExtensionsTest do
                "total_tokens" => 12,
                "seconds_running" => 42.5
              },
-             "rate_limits" => %{"primary" => %{"remaining" => 11}}
+             "runner_runtime_totals" => %{"seconds_running" => 84.5},
+             "suppression_events" => [],
+             "suppression_counts" => %{},
+             "rate_limits" => %{"primary" => %{"remaining" => 11}},
+             "polling" => %{
+               "checking?" => false,
+               "next_poll_in_ms" => 5_000,
+               "poll_interval_ms" => 2_000
+             },
+             "active_milestone" => nil
            }
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")
@@ -409,13 +855,24 @@ defmodule SymphonyElixir.ExtensionsTest do
              "running" => %{
                "worker_host" => nil,
                "workspace_path" => nil,
+               "runner" => %{
+                 "kind" => "opencode",
+                 "owner" => "opencode",
+                 "phase" => "command",
+                 "project_root" => "/home/agent/proj/symphony",
+                 "command" => ["opencode", "run", "--session", "thread-http"],
+                 "attach_url" => "http://127.0.0.1:3000",
+                 "result_state" => "running",
+                 "failure" => nil,
+                 "session_id" => "thread-http"
+               },
                "session_id" => "thread-http",
                "turn_count" => 7,
                "state" => "In Progress",
                "started_at" => issue_payload["running"]["started_at"],
-               "last_event" => "notification",
-               "last_message" => "rendered",
-               "last_event_at" => nil,
+               "last_runner_event" => "notification",
+               "last_runner_message" => "rendered",
+               "last_runner_event_at" => nil,
                "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
              },
              "retry" => nil,
@@ -428,7 +885,20 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     conn = get(build_conn(), "/api/v1/MT-RETRY")
 
-    assert %{"status" => "retrying", "retry" => %{"attempt" => 2, "error" => "boom"}} =
+    assert %{
+             "status" => "retrying",
+             "retry" => %{
+               "attempt" => 2,
+               "error" => "boom",
+               "runner" => %{
+                 "kind" => "codex",
+                 "owner" => "codex",
+                 "phase" => "retry_wait",
+                 "result_state" => "retrying",
+                 "failure" => "boom"
+               }
+             }
+           } =
              json_response(conn, 200)
 
     conn = get(build_conn(), "/api/v1/MT-BLOCKED")
@@ -439,7 +909,14 @@ defmodule SymphonyElixir.ExtensionsTest do
              "blocked" => %{
                "session_id" => "thread-blocked",
                "state" => "In Progress",
-               "error" => "codex turn requires operator input"
+               "error" => "codex turn requires operator input",
+               "runner" => %{
+                 "kind" => "codex",
+                 "owner" => "codex",
+                 "phase" => "blocked",
+                 "result_state" => "blocked",
+                 "failure" => "codex turn requires operator input"
+               }
              }
            } = json_response(conn, 200)
 
@@ -577,7 +1054,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Live"
     assert html =~ "Offline"
     assert html =~ "Copy ID"
-    assert html =~ "Codex update"
+    assert html =~ "Runner update"
+    assert html =~ "opencode"
+    assert html =~ "command"
     refute html =~ "data-runtime-clock="
     refute html =~ "setInterval(refreshRuntimeClocks"
     refute html =~ "Refresh now"
@@ -729,6 +1208,14 @@ defmodule SymphonyElixir.ExtensionsTest do
           codex_input_tokens: 4,
           codex_output_tokens: 8,
           codex_total_tokens: 12,
+          runner_kind: "opencode",
+          runner_owner: "opencode",
+          runner_phase: "command",
+          runner_project_root: "/home/agent/proj/symphony",
+          runner_command: ["opencode", "run", "--session", "thread-http"],
+          runner_attach_url: "http://127.0.0.1:3000",
+          runner_result_state: "running",
+          runner_failure: nil,
           started_at: DateTime.utc_now()
         }
       ],
@@ -738,7 +1225,12 @@ defmodule SymphonyElixir.ExtensionsTest do
           identifier: "MT-RETRY",
           attempt: 2,
           due_in_ms: 2_000,
-          error: "boom"
+          error: "boom",
+          runner_kind: "codex",
+          runner_owner: "codex",
+          runner_phase: "retry_wait",
+          runner_result_state: "retrying",
+          runner_failure: "boom"
         }
       ],
       blocked: [
@@ -749,6 +1241,12 @@ defmodule SymphonyElixir.ExtensionsTest do
           error: "codex turn requires operator input",
           worker_host: "dm-dev2",
           workspace_path: "/workspaces/MT-BLOCKED",
+          runner_kind: "codex",
+          runner_owner: "codex",
+          runner_phase: "blocked",
+          runner_project_root: "/workspaces/MT-BLOCKED",
+          runner_result_state: "blocked",
+          runner_failure: "codex turn requires operator input",
           session_id: "thread-blocked",
           blocked_at: DateTime.utc_now(),
           last_codex_event: :turn_input_required,
@@ -761,7 +1259,14 @@ defmodule SymphonyElixir.ExtensionsTest do
         }
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
-      rate_limits: %{"primary" => %{"remaining" => 11}}
+      runner_runtime_totals: %{seconds_running: 84.5},
+      rate_limits: %{"primary" => %{"remaining" => 11}},
+      polling: %{
+        "checking?" => false,
+        "next_poll_in_ms" => 5_000,
+        "poll_interval_ms" => 2_000
+      },
+      active_milestone: nil
     }
   end
 
@@ -795,5 +1300,25 @@ defmodule SymphonyElixir.ExtensionsTest do
         {:error, {:already_started, _pid}} -> :ok
       end
     end
+  end
+
+  defp opencode_task_prompt_comment(slice_id, prompt) do
+    """
+    <!-- symphony:opencode-task-prompt:v1 slice_id=#{slice_id} -->
+    ```text
+    #{prompt}
+    ```
+    """
+  end
+
+  defp review_decision_comment(status, slice_id, reason) do
+    """
+    <!-- symphony:review-decision:v1 -->
+    ```text
+    status: #{status}
+    slice_id: #{slice_id}
+    reason: #{reason}
+    ```
+    """
   end
 end

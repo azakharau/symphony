@@ -1,5 +1,7 @@
 import Config
 
+config :logger, :default_formatter, metadata: [:path, :pid, :project_id, :reason]
+
 config :phoenix, :json_library, Jason
 
 config :symphony_elixir, SymphonyElixirWeb.Endpoint,

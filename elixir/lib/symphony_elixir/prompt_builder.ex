@@ -9,9 +9,11 @@ defmodule SymphonyElixir.PromptBuilder do
 
   @spec build_prompt(SymphonyElixir.Linear.Issue.t(), keyword()) :: String.t()
   def build_prompt(issue, opts \\ []) do
+    project_context = Keyword.get(opts, :project_context)
+
     template =
-      Workflow.current()
-      |> prompt_template!()
+      workflow(project_context)
+      |> prompt_template!(project_context)
       |> parse_template!()
 
     template
@@ -25,9 +27,12 @@ defmodule SymphonyElixir.PromptBuilder do
     |> IO.iodata_to_binary()
   end
 
-  defp prompt_template!({:ok, %{prompt_template: prompt}}), do: default_prompt(prompt)
+  defp workflow(nil), do: Workflow.current()
+  defp workflow(project_context), do: SymphonyElixir.WorkflowStore.current(project_context.process_names.workflow_store |> SymphonyElixir.ProjectRegistry.via_name())
 
-  defp prompt_template!({:error, reason}) do
+  defp prompt_template!({:ok, %{prompt_template: prompt}}, project_context), do: default_prompt(prompt, project_context)
+
+  defp prompt_template!({:error, reason}, _project_context) do
     raise RuntimeError, "workflow_unavailable: #{inspect(reason)}"
   end
 
@@ -54,9 +59,9 @@ defmodule SymphonyElixir.PromptBuilder do
   defp to_solid_value(value) when is_list(value), do: Enum.map(value, &to_solid_value/1)
   defp to_solid_value(value), do: value
 
-  defp default_prompt(prompt) when is_binary(prompt) do
+  defp default_prompt(prompt, project_context) when is_binary(prompt) do
     if String.trim(prompt) == "" do
-      Config.workflow_prompt()
+      Config.workflow_prompt(project_context)
     else
       prompt
     end

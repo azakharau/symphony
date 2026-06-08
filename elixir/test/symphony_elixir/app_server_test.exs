@@ -39,6 +39,107 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server allows configured codex project root outside Symphony workspace root" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-project-root-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      project_root = Path.join(test_root, "repo")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-project-root.trace")
+      previous_trace = System.get_env("SYMP_TEST_CODEX_PROJECT_ROOT_TRACE")
+
+      on_exit(fn ->
+        if is_binary(previous_trace) do
+          System.put_env("SYMP_TEST_CODEX_PROJECT_ROOT_TRACE", previous_trace)
+        else
+          System.delete_env("SYMP_TEST_CODEX_PROJECT_ROOT_TRACE")
+        end
+      end)
+
+      System.put_env("SYMP_TEST_CODEX_PROJECT_ROOT_TRACE", trace_file)
+      File.mkdir_p!(workspace_root)
+      File.mkdir_p!(project_root)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEX_PROJECT_ROOT_TRACE:-/tmp/codex-project-root.trace}"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'PWD:%s JSON:%s\\n' "$(pwd)" "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-project-root"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-project-root"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      issue = %Issue{
+        id: "issue-project-root",
+        identifier: "MT-1003",
+        title: "Run in project root",
+        description: "Ensure Codex sessions are attached to repo root",
+        state: "Todo",
+        url: "https://example.org/issues/MT-1003",
+        labels: ["architecture"]
+      }
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_project_root: project_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      assert {:ok, %{thread_id: "thread-project-root"}} =
+               AppServer.run(project_root, "Use the project root", issue)
+
+      trace = File.read!(trace_file)
+      assert trace =~ "PWD:#{project_root} "
+
+      assert trace
+             |> String.split("\n", trim: true)
+             |> Enum.any?(fn line ->
+               if String.contains?(line, "JSON:") do
+                 line
+                 |> String.split("JSON:", parts: 2)
+                 |> List.last()
+                 |> Jason.decode!()
+                 |> then(fn payload ->
+                   payload["method"] == "turn/start" &&
+                     get_in(payload, ["params", "cwd"]) == project_root
+                 end)
+               else
+                 false
+               end
+             end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server rejects symlink escape cwd paths under the workspace root" do
     test_root =
       Path.join(
@@ -71,6 +172,124 @@ defmodule SymphonyElixir.AppServerTest do
 
       assert {:error, {:invalid_workspace_cwd, :symlink_escape, ^symlink_workspace, _root}} =
                AppServer.run(symlink_workspace, "guard", issue)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server resumes configured architect thread instead of starting a new one" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-thread-resume-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-1002")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-thread-resume.trace")
+      previous_trace = System.get_env("SYMP_TEST_CODEX_RESUME_TRACE")
+
+      on_exit(fn ->
+        if is_binary(previous_trace) do
+          System.put_env("SYMP_TEST_CODEX_RESUME_TRACE", previous_trace)
+        else
+          System.delete_env("SYMP_TEST_CODEX_RESUME_TRACE")
+        end
+      end)
+
+      System.put_env("SYMP_TEST_CODEX_RESUME_TRACE", trace_file)
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEX_RESUME_TRACE:-/tmp/codex-thread-resume.trace}"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\n' '{"id":2,"result":{"thread":{"id":"architect-thread-1002"}}}'
+            ;;
+          3)
+            printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-1002"}}}'
+            ;;
+          4)
+            printf '%s\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      parent = self()
+
+      issue = %Issue{
+        id: "issue-thread-resume",
+        identifier: "MT-1002",
+        title: "Resume architect thread",
+        description: "Ensure Codex uses the configured project architect session",
+        state: "Todo",
+        url: "https://example.org/issues/MT-1002",
+        labels: ["architecture"]
+      }
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_thread_id: "architect-thread-1002"
+      )
+
+      assert {:ok, %{thread_id: "architect-thread-1002"}} =
+               AppServer.run(workspace, "Resume the architect session", issue, on_message: fn message -> send(parent, {:codex_message, message}) end)
+
+      assert_receive {:codex_message,
+                      %{
+                        event: :session_started,
+                        thread_id: "architect-thread-1002",
+                        thread_resumed?: true
+                      }}
+
+      trace = File.read!(trace_file)
+      lines = String.split(trace, "\n", trim: true)
+
+      assert Enum.any?(lines, fn line ->
+               if String.starts_with?(line, "JSON:") do
+                 line
+                 |> String.trim_leading("JSON:")
+                 |> Jason.decode!()
+                 |> then(fn payload ->
+                   payload["method"] == "thread/resume" &&
+                     get_in(payload, ["params", "threadId"]) == "architect-thread-1002" &&
+                     get_in(payload, ["params", "cwd"]) == workspace &&
+                     case get_in(payload, ["params", "dynamicTools"]) do
+                       [%{"name" => "linear_graphql"}] -> true
+                       _ -> false
+                     end
+                 end)
+               else
+                 false
+               end
+             end)
+
+      refute Enum.any?(lines, fn line ->
+               String.starts_with?(line, "JSON:") &&
+                 line
+                 |> String.trim_leading("JSON:")
+                 |> Jason.decode!()
+                 |> Map.get("method") == "thread/start"
+             end)
     after
       File.rm_rf(test_root)
     end

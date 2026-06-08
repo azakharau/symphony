@@ -4,10 +4,13 @@ defmodule SymphonyElixir.Config do
   """
 
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.ProjectContext
+  alias SymphonyElixir.ProjectRegistry
   alias SymphonyElixir.Workflow
+  alias SymphonyElixir.WorkflowStore
 
   @default_prompt_template """
-  You are working on a Linear issue.
+  Linear issue execution request.
 
   Identifier: {{ issue.identifier }}
   Title: {{ issue.title }}
@@ -18,10 +21,19 @@ defmodule SymphonyElixir.Config do
   {% else %}
   No description provided.
   {% endif %}
+
+  Comments:
+  {% for comment in issue.comments %}
+  - {% if comment.created_at %}{{ comment.created_at }} {% endif %}{% if comment.author %}{{ comment.author }}: {% endif %}{{ comment.body }}
+  {% else %}
+  No comments provided.
+  {% endfor %}
   """
 
   @type codex_runtime_settings :: %{
           approval_policy: String.t() | map(),
+          project_root: String.t() | nil,
+          thread_id: String.t() | nil,
           thread_sandbox: String.t(),
           turn_sandbox_policy: map()
         }
@@ -29,6 +41,25 @@ defmodule SymphonyElixir.Config do
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
   def settings do
     case Workflow.current() do
+      {:ok, %{config: config}} when is_map(config) ->
+        Schema.parse(config)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @spec settings(ProjectContext.t() | GenServer.server() | nil) :: {:ok, Schema.t()} | {:error, term()}
+  def settings(nil), do: settings()
+
+  def settings(%ProjectContext{} = context) do
+    context.process_names.workflow_store
+    |> ProjectRegistry.via_name()
+    |> settings()
+  end
+
+  def settings(workflow_store_name) do
+    case WorkflowStore.current(workflow_store_name) do
       {:ok, %{config: config}} when is_map(config) ->
         Schema.parse(config)
 
@@ -48,6 +79,16 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @spec settings!(ProjectContext.t() | GenServer.server() | nil) :: Schema.t()
+  def settings!(nil), do: settings!()
+
+  def settings!(context_or_store) do
+    case settings(context_or_store) do
+      {:ok, settings} -> settings
+      {:error, reason} -> raise ArgumentError, message: format_config_error(reason)
+    end
+  end
+
   @spec max_concurrent_agents_for_state(term()) :: pos_integer()
   def max_concurrent_agents_for_state(state_name) when is_binary(state_name) do
     config = settings!()
@@ -60,6 +101,21 @@ defmodule SymphonyElixir.Config do
   end
 
   def max_concurrent_agents_for_state(_state_name), do: settings!().agent.max_concurrent_agents
+
+  @spec max_concurrent_agents_for_state(term(), ProjectContext.t() | GenServer.server() | nil) :: pos_integer()
+  def max_concurrent_agents_for_state(state_name, context_or_store) when is_binary(state_name) do
+    config = settings!(context_or_store)
+
+    Map.get(
+      config.agent.max_concurrent_agents_by_state,
+      Schema.normalize_issue_state(state_name),
+      config.agent.max_concurrent_agents
+    )
+  end
+
+  def max_concurrent_agents_for_state(_state_name, context_or_store) do
+    settings!(context_or_store).agent.max_concurrent_agents
+  end
 
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do
@@ -75,6 +131,25 @@ defmodule SymphonyElixir.Config do
   @spec workflow_prompt() :: String.t()
   def workflow_prompt do
     case Workflow.current() do
+      {:ok, %{prompt_template: prompt}} ->
+        if String.trim(prompt) == "", do: @default_prompt_template, else: prompt
+
+      _ ->
+        @default_prompt_template
+    end
+  end
+
+  @spec workflow_prompt(ProjectContext.t() | GenServer.server() | nil) :: String.t()
+  def workflow_prompt(nil), do: workflow_prompt()
+
+  def workflow_prompt(%ProjectContext{} = context) do
+    context.process_names.workflow_store
+    |> ProjectRegistry.via_name()
+    |> workflow_prompt()
+  end
+
+  def workflow_prompt(workflow_store_name) do
+    case WorkflowStore.current(workflow_store_name) do
       {:ok, %{prompt_template: prompt}} ->
         if String.trim(prompt) == "", do: @default_prompt_template, else: prompt
 
@@ -101,18 +176,25 @@ defmodule SymphonyElixir.Config do
   @spec codex_runtime_settings(Path.t() | nil, keyword()) ::
           {:ok, codex_runtime_settings()} | {:error, term()}
   def codex_runtime_settings(workspace \\ nil, opts \\ []) do
-    with {:ok, settings} <- settings() do
-      with {:ok, turn_sandbox_policy} <-
-             Schema.resolve_runtime_turn_sandbox_policy(settings, workspace, opts) do
-        {:ok,
-         %{
-           approval_policy: settings.codex.approval_policy,
-           thread_sandbox: settings.codex.thread_sandbox,
-           turn_sandbox_policy: turn_sandbox_policy
-         }}
-      end
+    settings = Keyword.get(opts, :settings)
+
+    with {:ok, settings} <- normalize_runtime_settings(settings),
+         {:ok, turn_sandbox_policy} <-
+           Schema.resolve_runtime_turn_sandbox_policy(settings, workspace, opts) do
+      {:ok,
+       %{
+         approval_policy: settings.codex.approval_policy,
+         project_root: settings.codex.project_root,
+         thread_id: settings.codex.thread_id,
+         thread_sandbox: settings.codex.thread_sandbox,
+         turn_sandbox_policy: turn_sandbox_policy
+       }}
     end
   end
+
+  defp normalize_runtime_settings(%Schema{} = settings), do: {:ok, settings}
+  defp normalize_runtime_settings(nil), do: settings()
+  defp normalize_runtime_settings(other), do: {:error, {:invalid_runtime_settings, other}}
 
   defp validate_semantics(settings) do
     cond do

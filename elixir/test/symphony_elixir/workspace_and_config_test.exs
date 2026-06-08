@@ -1171,6 +1171,38 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  test "non-todo issue with non-terminal blocker is not dispatch-eligible" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_active_states: ["Todo", "In Review"],
+      tracker_terminal_states: ["Done"]
+    )
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      active_project_milestone_id: "milestone-ready-1",
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "blocked-review-1",
+      identifier: "MT-1008",
+      title: "Blocked review",
+      state: "In Review",
+      project_milestone: %{
+        id: "milestone-ready-1",
+        name: "Ready milestone",
+        description: "phase_state: todo"
+      },
+      blocked_by: [%{id: "blocker-1", identifier: "MT-1002", state: "In Progress"}]
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(%{issue | blocked_by: []}, state)
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
   test "issue assigned to another worker is not dispatch-eligible" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "dev@example.com")
 

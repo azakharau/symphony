@@ -1393,7 +1393,7 @@ defmodule SymphonyElixir.Orchestrator do
     candidate_issue?(issue, active_states, terminal_states) and
       milestone_batch_allowed?(issue, state) and
       !owner_input_issue_state?(issue.state) and
-      !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
+      !issue_blocked_by_non_terminal?(issue, terminal_states) and
       issue_not_already_tracked?(issue.id, claimed, running, blocked) and
       available_slots(state) > 0 and
       state_slots_available?(issue, state) and
@@ -1644,22 +1644,18 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_routable_to_worker?(_issue), do: true
 
-  defp todo_issue_blocked_by_non_terminal?(
-         %Issue{state: issue_state, blocked_by: blockers},
-         terminal_states
-       )
-       when is_binary(issue_state) and is_list(blockers) do
-    normalize_issue_state(issue_state) == "todo" and
-      Enum.any?(blockers, fn
-        %{state: blocker_state} when is_binary(blocker_state) ->
-          !terminal_issue_state?(blocker_state, terminal_states)
+  defp issue_blocked_by_non_terminal?(%Issue{blocked_by: blockers}, terminal_states)
+       when is_list(blockers) do
+    Enum.any?(blockers, fn
+      %{state: blocker_state} when is_binary(blocker_state) ->
+        !terminal_issue_state?(blocker_state, terminal_states)
 
-        _ ->
-          true
-      end)
+      _ ->
+        true
+    end)
   end
 
-  defp todo_issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
+  defp issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
 
   defp terminal_issue_state?(state_name, terminal_states) when is_binary(state_name) do
     MapSet.member?(terminal_states, normalize_issue_state(state_name))
@@ -2695,7 +2691,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp retry_candidate_issue?(%Issue{} = issue, %State{} = state, terminal_states) do
     candidate_issue?(issue, active_state_set(state), terminal_states) and
-      !todo_issue_blocked_by_non_terminal?(issue, terminal_states)
+      !issue_blocked_by_non_terminal?(issue, terminal_states)
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do

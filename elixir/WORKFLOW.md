@@ -68,8 +68,8 @@ process_policy:
     "In Review": 1800000
     "RCA Required": 1800000
 stewardship:
-  active_milestone_id: "0b8b5a7e-d9a6-47df-a824-435cce359cb2"
-  active_milestone_name: "01. Multiproject runtime foundation"
+  active_milestone_id: "5c1090e2-998c-484c-b25d-9484bb3cb27d"
+  active_milestone_name: "03. Observability and polling semantics"
 codex:
   command: /home/agent/.symphony/bin/codex-ws-stdio-proxy
   read_timeout_ms: 10800000

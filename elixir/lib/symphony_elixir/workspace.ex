@@ -199,12 +199,28 @@ defmodule SymphonyElixir.Workspace do
     :ok
   end
 
-  @spec cleanup_issue_runtime_cache(Issue.t(), term()) :: :ok
+  @spec cleanup_issue_runtime_cache(Issue.t(), term()) :: :ok | {:error, [{atom(), term()}]}
   def cleanup_issue_runtime_cache(%Issue{} = issue, settings \\ Config.settings!()) do
-    :ok = remove_issue_workspaces(issue.identifier, nil, settings)
-    :ok = ACPSessionStore.remove_issue(issue, settings)
-    :ok = RuntimeCache.clear_issue(nil, issue)
-    :ok
+    errors =
+      [
+        workspace: remove_issue_workspaces(issue.identifier, nil, settings),
+        acp_session_store: ACPSessionStore.remove_issue(issue, settings),
+        runtime_cache: RuntimeCache.clear_issue(nil, issue)
+      ]
+      |> Enum.flat_map(fn
+        {_step, :ok} -> []
+        {step, {:error, reason}} -> [{step, reason}]
+        {step, other} -> [{step, other}]
+      end)
+
+    case errors do
+      [] ->
+        :ok
+
+      errors ->
+        Logger.warning("Issue runtime cache cleanup completed with errors issue_identifier=#{inspect(issue.identifier)} errors=#{inspect(errors)}")
+        {:error, errors}
+    end
   end
 
   @spec remove_legacy_runtime_cache(term()) :: :ok

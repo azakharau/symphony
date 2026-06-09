@@ -50,7 +50,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:api_key, :string)
       field(:project_slug, :string)
       field(:assignee, :string)
-      field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
+      field(:active_states, {:array, :string}, default: ["Todo", "Preparing", "In Progress"])
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
     end
 
@@ -74,7 +74,7 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:interval_ms, :integer, default: 30_000)
       field(:full_interval_ms, :integer, default: 60_000)
-      field(:fast_states, {:array, :string}, default: ["Todo", "Need Owner Input"])
+      field(:fast_states, {:array, :string}, default: ["Todo", "Preparing", "Need Owner Input"])
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -255,7 +255,6 @@ defmodule SymphonyElixir.Config.Schema do
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       read_timeout_present? = read_timeout_present?(attrs)
-      stall_timeout_present? = stall_timeout_present?(attrs)
 
       schema
       |> cast(
@@ -278,7 +277,6 @@ defmodule SymphonyElixir.Config.Schema do
         empty_values: []
       )
       |> default_acp_read_timeout(read_timeout_present?)
-      |> default_acp_stall_timeout(stall_timeout_present?)
       |> validate_required([:command, :agent, :format, :result_state])
       |> validate_inclusion(:protocol, ["cli", "acp"])
       |> validate_number(:timeout_ms, greater_than: 0)
@@ -295,26 +293,11 @@ defmodule SymphonyElixir.Config.Schema do
 
     defp default_acp_read_timeout(changeset, _read_timeout_present?), do: changeset
 
-    defp default_acp_stall_timeout(changeset, false) do
-      case get_field(changeset, :protocol) do
-        "acp" -> put_change(changeset, :stall_timeout_ms, 0)
-        _protocol -> changeset
-      end
-    end
-
-    defp default_acp_stall_timeout(changeset, _stall_timeout_present?), do: changeset
-
     defp read_timeout_present?(attrs) when is_map(attrs) do
       Map.has_key?(attrs, :read_timeout_ms) or Map.has_key?(attrs, "read_timeout_ms")
     end
 
     defp read_timeout_present?(_attrs), do: false
-
-    defp stall_timeout_present?(attrs) when is_map(attrs) do
-      Map.has_key?(attrs, :stall_timeout_ms) or Map.has_key?(attrs, "stall_timeout_ms")
-    end
-
-    defp stall_timeout_present?(_attrs), do: false
   end
 
   defmodule ProcessPolicy do
@@ -340,7 +323,11 @@ defmodule SymphonyElixir.Config.Schema do
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:rca_required_state, :max_rejections_per_slice, :timeout_state, :state_timeouts_ms], empty_values: [])
+      |> cast(
+        attrs,
+        [:rca_required_state, :max_rejections_per_slice, :timeout_state, :state_timeouts_ms],
+        empty_values: []
+      )
       |> validate_required([:rca_required_state, :timeout_state])
       |> validate_number(:max_rejections_per_slice, greater_than: 0)
       |> update_change(:state_timeouts_ms, &Schema.normalize_state_limits/1)

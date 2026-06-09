@@ -372,7 +372,7 @@ defmodule SymphonyElixir.IsolationRegression.ConfigSettingsExtendedTest do
             },
             fn beta_ctx ->
               assert Config.settings!(alpha_ctx).polling.fast_states == ["Critical"]
-              assert Config.settings!(beta_ctx).polling.fast_states == ["Todo", "Need Owner Input"]
+              assert Config.settings!(beta_ctx).polling.fast_states == ["Todo", "Preparing", "Need Owner Input"]
             end
           )
         end

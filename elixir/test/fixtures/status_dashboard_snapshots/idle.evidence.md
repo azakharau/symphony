@@ -5,6 +5,7 @@
 │ Runtime: 0m 0s
 │ Tokens: in 0 | out 0 | total 0
 │ Rate Limits: unavailable
+│ Dispatch: n/a │ eligible 0 │ dep 0 │ running 0 │ retry 0 │ owner/block 0
 │ Project: https://linear.app/project/project/issues
 │ Next refresh: n/a
 ├─ Running

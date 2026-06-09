@@ -34,17 +34,38 @@ defmodule SymphonyElixir.IsolationAcceptanceContractTest do
         {"elixir/test/symphony_elixir/isolation_workflow_config_prompt_test.exs", "build_prompt does not leak templates across projects for the same issue"},
         {"elixir/test/symphony_elixir/isolation_orchestrator_steward_registry_test.exs", "build/2 returns project-specific payload for different project contexts"}
       ],
-      apis: [{PromptBuilder, :build_prompt, 2}, {SymphonyElixir.Steward.ExecutionPacket, :build, 2}]
+      apis: [
+        {PromptBuilder, :build_prompt, 2},
+        {SymphonyElixir.Steward.ExecutionPacket, :build, 2}
+      ]
     },
     %{
       row: :runner_session_identity,
-      tests: [{"elixir/test/symphony_elixir/isolation_acceptance_contract_test.exs", "acceptance session store keeps runner sessions isolated by issue, project root, and prompt scope"}],
-      apis: [{ACPSessionStore, :put, 5}, {ACPSessionStore, :fetch, 4}, {Orchestrator, :snapshot, 2}]
+      tests: [
+        {
+          "elixir/test/symphony_elixir/isolation_acceptance_contract_test.exs",
+          "acceptance session store keeps runner sessions isolated by issue, project root, and prompt scope"
+        }
+      ],
+      apis: [
+        {ACPSessionStore, :put, 5},
+        {ACPSessionStore, :fetch, 4},
+        {Orchestrator, :snapshot, 2}
+      ]
     },
     %{
       row: :dashboard_api_aggregate_identity,
-      tests: [{"elixir/test/symphony_elixir/isolation_acceptance_contract_test.exs", "acceptance projection preserves runner aggregate identity across presenter and dashboard"}],
-      apis: [{Presenter, :state_payload, 2}, {Presenter, :issue_payload, 3}, {StatusDashboard, :format_snapshot_content_for_test, 3}]
+      tests: [
+        {
+          "elixir/test/symphony_elixir/isolation_acceptance_contract_test.exs",
+          "acceptance projection preserves runner aggregate identity across presenter and dashboard"
+        }
+      ],
+      apis: [
+        {Presenter, :state_payload, 2},
+        {Presenter, :issue_payload, 3},
+        {StatusDashboard, :format_snapshot_content_for_test, 3}
+      ]
     },
     %{
       row: :config_process_policy_isolation,

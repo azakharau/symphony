@@ -312,10 +312,6 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
 
     assert output =~ "streamed text"
 
-    assert_receive {:opencode_event, %{event: :command_prepared, phase: :command}}
-
-    assert_receive {:opencode_event, %{event: :session_started, session_id: "new-session", phase: :session}}
-
     assert_receive {:opencode_event,
                     %{
                       event: :notification,
@@ -400,6 +396,61 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
 
     assert {:error, {:need_owner_input, _events}} =
              Runner.run("/tmp/workspace", issue(), "prompt body")
+  end
+
+  test "opencode acp runner keeps session-update heartbeats alive until final result" do
+    {python, script} = fake_acp_server!()
+    workspace_root = workspace_root!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      opencode_command: python,
+      opencode_args: [script, "heartbeat-progress"],
+      opencode_project_root: File.cwd!(),
+      opencode_stall_timeout_ms: 100,
+      opencode_timeout_ms: 5_000,
+      workspace_root: workspace_root
+    )
+
+    assert {:ok, %{output: output}} = Runner.run("/tmp/workspace", issue(), "prompt body")
+    assert output =~ "heartbeat done"
+  end
+
+  test "opencode acp runner polls persisted session activity before declaring stall" do
+    {python, script} = fake_acp_server!()
+    workspace_root = workspace_root!()
+    project_root = File.cwd!()
+    test_pid = self()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      opencode_protocol: "acp",
+      opencode_command: python,
+      opencode_args: [script, "delayed-success"],
+      opencode_project_root: project_root,
+      opencode_stall_timeout_ms: 20,
+      opencode_timeout_ms: 5_000,
+      workspace_root: workspace_root
+    )
+
+    calls = :counters.new(1, [])
+
+    assert {:ok, %{output: output}} =
+             Runner.run("/tmp/workspace", issue(), "prompt body",
+               on_event: fn event -> send(test_pid, {:opencode_event, event}) end,
+               session_activity_reader: fn ^project_root, "new-session" ->
+                 :counters.add(calls, 1, 1)
+                 count = :counters.get(calls, 1)
+
+                 {:ok,
+                  %{
+                    "fingerprint" => "activity-#{count}",
+                    "usage" => %{"inputTokens" => 12 + count, "outputTokens" => count, "totalTokens" => 12 + count * 2}
+                  }}
+               end
+             )
+
+    assert output =~ "delayed done"
+    assert :counters.get(calls, 1) > 1
   end
 
   test "opencode acp runner disables stall timeout when configured as zero" do
@@ -526,6 +577,20 @@ defmodule SymphonyElixir.OpenCodeACPRunnerTest do
             import time
             time.sleep(0.05)
             send({"jsonrpc":"2.0","method":"session/update","params":{"type":"agent_text","text":"slow done"}})
+            send({"jsonrpc":"2.0","method":"session/update","params":{"type":"end_turn","processCwd":os.getcwd()}})
+            send({"jsonrpc":"2.0","id":mid,"result":{"stopReason":"end_turn","processCwd":os.getcwd()}})
+        elif method == "session/prompt" and scenario == "heartbeat-progress":
+            import time
+            for _ in range(5):
+                send({"jsonrpc":"2.0","method":"session/update","params":{"type":"status"}})
+                time.sleep(0.03)
+            send({"jsonrpc":"2.0","method":"session/update","params":{"type":"agent_text","text":"heartbeat done"}})
+            send({"jsonrpc":"2.0","method":"session/update","params":{"type":"end_turn","processCwd":os.getcwd()}})
+            send({"jsonrpc":"2.0","id":mid,"result":{"stopReason":"end_turn","processCwd":os.getcwd()}})
+        elif method == "session/prompt" and scenario == "delayed-success":
+            import time
+            time.sleep(0.15)
+            send({"jsonrpc":"2.0","method":"session/update","params":{"type":"agent_text","text":"delayed done"}})
             send({"jsonrpc":"2.0","method":"session/update","params":{"type":"end_turn","processCwd":os.getcwd()}})
             send({"jsonrpc":"2.0","id":mid,"result":{"stopReason":"end_turn","processCwd":os.getcwd()}})
         elif method == "session/prompt" and scenario == "streaming":

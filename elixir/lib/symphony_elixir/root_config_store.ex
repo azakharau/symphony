@@ -35,10 +35,7 @@ defmodule SymphonyElixir.RootConfigStore do
         {:ok, %State{path: path, config: config, project_states: project_states}}
 
       {:error, reason} ->
-        Logger.error("Root config store failed to load initial root config at #{path}: #{inspect(reason)}",
-          path: path,
-          reason: inspect(reason)
-        )
+        Logger.error("Root config store failed to load initial root config at #{path}: #{inspect(reason)}")
 
         {:stop, reason}
     end
@@ -51,10 +48,7 @@ defmodule SymphonyElixir.RootConfigStore do
         {:reply, {:ok, config}, %{state | config: config, project_states: project_states}}
 
       {:error, reason} ->
-        Logger.error("Root config store reload failed for #{state.path}; keeping previous project state: #{inspect(reason)}",
-          path: state.path,
-          reason: inspect(reason)
-        )
+        Logger.error("Root config store reload failed for #{state.path}; keeping previous project state: #{inspect(reason)}")
 
         {:reply, {:error, reason}, state}
     end
@@ -129,10 +123,7 @@ defmodule SymphonyElixir.RootConfigStore do
         %{status: :running, context: context, pid: pid, error: nil}
 
       {:error, reason} ->
-        Logger.error("Root config store failed to start project supervisor for #{context.project_id}: #{inspect(reason)}",
-          project_id: context.project_id,
-          reason: inspect(reason)
-        )
+        Logger.error("Root config store failed to start project supervisor for #{context.project_id}: #{inspect(reason)}")
 
         %{status: :error, context: context, pid: nil, error: reason}
     end
@@ -146,11 +137,7 @@ defmodule SymphonyElixir.RootConfigStore do
             await_project_stopped(project_id, 50)
 
           {:error, reason} ->
-            Logger.warning("Root config store failed to stop project supervisor for #{project_id}; continuing reconciliation: #{inspect(reason)}",
-              project_id: project_id,
-              pid: inspect(pid),
-              reason: inspect(reason)
-            )
+            Logger.warning("Root config store failed to stop project supervisor for #{project_id} pid #{inspect(pid)}; continuing reconciliation: #{inspect(reason)}")
 
             :ok
         end

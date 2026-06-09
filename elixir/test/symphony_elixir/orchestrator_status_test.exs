@@ -41,7 +41,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, :stop)
   end
 
-  test "snapshot exposes in-memory suppression counts without stale suppression events" do
+  test "snapshot exposes in-memory suppression counts and bounded recent suppression events" do
     orchestrator_name = Module.concat(__MODULE__, :SuppressionProjectionOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, dispatch_paused?: true)
 
@@ -59,6 +59,41 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert snapshot.suppression_events == []
     assert %{"owner_wait_no_change" => 1} = snapshot.suppression_counts
+
+    :sys.replace_state(pid, fn state ->
+      %{
+        state
+        | running: %{
+            "issue-1" => %{
+              issue: %Issue{id: "issue-1", identifier: "SYM-17", state: "In Progress"},
+              identifier: "SYM-17",
+              state: "In Progress",
+              runner_kind: "opencode",
+              runner_owner: "opencode",
+              runner_phase: "handoff",
+              session_id: "session-1"
+            }
+          }
+      }
+    end)
+
+    update = %{
+      event: :handoff_suppressed,
+      timestamp: DateTime.utc_now(),
+      suppression_kind: "handoff_unchanged",
+      reason: "handoff unchanged"
+    }
+
+    send(pid, {:runner_worker_update, "issue-1", update})
+    send(pid, {:runner_worker_update, "issue-1", update})
+
+    snapshot = GenServer.call(pid, :snapshot)
+
+    assert [event] = snapshot.suppression_events
+    assert event.kind == "handoff_unchanged"
+    assert event.reason == "handoff unchanged"
+    assert event.identifier == "SYM-17"
+    assert snapshot.dispatch_summary.dispatch_state == :unchanged
   end
 
   test "orchestrator snapshot exposes configured active milestone runtime context" do
@@ -90,6 +125,54 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            } = snapshot.active_milestone
 
     assert snapshot.suppression_counts == %{}
+  end
+
+  test "snapshot reports dependency blocked todo ahead of generic owner input block" do
+    orchestrator_name = Module.concat(__MODULE__, :DependencyBlockedProjectionOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, dispatch_paused?: true)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    parked_issue = %Issue{
+      id: "issue-owner-input",
+      identifier: "MNE-38",
+      title: "Parked benchmark",
+      state: "Need Owner Input",
+      project_milestone: %{id: "milestone-current", name: "01 Benchmark"}
+    }
+
+    blocked_todo = %Issue{
+      id: "issue-blocked-todo",
+      identifier: "MNE-41",
+      title: "Product candidates",
+      state: "Todo",
+      project_milestone: %{id: "milestone-current", name: "01 Benchmark"},
+      blocked_by: [%{id: parked_issue.id, identifier: parked_issue.identifier, state: parked_issue.state}]
+    }
+
+    :sys.replace_state(pid, fn state ->
+      %{
+        state
+        | last_poll_issues: [parked_issue, blocked_todo],
+          active_project_milestone_id: nil,
+          running: %{},
+          retry_attempts: %{},
+          blocked: %{}
+      }
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+
+    assert snapshot.dispatch_summary.dispatch_state == :dependency_blocked
+    assert snapshot.dispatch_summary.dependency_blocked_count == 1
+    assert snapshot.dispatch_summary.owner_input_count == 1
+
+    assert [%{identifier: "MNE-41", blocked: true, blockers: [%{identifier: "MNE-38", terminal: false}]}] =
+             snapshot.dependency_blocked_items
   end
 
   test "owner-input pulse ignores machine-generated parked owner questions" do

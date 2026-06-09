@@ -5,6 +5,7 @@
 │ Runtime: 1m 15s
 │ Tokens: in 90 | out 12 | total 102
 │ Rate Limits: priority-tier | primary 100/100 reset 1s | secondary 500/500 reset 1s | credits unlimited
+│ Dispatch: n/a │ eligible 0 │ dep 0 │ running 0 │ retry 0 │ owner/block 0
 │ Project: https://linear.app/project/project/issues
 │ Next refresh: n/a
 ├─ Running

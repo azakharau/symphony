@@ -333,7 +333,10 @@ defmodule SymphonyElixir.StatusDashboard do
              polling: Map.get(snapshot, :polling),
              active_milestone: Map.get(snapshot, :active_milestone),
              active_project_milestone_id: Map.get(snapshot, :active_project_milestone_id),
-             suppression_counts: Map.get(snapshot, :suppression_counts, %{})
+             suppression_counts: Map.get(snapshot, :suppression_counts, %{}),
+             suppression_events: Map.get(snapshot, :suppression_events, []),
+             stewardship: Map.get(snapshot, :stewardship, %{}),
+             dispatch_summary: Map.get(snapshot, :dispatch_summary, %{})
            }},
           update_token_samples(token_samples, now_ms, total_tokens)
         }
@@ -355,6 +358,7 @@ defmodule SymphonyElixir.StatusDashboard do
         active_project_milestone_id = Map.get(snapshot, :active_project_milestone_id)
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
+        stewardship_lines = format_stewardship_lines(snapshot)
         codex_input_tokens = Map.get(codex_totals, :input_tokens, 0)
         codex_output_tokens = Map.get(codex_totals, :output_tokens, 0)
         codex_total_tokens = Map.get(codex_totals, :total_tokens, 0)
@@ -384,6 +388,7 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize("total #{format_count(codex_total_tokens)}", @ansi_yellow),
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
            List.wrap(format_milestone_line(active_milestone, active_project_milestone_id, snapshot)),
+           stewardship_lines,
            project_link_lines,
            project_refresh_line,
            colorize("├─ Running", @ansi_bold),
@@ -466,6 +471,86 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp format_milestone_line(_milestone, _milestone_id, _snapshot), do: nil
+
+  defp format_stewardship_lines(snapshot) do
+    summary = Map.get(snapshot, :dispatch_summary, %{}) || %{}
+    stewardship = Map.get(snapshot, :stewardship, %{}) || %{}
+    events = Map.get(snapshot, :suppression_events, []) || []
+
+    state = Map.get(summary, :dispatch_state) || Map.get(summary, "dispatch_state") || "n/a"
+    reason = Map.get(summary, :reason) || Map.get(summary, "reason")
+
+    [
+      format_dispatch_line(state, summary, stewardship),
+      if(reason, do: colorize("│ Reason: ", @ansi_bold) <> colorize(to_string(reason), @ansi_gray), else: nil),
+      format_recent_suppression_line(events)
+    ]
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp format_dispatch_line(state, summary, stewardship) do
+    colorize("│ Dispatch: ", @ansi_bold) <>
+      colorize(to_string(state), dispatch_state_color(state)) <>
+      colorize(" │ #{format_stewardship_counts(summary, stewardship)}", @ansi_gray)
+  end
+
+  defp format_stewardship_counts(summary, stewardship) do
+    [
+      "eligible #{format_stewardship_count(summary, stewardship, :eligible_issue_count)}",
+      "dep #{format_stewardship_count(summary, stewardship, :dependency_blocked_count)}",
+      "running #{format_stewardship_count(summary, stewardship, :running_count)}",
+      "retry #{format_stewardship_count(summary, stewardship, :retrying_count)}",
+      "owner/block #{format_count(owner_block_count(summary, stewardship))}"
+    ]
+    |> Enum.join(" │ ")
+  end
+
+  defp format_stewardship_count(summary, stewardship, key) do
+    format_count(simple_map_value(summary, key) || simple_map_value(stewardship, key))
+  end
+
+  defp owner_block_count(summary, stewardship) do
+    (simple_map_value(summary, :owner_input_count) || simple_map_value(stewardship, :owner_input_count) || 0) +
+      (simple_map_value(summary, :blocked_count) || simple_map_value(stewardship, :blocked_count) || 0)
+  end
+
+  defp format_recent_suppression_line(events) do
+    events
+    |> List.wrap()
+    |> List.first()
+    |> suppression_event_label()
+    |> case do
+      nil -> nil
+      recent -> colorize("│ Recent suppression: ", @ansi_bold) <> colorize(recent, @ansi_orange)
+    end
+  end
+
+  defp simple_map_value(map, key) when is_map(map), do: Map.get(map, key) || Map.get(map, Atom.to_string(key))
+  defp simple_map_value(_map, _key), do: nil
+
+  defp suppression_event_label(nil), do: nil
+
+  defp suppression_event_label(event) when is_map(event) do
+    kind = simple_map_value(event, :kind) || "suppressed"
+    reason = simple_map_value(event, :reason)
+    identifier = simple_map_value(event, :identifier) || simple_map_value(event, :issue_identifier)
+
+    [identifier, kind, reason]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map_join(" — ", &to_string/1)
+  end
+
+  defp dispatch_state_color(state) do
+    case to_string(state) do
+      "dependency_blocked" -> @ansi_orange
+      "owner_blocked" -> @ansi_red
+      "retry_waiting" -> @ansi_orange
+      "unchanged" -> @ansi_yellow
+      "done_processed" -> @ansi_green
+      "eligible_work" -> @ansi_cyan
+      _ -> @ansi_gray
+    end
+  end
 
   defp format_project_refresh_line(%{checking?: true}) do
     colorize("│ Next refresh: ", @ansi_bold) <> colorize("checking now…", @ansi_cyan)
@@ -618,7 +703,13 @@ defmodule SymphonyElixir.StatusDashboard do
              codex_totals: codex_totals,
              runner_runtime_totals: runner_runtime_totals(snapshot, codex_totals),
              rate_limits: Map.get(snapshot, :rate_limits),
-             polling: Map.get(snapshot, :polling)
+             polling: Map.get(snapshot, :polling),
+             active_milestone: Map.get(snapshot, :active_milestone),
+             active_project_milestone_id: Map.get(snapshot, :active_project_milestone_id),
+             suppression_counts: Map.get(snapshot, :suppression_counts, %{}),
+             suppression_events: Map.get(snapshot, :suppression_events, []),
+             stewardship: Map.get(snapshot, :stewardship, %{}),
+             dispatch_summary: Map.get(snapshot, :dispatch_summary, %{})
            }}
 
         _ ->

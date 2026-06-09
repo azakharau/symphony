@@ -1,8 +1,12 @@
 defmodule SymphonyElixir.IsolationRegression.OrchestratorStewardRegistryTest do
   use ExUnit.Case, async: false
 
+  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Orchestrator
+  alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.ProjectRegistry
   alias SymphonyElixir.RootConfigStore
+  alias SymphonyElixir.Steward.ExecutionPacket
   alias SymphonyElixir.WorkflowStore
 
   describe "Orchestrator per-project runtime state isolation" do
@@ -28,7 +32,7 @@ defmodule SymphonyElixir.IsolationRegression.OrchestratorStewardRegistryTest do
       workflow_path = Path.join([test_root, project_id, "WORKFLOW.md"])
       File.mkdir_p!(Path.dirname(workflow_path))
 
-      %SymphonyElixir.ProjectContext{
+      %ProjectContext{
         id: project_id,
         project_id: project_id,
         name: "Project #{project_id}",
@@ -51,7 +55,7 @@ defmodule SymphonyElixir.IsolationRegression.OrchestratorStewardRegistryTest do
 
       {:ok, alpha_pid} =
         start_supervised(
-          {SymphonyElixir.Orchestrator,
+          {Orchestrator,
            [
              project_context: alpha_ctx,
              dispatch_paused?: true,
@@ -62,7 +66,7 @@ defmodule SymphonyElixir.IsolationRegression.OrchestratorStewardRegistryTest do
 
       {:ok, beta_pid} =
         start_supervised(
-          {SymphonyElixir.Orchestrator,
+          {Orchestrator,
            [
              project_context: beta_ctx,
              dispatch_paused?: true,
@@ -130,7 +134,7 @@ defmodule SymphonyElixir.IsolationRegression.OrchestratorStewardRegistryTest do
 
       {:ok, alpha_pid} =
         start_supervised(
-          {SymphonyElixir.Orchestrator,
+          {Orchestrator,
            [
              project_context: alpha_ctx,
              dispatch_paused?: true,
@@ -141,7 +145,7 @@ defmodule SymphonyElixir.IsolationRegression.OrchestratorStewardRegistryTest do
 
       {:ok, beta_pid} =
         start_supervised(
-          {SymphonyElixir.Orchestrator,
+          {Orchestrator,
            [
              project_context: beta_ctx,
              dispatch_paused?: true,
@@ -171,7 +175,7 @@ defmodule SymphonyElixir.IsolationRegression.OrchestratorStewardRegistryTest do
 
       issue_id = "linear-42"
 
-      common_issue = %SymphonyElixir.Linear.Issue{
+      common_issue = %Issue{
         id: issue_id,
         identifier: "SYM-1",
         title: "Common issue",
@@ -183,8 +187,8 @@ defmodule SymphonyElixir.IsolationRegression.OrchestratorStewardRegistryTest do
       alpha_issue = %{common_issue | project_milestone: alpha_milestone}
       beta_issue = %{common_issue | project_milestone: beta_milestone}
 
-      alpha_packet = SymphonyElixir.Steward.ExecutionPacket.build(alpha_issue, alpha_project)
-      beta_packet = SymphonyElixir.Steward.ExecutionPacket.build(beta_issue, beta_project)
+      alpha_packet = ExecutionPacket.build(alpha_issue, alpha_project)
+      beta_packet = ExecutionPacket.build(beta_issue, beta_project)
 
       # Project payload is per-project
       assert alpha_packet["project"]["id"] == "proj-alpha"
@@ -204,14 +208,14 @@ defmodule SymphonyElixir.IsolationRegression.OrchestratorStewardRegistryTest do
     end
 
     test "build/2 defaults project payload to nil when project_context is nil" do
-      issue = %SymphonyElixir.Linear.Issue{
+      issue = %Issue{
         id: "linear-99",
         identifier: "SYM-99",
         title: "No project issue",
         state: "todo"
       }
 
-      packet = SymphonyElixir.Steward.ExecutionPacket.build(issue, nil)
+      packet = ExecutionPacket.build(issue, nil)
 
       assert packet["project"]["id"] == nil
       assert packet["project"]["name"] == nil
@@ -220,13 +224,13 @@ defmodule SymphonyElixir.IsolationRegression.OrchestratorStewardRegistryTest do
     end
 
     test "build/2 defaults project payload to nil when project_context lacks id/name" do
-      issue = %SymphonyElixir.Linear.Issue{
+      issue = %Issue{
         id: "linear-100",
         identifier: "SYM-100",
         title: "Partial project issue"
       }
 
-      packet = SymphonyElixir.Steward.ExecutionPacket.build(issue, %{other_key: "value"})
+      packet = ExecutionPacket.build(issue, %{other_key: "value"})
 
       assert packet["project"]["id"] == nil
       assert packet["project"]["name"] == nil
@@ -235,7 +239,7 @@ defmodule SymphonyElixir.IsolationRegression.OrchestratorStewardRegistryTest do
     test "build/2 uses issue milestone independently of project context" do
       milestone = %{id: "ms-42", name: "Milestone 42"}
 
-      issue = %SymphonyElixir.Linear.Issue{
+      issue = %Issue{
         id: "linear-200",
         identifier: "SYM-200",
         title: "Milestone issue",
@@ -243,8 +247,8 @@ defmodule SymphonyElixir.IsolationRegression.OrchestratorStewardRegistryTest do
       }
 
       # Same issue with different project contexts produces different project but same milestone
-      packet_a = SymphonyElixir.Steward.ExecutionPacket.build(issue, %{id: "proj-a", name: "A"})
-      packet_b = SymphonyElixir.Steward.ExecutionPacket.build(issue, %{id: "proj-b", name: "B"})
+      packet_a = ExecutionPacket.build(issue, %{id: "proj-a", name: "A"})
+      packet_b = ExecutionPacket.build(issue, %{id: "proj-b", name: "B"})
 
       assert packet_a["project"]["id"] == "proj-a"
       assert packet_b["project"]["id"] == "proj-b"
@@ -253,29 +257,32 @@ defmodule SymphonyElixir.IsolationRegression.OrchestratorStewardRegistryTest do
     end
 
     test "prompt/1 returns {:ok, _} for clean execution packets" do
-      issue = %SymphonyElixir.Linear.Issue{
+      issue = %Issue{
         id: "linear-300",
         identifier: "SYM-300",
         title: "Prompt test"
       }
 
-      packet = SymphonyElixir.Steward.ExecutionPacket.build(issue, nil)
+      packet = ExecutionPacket.build(issue, nil)
 
-      assert {:ok, prompt_str} = SymphonyElixir.Steward.ExecutionPacket.prompt(packet)
+      assert {:ok, prompt_str} = ExecutionPacket.prompt(packet)
       assert String.contains?(prompt_str, "SYM-300")
-      assert String.contains?(prompt_str, "execution packet")
+      assert String.contains?(prompt_str, "Symphony steward packet")
+      assert String.contains?(prompt_str, "OpenCode writes application code")
+      assert String.contains?(prompt_str, "Do not edit repo files")
+      assert String.contains?(prompt_str, "symphony:review-decision:v1")
     end
 
     test "forbidden_preamble?/1 detects forbidden role preambles" do
-      assert SymphonyElixir.Steward.ExecutionPacket.forbidden_preamble?("You are the coding orchestrator for project X")
+      assert ExecutionPacket.forbidden_preamble?("You are the coding orchestrator for project X")
 
-      assert SymphonyElixir.Steward.ExecutionPacket.forbidden_preamble?("You are the Machine Architect deciding the architecture")
+      assert ExecutionPacket.forbidden_preamble?("You are the Machine Architect deciding the architecture")
 
-      refute SymphonyElixir.Steward.ExecutionPacket.forbidden_preamble?("You are the OpenCode build orchestrator")
+      refute ExecutionPacket.forbidden_preamble?("You are the OpenCode build orchestrator")
 
-      refute SymphonyElixir.Steward.ExecutionPacket.forbidden_preamble?("Symphony execution packet\\n\\n{...}")
+      refute ExecutionPacket.forbidden_preamble?("Symphony execution packet\\n\\n{...}")
 
-      refute SymphonyElixir.Steward.ExecutionPacket.forbidden_preamble?("Normal prompt without forbidden preamble")
+      refute ExecutionPacket.forbidden_preamble?("Normal prompt without forbidden preamble")
     end
   end
 

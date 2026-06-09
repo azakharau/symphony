@@ -519,15 +519,21 @@ defmodule SymphonyElixir.OpenCode.Runner do
 
     with true <- File.exists?(db_path) || {:error, {:opencode_db_not_found, db_path}},
          {:ok, session} <- read_session_row(db_path, session_id) do
-      input = Map.get(session, "tokens_input") || 0
-      output = Map.get(session, "tokens_output") || 0
+      {:ok, session_usage(session)}
+    end
+  end
 
+  @spec read_session_activity(Path.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def read_session_activity(execution_dir, session_id) do
+    db_path = opencode_db_path()
+
+    with true <- File.exists?(db_path) || {:error, {:opencode_db_not_found, db_path}},
+         {:ok, activity} <- read_session_activity_row(db_path, session_id),
+         :ok <- ensure_session_directory(activity, execution_dir) do
       {:ok,
-       %{
-         "inputTokens" => input,
-         "outputTokens" => output,
-         "totalTokens" => input + output
-       }}
+       activity
+       |> Map.put("usage", session_usage(activity))
+       |> Map.put("fingerprint", session_activity_fingerprint(activity))}
     end
   end
 
@@ -556,6 +562,83 @@ defmodule SymphonyElixir.OpenCode.Runner do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp read_session_activity_row(db_path, session_id) do
+    sql =
+      """
+      select
+        s.id,
+        s.title,
+        s.directory,
+        s.time_created,
+        s.time_updated,
+        s.summary_files,
+        s.summary_additions,
+        s.summary_deletions,
+        s.tokens_input,
+        s.tokens_output,
+        s.tokens_reasoning,
+        s.tokens_cache_read,
+        s.tokens_cache_write,
+        (select count(*) from message m where m.session_id = s.id) as message_count,
+        coalesce((select max(m.time_updated) from message m where m.session_id = s.id), 0) as message_updated,
+        (select count(*) from part p where p.session_id = s.id) as part_count,
+        coalesce((select max(p.time_updated) from part p where p.session_id = s.id), 0) as part_updated
+      from session s
+      where s.id = #{sql_string(session_id)}
+      limit 1;
+      """
+
+    case sqlite_json(db_path, sql) do
+      {:ok, [activity | _]} -> {:ok, activity}
+      {:ok, []} -> {:error, {:opencode_session_not_found, session_id}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp session_usage(session) when is_map(session) do
+    input = integer_value(Map.get(session, "tokens_input"))
+    output = integer_value(Map.get(session, "tokens_output"))
+
+    %{
+      "inputTokens" => input,
+      "outputTokens" => output,
+      "totalTokens" => input + output
+    }
+  end
+
+  defp session_activity_fingerprint(activity) when is_map(activity) do
+    [
+      "time_updated",
+      "summary_files",
+      "summary_additions",
+      "summary_deletions",
+      "tokens_input",
+      "tokens_output",
+      "tokens_reasoning",
+      "tokens_cache_read",
+      "tokens_cache_write",
+      "message_count",
+      "message_updated",
+      "part_count",
+      "part_updated"
+    ]
+    |> Enum.map(&[&1, Map.get(activity, &1)])
+    |> Jason.encode!()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
+  defp integer_value(value) when is_integer(value), do: value
+
+  defp integer_value(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {integer, ""} -> integer
+      _other -> 0
+    end
+  end
+
+  defp integer_value(_value), do: 0
 
   defp ensure_session_directory(%{"directory" => execution_dir}, execution_dir), do: :ok
 

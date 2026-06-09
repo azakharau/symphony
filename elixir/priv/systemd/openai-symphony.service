@@ -1,0 +1,28 @@
+# Checked-in template for the Symphony multiproject root daemon.
+# Do not install, reload, enable, start, stop, or restart this unit without
+# owner approval that names openai-symphony.service and the exact action.
+# Copy to /etc/systemd/system/openai-symphony.service only during an approved
+# cutover; keep old per-project openai-symphony-*.service units available for
+# rollback until owner acceptance.
+
+[Unit]
+Description=OpenAI Symphony multiproject root daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+WorkingDirectory=/home/agent/proj/symphony/elixir
+Environment=HOME=/home/agent
+Environment=SYMPHONY_LOGS_ROOT=/home/agent/.symphony/logs/openai-symphony/daemon
+ExecStart=/home/agent/proj/symphony/elixir/bin/symphony --i-understand-that-this-will-be-running-without-the-usual-guardrails --projects-config /home/agent/.symphony/config/projects.yml --logs-root /home/agent/.symphony/logs/openai-symphony/daemon --port 4110
+Restart=on-failure
+RestartSec=10s
+KillSignal=SIGTERM
+TimeoutStopSec=60s
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

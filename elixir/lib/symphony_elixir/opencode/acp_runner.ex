@@ -6,6 +6,8 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
   alias SymphonyElixir.{Config, Linear.Issue, PathSafety}
   alias SymphonyElixir.OpenCode.{ACPClient, ACPSessionStore, Runner}
 
+  @session_activity_poll_ms 30_000
+
   @spec run(Path.t(), Issue.t(), String.t(), keyword()) ::
           {:ok, Runner.result()} | {:error, term()}
   def run(workspace, %Issue{} = issue, prompt, opts \\ [])
@@ -22,6 +24,7 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
       Keyword.get(opts, :session_result_reader, &Runner.read_completed_session_result/2)
 
     session_usage_reader = Keyword.get(opts, :session_usage_reader, &Runner.read_session_usage/2)
+    session_activity_reader = Keyword.get(opts, :session_activity_reader, &Runner.read_session_activity/2)
     session_scope = session_store.prompt_scope(prompt)
     cwd = Keyword.get(opts, :cwd, opencode_project_root(opencode.project_root, workspace))
     title = Keyword.get(opts, :title, issue_title(issue))
@@ -83,7 +86,8 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
                       cwd: cwd,
                       on_event: on_event,
                       session_result_reader: session_result_reader,
-                      session_usage_reader: session_usage_reader
+                      session_usage_reader: session_usage_reader,
+                      session_activity_reader: session_activity_reader
                     ),
                     prompt
                   )
@@ -110,7 +114,8 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
                     cwd: cwd,
                     on_event: on_event,
                     session_result_reader: session_result_reader,
-                    session_usage_reader: session_usage_reader
+                    session_usage_reader: session_usage_reader,
+                    session_activity_reader: session_activity_reader
                   ),
                   prompt
                 )
@@ -175,11 +180,12 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
     do: {:error, :opencode_session_id_missing}
 
   defp configure_session(client_module, client, session_id, opencode) do
-    with :ok <-
-           set_session_config_option(client_module, client, session_id, "mode", opencode.agent, opencode),
-         :ok <-
-           set_session_config_option(client_module, client, session_id, "model", opencode.model, opencode) do
-      :ok
+    case set_session_config_option(client_module, client, session_id, "mode", opencode.agent, opencode) do
+      :ok ->
+        set_session_config_option(client_module, client, session_id, "model", opencode.model, opencode)
+
+      error ->
+        error
     end
   end
 
@@ -191,29 +197,30 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
 
   defp set_session_config_option(client_module, client, session_id, config_id, value, opencode) do
     if function_exported?(client_module, :set_config_option, 3) do
-      case client_module.set_config_option(
-             client,
-             %{"sessionId" => session_id, "configId" => config_id, "value" => value},
-             opencode.read_timeout_ms
-           ) do
-        {:ok, _result} ->
-          :ok
-
-        {:error, reason} ->
-          if unsupported_config_option_reason?(reason) do
-            :ok
-          else
-            {:error, {:opencode_acp_config_option_failed, config_id, reason}}
-          end
-      end
+      do_set_session_config_option(client_module, client, session_id, config_id, value, opencode)
     else
       :ok
     end
   end
 
+  defp do_set_session_config_option(client_module, client, session_id, config_id, value, opencode) do
+    params = %{"sessionId" => session_id, "configId" => config_id, "value" => value}
+
+    case client_module.set_config_option(client, params, opencode.read_timeout_ms) do
+      {:ok, _result} -> :ok
+      {:error, reason} -> config_option_error(config_id, reason)
+    end
+  end
+
+  defp config_option_error(config_id, reason) do
+    if unsupported_config_option_reason?(reason),
+      do: :ok,
+      else: {:error, {:opencode_acp_config_option_failed, config_id, reason}}
+  end
+
   defp unsupported_config_option_reason?({:unsupported_acp_method, "session/set_config_option"}), do: true
 
-  defp unsupported_config_option_reason?(%{"code" => -32601}), do: true
+  defp unsupported_config_option_reason?(%{"code" => -32_601}), do: true
 
   defp unsupported_config_option_reason?(%{"message" => message}) when is_binary(message) do
     message
@@ -233,7 +240,8 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
       cwd: Keyword.fetch!(attrs, :cwd),
       on_event: Keyword.fetch!(attrs, :on_event),
       session_result_reader: Keyword.fetch!(attrs, :session_result_reader),
-      session_usage_reader: Keyword.fetch!(attrs, :session_usage_reader)
+      session_usage_reader: Keyword.fetch!(attrs, :session_usage_reader),
+      session_activity_reader: Keyword.fetch!(attrs, :session_activity_reader)
     }
   end
 
@@ -255,83 +263,304 @@ defmodule SymphonyElixir.OpenCode.ACPRunner do
         )
       end)
 
-    collect_prompt_result(task, context, [], false)
+    collect_prompt_result(
+      task,
+      context,
+      [],
+      false,
+      stall_deadline(context.opencode.stall_timeout_ms),
+      read_session_activity_fingerprint(context)
+    )
   end
 
-  defp collect_prompt_result(task, context, events, end_turn?) do
-    task_ref = task.ref
-
+  defp collect_prompt_result(task, context, events, end_turn?, stall_deadline_ms, activity_fingerprint) do
     receive do
-      {^task_ref, {:ok, result}} ->
-        demonitor_task(task)
-
-        cond do
-          user_input_required?(events) ->
-            {:error, {:need_owner_input, events}}
-
-          end_turn? or end_turn_result?(result) ->
-            case completed_session_result(
-                   context.session_result_reader,
-                   context.cwd,
-                   context.session_id,
-                   context.command,
-                   context.opencode
-                 ) do
-              {:ok, result} ->
-                {:ok, result}
-
-              {:error, _reason} ->
-                {:ok,
-                 %{
-                   output: format_output(events, result),
-                   command: context.command,
-                   project_root: context.cwd,
-                   session_id: context.session_id,
-                   attach_url: context.opencode.server_url,
-                   runner_owner: "opencode"
-                 }}
-            end
-
-          true ->
-            {:error, {:opencode_acp_incomplete, result}}
-        end
-
-      {^task_ref, {:error, :timeout}} ->
-        demonitor_task(task)
-        maybe_cancel(context.client_module, context.client, context.session_id, context.opencode)
-        {:error, {:opencode_timeout, context.opencode.timeout_ms}}
-
-      {^task_ref, {:error, reason}} ->
-        demonitor_task(task)
-        {:error, reason}
-
-      {:DOWN, ^task_ref, :process, _pid, reason} ->
-        {:error, {:opencode_acp_prompt_failed, reason}}
-
-      {:acp_notification, method, params} ->
-        emit_acp_update(context, :notification, method, params)
-
-        collect_prompt_result(
+      message ->
+        handle_prompt_message(
+          message,
           task,
           context,
-          [{method, params} | events],
-          end_turn? or end_turn_event?(method, params)
+          events,
+          end_turn?,
+          stall_deadline_ms,
+          activity_fingerprint
         )
-
-      {:acp_request, method, params} ->
-        emit_acp_update(context, :request, method, params)
-
-        collect_prompt_result(task, context, [{method, params} | events], end_turn?)
     after
-      stall_timeout(context.opencode.stall_timeout_ms) ->
-        maybe_cancel(context.client_module, context.client, context.session_id, context.opencode)
-        Task.shutdown(task, :brutal_kill)
-        {:error, {:opencode_acp_stalled, context.opencode.stall_timeout_ms}}
+      activity_wait_timeout(stall_deadline_ms) ->
+        handle_prompt_activity_timeout(task, context, events, end_turn?, stall_deadline_ms, activity_fingerprint)
     end
   end
 
-  defp stall_timeout(0), do: :infinity
-  defp stall_timeout(timeout_ms), do: timeout_ms
+  defp handle_prompt_message({task_ref, {:ok, result}}, %{ref: task_ref} = task, context, events, end_turn?, _deadline, _activity) do
+    demonitor_task(task)
+    finalize_prompt_result(result, context, events, end_turn?)
+  end
+
+  defp handle_prompt_message({task_ref, {:error, :timeout}}, %{ref: task_ref} = task, context, _events, _end_turn?, _deadline, _activity) do
+    demonitor_task(task)
+    maybe_cancel(context.client_module, context.client, context.session_id, context.opencode)
+    {:error, {:opencode_timeout, context.opencode.timeout_ms}}
+  end
+
+  defp handle_prompt_message({task_ref, {:error, reason}}, %{ref: task_ref} = task, _context, _events, _end_turn?, _deadline, _activity) do
+    demonitor_task(task)
+    {:error, reason}
+  end
+
+  defp handle_prompt_message(
+         {:DOWN, task_ref, :process, _pid, reason},
+         %{ref: task_ref},
+         _context,
+         _events,
+         _end_turn?,
+         _deadline,
+         _activity
+       ) do
+    {:error, {:opencode_acp_prompt_failed, reason}}
+  end
+
+  defp handle_prompt_message(
+         {:acp_notification, method, params},
+         task,
+         context,
+         events,
+         end_turn?,
+         stall_deadline_ms,
+         activity_fingerprint
+       ) do
+    emit_acp_update(context, :notification, method, params)
+
+    stall_deadline_ms =
+      maybe_refresh_stall_deadline(stall_deadline_ms, method, params, context.opencode.stall_timeout_ms)
+
+    collect_prompt_result(
+      task,
+      context,
+      [{method, params} | events],
+      end_turn? or end_turn_event?(method, params),
+      stall_deadline_ms,
+      activity_fingerprint
+    )
+  end
+
+  defp handle_prompt_message(
+         {:acp_request, method, params},
+         task,
+         context,
+         events,
+         end_turn?,
+         stall_deadline_ms,
+         activity_fingerprint
+       ) do
+    emit_acp_update(context, :request, method, params)
+    stall_deadline_ms = refresh_stall_deadline(stall_deadline_ms, context.opencode.stall_timeout_ms)
+
+    collect_prompt_result(
+      task,
+      context,
+      [{method, params} | events],
+      end_turn?,
+      stall_deadline_ms,
+      activity_fingerprint
+    )
+  end
+
+  defp handle_prompt_message(_message, task, context, events, end_turn?, stall_deadline_ms, activity_fingerprint) do
+    collect_prompt_result(task, context, events, end_turn?, stall_deadline_ms, activity_fingerprint)
+  end
+
+  defp finalize_prompt_result(result, context, events, end_turn?) do
+    cond do
+      user_input_required?(events) ->
+        {:error, {:need_owner_input, events}}
+
+      end_turn? or end_turn_result?(result) ->
+        completed_or_formatted_session_result(result, context, events)
+
+      true ->
+        {:error, {:opencode_acp_incomplete, result}}
+    end
+  end
+
+  defp handle_prompt_activity_timeout(task, context, events, end_turn?, stall_deadline_ms, activity_fingerprint) do
+    case maybe_emit_session_activity(context, activity_fingerprint) do
+      {:progress, next_activity_fingerprint} ->
+        collect_prompt_result(
+          task,
+          context,
+          events,
+          end_turn?,
+          refresh_stall_deadline(stall_deadline_ms, context.opencode.stall_timeout_ms),
+          next_activity_fingerprint
+        )
+
+      {:idle, next_activity_fingerprint} ->
+        maybe_continue_after_idle_activity(
+          task,
+          context,
+          events,
+          end_turn?,
+          stall_deadline_ms,
+          next_activity_fingerprint
+        )
+    end
+  end
+
+  defp maybe_continue_after_idle_activity(task, context, events, end_turn?, stall_deadline_ms, activity_fingerprint) do
+    if stall_deadline_expired?(stall_deadline_ms) do
+      maybe_cancel(context.client_module, context.client, context.session_id, context.opencode)
+      Task.shutdown(task, :brutal_kill)
+      {:error, {:opencode_acp_stalled, context.opencode.stall_timeout_ms}}
+    else
+      collect_prompt_result(task, context, events, end_turn?, stall_deadline_ms, activity_fingerprint)
+    end
+  end
+
+  defp completed_or_formatted_session_result(result, context, events) do
+    case completed_session_result(
+           context.session_result_reader,
+           context.cwd,
+           context.session_id,
+           context.command,
+           context.opencode
+         ) do
+      {:ok, result} -> {:ok, result}
+      {:error, _reason} -> {:ok, formatted_prompt_result(result, context, events)}
+    end
+  end
+
+  defp formatted_prompt_result(result, context, events) do
+    %{
+      output: format_output(events, result),
+      command: context.command,
+      project_root: context.cwd,
+      session_id: context.session_id,
+      attach_url: context.opencode.server_url,
+      runner_owner: "opencode"
+    }
+  end
+
+  defp stall_deadline(0), do: :infinity
+  defp stall_deadline(timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0, do: System.monotonic_time(:millisecond) + timeout_ms
+  defp stall_deadline(_timeout_ms), do: :infinity
+
+  defp remaining_stall_timeout(deadline_ms) when is_integer(deadline_ms) do
+    max(deadline_ms - System.monotonic_time(:millisecond), 0)
+  end
+
+  defp activity_wait_timeout(:infinity), do: :infinity
+
+  defp activity_wait_timeout(stall_deadline_ms) when is_integer(stall_deadline_ms) do
+    min(remaining_stall_timeout(stall_deadline_ms), @session_activity_poll_ms)
+  end
+
+  defp stall_deadline_expired?(:infinity), do: false
+
+  defp stall_deadline_expired?(stall_deadline_ms) when is_integer(stall_deadline_ms) do
+    remaining_stall_timeout(stall_deadline_ms) == 0
+  end
+
+  defp maybe_refresh_stall_deadline(stall_deadline_ms, method, params, timeout_ms) do
+    if productive_acp_event?(method, params) do
+      refresh_stall_deadline(stall_deadline_ms, timeout_ms)
+    else
+      stall_deadline_ms
+    end
+  end
+
+  defp refresh_stall_deadline(:infinity, _timeout_ms), do: :infinity
+  defp refresh_stall_deadline(_stall_deadline_ms, timeout_ms), do: stall_deadline(timeout_ms)
+
+  defp productive_acp_event?(method, _params) when method in ["session/update", :session_update], do: true
+
+  defp productive_acp_event?(_method, %{"type" => type} = params) when is_binary(type) do
+    type in [
+      "agent_text",
+      "assistant_message",
+      "end_turn",
+      "error",
+      "tool_call",
+      "tool_plan",
+      "tool_result",
+      "usage",
+      "user_input_required",
+      "session"
+    ] or Map.has_key?(params, "usage") or Map.has_key?(params, "text") or Map.has_key?(params, "tool") or
+      Map.has_key?(params, "message")
+  end
+
+  defp productive_acp_event?(_method, %{"usage" => usage}) when is_map(usage), do: true
+  defp productive_acp_event?(_method, %{"text" => text}) when is_binary(text) and text != "", do: true
+  defp productive_acp_event?(_method, %{"tool" => tool}) when is_binary(tool) and tool != "", do: true
+  defp productive_acp_event?(_method, _params), do: true
+
+  defp read_session_activity_fingerprint(context) do
+    case read_session_activity(context) do
+      {:ok, activity} -> session_activity_fingerprint(activity)
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp maybe_emit_session_activity(context, previous_fingerprint) do
+    case read_session_activity(context) do
+      {:ok, activity} ->
+        fingerprint = session_activity_fingerprint(activity)
+
+        if is_binary(fingerprint) and fingerprint != previous_fingerprint do
+          emit_session_activity(context, activity)
+          {:progress, fingerprint}
+        else
+          {:idle, fingerprint || previous_fingerprint}
+        end
+
+      {:error, _reason} ->
+        {:idle, previous_fingerprint}
+    end
+  end
+
+  defp read_session_activity(%{session_activity_reader: session_activity_reader, cwd: cwd, session_id: session_id})
+       when is_function(session_activity_reader, 2) and is_binary(session_id) and session_id != "" do
+    case session_activity_reader.(cwd, session_id) do
+      {:ok, activity} when is_map(activity) -> {:ok, activity}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:opencode_session_activity_reader_unexpected, other}}
+    end
+  rescue
+    error in [ErlangError, RuntimeError, ArgumentError, File.Error] ->
+      {:error, {:opencode_session_activity_reader_failed, Exception.message(error)}}
+  end
+
+  defp read_session_activity(_context), do: {:error, :opencode_session_activity_unavailable}
+
+  defp session_activity_fingerprint(%{"fingerprint" => fingerprint}) when is_binary(fingerprint) and fingerprint != "",
+    do: fingerprint
+
+  defp session_activity_fingerprint(%{fingerprint: fingerprint}) when is_binary(fingerprint) and fingerprint != "",
+    do: fingerprint
+
+  defp session_activity_fingerprint(_activity), do: nil
+
+  defp emit_session_activity(context, activity) do
+    update =
+      %{
+        event: :session_activity,
+        phase: :running,
+        timestamp: DateTime.utc_now(),
+        runner_owner: "opencode",
+        project_root: context.cwd,
+        command: context.command,
+        session_id: context.session_id,
+        attach_url: context.opencode.server_url,
+        payload: %{"source" => "opencode_db", "activity" => activity}
+      }
+      |> maybe_put_activity_usage(activity)
+
+    context.on_event.(update)
+  end
+
+  defp maybe_put_activity_usage(update, %{"usage" => usage}) when is_map(usage), do: Map.put(update, :usage, usage)
+  defp maybe_put_activity_usage(update, %{usage: usage}) when is_map(usage), do: Map.put(update, :usage, usage)
+  defp maybe_put_activity_usage(update, _activity), do: update
 
   @dialyzer {:no_opaque, demonitor_task: 1}
   defp demonitor_task(%Task{ref: ref}) do

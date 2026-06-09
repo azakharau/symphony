@@ -10,12 +10,21 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
 
   @spec state(Conn.t(), map()) :: Conn.t()
   def state(conn, _params) do
-    json(conn, Presenter.state_payload(orchestrator(), snapshot_timeout_ms()))
+    json(conn, Presenter.state_payload(orchestrator(), snapshot_timeout_ms(), project_states_provider()))
+  end
+
+  @spec project_state(Conn.t(), map()) :: Conn.t()
+  def project_state(conn, %{"project_id" => project_id}) do
+    case Presenter.project_state_payload(project_id, project_states_provider(), snapshot_timeout_ms()) do
+      {:ok, payload} -> json(conn, payload)
+      {:error, :project_not_found} -> error_response(conn, 404, "project_not_found", "Project not found")
+      {:error, :project_unavailable} -> error_response(conn, 503, "project_unavailable", "Project is unavailable")
+    end
   end
 
   @spec issue(Conn.t(), map()) :: Conn.t()
   def issue(conn, %{"issue_identifier" => issue_identifier}) do
-    case Presenter.issue_payload(issue_identifier, orchestrator(), snapshot_timeout_ms()) do
+    case Presenter.issue_payload(issue_identifier, orchestrator(), snapshot_timeout_ms(), project_states_provider()) do
       {:ok, payload} ->
         json(conn, payload)
 
@@ -24,9 +33,24 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
     end
   end
 
+  @spec project_issue(Conn.t(), map()) :: Conn.t()
+  def project_issue(conn, %{"project_id" => project_id, "issue_identifier" => issue_identifier}) do
+    case Presenter.project_issue_payload(
+           project_id,
+           issue_identifier,
+           project_states_provider(),
+           snapshot_timeout_ms()
+         ) do
+      {:ok, payload} -> json(conn, payload)
+      {:error, :project_not_found} -> error_response(conn, 404, "project_not_found", "Project not found")
+      {:error, :project_unavailable} -> error_response(conn, 503, "project_unavailable", "Project is unavailable")
+      {:error, :issue_not_found} -> error_response(conn, 404, "issue_not_found", "Issue not found")
+    end
+  end
+
   @spec refresh(Conn.t(), map()) :: Conn.t()
   def refresh(conn, _params) do
-    case Presenter.refresh_payload(orchestrator()) do
+    case Presenter.refresh_payload(orchestrator(), project_states_provider()) do
       {:ok, payload} ->
         conn
         |> put_status(202)
@@ -34,6 +58,25 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
 
       {:error, :unavailable} ->
         error_response(conn, 503, "orchestrator_unavailable", "Orchestrator is unavailable")
+    end
+  end
+
+  @spec project_refresh(Conn.t(), map()) :: Conn.t()
+  def project_refresh(conn, %{"project_id" => project_id}) do
+    case Presenter.project_refresh_payload(project_id, project_states_provider()) do
+      {:ok, payload} ->
+        conn
+        |> put_status(202)
+        |> json(payload)
+
+      {:error, :project_not_found} ->
+        error_response(conn, 404, "project_not_found", "Project not found")
+
+      {:error, :project_unavailable} ->
+        error_response(conn, 503, "project_unavailable", "Project is unavailable")
+
+      {:error, :unavailable} ->
+        error_response(conn, 503, "project_unavailable", "Project is unavailable")
     end
   end
 
@@ -59,5 +102,9 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
 
   defp snapshot_timeout_ms do
     Endpoint.config(:snapshot_timeout_ms) || 15_000
+  end
+
+  defp project_states_provider do
+    Endpoint.config(:project_states_provider)
   end
 end

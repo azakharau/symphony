@@ -310,7 +310,7 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
     Failure:
     - #{runner_failure_human(reason)}
 
-    This is an OpenCode runner liveness/timeout condition, not implementation RCA evidence. Increase or disable `opencode.stall_timeout_ms`, inspect the OpenCode session if needed, then move the issue back to `In Progress` when the runner should continue.
+    This is an OpenCode runner liveness condition, not implementation RCA evidence. Symphony only parks after both the ACP stream and persisted OpenCode session activity stay unchanged for the configured stall window. Inspect the OpenCode session if needed, then move the issue back to `In Progress` when the runner should continue.
     """
     |> String.trim()
   end
@@ -319,17 +319,11 @@ defmodule SymphonyElixir.Runner.OpenCodeDispatch do
     %{reason: :opencode_acp_stalled, timeout_ms: timeout_ms}
   end
 
-  defp runner_failure_payload(reason), do: %{reason: runner_failure_reason(reason)}
-
-  defp runner_failure_reason({reason, _detail}) when is_atom(reason), do: reason
-  defp runner_failure_reason(reason) when is_atom(reason), do: reason
-  defp runner_failure_reason(_reason), do: :opencode_runner_failed
+  defp runner_failure_reason({:opencode_acp_stalled, _timeout_ms}), do: :opencode_acp_stalled
 
   defp runner_failure_human({:opencode_acp_stalled, timeout_ms}) do
-    "OpenCode ACP session produced no runner events for #{timeout_ms}ms."
+    "OpenCode ACP session produced no ACP updates or persisted session activity for #{timeout_ms}ms."
   end
-
-  defp runner_failure_human(reason), do: inspect(reason)
 
   defp malformed_opencode_task_prompt_comment(%Issue{} = issue, reason, rca_required_state) do
     """

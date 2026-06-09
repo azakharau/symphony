@@ -370,7 +370,7 @@ Fields:
 - `project_slug` (string)
   - REQUIRED for dispatch when `tracker.kind == "linear"`.
 - `active_states` (list of strings)
-  - Default: `Todo`, `In Progress`
+  - Default: `Todo`, `Preparing`, `In Progress`
 - `terminal_states` (list of strings)
   - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done`
 
@@ -386,7 +386,7 @@ Fields:
   - Used for expensive full-project polling when an implementation distinguishes fast and full polls.
   - Implementations MAY set this to `30000` for projects where all active states need fast reaction.
 - `fast_states` (list of strings)
-  - Default: `Todo`, `Need Owner Input`
+  - Default: `Todo`, `Preparing`, `Need Owner Input`
   - States listed here SHOULD be checked on the fast `interval_ms` cadence.
   - When `In Progress` is routed to OpenCode, `In Progress` SHOULD be included so runner progress,
     handoffs, and state changes are observed without waiting for a full poll.
@@ -459,10 +459,23 @@ Fields:
 
 Runner route intent:
 
-- `Todo` is typically routed to Codex/steward work that prepares the implementation packet.
+- `Todo` is queued work. It is not a runner execution state.
+- `Preparing` is typically routed to Codex/steward work that prepares the implementation packet.
 - `In Progress` MAY be routed to OpenCode for first-class implementation execution.
 - `In Review` SHOULD remain dispatch-eligible when the review/acceptance agent owns validation.
 - `Need Owner Input` SHOULD NOT launch implementation work unless a newer owner-visible answer exists.
+
+When Codex is used for stewardship, it is not an implementation runner:
+
+- For `Todo`, Symphony may promote one eligible issue to `Preparing` and stop the poll cycle.
+- For `Preparing`, Codex may verify milestone/blocker eligibility, post one complete OpenCode task
+  prompt, move the same issue to `In Progress`, and stop. It MUST NOT edit application files, run
+  implementation validation, commit, push, or open a PR.
+- For `In Review`, Codex may inspect the OpenCode handoff, direct diff, and validation evidence,
+  then post one review decision and perform accepted closure.
+- For `RCA Required`, Codex may diagnose the failure and author a redesigned OpenCode prompt, but
+  MUST NOT implement the repair itself.
+- OpenCode remains the implementation runner for application-code changes.
 
 #### 5.3.7 `codex` (object)
 
@@ -668,11 +681,11 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.endpoint`: string, default `https://api.linear.app/graphql` when `tracker.kind=linear`
 - `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
 - `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear`
-- `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
+- `tracker.active_states`: list of strings, default `["Todo", "Preparing", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
 - `polling.interval_ms`: integer, default `30000`
 - `polling.full_interval_ms`: integer, default `60000`
-- `polling.fast_states`: list of strings, default `["Todo", "Need Owner Input"]`
+- `polling.fast_states`: list of strings, default `["Todo", "Preparing", "Need Owner Input"]`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
 - `hooks.after_create`: shell script or null
 - `hooks.before_run`: shell script or null
@@ -837,8 +850,9 @@ An issue is dispatch-eligible only if all are true:
 - It is not already in `claimed`.
 - Global concurrency slots are available.
 - Per-state concurrency slots are available.
-- Blocker rule for `Todo` state passes:
-  - If the issue state is `Todo`, do not dispatch when any blocker is non-terminal.
+- Queued-state promotion rule passes:
+  - If the issue state is `Todo`, do not dispatch a runner. Promote one eligible issue to `Preparing` and stop the poll cycle.
+  - If the issue state is `Preparing`, do not dispatch when any blocker is non-terminal.
 - Runner route exists:
   - Use `runner.routes[issue.state]` when present, otherwise `runner.default`.
   - If the selected runner is unavailable or lacks required config, do not dispatch the issue.
@@ -1576,6 +1590,14 @@ Minimum endpoints:
 - `GET /api/v1/state`
   - Returns a summary view of the current system state (running sessions, retry queue/delays,
     aggregate token/runtime totals, latest rate limits, and any additional tracked summary fields).
+  - In root multiproject mode, returns aggregate state across configured projects. The aggregate
+    SHOULD include `counts`, `counts_by_project`, `counts_by_runner_kind`, and a `projects` list.
+    Disabled, missing, or currently unavailable projects remain visible in `projects` with zero
+    issue counts and unavailable/error health so operators can distinguish hidden work from an
+    intentionally disabled or unhealthy project.
+  - Each project entry SHOULD include project metadata useful for routing and operations: `id`,
+    `name`, `order`, `root`, `app_root`, `enabled`, `status`, `execution_enabled`, `gate_enabled`,
+    `runner_kind`, `worker_health`, and `error` when applicable.
   - Suggested response shape:
 
     ```json
@@ -1634,6 +1656,11 @@ Minimum endpoints:
 - `GET /api/v1/<issue_identifier>`
   - Returns issue-specific runtime/debug details for the identified issue, including any information
     the implementation tracks that is useful for debugging.
+  - This global compatibility endpoint remains valid in single-runtime mode. In root multiproject
+    mode, implementations SHOULD search the aggregate project states when available.
+  - If duplicate matches are possible, the response SHOULD expose enough match metadata for an
+    operator to disambiguate project-local records, including issue id, issue identifier, status,
+    project, workspace path, runner, and session id.
   - Suggested response shape:
 
     ```json
@@ -1696,9 +1723,26 @@ Minimum endpoints:
   - If the issue is unknown to the current in-memory state, return `404` with an error response (for
     example `{\"error\":{\"code\":\"issue_not_found\",\"message\":\"...\"}}`).
 
+- `GET /api/v1/projects/<project_id>/state`
+  - Returns the same state shape as `/api/v1/state`, scoped to the configured project id.
+  - If the project id is not configured, return `404` with a `project_not_found` error response.
+  - If the project exists but its runtime state cannot currently be served, return `503` with a
+    `project_unavailable` or `unavailable` error response.
+
+- `GET /api/v1/projects/<project_id>/issues/<issue_identifier>`
+  - Returns issue-specific runtime/debug details scoped to the configured project id.
+  - This route is preferred when the caller already knows the project or when global lookup reports
+    duplicate matches.
+  - If the issue identifier exists only in another project, this route returns `404 issue_not_found`;
+    it must not fall back to the aggregate/global issue lookup.
+  - If the project id is not configured, return `404` with a `project_not_found` error response. If
+    the project exists but cannot currently serve issue state, return `503` with a
+    `project_unavailable` or `unavailable` error response.
+
 - `POST /api/v1/refresh`
   - Queues an immediate tracker poll + reconciliation cycle (best-effort trigger; implementations
     MAY coalesce repeated requests).
+  - In root multiproject mode, triggers refresh across available projects.
   - Suggested request body: empty body or `{}`.
   - Suggested response (`202 Accepted`) shape:
 
@@ -1710,6 +1754,12 @@ Minimum endpoints:
       "operations": ["poll", "reconcile"]
     }
     ```
+
+- `POST /api/v1/projects/<project_id>/refresh`
+  - Queues an immediate tracker poll + reconciliation cycle for the configured project id.
+  - Return `202 Accepted` on successful queueing. If the project id is not configured, return `404`
+    with a `project_not_found` error response. If the project exists but cannot currently accept a
+    refresh trigger, return `503` with a `project_unavailable` or `unavailable` error response.
 
 API design notes:
 
@@ -2197,8 +2247,9 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 ### 17.4 Orchestrator Dispatch, Reconciliation, and Retry
 
 - Dispatch sort order is priority then oldest creation time
-- `Todo` issue with non-terminal blockers is not eligible
-- `Todo` issue with terminal blockers is eligible
+- `Todo` issue with terminal blockers can be promoted to `Preparing`; it is not directly dispatched to a runner
+- `Preparing` issue with non-terminal blockers is not eligible
+- `Preparing` issue with terminal blockers is eligible
 - `Need Owner Input` without newer owner-visible input is not eligible for repeated processing
 - `In Review` remains eligible when review/acceptance is routed to the steward runner
 - State runner route selects the configured runner and falls back to `runner.default`

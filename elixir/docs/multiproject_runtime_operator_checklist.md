@@ -5,6 +5,10 @@ preparation guide only: do not stop existing per-project services, enable a new
 root daemon, change systemd units, or migrate live issue processing unless the
 owner explicitly approves the named service and exact action.
 
+For the checked-in SYM-19 dry-run, cutover, health-check, stop, and rollback
+procedure, use `docs/multiproject_cutover.md`. Keep this checklist as the quick
+preparation summary; the cutover runbook is the source for exact command blocks.
+
 ## Current runtime boundary
 
 - Single-project mode remains supported with `./bin/symphony /path/to/WORKFLOW.md`.
@@ -127,25 +131,44 @@ mix specs.check
 git diff --check
 ```
 
-5. Dry-start root mode only in an owner-approved, non-live environment:
+5. Rehearse root mode only with temporary config/logs/state outside live paths.
+   Follow `docs/multiproject_cutover.md#2-isolated-no-mutation-dry-run-rehearsal`
+   for the checked-in dry-run recipe. The durable live config path remains
+   `/home/agent/.symphony/config/projects.yml`, but dry-runs must not read or
+   write that file.
+
+6. Dry-start root mode only after owner approval names the exact foreground
+   root-daemon rehearsal action and the command points at temporary config/logs,
+   not the live durable config:
 
 ```bash
 cd /home/agent/proj/symphony/elixir
-./bin/symphony --i-understand-that-this-will-be-running-without-the-usual-guardrails --projects-config /home/agent/.symphony/config/projects.yml
+./bin/symphony --i-understand-that-this-will-be-running-without-the-usual-guardrails \
+  --projects-config "$SYMPHONY_DRY_RUN_ROOT/config/projects.yml" \
+  --logs-root "$SYMPHONY_DRY_RUN_ROOT/logs/openai-symphony/daemon" \
+  --port 4110
 ```
 
-Do not run this command against live project config while the old per-project
-services are active unless the owner approved that exact action.
+Do not run the root daemon against live project config while the old per-project
+services are active unless the owner approved that exact live root-daemon action.
 
 ## Cutover readiness checklist
 
 Cutover remains blocked until all items below are true.
 
 - Owner approval names the exact service or daemon action.
+- The checked-in root unit template is reviewed at
+  `priv/systemd/openai-symphony.service`; installation to `/etc/systemd/system/`
+  is still blocked until owner approval names that exact install and reload
+  action.
 - Existing per-project services are idle, or the owner accepts the live-run risk.
 - The root config is committed or otherwise durably recorded.
+- Daemon logs are expected under
+  `/home/agent/.symphony/logs/openai-symphony/daemon/`, and project logs are
+  expected under `/home/agent/.symphony/logs/openai-symphony/<project_id>/`.
 - Each project has an explicit active milestone pointer or is intentionally
   disabled/gated off.
+- Milestone existence alone does not authorize service mutation or dispatch.
 - No project relies on `phase_state:*` milestone description text for dispatch.
 - A rollback target records the previous unit, workflow path, runner routes, and
   workspace root for every affected project.
@@ -160,18 +183,22 @@ Use this only after an owner-approved cutover action has started.
 
 1. Preserve failure evidence with read-only service, listener, dashboard/API,
    logs, and issue lifecycle commands.
-2. Restore the previous workflow or root config from the recorded rollback
-   target.
-3. Run only owner-approved service mutation commands required for rollback.
-4. Verify restored service state with read-only `systemctl show`, listener, and
-   issue lifecycle checks.
-5. Record remaining blockers before resuming dispatch.
+2. Stop the new `openai-symphony.service` only when the owner approves that exact
+   stop action.
+3. Restore the previous root config/unit target from the recorded rollback target
+   only if the approved cutover changed it.
+4. Restart only the previously active per-project units, and only when owner
+   approval names each unit and action.
+5. Verify restored service state with read-only `systemctl show`, listener, port
+   `4111`-`4115`, and issue lifecycle checks.
+6. Record remaining blockers before resuming dispatch.
 
 ## Known blockers and residual risks
 
 - Root mode currently starts project infrastructure with dispatch paused; full
   context-aware multiproject dispatch is still later milestone work.
-- No checked-in systemd root daemon unit is part of this foundation checklist.
+- The checked-in root daemon unit is only a template; installation and systemd
+  actions remain owner-approved live mutations.
 - No live cutover has been approved by this document.
 - Service inventory, listener state, and active issue state can drift after it is
   recorded; refresh evidence immediately before any owner-approved action.

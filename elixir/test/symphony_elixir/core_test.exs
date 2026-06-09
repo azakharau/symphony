@@ -14,8 +14,8 @@ defmodule SymphonyElixir.CoreTest do
     config = Config.settings!()
     assert config.polling.interval_ms == 30_000
     assert config.polling.full_interval_ms == 60_000
-    assert config.polling.fast_states == ["Todo", "Need Owner Input"]
-    assert config.tracker.active_states == ["Todo", "In Progress"]
+    assert config.polling.fast_states == ["Todo", "Preparing", "Need Owner Input"]
+    assert config.tracker.active_states == ["Todo", "Preparing", "In Progress"]
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
@@ -142,7 +142,7 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(opencode, "agent") == "build"
     assert Map.get(opencode, "server_url") == nil
     assert Map.get(opencode, "timeout_ms") == 10_800_000
-    assert Map.get(opencode, "stall_timeout_ms") == 0
+    assert Map.get(opencode, "stall_timeout_ms") == 300_000
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())

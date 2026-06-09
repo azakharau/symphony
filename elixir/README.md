@@ -174,7 +174,9 @@ codex:
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
-  `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+  `/`, `/api/v1/state`, `/api/v1/projects/<project_id>/state`,
+  `/api/v1/<issue_identifier>`, `/api/v1/projects/<project_id>/issues/<issue_identifier>`,
+  `/api/v1/refresh`, and `/api/v1/projects/<project_id>/refresh`.
 - `stewardship.active_milestone_id` selects the only Project Milestone eligible for dispatch in a
   project workflow. Milestone description text such as `phase_state:*` is not parsed as runtime
   state and must not be used as a dispatch gate.
@@ -206,6 +208,16 @@ Each project id must be unique lower-case URL-safe text. `workflow_path` is requ
 missing, or invalid projects are isolated to that project context so other configured projects can
 remain visible. Keep `enabled: false` or `gates.dispatch_enabled: false` during migration
 preparation until an owner-approved cutover explicitly allows dispatch.
+
+In root multiproject mode, `/api/v1/state` returns aggregate counts plus per-project metadata and
+health, while `/api/v1/projects/<project_id>/state` scopes the same operational state to one
+configured project. `/api/v1/refresh` queues refresh across available projects, and
+`/api/v1/projects/<project_id>/refresh` queues refresh for one project. Project-scoped routes return
+`404 project_not_found` for unknown ids and `503 project_unavailable`/`unavailable` when a configured
+project cannot currently serve state or refresh. The global issue lookup remains available for
+single-runtime compatibility and searches aggregate project states when present; project-scoped issue
+lookup should be used when the caller already knows the project or needs to disambiguate duplicates,
+and it returns `404 issue_not_found` instead of falling back to another project's matching issue.
 
 ## Web dashboard
 

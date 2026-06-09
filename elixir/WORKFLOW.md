@@ -4,6 +4,7 @@ tracker:
   project_slug: "87b3b7431580"
   active_states:
     - Todo
+    - Preparing
     - In Progress
     - In Review
     - "Need Owner Input"
@@ -17,6 +18,7 @@ polling:
   full_interval_ms: 30000
   fast_states:
     - Todo
+    - Preparing
     - In Progress
     - "Need Owner Input"
 workspace:
@@ -31,6 +33,7 @@ runner:
   default: codex
   routes:
     Todo: codex
+    Preparing: codex
     "In Review": codex
     "Need Owner Input": codex
     "RCA Required": codex
@@ -48,7 +51,7 @@ opencode:
   result_state: "In Review"
   timeout_ms: 10800000
   read_timeout_ms: 30000
-  stall_timeout_ms: 0
+  stall_timeout_ms: 300000
   permission_policy: reject
 
 OpenCode live validation gate:
@@ -58,7 +61,7 @@ OpenCode live validation gate:
 - To link handoff evidence to a visible OpenCode Web session, also set `OPENCODE_SERVER_URL=http://127.0.0.1:3000`; ACP still runs as the stdio command `/usr/local/bin/opencode acp`, and the URL is recorded only as attach metadata.
 - The gate uses the memory tracker, an evidence-only no-edit OpenCode prompt, and `git status --short` before/after protection; it proves an `In Progress` issue dispatches through OpenCode and reaches the controlled `In Review` handoff state without production Linear mutation.
 - Cleanup is limited to test-owned temporary workspaces. If the gate fails, interpret the command output as local OpenCode/server/session evidence and record the exact command, result, attach URL, session id when present, and any Mnemesh evidence refs on the Linear/Mnemesh validation record.
-- `/home/agent/proj/symphony` is the canonical live gate project root. `/home/agent/.symphony/vendor/openai-symphony` is only a compatibility alias for older service paths, not the live validation root.
+- `/home/agent/proj/symphony` is the canonical live gate project root. Do not use vendor aliases for live validation or service configuration.
 
 process_policy:
   rca_required_state: "RCA Required"
@@ -67,9 +70,6 @@ process_policy:
   state_timeouts_ms:
     "In Review": 1800000
     "RCA Required": 1800000
-stewardship:
-  active_milestone_id: "5c1090e2-998c-484c-b25d-9484bb3cb27d"
-  active_milestone_name: "03. Observability and polling semantics"
 codex:
   command: /home/agent/.symphony/bin/codex-ws-stdio-proxy
   read_timeout_ms: 10800000
@@ -94,36 +94,36 @@ Project identity:
 - Linear team: `SYM` / `SYMPHONY`.
 - Linear project: `symphony`, `projectId=07df87ce-4e93-4d2c-a73d-84aee1f27e07`, `project_slug=87b3b7431580`.
 - Canonical repository checkout: `/home/agent/proj/symphony`.
-- Compatibility alias for older service paths: `/home/agent/.symphony/vendor/openai-symphony`.
 - Elixir app root: `/home/agent/proj/symphony/elixir`.
 - Current working branch for this project: `agent-server/opencode-runner-extension`.
 
 Role boundary:
 
-- The steward owns planning inside approved milestones, architecture, review/evaluation, acceptance/rejection, docs/runbooks, validation ownership, git stage/commit/push, and Linear state hygiene.
-- OpenCode owns implementation of application code when you hand it a complete coding task packet.
-- Do not write application code directly unless the issue is explicitly docs/runbook/config/ops/meta work that is Codex-owned by nature.
-- Do not create new product milestones, choose the next global direction, or seed top-level backlog work. CTO/owner agents choose global milestones. You only decompose an approved milestone into executable tasks.
+- Codex is the architect/reviewer: milestone stewardship, OpenCode prompt authoring, acceptance/rejection, RCA, docs/runbooks, git closure, and Linear hygiene.
+- OpenCode owns implementation of application code as the coding runner: focused validation and one consolidated handoff.
+- Codex must not implement application code for `Todo`, `Preparing`, `In Progress`, `RCA Required`, or `Need Owner Input` issues.
+- Codex may edit files only for explicit docs/runbook/config/ops/meta issues or for final accepted git closure.
+- Do not choose new product milestones or seed top-level backlog work. Work only inside Linear milestones and issues already curated by the owner/CTO.
 
-Active milestone stewardship:
+Milestone rules:
 
-- The CTO/owner selects exactly one active milestone pointer for this project by editing `stewardship.active_milestone_id` in this file; `stewardship.active_milestone_name` is optional display metadata.
-- Work only issues that belong to the active milestone. If there is no active pointer, do not dispatch milestone work.
-- When all known child issues for the active milestone are terminal, Symphony clears the runtime active pointer and records the closure in the in-memory runtime cache. It waits for the CTO/owner to clear or replace the configured pointer before dispatching more milestone work.
+- Do not keep workflow-local milestone pointers.
+- Linear is the milestone control plane: milestone ordering/status, issue priority, issue state, and explicit blockers define execution order.
+- Work one eligible issue at a time from the next nonterminal milestone that has unblocked work in `Todo`, `Preparing`, `In Review`, `RCA Required`, or `Need Owner Input`.
+- If all issues in the current milestone are terminal or blocked by nonterminal dependencies, do not synthesize replacement work; report the blocked/exhausted state and wait for owner/CTO backlog changes.
 - Milestone descriptions are product context only; never parse them as runtime state.
 - `phase_state:*` text has no runtime effect and must not gate dispatch.
-- Do not scan, rank, promote, or synthesize the next milestone. After active milestone closure, wait for the CTO/owner to set or replace the active pointer.
+- Do not scan, rank, promote, or synthesize new milestones.
 
-Status ownership:
+State contract:
 
-- During normal issue processing, run for Linear issues in `Todo` or `In Review`.
-- Additionally handle owner-answer pulses for `Need Owner Input`.
-- `Todo`: verify project + milestone, produce the architecture/task packet, post the OpenCode handoff when implementation is needed, and move the issue to `In Progress`.
-- `In Progress`: belongs to OpenCode. Do not process directly except when Symphony invokes OpenCode through the configured runner.
-- `In Review`: inspect OpenCode handoff, verify scope/evidence/diff/tests, then accept, reject, request repair, ask owner, or close.
-- `RCA Required`: perform root-cause analysis and create a redesigned implementation prompt with a new `slice_id` only after the fundamental miss is understood.
-- `Need Owner Input`: parked owner-review state. When invoked because the owner replied, read the latest owner comments/replies, apply the decision, and move the same issue out of `Need Owner Input` before stopping.
-- `Done`, `Canceled`, and `Duplicate` are terminal states.
+- `Todo`: queued work only. Symphony promotes one eligible issue to `Preparing`; Codex must not run while the issue is still `Todo`.
+- `Preparing`: Codex-owned stewardship. Verify the Linear milestone and blockers. If code is needed, post exactly one marked OpenCode prompt, move the same issue to `In Progress`, then stop. Do not edit files, run implementation validation, commit, push, or open PRs.
+- `In Progress`: OpenCode-owned. Codex must not process it directly.
+- `In Review`: Codex-owned acceptance. Inspect OpenCode handoff, diff, and validation evidence; post one marked review decision; then accept/close, reject, ask owner, or route to RCA.
+- `RCA Required`: Codex-owned RCA. Identify root cause first; if repair is needed, post a redesigned OpenCode prompt with a new `slice_id`, move to `In Progress`, then stop. Do not implement the repair.
+- `Need Owner Input`: read the latest owner-visible comment, apply the owner decision if present, otherwise keep it parked. Do not edit files.
+- `Done`, `Canceled`, and `Duplicate` are terminal.
 
 Issue context:
 
@@ -156,9 +156,10 @@ Hard process guards:
 - Do not optimize benchmark behavior for benchmark-specific issue names, paths, or fixtures.
 - Preserve existing dirty/unrelated user changes. Never reset, checkout, or clean unrelated files.
 
-OpenCode handoff contract:
+OpenCode prompt contract:
 
-- When implementation is needed, create the complete OpenCode task prompt yourself.
+- Use direct, scoped prompts: objective, context, allowed paths, forbidden actions, acceptance criteria, validation commands, stop conditions, and handoff requirements.
+- Keep the prompt concise; include only evidence needed for implementation.
 - Post the prompt as a Linear comment using exactly this envelope:
 
 <!-- symphony:opencode-task-prompt:v1 slice_id=<stable-slice-id> -->
@@ -166,13 +167,11 @@ OpenCode handoff contract:
 <the full prompt OpenCode must receive>
 ```
 
-- The prompt inside the fenced block must be self-contained, bounded to the implementation slice, and free of role-declaration preambles.
-- Start the prompt with a compact task objective and required constraints, not with `You are ...`.
-- Tell OpenCode to preserve Mnemesh-backed planning when available, select and delegate to the appropriate writable engineer agents (`rust-engineer`, `python-engineer`, `typescript-engineer`, or `integrator`), run/collect validation, and return one consolidated handoff.
-- Include repo path, exact scope, allowed paths, forbidden paths, role boundary, root cause/design intent, acceptance criteria, validation commands, stop conditions, delegation expectations, and handoff requirements.
+- The fenced prompt must be self-contained, bounded to one implementation slice, and free of role-declaration preambles.
+- Start with the task objective and constraints, not `You are ...`.
+- Tell OpenCode to use writable engineer agents when useful, run/collect validation, and return one consolidated handoff.
 - Use `/home/agent/proj/symphony` as the OpenCode-visible project root so sessions appear in OpenCode WebUI.
-- After posting the marked comment, move the issue to `In Progress`.
-- Do not rely on Symphony to reconstruct or summarize the OpenCode task; it passes your marked prompt to OpenCode verbatim.
+- After posting the marked comment, move the issue to `In Progress` and stop. Symphony passes the marked prompt to OpenCode verbatim.
 
 Review decision contract:
 

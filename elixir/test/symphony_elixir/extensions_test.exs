@@ -747,6 +747,48 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
              "counts" => %{"running" => 1, "retrying" => 1, "blocked" => 1},
+             "attention" => %{
+               "active_projects" => 1,
+               "blocked" => 1,
+               "in_review" => 0,
+               "owner_input" => 0,
+               "rca_required" => 0,
+               "recent_failures" => 0,
+               "retrying" => 1,
+               "runnable_todo" => 0,
+               "running" => 1,
+               "stale" => 0
+             },
+             "issue_queue" => [],
+             "review_items" => [],
+             "owner_input_items" => [],
+             "rca_required_items" => [],
+             "stale_states" => [],
+             "recent_failures" => [],
+             "cleanup_status" => %{},
+             "recent_activity" => [],
+             "stewardship" => %{
+               "active_milestone" => nil,
+               "active_project_milestone_id" => nil,
+               "eligible_issue_count" => 0,
+               "running_count" => 1,
+               "retrying_count" => 1,
+               "blocked_count" => 1,
+               "owner_input_count" => 0,
+               "recent_suppression_reasons" => []
+             },
+             "dispatch_summary" => %{
+               "active_milestone" => nil,
+               "active_project_milestone_id" => nil,
+               "eligible_issue_count" => 0,
+               "running_count" => 1,
+               "retrying_count" => 1,
+               "blocked_count" => 1,
+               "owner_input_count" => 0,
+               "recent_suppression_reasons" => [],
+               "dispatch_state" => "owner_blocked",
+               "reason" => "Owner input or runtime block is preventing dispatch."
+             },
              "running" => [
                %{
                  "issue_id" => "issue-http",
@@ -786,6 +828,10 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "attempt" => 2,
                  "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
                  "error" => "boom",
+                 "session_id" => nil,
+                 "last_runner_event" => nil,
+                 "last_runner_message" => nil,
+                 "last_runner_event_at" => nil,
                  "runner" => %{
                    "kind" => "codex",
                    "owner" => "codex",
@@ -978,6 +1024,294 @@ defmodule SymphonyElixir.ExtensionsTest do
              json_response(conn, 202)
   end
 
+  test "orchestrator snapshot exposes active issue attention fields from last poll" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_active_states: ["Todo", "Preparing", "In Progress", "Need Owner Input", "In Review", "RCA Required"]
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :AttentionSnapshotOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, dispatch_paused?: true)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    polled_at = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    :sys.replace_state(pid, fn state ->
+      %{
+        state
+        | last_poll_at: polled_at,
+          last_poll_issues: [
+            %Issue{id: "issue-todo", identifier: "SYM-TODO", title: "Queued", state: "Todo"},
+            %Issue{id: "issue-preparing", identifier: "SYM-PREP", title: "Preparing", state: "Preparing"},
+            %Issue{id: "issue-review", identifier: "SYM-REVIEW", title: "Review", state: "In Review"},
+            %Issue{id: "issue-owner", identifier: "SYM-OWNER", title: "Owner", state: "Need Owner Input"},
+            %Issue{id: "issue-rca", identifier: "SYM-RCA", title: "RCA", state: "RCA Required"}
+          ]
+      }
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+
+    assert Enum.map(snapshot.issue_queue, & &1.identifier) |> Enum.sort() == ["SYM-PREP", "SYM-TODO"]
+    assert Enum.map(snapshot.review_items, & &1.identifier) == ["SYM-REVIEW"]
+    assert Enum.map(snapshot.owner_input_items, & &1.identifier) == ["SYM-OWNER"]
+    assert Enum.map(snapshot.rca_required_items, & &1.identifier) == ["SYM-RCA"]
+    assert snapshot.cleanup_status == %{last_poll_at: polled_at, attempts: [], last_attempt: nil}
+    assert [%{event: "poll", at: ^polled_at}] = snapshot.recent_activity
+  end
+
+  test "orchestrator recent activity excludes running entries without runner evidence" do
+    orchestrator_name = Module.concat(__MODULE__, :RecentActivityEvidenceOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, dispatch_paused?: true)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    event_at = ~U[2026-06-09 12:00:00Z]
+
+    :sys.replace_state(pid, fn state ->
+      %{
+        state
+        | running: %{
+            "issue-empty" => %{
+              identifier: "SYM-EMPTY",
+              issue: %Issue{id: "issue-empty", identifier: "SYM-EMPTY", state: "In Progress"},
+              session_id: "session-empty",
+              runner_result_state: nil,
+              last_codex_event: nil,
+              last_codex_message: nil,
+              last_codex_timestamp: nil,
+              started_at: event_at
+            },
+            "issue-event" => %{
+              identifier: "SYM-EVENT",
+              issue: %Issue{id: "issue-event", identifier: "SYM-EVENT", state: "In Progress"},
+              session_id: "session-event",
+              runner_result_state: nil,
+              last_codex_event: :notification,
+              last_codex_message: "runner emitted an update",
+              last_codex_timestamp: event_at,
+              started_at: event_at
+            }
+          }
+      }
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+
+    assert Enum.map(snapshot.running, & &1.identifier) |> Enum.sort() == ["SYM-EMPTY", "SYM-EVENT"]
+    assert [%{identifier: "SYM-EVENT", event: :notification, message: "runner emitted an update", at: ^event_at}] = snapshot.recent_activity
+  end
+
+  test "phoenix observability api exposes aggregate and project-scoped projections" do
+    alpha_orchestrator = Module.concat(__MODULE__, :AggregateAlphaOrchestrator)
+    beta_orchestrator = Module.concat(__MODULE__, :AggregateBetaOrchestrator)
+    delta_orchestrator_key = SymphonyElixir.ProjectContext.process_names("delta").orchestrator
+
+    unless Process.whereis(SymphonyElixir.ProjectRegistry) do
+      start_supervised!(SymphonyElixir.ProjectRegistry)
+    end
+
+    {:ok, _alpha_pid} =
+      StaticOrchestrator.start_link(
+        name: alpha_orchestrator,
+        snapshot:
+          project_snapshot("alpha", "Alpha", "/projects/alpha", "SYM-6", "thread-alpha",
+            issue_queue: [
+              %{
+                identifier: "SYM-23",
+                title: "Prepare release",
+                state: "Todo",
+                blocked: true,
+                blocked_by: [
+                  %{identifier: "SYM-10", title: "Finish schema review", state: "In Review"}
+                ],
+                reason: "waiting for dependency SYM-10"
+              }
+            ],
+            review_items: [%{identifier: "SYM-21", state: "In Review"}],
+            owner_input_items: [%{identifier: "SYM-22", state: "Need Owner Input"}],
+            rca_required_items: [%{identifier: "SYM-20", state: "RCA Required"}],
+            stale_states: [%{identifier: "SYM-19", state: "In Progress", age_ms: 3_600_000, timeout_ms: 1_800_000}],
+            recent_failures: [%{identifier: "SYM-18", error: "failed"}],
+            cleanup_status: %{
+              status: "failed",
+              error: "workspace prune failed",
+              attempts: [
+                %{result: "failed", error: "permission denied", removed_count: 0}
+              ],
+              last_attempt: %{result: "failed", error: "permission denied", removed_count: 0}
+            },
+            recent_activity: [%{identifier: "SYM-17", event: "accepted"}],
+            active_milestone: %{name: "SYM-23"}
+          ),
+        refresh: %{queued: true, coalesced: false, requested_at: DateTime.utc_now(), operations: ["poll"]}
+      )
+
+    beta_cleanup_status = %{last_poll_at: DateTime.utc_now(), attempts: [], last_attempt: nil}
+    beta_root = "/projects/beta"
+    beta_thread_id = "thread-beta"
+
+    beta_snapshot =
+      project_snapshot("beta", "Beta", beta_root, "SYM-6", beta_thread_id, cleanup_status: beta_cleanup_status)
+
+    {:ok, _beta_pid} =
+      StaticOrchestrator.start_link(
+        name: beta_orchestrator,
+        snapshot: beta_snapshot,
+        refresh: %{queued: true, coalesced: true, requested_at: DateTime.utc_now(), operations: ["reconcile"]}
+      )
+
+    {:ok, _delta_pid} =
+      StaticOrchestrator.start_link(
+        name: SymphonyElixir.ProjectRegistry.via_name(delta_orchestrator_key),
+        snapshot: project_snapshot("delta", "Delta", "/projects/delta", "SYM-7", "thread-delta"),
+        refresh: %{queued: true, coalesced: false, requested_at: DateTime.utc_now(), operations: ["poll"]}
+      )
+
+    start_test_endpoint(
+      project_states_provider: fn ->
+        project_states(%{
+          "alpha" => alpha_orchestrator,
+          "beta" => beta_orchestrator,
+          "delta" => delta_orchestrator_key,
+          "gamma" => {:disabled, nil}
+        })
+      end,
+      snapshot_timeout_ms: 50
+    )
+
+    aggregate_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+
+    assert aggregate_payload["counts"] == %{"running" => 3, "retrying" => 0, "blocked" => 0}
+    assert aggregate_payload["stewardship"]["running_count"] == 3
+    assert aggregate_payload["stewardship"]["eligible_issue_count"] == 0
+    assert aggregate_payload["dispatch_summary"]["dispatch_state"] == "no_eligible_work"
+
+    assert aggregate_payload["attention"] == %{
+             "active_projects" => 3,
+             "blocked" => 0,
+             "cleanup_problems" => 1,
+             "dependency_blocked" => 1,
+             "in_review" => 1,
+             "owner_input" => 1,
+             "rca_required" => 1,
+             "recent_failures" => 1,
+             "retrying" => 0,
+             "runnable_todo" => 0,
+             "running" => 3,
+             "stale" => 1
+           }
+
+    assert Enum.map(aggregate_payload["projects"], & &1["id"]) == ["alpha", "beta", "delta", "gamma"]
+    assert Enum.map(aggregate_payload["running"], & &1["project"]["id"]) == ["alpha", "beta", "delta"]
+    assert Enum.map(aggregate_payload["running"], & &1["runner"]["owner"]) == ["opencode", "opencode", "opencode"]
+    assert Enum.map(aggregate_payload["issue_queue"], & &1["project_id"]) == ["alpha"]
+    assert [%{"identifier" => "SYM-23", "blockers" => [%{"identifier" => "SYM-10"}]}] = aggregate_payload["dependency_blocked_items"]
+    assert [%{"reason" => "workspace prune failed"}] = aggregate_payload["cleanup_problem_items"]
+    assert Enum.find(aggregate_payload["projects"], &(&1["id"] == "alpha"))["queue_depth"] == 1
+    assert Enum.find(aggregate_payload["projects"], &(&1["id"] == "alpha"))["dependency_blocked_count"] == 1
+    assert Enum.find(aggregate_payload["projects"], &(&1["id"] == "alpha"))["cleanup_problem_count"] == 1
+    assert Enum.find(aggregate_payload["projects"], &(&1["id"] == "beta"))["cleanup_problem_count"] == 0
+    assert Enum.find(aggregate_payload["projects"], &(&1["id"] == "alpha"))["active_milestone"] == %{"name" => "SYM-23"}
+    assert Enum.find(aggregate_payload["projects"], &(&1["id"] == "gamma"))["status"] == "disabled"
+
+    assert %{"counts" => %{"running" => 1}, "projects" => [%{"id" => "beta"}]} =
+             json_response(get(build_conn(), "/api/v1/projects/beta/state"), 200)
+
+    assert %{"dispatch_summary" => %{"running_count" => 1, "dispatch_state" => "no_eligible_work"}} =
+             json_response(get(build_conn(), "/api/v1/projects/beta/state"), 200)
+
+    {:ok, _metadata_view, metadata_html} = live(build_conn(), "/projects/beta")
+    assert metadata_html =~ "No cleanup warnings in runtime state."
+    refute metadata_html =~ "reported"
+
+    {:ok, _cleanup_view, cleanup_html} = live(build_conn(), "/projects/alpha")
+    assert cleanup_html =~ "permission denied"
+    assert cleanup_html =~ "workspace prune failed"
+
+    assert %{
+             "issue_queue" => [%{"identifier" => "SYM-23"}],
+             "dependency_blocked_items" => [%{"identifier" => "SYM-23", "blockers" => [%{"identifier" => "SYM-10"}]}],
+             "projects" => [%{"id" => "alpha", "queue_depth" => 1}]
+           } = json_response(get(build_conn(), "/api/v1/projects/alpha/state"), 200)
+
+    assert %{
+             "status" => "running",
+             "matches" => [
+               %{"project" => %{"id" => "alpha"}},
+               %{"project" => %{"id" => "beta"}}
+             ]
+           } = json_response(get(build_conn(), "/api/v1/SYM-6"), 200)
+
+    assert %{"issue_id" => "issue-beta"} =
+             json_response(get(build_conn(), "/api/v1/projects/beta/issues/SYM-6"), 200)
+
+    assert %{"issue_id" => "issue-alpha", "project" => %{"id" => "alpha"}} =
+             json_response(get(build_conn(), "/api/v1/projects/alpha/issues/SYM-6"), 200)
+
+    assert %{"error" => %{"code" => "issue_not_found"}} =
+             json_response(get(build_conn(), "/api/v1/projects/alpha/issues/SYM-7"), 404)
+
+    assert %{"issue_id" => "issue-delta"} =
+             json_response(get(build_conn(), "/api/v1/projects/delta/issues/SYM-7"), 200)
+
+    assert %{"error" => %{"code" => "project_unavailable"}} =
+             json_response(get(build_conn(), "/api/v1/projects/gamma/state"), 503)
+
+    assert %{"error" => %{"code" => "project_not_found"}} =
+             json_response(get(build_conn(), "/api/v1/projects/missing/state"), 404)
+
+    assert %{"queued" => true, "coalesced" => false, "operations" => ["poll"]} =
+             json_response(post(build_conn(), "/api/v1/projects/alpha/refresh", %{}), 202)
+
+    root_refresh_payload = json_response(post(build_conn(), "/api/v1/refresh", %{}), 202)
+
+    assert %{"queued" => true, "coalesced" => false, "operations" => ["poll", "reconcile"]} =
+             root_refresh_payload
+
+    assert Enum.map(root_refresh_payload["projects"], & &1["id"]) == ["alpha", "beta", "delta"]
+    assert Enum.map(root_refresh_payload["projects"], &get_in(&1, ["refresh", "operations"])) == [["poll"], ["reconcile"], ["poll"]]
+    refute Enum.any?(root_refresh_payload["projects"], &(&1["id"] == "gamma"))
+
+    html = html_response(get(build_conn(), "/"), 200)
+    assert html =~ "Active project overview"
+    assert html =~ "Needs attention"
+    assert html =~ "Alpha"
+    assert html =~ "Beta"
+    assert html =~ "Delta"
+    assert html =~ "Gamma"
+    assert html =~ "/projects/alpha"
+    assert html =~ "/api/v1/projects/alpha/state"
+    refute html =~ ~s(href="/api/v1/projects/alpha/refresh")
+    assert html =~ "Refresh API: POST only"
+
+    project_html = html_response(get(build_conn(), "/projects/alpha"), 200)
+    assert project_html =~ "Project drilldown"
+    assert project_html =~ "SYM-23"
+    assert project_html =~ "SYM-10"
+    assert project_html =~ "Finish schema review"
+    assert project_html =~ "waiting for dependency SYM-10"
+    assert project_html =~ "workspace prune failed"
+    assert project_html =~ "permission denied"
+    assert project_html =~ "Running 1 active session(s): 1 running; 1 dependency blocked; 1 waiting review; 1 owner input; 1 RCA; 1 stale; 1 recent failure; cleanup workspace prune failed."
+    assert project_html =~ "state: In Review"
+    assert project_html =~ "state: Need Owner Input"
+    assert project_html =~ "state: RCA Required"
+    assert project_html =~ "age: 1h / timeout 30m"
+    assert project_html =~ "error: failed"
+    assert project_html =~ "SYM-17"
+
+    unavailable_project_html = html_response(get(build_conn(), "/projects/gamma"), 200)
+    assert unavailable_project_html =~ "Project drilldown"
+    assert unavailable_project_html =~ "Gamma"
+    assert unavailable_project_html =~ "0 running / 0 retrying / 0 blocked"
+    assert unavailable_project_html =~ "No queued issues in runtime state."
+  end
+
   test "phoenix observability api preserves 405, 404, and unavailable behavior" do
     unavailable_orchestrator = Module.concat(__MODULE__, :UnavailableOrchestrator)
     start_test_endpoint(orchestrator: unavailable_orchestrator, snapshot_timeout_ms: 5)
@@ -1026,6 +1360,41 @@ defmodule SymphonyElixir.ExtensionsTest do
                "generated_at" => timeout_payload["generated_at"],
                "error" => %{"code" => "snapshot_timeout", "message" => "Snapshot timed out"}
              }
+  end
+
+  test "project-scoped observability api returns 503 when project snapshot times out" do
+    timeout_orchestrator = Module.concat(__MODULE__, :ProjectStateTimeoutOrchestrator)
+    {:ok, _pid} = SlowOrchestrator.start_link(name: timeout_orchestrator)
+
+    start_test_endpoint(
+      project_states_provider: fn ->
+        project_states(%{"epsilon" => timeout_orchestrator})
+      end,
+      snapshot_timeout_ms: 1
+    )
+
+    assert %{"error" => %{"code" => "project_unavailable"}} =
+             json_response(get(build_conn(), "/api/v1/projects/epsilon/state"), 503)
+  end
+
+  test "dashboard project drilldown falls back to aggregate metadata when scoped snapshot times out" do
+    timeout_orchestrator = Module.concat(__MODULE__, :ProjectDrilldownTimeoutOrchestrator)
+    {:ok, _pid} = SlowOrchestrator.start_link(name: timeout_orchestrator)
+
+    start_test_endpoint(
+      project_states_provider: fn ->
+        project_states(%{"epsilon" => timeout_orchestrator})
+      end,
+      snapshot_timeout_ms: 1
+    )
+
+    project_html = html_response(get(build_conn(), "/projects/epsilon"), 200)
+
+    assert project_html =~ "Project drilldown"
+    assert project_html =~ "Epsilon"
+    assert project_html =~ "Project snapshot unavailable"
+    assert project_html =~ "snapshot_timeout"
+    assert project_html =~ "No queued issues in runtime state."
   end
 
   test "dashboard bootstraps liveview from embedded static assets" do
@@ -1238,6 +1607,108 @@ defmodule SymphonyElixir.ExtensionsTest do
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
   end
 
+  defp project_states(project_orchestrators) do
+    Map.new(project_orchestrators, fn {project_id, project_status} ->
+      {status, orchestrator} = project_status(project_status)
+
+      {project_id,
+       %{
+         status: status,
+         context: %SymphonyElixir.ProjectContext{
+           id: project_id,
+           project_id: project_id,
+           name: String.capitalize(project_id),
+           enabled: status == :running,
+           status: if(status == :running, do: :valid, else: :disabled),
+           repo_root: "/projects/#{project_id}",
+           app_root: "/projects/#{project_id}/elixir",
+           workflow_path: "/projects/#{project_id}/WORKFLOW.md",
+           dashboard_order: if(project_id == "alpha", do: 1, else: 2),
+           logs_root: "/projects/#{project_id}/logs",
+           linear: %{},
+           mnemesh: %{},
+           runner: %{"default" => "opencode"},
+           execution: %{"enabled" => true},
+           gates: %{"dispatch_enabled" => true},
+           errors: [],
+           process_names: %{orchestrator: orchestrator}
+         },
+         pid: if(status == :running, do: self()),
+         error: nil
+       }}
+    end)
+  end
+
+  defp project_status({status, orchestrator}), do: {status, orchestrator}
+  defp project_status(orchestrator), do: {:running, orchestrator}
+
+  defp project_snapshot(project_id, project_name, project_root, issue_identifier, session_id, overrides \\ []) do
+    Map.merge(
+      %{
+        running: [
+          %{
+            issue_id: "issue-#{project_id}",
+            identifier: issue_identifier,
+            project_id: project_id,
+            project_name: project_name,
+            project_root: project_root,
+            state: "In Progress",
+            session_id: session_id,
+            turn_count: 3,
+            codex_input_tokens: 11,
+            codex_output_tokens: 5,
+            codex_total_tokens: 16,
+            last_codex_message: "project #{project_id} update",
+            last_codex_timestamp: nil,
+            last_codex_event: :notification,
+            runner_kind: "opencode",
+            runner_owner: "opencode",
+            runner_phase: :command,
+            runner_project_root: project_root,
+            runner_command: ["opencode", "run", "--session", session_id],
+            runner_attach_url: "http://127.0.0.1:3000/session/#{session_id}",
+            runner_result_state: "running",
+            runner_failure: nil,
+            workspace_path: "/workspaces/#{project_id}/#{issue_identifier}",
+            started_at: DateTime.utc_now()
+          }
+        ],
+        retrying: [],
+        blocked: [],
+        codex_totals: %{input_tokens: 11, output_tokens: 5, total_tokens: 16, seconds_running: 12},
+        runner_runtime_totals: %{seconds_running: 12},
+        suppression_events: [],
+        suppression_counts: %{},
+        stewardship: %{
+          active_milestone: nil,
+          active_project_milestone_id: nil,
+          eligible_issue_count: 0,
+          running_count: 1,
+          retrying_count: 0,
+          blocked_count: 0,
+          owner_input_count: 0,
+          recent_suppression_reasons: []
+        },
+        dispatch_summary: %{
+          active_milestone: nil,
+          active_project_milestone_id: nil,
+          eligible_issue_count: 0,
+          running_count: 1,
+          retrying_count: 0,
+          blocked_count: 0,
+          owner_input_count: 0,
+          recent_suppression_reasons: [],
+          dispatch_state: :no_eligible_work,
+          reason: "No eligible issue is available for the active milestone and worker policy."
+        },
+        rate_limits: nil,
+        polling: %{checking?: false, next_poll_in_ms: 5_000, poll_interval_ms: 2_000},
+        active_milestone: nil
+      },
+      Map.new(overrides)
+    )
+  end
+
   defp static_snapshot do
     %{
       running: [
@@ -1306,6 +1777,28 @@ defmodule SymphonyElixir.ExtensionsTest do
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
       runner_runtime_totals: %{seconds_running: 84.5},
+      stewardship: %{
+        active_milestone: nil,
+        active_project_milestone_id: nil,
+        eligible_issue_count: 0,
+        running_count: 1,
+        retrying_count: 1,
+        blocked_count: 1,
+        owner_input_count: 0,
+        recent_suppression_reasons: []
+      },
+      dispatch_summary: %{
+        active_milestone: nil,
+        active_project_milestone_id: nil,
+        eligible_issue_count: 0,
+        running_count: 1,
+        retrying_count: 1,
+        blocked_count: 1,
+        owner_input_count: 0,
+        recent_suppression_reasons: [],
+        dispatch_state: :owner_blocked,
+        reason: "Owner input or runtime block is preventing dispatch."
+      },
       rate_limits: %{"primary" => %{"remaining" => 11}},
       polling: %{
         "checking?" => false,

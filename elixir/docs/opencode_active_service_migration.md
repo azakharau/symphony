@@ -7,7 +7,7 @@ This runbook records read-only evidence and operator checklists for migrating ac
 - `AGENTS.md` requires runtime config to come from `WORKFLOW.md` front matter and warns that workspace/orchestrator safety matters during validation.
 - `AGENTS.md` keeps validation centered on targeted checks first and `mix specs.check` for full Elixir validation when code changes require it.
 - `WORKFLOW.md` identifies the operator-visible project root as `/home/agent/proj/symphony`, the Elixir app root as `/home/agent/proj/symphony/elixir`, and the current branch as `agent-server/opencode-runner-extension`.
-- Multiproject runtime preparation is tracked separately in `docs/multiproject_runtime_operator_checklist.md`; root mode is not a live-service cutover until the owner approves the exact action.
+- Multiproject runtime preparation is tracked separately in `docs/multiproject_runtime_operator_checklist.md`; SYM-19 root-daemon dry-run, cutover, health-check, stop, and rollback commands are separated in `docs/multiproject_cutover.md`. Root mode is not a live-service cutover until the owner approves the exact action.
 - `WORKFLOW.md` sets `runner.default: codex`, routes `In Progress` to `opencode`, and configures OpenCode with `/usr/local/bin/opencode`, `http://127.0.0.1:3000`, agent `build`, JSON format, and `result_state: "In Review"`.
 - As of 2026-06-01, the physical checkout lives at `/home/agent/proj/symphony`; `/home/agent/.symphony/vendor/openai-symphony` is a compatibility symlink for older service paths.
 
@@ -156,6 +156,11 @@ Use this checklist only after owner-approved cutover work has started and rollba
 ## No-cutover policy
 
 No cutover is authorized by this runbook. Until owner approval is explicit for a named service and exact action, operators must not run service or process mutation commands such as `systemctl start`, `stop`, `restart`, `reload`, `enable`, `disable`, `daemon-reload`, `kill`, `pkill`, `docker compose up/down`, or equivalents.
+
+Milestone existence, milestone descriptions, and multiproject root preparation do
+not authorize service mutation. Use `docs/multiproject_cutover.md` for the
+separate root-daemon dry-run and rollback rehearsal; keep OpenCode per-service
+migration approval separate from root-daemon cutover approval.
 
 ## Known blockers and residual risks
 

@@ -28,6 +28,7 @@ defmodule SymphonyElixir.Orchestrator do
   }
   @owner_wait_no_change "owner_wait_no_change"
   @next_milestone_scan_suppressed "next_milestone_scan_suppressed"
+  @suppression_event_limit 20
 
   defmodule State do
     @moduledoc """
@@ -56,9 +57,14 @@ defmodule SymphonyElixir.Orchestrator do
       closed_project_milestone_ids: MapSet.new(),
       active_project_milestone_id: nil,
       suppression_counts: %{},
+      suppression_events: [],
+      suppression_event_fingerprints: MapSet.new(),
       codex_totals: nil,
       runner_runtime_totals: nil,
       codex_rate_limits: nil,
+      last_poll_issues: [],
+      last_poll_at: nil,
+      cleanup_attempts: [],
       dispatch_paused?: false
     ]
 
@@ -129,8 +135,8 @@ defmodule SymphonyElixir.Orchestrator do
 
     state = apply_configured_active_milestone(state, config)
 
-    run_terminal_workspace_cleanup(state)
-    run_runtime_cache_cleanup(state)
+    state = run_terminal_workspace_cleanup(state)
+    state = run_runtime_cache_cleanup(state)
     schedule_tick(state, 0)
   end
 
@@ -290,6 +296,8 @@ defmodule SymphonyElixir.Orchestrator do
       running_entry ->
         {updated_running_entry, _token_delta} = integrate_runner_update(running_entry, update)
 
+        state = maybe_record_runner_suppression_event(state, issue_id, running_entry, update)
+
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
     end
@@ -407,14 +415,14 @@ defmodule SymphonyElixir.Orchestrator do
       end
 
     with :ok <- validate_runtime_config(state),
-         {:ok, issues} <- fetch_poll_candidate_issues(state, full_poll?),
-         true <- available_slots(state) > 0 do
-      state = runtime_cache_gc(state, issues)
+         {:ok, issues} <- fetch_poll_candidate_issues(state, full_poll?) do
+      state = remember_poll_issues(state, issues)
 
-      issues
-      |> choose_issues(state)
-      |> maybe_dispatch_idle_pulse(issues, full_poll?)
-      |> record_disabled_next_milestone_scan_suppression(issues, full_poll?)
+      if available_slots(state) > 0 do
+        dispatch_available_issues(state, issues, full_poll?)
+      else
+        state
+      end
     else
       {:error, :missing_linear_api_token} ->
         Logger.error("Linear API token missing in WORKFLOW.md")
@@ -453,9 +461,24 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, reason} ->
         Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
         state
+    end
+  end
 
-      false ->
+  defp dispatch_available_issues(%State{} = state, issues, full_poll?) do
+    state = runtime_cache_gc(state, issues)
+    active_states = active_state_set(state)
+    terminal_states = terminal_state_set(state)
+    state = maybe_select_active_project_milestone_from_poll(state, issues, active_states, terminal_states)
+
+    case maybe_promote_todo_issue_to_preparing(state, issues, active_states, terminal_states) do
+      {:promoted, state} ->
         state
+
+      :none ->
+        issues
+        |> choose_issues(state)
+        |> maybe_dispatch_idle_pulse(issues, full_poll?)
+        |> record_disabled_next_milestone_scan_suppression(issues, full_poll?)
     end
   end
 
@@ -574,6 +597,21 @@ defmodule SymphonyElixir.Orchestrator do
   @spec should_dispatch_issue_for_test(Issue.t(), term()) :: boolean()
   def should_dispatch_issue_for_test(%Issue{} = issue, %State{} = state) do
     should_dispatch_issue?(issue, state, active_state_set(state), terminal_state_set(state))
+  end
+
+  @doc false
+  @spec retry_dispatchable_issue_for_test(Issue.t(), State.t()) :: {boolean(), State.t()}
+  def retry_dispatchable_issue_for_test(%Issue{} = issue, %State{} = state) do
+    state = maybe_hydrate_active_project_milestone_from_retry_issue(state, issue)
+    terminal_states = terminal_state_set(state)
+
+    dispatchable? =
+      retry_candidate_issue?(issue, state, terminal_states) and
+        milestone_batch_allowed?(issue, state) and
+        dispatch_slots_available?(issue, state) and
+        worker_slots_available?(state, nil, runner_kind_for_issue(issue, state))
+
+    {dispatchable?, state}
   end
 
   @doc false
@@ -884,7 +922,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp terminate_terminal_running_issue(%State{} = state, %Issue{} = issue) do
-    :ok = cleanup_issue_runtime_cache(state, issue)
+    _cleanup_result = cleanup_issue_runtime_cache(state, issue)
     terminate_running_issue(state, issue.id, false)
   end
 
@@ -1003,7 +1041,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp state_timeout_stop_comment(identifier, running_entry, error, timeout_state) do
     previous_state = running_entry_state_name(running_entry) || "unknown"
-    session_id = running_entry_session_id(running_entry) || "n/a"
+    session_id = running_entry_session_id(running_entry)
     runner = Map.get(running_entry, :runner_kind, "codex")
 
     """
@@ -1274,7 +1312,13 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp record_disabled_next_milestone_scan_suppression(%State{} = state, _active_issues, full_poll?) when is_boolean(full_poll?) do
     if full_poll? do
-      %{state | suppression_counts: increment_suppression(state.suppression_counts, @next_milestone_scan_suppressed)}
+      state
+      |> increment_suppression_count(@next_milestone_scan_suppressed)
+      |> record_suppression_event(@next_milestone_scan_suppressed, %{
+        reason: "next_milestone_scan_disabled",
+        category: :unchanged,
+        status: :suppressed
+      })
     else
       state
     end
@@ -1382,7 +1426,21 @@ defmodule SymphonyElixir.Orchestrator do
 
     if MapSet.member?(owner_input_pulsed, fingerprint) do
       Logger.info("Suppressing owner-input pulse for #{issue_context(issue)}: already processed")
-      {:none, %{state | suppression_counts: increment_suppression(state.suppression_counts, @owner_wait_no_change)}}
+
+      state =
+        state
+        |> increment_suppression_count(@owner_wait_no_change)
+        |> record_suppression_event(@owner_wait_no_change, %{
+          reason: "owner_input_pulse_unchanged",
+          category: :unchanged,
+          status: :suppressed,
+          issue_id: issue.id,
+          identifier: issue.identifier,
+          issue_state: issue.state,
+          fingerprint: fingerprint
+        })
+
+      {:none, state}
     else
       Logger.info("Dispatching Codex owner-input pulse from updated issue: #{issue_context(issue)}")
 
@@ -1402,7 +1460,7 @@ defmodule SymphonyElixir.Orchestrator do
     |> Enum.filter(fn
       %Issue{id: id, state: state_name} = issue when is_binary(id) and is_binary(state_name) ->
         normalize_issue_state(state_name) == "need owner input" and
-          milestone_batch_allowed?(issue, state) and
+          owner_input_milestone_allowed?(issue, state) and
           not is_nil(OwnerInputPulse.activity_at(issue)) and
           !MapSet.member?(state.owner_input_pulsed, OwnerInputPulse.fingerprint(issue)) and
           !MapSet.member?(state.claimed, id) and
@@ -1430,6 +1488,102 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp increment_suppression(_counts, kind) when is_binary(kind), do: %{kind => 1}
 
+  defp increment_suppression_count(%State{} = state, kind) when is_binary(kind) do
+    %{state | suppression_counts: increment_suppression(state.suppression_counts, kind)}
+  end
+
+  defp maybe_record_runner_suppression_event(%State{} = state, issue_id, running_entry, %{event: event} = update) do
+    if suppression_runner_event?(event) do
+      kind = update_value(update, :suppression_kind) || update_value(update, :kind) || "handoff_suppressed"
+
+      record_suppression_event(state, to_string(kind), %{
+        reason: runner_suppression_reason(update),
+        category: suppression_category(update),
+        status: :suppressed,
+        issue_id: issue_id,
+        identifier: Map.get(running_entry, :identifier),
+        issue_state: Map.get(running_entry, :state),
+        project_id: Map.get(running_entry, :project_id),
+        project_name: Map.get(running_entry, :project_name),
+        project_root: Map.get(running_entry, :project_root) || Map.get(running_entry, :runner_project_root),
+        runner_kind: Map.get(running_entry, :runner_kind),
+        runner_owner: Map.get(running_entry, :runner_owner),
+        runner_phase: Map.get(running_entry, :runner_phase),
+        session_id: Map.get(running_entry, :session_id),
+        at: update_value(update, :timestamp)
+      })
+    else
+      state
+    end
+  end
+
+  defp suppression_runner_event?(event) when event in [:handoff_suppressed, "handoff_suppressed"], do: true
+  defp suppression_runner_event?(_event), do: false
+
+  defp runner_suppression_reason(update) do
+    update_value(update, :reason) ||
+      update_value(update, :suppression_reason) ||
+      update_value(update, :message)
+  end
+
+  defp suppression_category(update) do
+    reason = update_value(update, :reason) || update_value(update, :suppression_reason)
+
+    case reason && String.downcase(to_string(reason)) do
+      reason when is_binary(reason) ->
+        cond do
+          String.contains?(reason, "unchanged") || String.contains?(reason, "no_change") -> :unchanged
+          String.contains?(reason, "done") -> :done_processed
+          true -> :runner_suppressed
+        end
+
+      _ ->
+        :runner_suppressed
+    end
+  end
+
+  defp update_value(update, key) when is_map(update), do: Map.get(update, key) || Map.get(update, Atom.to_string(key))
+
+  defp record_suppression_event(%State{} = state, kind, attrs) when is_binary(kind) and is_map(attrs) do
+    fingerprint = suppression_event_fingerprint(kind, attrs)
+    fingerprints = Map.get(state, :suppression_event_fingerprints) || MapSet.new()
+
+    if MapSet.member?(fingerprints, fingerprint) do
+      state
+    else
+      event =
+        attrs
+        |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+        |> Map.new()
+        |> Map.put(:kind, kind)
+        |> Map.put_new(:status, :suppressed)
+        |> Map.put_new(:category, :suppressed)
+        |> Map.put_new(:at, DateTime.utc_now())
+
+      events = [event | List.wrap(Map.get(state, :suppression_events))] |> Enum.take(@suppression_event_limit)
+      fingerprints = suppression_event_fingerprints(events)
+
+      %{state | suppression_events: events, suppression_event_fingerprints: fingerprints}
+    end
+  end
+
+  defp suppression_event_fingerprints(events) when is_list(events) do
+    events
+    |> Enum.map(fn event -> suppression_event_fingerprint(update_value(event, :kind) || "", event) end)
+    |> MapSet.new()
+  end
+
+  defp suppression_event_fingerprint(kind, attrs) do
+    [
+      kind,
+      update_value(attrs, :reason),
+      update_value(attrs, :issue_id),
+      update_value(attrs, :identifier),
+      update_value(attrs, :session_id)
+    ]
+    |> Enum.map_join("|", &to_string(&1 || ""))
+  end
+
   defp mark_owner_input_pulsed(%State{} = state, fingerprint) when is_binary(fingerprint) do
     %{state | owner_input_pulsed: MapSet.put(state.owner_input_pulsed, fingerprint)}
   end
@@ -1447,6 +1601,40 @@ defmodule SymphonyElixir.Orchestrator do
   defp priority_rank(priority) when is_integer(priority) and priority in 1..4, do: priority
   defp priority_rank(_priority), do: 5
 
+  defp sort_issues_for_milestone_intake(issues) when is_list(issues) do
+    Enum.sort_by(issues, fn
+      %Issue{} = issue ->
+        {
+          project_milestone_order_key(issue),
+          priority_rank(issue.priority),
+          issue_created_at_sort_key(issue),
+          issue.identifier || issue.id || ""
+        }
+
+      _ ->
+        {project_milestone_order_key(nil), priority_rank(nil), issue_created_at_sort_key(nil), ""}
+    end)
+  end
+
+  defp project_milestone_order_key(%Issue{} = issue) do
+    issue
+    |> issue_project_milestone_name()
+    |> milestone_order_key()
+  end
+
+  defp project_milestone_order_key(_issue), do: 9_223_372_036_854_775_807
+
+  defp milestone_order_key(name) when is_binary(name) do
+    trimmed = String.trim(name)
+
+    case Regex.run(~r/^P?(\d+)/i, trimmed) do
+      [_, order] -> String.to_integer(order)
+      _ -> 9_223_372_036_854_775_807
+    end
+  end
+
+  defp milestone_order_key(_name), do: 9_223_372_036_854_775_807
+
   defp issue_created_at_sort_key(%Issue{created_at: %DateTime{} = created_at}) do
     DateTime.to_unix(created_at, :microsecond)
   end
@@ -1460,18 +1648,88 @@ defmodule SymphonyElixir.Orchestrator do
          active_states,
          terminal_states
        ) do
+    issue_candidate_ready?(issue, state, active_states, terminal_states) and
+      issue_runtime_capacity_available?(issue, state, claimed, running, blocked, terminal_states)
+  end
+
+  defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
+
+  defp issue_candidate_ready?(%Issue{} = issue, %State{} = state, active_states, terminal_states) do
     candidate_issue?(issue, active_states, terminal_states) and
+      dispatchable_issue_state?(issue.state) and
       milestone_batch_allowed?(issue, state) and
       project_issue_lane_available?(issue, state) and
-      !owner_input_issue_state?(issue.state) and
-      !issue_blocked_by_non_terminal?(issue, terminal_states) and
+      !owner_input_issue_state?(issue.state)
+  end
+
+  defp issue_runtime_capacity_available?(%Issue{} = issue, %State{} = state, claimed, running, blocked, terminal_states) do
+    !issue_blocked_by_non_terminal?(issue, terminal_states) and
       issue_not_already_tracked?(issue.id, claimed, running, blocked) and
       available_slots(state) > 0 and
       state_slots_available?(issue, state) and
       worker_slots_available?(state, nil, runner_kind_for_issue(issue, state))
   end
 
-  defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
+  defp dispatchable_issue_state?(state_name) when is_binary(state_name) do
+    normalize_issue_state(state_name) != "todo"
+  end
+
+  defp dispatchable_issue_state?(_state_name), do: false
+
+  defp maybe_promote_todo_issue_to_preparing(
+         %State{} = state,
+         issues,
+         active_states,
+         terminal_states
+       )
+       when is_list(issues) do
+    if ready_dispatch_issue_present?(state, issues, active_states, terminal_states) do
+      :none
+    else
+      promote_todo_issue_candidate(state, issues, active_states, terminal_states)
+    end
+  end
+
+  defp ready_dispatch_issue_present?(%State{} = state, issues, active_states, terminal_states) do
+    Enum.any?(issues, &should_dispatch_issue?(&1, state, active_states, terminal_states))
+  end
+
+  defp promote_todo_issue_candidate(%State{} = state, issues, active_states, terminal_states) do
+    issues
+    |> sort_issues_for_milestone_intake()
+    |> Enum.find(&todo_issue_ready_for_preparing?(&1, state, active_states, terminal_states))
+    |> case do
+      %Issue{} = issue ->
+        promote_todo_issue_to_preparing(state, issue)
+
+      nil ->
+        :none
+    end
+  end
+
+  defp todo_issue_ready_for_preparing?(%Issue{} = issue, %State{} = state, active_states, terminal_states) do
+    normalize_issue_state(issue.state) == "todo" and
+      candidate_issue?(issue, active_states, terminal_states) and
+      milestone_batch_allowed?(issue, state) and
+      project_issue_lane_available?(issue, state) and
+      !issue_blocked_by_non_terminal?(issue, terminal_states) and
+      issue_not_already_tracked?(issue.id, state.claimed, state.running, state.blocked) and
+      available_slots(state) > 0
+  end
+
+  defp todo_issue_ready_for_preparing?(_issue, _state, _active_states, _terminal_states), do: false
+
+  defp promote_todo_issue_to_preparing(%State{} = state, %Issue{} = issue) do
+    case Tracker.update_issue_state(issue.id, preparing_issue_state(), state.project_context) do
+      :ok ->
+        Logger.info("Promoted queued issue to Preparing: #{issue_context(issue)}")
+        {:promoted, state}
+
+      {:error, reason} ->
+        Logger.warning("Failed to promote queued issue to Preparing: #{issue_context(issue)} reason=#{inspect(reason)}")
+        :none
+    end
+  end
 
   defp project_issue_lane_available?(%Issue{id: issue_id} = issue, %State{} = state) do
     milestone_id = issue_project_milestone_id(issue)
@@ -1578,6 +1836,45 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp milestone_batch_allowed?(_issue, _state), do: false
+
+  defp owner_input_milestone_allowed?(%Issue{} = issue, %State{active_project_milestone_id: nil}) do
+    is_binary(issue_project_milestone_id(issue))
+  end
+
+  defp owner_input_milestone_allowed?(%Issue{} = issue, %State{} = state) do
+    milestone_batch_allowed?(issue, state)
+  end
+
+  defp maybe_select_active_project_milestone_from_poll(
+         %State{active_project_milestone_id: nil} = state,
+         issues,
+         active_states,
+         terminal_states
+       )
+       when is_list(issues) do
+    issues
+    |> sort_issues_for_milestone_intake()
+    |> Enum.find(&linear_native_milestone_candidate?(&1, state, active_states, terminal_states))
+    |> case do
+      %Issue{} = issue ->
+        %{state | active_project_milestone_id: issue_project_milestone_id(issue)}
+
+      nil ->
+        state
+    end
+  end
+
+  defp maybe_select_active_project_milestone_from_poll(%State{} = state, _issues, _active_states, _terminal_states), do: state
+
+  defp linear_native_milestone_candidate?(%Issue{} = issue, %State{} = state, active_states, terminal_states) do
+    is_binary(issue_project_milestone_id(issue)) and
+      candidate_issue?(issue, active_states, terminal_states) and
+      !owner_input_issue_state?(issue.state) and
+      !issue_blocked_by_non_terminal?(issue, terminal_states) and
+      issue_not_already_tracked?(issue.id, state.claimed, state.running, state.blocked)
+  end
+
+  defp linear_native_milestone_candidate?(_issue, _state, _active_states, _terminal_states), do: false
 
   defp maybe_release_active_project_milestone(
          %State{active_project_milestone_id: nil} = state,
@@ -1700,6 +1997,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_close_exhausted_active_project_milestone(%State{} = state, _issues, _active_states, _terminal_states), do: state
 
+  defp remember_poll_issues(%State{} = state, issues) when is_list(issues) do
+    %{state | last_poll_issues: issues, last_poll_at: DateTime.utc_now()}
+  end
+
   defp issues_for_project_milestone(issues, milestone_id) when is_list(issues) and is_binary(milestone_id) do
     Enum.filter(issues, fn
       %Issue{} = issue -> issue_project_milestone_id(issue) == milestone_id
@@ -1754,6 +2055,17 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_project_milestone_id(_issue), do: nil
 
+  defp issue_project_milestone_name(%Issue{project_milestone: milestone}) when is_map(milestone) do
+    case Map.get(milestone, :name) || Map.get(milestone, "name") do
+      name when is_binary(name) and name != "" -> name
+      _ -> nil
+    end
+  end
+
+  defp issue_project_milestone_name(_issue), do: nil
+
+  defp preparing_issue_state, do: "Preparing"
+
   defp owner_input_issue_state?(state_name) when is_binary(state_name) do
     normalize_issue_state(state_name) == "need owner input"
   end
@@ -1804,6 +2116,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp normalize_issue_state(state_name) when is_binary(state_name) do
     String.downcase(String.trim(state_name))
   end
+
+  defp normalize_issue_state(_state_name), do: ""
 
   defp terminal_state_set(%State{} = state) do
     settings_for_state(state).tracker.terminal_states
@@ -2098,6 +2412,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_retry_issue_lookup(%Issue{} = issue, state, issue_id, attempt, metadata) do
+    state = maybe_hydrate_active_project_milestone_from_retry_issue(state, issue)
     terminal_states = terminal_state_set(state)
 
     cond do
@@ -2122,6 +2437,27 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, release_issue_claim(state, issue_id)}
   end
 
+  defp maybe_hydrate_active_project_milestone_from_retry_issue(
+         %State{active_project_milestone_id: nil} = state,
+         %Issue{} = issue
+       ) do
+    case issue_project_milestone_id(issue) do
+      milestone_id when is_binary(milestone_id) ->
+        Logger.info("Hydrating active milestone from retry issue: #{issue_context(issue)} project_milestone_id=#{milestone_id}")
+
+        %{
+          state
+          | active_project_milestone_id: milestone_id,
+            closed_project_milestone_ids: MapSet.delete(state.closed_project_milestone_ids || MapSet.new(), milestone_id)
+        }
+
+      _ ->
+        state
+    end
+  end
+
+  defp maybe_hydrate_active_project_milestone_from_retry_issue(%State{} = state, _issue), do: state
+
   defp cleanup_issue_workspace(state_or_identifier, identifier_or_worker_host, worker_host)
 
   defp cleanup_issue_workspace(%State{} = state, identifier, worker_host) when is_binary(identifier) do
@@ -2141,17 +2477,52 @@ defmodule SymphonyElixir.Orchestrator do
   defp run_terminal_workspace_cleanup(%State{} = state) do
     case Tracker.fetch_issues_by_states(settings_for_state(state).tracker.terminal_states, state.project_context) do
       {:ok, issues} ->
-        issues
-        |> Enum.each(fn
-          %Issue{} = issue ->
-            Workspace.cleanup_issue_runtime_cache(issue, settings_for_state(state))
+        attempted =
+          issues
+          |> Enum.count(&match?(%Issue{}, &1))
 
-          _ ->
-            :ok
-        end)
+        cleanup_results =
+          issues
+          |> Enum.flat_map(fn
+            %Issue{} = issue ->
+              [{issue, Workspace.cleanup_issue_runtime_cache(issue, settings_for_state(state))}]
+
+            _ ->
+              []
+          end)
+
+        cleanup_errors =
+          cleanup_results
+          |> Enum.flat_map(fn
+            {%Issue{} = issue, {:error, errors}} ->
+              [%{issue_identifier: issue.identifier, errors: inspect(errors)}]
+
+            {_issue, :ok} ->
+              []
+          end)
+
+        success_count = attempted - length(cleanup_errors)
+
+        if cleanup_errors == [] do
+          record_cleanup_attempt(state, :terminal_runtime_cache, :ok, %{
+            attempted_count: attempted,
+            success_count: success_count,
+            error_count: 0
+          })
+        else
+          Logger.warning("Startup terminal runtime cache cleanup completed with errors: #{inspect(cleanup_errors)}")
+
+          record_cleanup_attempt(state, :terminal_runtime_cache, :error, %{
+            attempted_count: attempted,
+            success_count: success_count,
+            error_count: length(cleanup_errors),
+            errors: cleanup_errors
+          })
+        end
 
       {:error, reason} ->
         Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues: #{inspect(reason)}")
+        record_cleanup_attempt(state, :terminal_runtime_cache, :error, %{error: inspect(reason), attempted_count: 0})
     end
   end
 
@@ -2168,13 +2539,36 @@ defmodule SymphonyElixir.Orchestrator do
           |> Enum.filter(&is_binary/1)
 
         case Workspace.sweep_abandoned_runtime_cache(active_identifiers, settings) do
-          {:ok, _removed} -> :ok
-          {:error, reason} -> Logger.warning("Skipping abandoned runtime cache cleanup: #{inspect(reason)}")
+          {:ok, removed} ->
+            record_cleanup_attempt(state, :abandoned_runtime_cache, :ok, %{
+              active_count: length(active_identifiers),
+              removed_count: length(removed),
+              removed_paths: removed
+            })
+
+          {:error, reason} ->
+            Logger.warning("Skipping abandoned runtime cache cleanup: #{inspect(reason)}")
+
+            record_cleanup_attempt(state, :abandoned_runtime_cache, :error, %{
+              active_count: length(active_identifiers),
+              error: inspect(reason)
+            })
         end
 
       {:error, reason} ->
         Logger.warning("Skipping abandoned runtime cache cleanup; failed to fetch active issues: #{inspect(reason)}")
+        record_cleanup_attempt(state, :abandoned_runtime_cache, :error, %{error: inspect(reason)})
     end
+  end
+
+  defp record_cleanup_attempt(%State{} = state, kind, result, evidence) when is_map(evidence) do
+    attempt =
+      evidence
+      |> Map.put(:kind, kind)
+      |> Map.put(:result, result)
+      |> Map.put(:at, DateTime.utc_now())
+
+    %{state | cleanup_attempts: [attempt | List.wrap(Map.get(state, :cleanup_attempts))]}
   end
 
   defp notify_dashboard do
@@ -2458,8 +2852,13 @@ defmodule SymphonyElixir.Orchestrator do
           runner_phase: Map.get(retry, :runner_phase),
           runner_command: Map.get(retry, :runner_command),
           runner_project_root: Map.get(retry, :runner_project_root),
+          runner_attach_url: Map.get(retry, :runner_attach_url),
           runner_result_state: Map.get(retry, :runner_result_state),
           runner_failure: Map.get(retry, :runner_failure),
+          session_id: Map.get(retry, :session_id),
+          last_codex_timestamp: Map.get(retry, :last_codex_timestamp),
+          last_codex_message: Map.get(retry, :last_codex_message),
+          last_codex_event: Map.get(retry, :last_codex_event),
           worker_host: Map.get(retry, :worker_host),
           workspace_path: Map.get(retry, :workspace_path)
         }
@@ -2502,8 +2901,19 @@ defmodule SymphonyElixir.Orchestrator do
        codex_totals: state.codex_totals,
        runner_runtime_totals: state.runner_runtime_totals || @empty_runner_runtime_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
-       suppression_events: [],
+       suppression_events: state.suppression_events || [],
        suppression_counts: state.suppression_counts || %{},
+       stewardship: stewardship_snapshot(state),
+       dispatch_summary: dispatch_summary_snapshot(state),
+       issue_queue: issue_queue_snapshot(state),
+       dependency_blocked_items: dependency_blocked_items_snapshot(state),
+       review_items: review_items_snapshot(state),
+       owner_input_items: owner_input_items_snapshot(state),
+       rca_required_items: rca_required_items_snapshot(state),
+       stale_states: stale_states_snapshot(state),
+       recent_failures: recent_failures_snapshot(state),
+       recent_activity: recent_activity_snapshot(state),
+       cleanup_status: cleanup_status_snapshot(state),
        polling: %{
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
@@ -2532,6 +2942,362 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp blocked_issue_state(%{issue: %Issue{state: state}}), do: state
   defp blocked_issue_state(_metadata), do: nil
+
+  defp stewardship_snapshot(%State{} = state) do
+    active_states = active_state_set(state)
+    terminal_states = terminal_state_set(state)
+    issues = polled_issues(state)
+    eligible = eligible_issues(issues, state, active_states, terminal_states)
+    owner_input = Enum.filter(issues, &owner_input_issue_state?(&1.state))
+    dependency_blocked = dependency_blocked_issues(issues, terminal_states)
+
+    %{
+      active_milestone: active_milestone_snapshot(state),
+      active_project_milestone_id: state.active_project_milestone_id,
+      eligible_issue_count: length(eligible),
+      dependency_blocked_count: length(dependency_blocked),
+      running_count: map_size(state.running || %{}),
+      retrying_count: map_size(state.retry_attempts || %{}),
+      blocked_count: map_size(state.blocked || %{}),
+      owner_input_count: length(owner_input),
+      recent_suppression_reasons: recent_suppression_reasons(state)
+    }
+  end
+
+  defp dispatch_summary_snapshot(%State{} = state) do
+    stewardship = stewardship_snapshot(state)
+    recent_category = recent_suppression_category(state)
+    completed? = MapSet.size(state.completed || MapSet.new()) > 0
+    {dispatch_state, reason} = dispatch_summary_state(stewardship, recent_category, completed?)
+
+    Map.merge(stewardship, %{dispatch_state: dispatch_state, reason: reason})
+  end
+
+  defp dispatch_summary_state(%{dependency_blocked_count: dep, eligible_issue_count: 0}, _recent_category, _completed?)
+       when dep > 0 do
+    {:dependency_blocked, "Queued issue(s) are blocked by unfinished Linear dependencies."}
+  end
+
+  defp dispatch_summary_state(%{blocked_count: blocked}, _recent_category, _completed?) when blocked > 0 do
+    {:owner_blocked, "Owner input or runtime block is preventing dispatch."}
+  end
+
+  defp dispatch_summary_state(%{owner_input_count: owner_input}, _recent_category, _completed?) when owner_input > 0 do
+    {:owner_blocked, "Owner input or runtime block is preventing dispatch."}
+  end
+
+  defp dispatch_summary_state(_stewardship, :unchanged, _completed?) do
+    {:unchanged, "Recent owner-input or handoff signal was unchanged and was suppressed."}
+  end
+
+  defp dispatch_summary_state(_stewardship, :done_processed, _completed?) do
+    {:done_processed, "Recent completed issue was already processed."}
+  end
+
+  defp dispatch_summary_state(_stewardship, _recent_category, true) do
+    {:done_processed, "Recent completed issue was already processed."}
+  end
+
+  defp dispatch_summary_state(%{retrying_count: retrying}, _recent_category, _completed?) when retrying > 0 do
+    {:retry_waiting, "Failed issue is waiting for its retry window."}
+  end
+
+  defp dispatch_summary_state(%{eligible_issue_count: 0}, _recent_category, _completed?) do
+    {:no_eligible_work, "No eligible issue is available for the active milestone and worker policy."}
+  end
+
+  defp dispatch_summary_state(_stewardship, _recent_category, _completed?) do
+    {:eligible_work, "Eligible issue(s) are available for dispatch when runner capacity opens."}
+  end
+
+  defp eligible_issues(issues, %State{} = state, active_states, terminal_states) do
+    Enum.filter(issues, fn
+      %Issue{} = issue -> issue_candidate_ready?(issue, state, active_states, terminal_states)
+      _ -> false
+    end)
+  end
+
+  defp dependency_blocked_issues(issues, terminal_states) do
+    Enum.filter(issues, fn
+      %Issue{} = issue ->
+        normalize_issue_state(issue.state) in ["todo", "preparing"] and
+          issue_blocked_by_non_terminal?(issue, terminal_states)
+
+      _ ->
+        false
+    end)
+  end
+
+  defp recent_suppression_reasons(%State{} = state) do
+    state
+    |> Map.get(:suppression_events, [])
+    |> Enum.map(&(Map.get(&1, :reason) || Map.get(&1, :kind)))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> Enum.take(5)
+  end
+
+  defp recent_suppression_category(%State{} = state) do
+    state
+    |> Map.get(:suppression_events, [])
+    |> List.first()
+    |> case do
+      %{category: category} -> category
+      _ -> nil
+    end
+  end
+
+  defp issue_queue_snapshot(%State{} = state) do
+    active_states = active_state_set(state)
+    terminal_states = terminal_state_set(state)
+
+    state
+    |> polled_issues()
+    |> Enum.filter(fn issue ->
+      normalize_issue_state(issue.state) in ["todo", "preparing"] and
+        candidate_issue?(issue, active_states, terminal_states) and
+        issue_not_already_tracked?(issue.id, state.claimed, state.running, state.blocked)
+    end)
+    |> sort_issues_for_dispatch()
+    |> Enum.map(&issue_attention_payload(&1, terminal_states))
+  end
+
+  defp dependency_blocked_items_snapshot(%State{} = state) do
+    terminal_states = terminal_state_set(state)
+
+    state
+    |> polled_issues()
+    |> Enum.filter(fn issue ->
+      normalize_issue_state(issue.state) in ["todo", "preparing"] and
+        issue_blocked_by_non_terminal?(issue, terminal_states)
+    end)
+    |> sort_issues_for_dispatch()
+    |> Enum.map(&issue_attention_payload(&1, terminal_states))
+  end
+
+  defp review_items_snapshot(%State{} = state) do
+    state
+    |> polled_issues()
+    |> Enum.filter(&(normalize_issue_state(&1.state) in ["in review", "review"]))
+    |> Enum.map(&issue_attention_payload(&1, terminal_state_set(state)))
+  end
+
+  defp owner_input_items_snapshot(%State{} = state) do
+    state
+    |> polled_issues()
+    |> Enum.filter(&owner_input_issue_state?(&1.state))
+    |> Enum.map(&issue_attention_payload(&1, terminal_state_set(state)))
+  end
+
+  defp rca_required_items_snapshot(%State{} = state) do
+    rca_state = settings_for_state(state).process_policy.rca_required_state |> normalize_issue_state()
+
+    state
+    |> polled_issues()
+    |> Enum.filter(&(normalize_issue_state(&1.state) == rca_state))
+    |> Enum.map(&issue_attention_payload(&1, terminal_state_set(state)))
+  end
+
+  defp stale_states_snapshot(%State{} = state) do
+    timeouts = settings_for_state(state).process_policy.state_timeouts_ms || %{}
+    now = DateTime.utc_now()
+
+    state
+    |> polled_issues()
+    |> Enum.filter(&issue_stale?(&1, timeouts, now))
+    |> Enum.map(fn issue ->
+      issue
+      |> issue_attention_payload(terminal_state_set(state))
+      |> Map.put(:age_ms, issue_age_ms(issue, now))
+      |> Map.put(:timeout_ms, Map.get(timeouts, normalize_issue_state(issue.state)))
+    end)
+  end
+
+  defp recent_failures_snapshot(%State{} = state) do
+    retry_failures =
+      state.retry_attempts
+      |> Enum.map(fn {_issue_id, retry} ->
+        %{
+          issue_id: Map.get(retry, :issue_id),
+          identifier: Map.get(retry, :identifier),
+          state: retry |> Map.get(:issue) |> Kernel.||(%{}) |> Map.get(:state),
+          error: Map.get(retry, :error) || Map.get(retry, :runner_failure),
+          at: Map.get(retry, :due_at)
+        }
+      end)
+
+    blocked_failures =
+      state.blocked
+      |> Enum.map(fn {issue_id, metadata} ->
+        %{
+          issue_id: issue_id,
+          identifier: Map.get(metadata, :identifier),
+          state: blocked_issue_state(metadata),
+          error: Map.get(metadata, :error) || Map.get(metadata, :runner_failure),
+          at: Map.get(metadata, :blocked_at)
+        }
+      end)
+
+    retry_failures ++ blocked_failures
+  end
+
+  defp recent_activity_snapshot(%State{} = state) do
+    runner_activity =
+      state.running
+      |> Enum.flat_map(&runner_recent_activity/1)
+
+    poll_activity =
+      case Map.get(state, :last_poll_at) do
+        %DateTime{} = at -> [%{event: "poll", message: "Fetched active issue snapshot", at: at}]
+        _ -> []
+      end
+
+    marker_activity =
+      state
+      |> polled_issues()
+      |> Enum.flat_map(&issue_marker_comment_activity/1)
+
+    runner_activity
+    |> Kernel.++(poll_activity)
+    |> Kernel.++(marker_activity)
+    |> Enum.sort_by(&activity_sort_key/1, :desc)
+    |> Enum.take(20)
+  end
+
+  defp runner_recent_activity({issue_id, entry}) do
+    if runner_activity_evidence?(entry) do
+      [
+        %{
+          issue_id: issue_id,
+          identifier: Map.get(entry, :identifier),
+          event: Map.get(entry, :last_codex_event) || Map.get(entry, :runner_result_state),
+          message: Map.get(entry, :last_codex_message),
+          at: Map.get(entry, :last_codex_timestamp)
+        }
+      ]
+    else
+      []
+    end
+  end
+
+  defp runner_activity_evidence?(entry) do
+    Enum.any?([
+      Map.get(entry, :last_codex_event),
+      Map.get(entry, :last_codex_timestamp),
+      Map.get(entry, :last_codex_message),
+      Map.get(entry, :runner_result_state)
+    ])
+  end
+
+  defp cleanup_status_snapshot(%State{} = state) do
+    attempts = List.wrap(Map.get(state, :cleanup_attempts))
+
+    %{
+      last_poll_at: Map.get(state, :last_poll_at),
+      attempts: attempts,
+      last_attempt: List.first(attempts)
+    }
+  end
+
+  defp issue_marker_comment_activity(%Issue{} = issue) do
+    issue.comments
+    |> List.wrap()
+    |> Enum.flat_map(fn
+      %{body: body, created_at: %DateTime{} = created_at} = comment when is_binary(body) ->
+        case comment_marker(body) do
+          nil ->
+            []
+
+          marker ->
+            [
+              %{
+                issue_id: issue.id,
+                identifier: issue.identifier,
+                event: marker,
+                message: comment_activity_message(body),
+                at: created_at,
+                author: Map.get(comment, :author)
+              }
+            ]
+        end
+
+      _ ->
+        []
+    end)
+  end
+
+  defp comment_marker(body) when is_binary(body) do
+    case Regex.run(~r/symphony:[a-z0-9_-]+(?:-[a-z0-9_-]+)*:v\d+/i, body) do
+      [marker] -> marker
+      _ -> nil
+    end
+  end
+
+  defp comment_activity_message(body) when is_binary(body) do
+    body
+    |> String.split("\n", parts: 2)
+    |> List.first()
+    |> String.trim()
+    |> String.slice(0, 160)
+  end
+
+  defp activity_sort_key(%{at: %DateTime{} = at}), do: DateTime.to_unix(at, :microsecond)
+  defp activity_sort_key(_activity), do: 0
+
+  defp polled_issues(%State{last_poll_issues: issues}) when is_list(issues), do: Enum.filter(issues, &match?(%Issue{}, &1))
+  defp polled_issues(_state), do: []
+
+  defp issue_attention_payload(%Issue{} = issue, terminal_states) do
+    %{
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      state: issue.state,
+      priority: issue.priority,
+      url: issue.url,
+      assignee_id: issue.assignee_id,
+      project_milestone: issue.project_milestone,
+      updated_at: issue.updated_at,
+      created_at: issue.created_at,
+      blocked: issue_blocked_by_non_terminal?(issue, terminal_states),
+      blockers: issue_blocker_payloads(issue, terminal_states)
+    }
+  end
+
+  defp issue_blocker_payloads(%Issue{blocked_by: blocked_by}, terminal_states) when is_list(blocked_by) do
+    blocked_by
+    |> Enum.map(&issue_blocker_payload(&1, terminal_states))
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp issue_blocker_payloads(_issue, _terminal_states), do: []
+
+  defp issue_blocker_payload(%{} = blocker, terminal_states) do
+    state = Map.get(blocker, :state) || Map.get(blocker, "state")
+
+    %{
+      id: Map.get(blocker, :id) || Map.get(blocker, "id"),
+      identifier: Map.get(blocker, :identifier) || Map.get(blocker, "identifier"),
+      title: Map.get(blocker, :title) || Map.get(blocker, "title"),
+      state: state,
+      terminal: terminal_issue_state?(state, terminal_states)
+    }
+  end
+
+  defp issue_blocker_payload(_blocker, _terminal_states), do: nil
+
+  defp issue_stale?(%Issue{} = issue, timeouts, %DateTime{} = now) when is_map(timeouts) do
+    timeout_ms = Map.get(timeouts, normalize_issue_state(issue.state))
+    age_ms = issue_age_ms(issue, now)
+
+    is_integer(timeout_ms) and is_integer(age_ms) and age_ms >= timeout_ms
+  end
+
+  defp issue_stale?(_issue, _timeouts, _now), do: false
+
+  defp issue_age_ms(%Issue{updated_at: %DateTime{} = updated_at}, %DateTime{} = now), do: DateTime.diff(now, updated_at, :millisecond)
+  defp issue_age_ms(%Issue{created_at: %DateTime{} = created_at}, %DateTime{} = now), do: DateTime.diff(now, created_at, :millisecond)
+  defp issue_age_ms(_issue, _now), do: nil
 
   defp integrate_runner_update(running_entry, %{event: event, timestamp: timestamp} = update) do
     token_delta = extract_token_delta(running_entry, update)
@@ -2685,11 +3451,11 @@ defmodule SymphonyElixir.Orchestrator do
       Map.get(update, :thread_resumed?) == true ->
         true
 
-      Map.get(running_entry || %{}, :codex_usage_baseline_pending, false) and Map.get(token_delta, :baseline_applied, false) ->
+      Map.get(running_entry, :codex_usage_baseline_pending, false) and Map.get(token_delta, :baseline_applied, false) ->
         false
 
       true ->
-        Map.get(running_entry || %{}, :codex_usage_baseline_pending, false)
+        Map.get(running_entry, :codex_usage_baseline_pending, false)
     end
   end
 

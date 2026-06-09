@@ -749,6 +749,85 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
     assert prompt =~ "no unresolved question"
   end
 
+  test "opencode runner reads persisted session activity fingerprint and usage" do
+    data_home = Path.join(System.tmp_dir!(), "opencode-runner-activity-#{System.unique_integer([:positive, :monotonic])}")
+    db_dir = Path.join([data_home, "opencode"])
+    db_path = Path.join(db_dir, "opencode.db")
+    execution_dir = Path.join(data_home, "workspace")
+    File.mkdir_p!(db_dir)
+    File.mkdir_p!(execution_dir)
+
+    previous_xdg_data_home = System.get_env("XDG_DATA_HOME")
+    System.put_env("XDG_DATA_HOME", data_home)
+
+    on_exit(fn ->
+      if previous_xdg_data_home do
+        System.put_env("XDG_DATA_HOME", previous_xdg_data_home)
+      else
+        System.delete_env("XDG_DATA_HOME")
+      end
+
+      File.rm_rf(data_home)
+    end)
+
+    sql = """
+    create table session (
+      id text primary key,
+      title text,
+      directory text,
+      time_created integer,
+      time_updated integer,
+      summary_files integer,
+      summary_additions integer,
+      summary_deletions integer,
+      tokens_input integer,
+      tokens_output integer,
+      tokens_reasoning integer,
+      tokens_cache_read integer,
+      tokens_cache_write integer
+    );
+
+    create table message (
+      id text primary key,
+      session_id text,
+      time_created integer,
+      time_updated integer,
+      data text
+    );
+
+    create table part (
+      id text primary key,
+      message_id text,
+      session_id text,
+      time_created integer,
+      time_updated integer,
+      data text
+    );
+
+    insert into session
+      (id,title,directory,time_created,time_updated,summary_files,summary_additions,summary_deletions,tokens_input,tokens_output,tokens_reasoning,tokens_cache_read,tokens_cache_write)
+      values
+      ('ses_activity','Activity session','#{execution_dir}',1,10,2,3,1,100,25,5,70,8);
+
+    insert into message (id,session_id,time_created,time_updated,data)
+      values ('msg_activity','ses_activity',2,20,'{}');
+
+    insert into part (id,message_id,session_id,time_created,time_updated,data)
+      values ('part_activity','msg_activity','ses_activity',3,30,'{}');
+    """
+
+    assert {"", 0} = System.cmd("sqlite3", [db_path, sql], stderr_to_stdout: true)
+
+    assert {:ok, activity} = Runner.read_session_activity(execution_dir, "ses_activity")
+    assert activity["usage"] == %{"inputTokens" => 100, "outputTokens" => 25, "totalTokens" => 125}
+    assert activity["message_count"] == 1
+    assert activity["message_updated"] == 20
+    assert activity["part_count"] == 1
+    assert activity["part_updated"] == 30
+    assert is_binary(activity["fingerprint"])
+    assert byte_size(activity["fingerprint"]) == 64
+  end
+
   test "opencode runner uses configured project root for visible shared sessions" do
     issue = %Issue{
       id: "issue-1",
@@ -1182,7 +1261,7 @@ defmodule SymphonyElixir.OpenCodeRunnerTest do
 
     assert_receive {:memory_tracker_comment, "issue-stall-reroute", comment}
     assert comment =~ "OpenCode Runner Parked"
-    assert comment =~ "produced no runner events for 300000ms"
+    assert comment =~ "produced no ACP updates or persisted session activity for 300000ms"
     refute comment =~ "Codex Architect RCA"
     assert_receive {:memory_tracker_state_update, "issue-stall-reroute", "Need Owner Input"}
   end

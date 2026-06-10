@@ -1,10 +1,9 @@
 pub(super) const CANDIDATE_ISSUES_QUERY: &str = r#"
-query CandidateIssues($teamKey: String!, $projectId: ID!, $projectMilestoneId: ID!, $states: [String!], $after: String) {
+query CandidateIssues($teamKey: String!, $projectId: ID!, $states: [String!], $after: String) {
   issues(
     filter: {
       team: { key: { eq: $teamKey } }
       project: { id: { eq: $projectId } }
-      projectMilestone: { id: { eq: $projectMilestoneId } }
       state: { name: { in: $states } }
     }
     first: 100
@@ -23,6 +22,7 @@ query CandidateIssues($teamKey: String!, $projectId: ID!, $projectMilestoneId: I
       priority
       branchName
       url
+      projectMilestone { id name }
       labels { nodes { name } }
       comments(last: 50, orderBy: createdAt) {
         nodes {

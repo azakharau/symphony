@@ -38,35 +38,106 @@ mod orchestration_basic;
 #[path = "bootstrap/orchestration_handoff.rs"]
 mod orchestration_handoff;
 
-fn valid_config_yaml() -> &'static str {
+fn valid_config_toml() -> &'static str {
     r#"
-server:
-  host: 127.0.0.1
-  port: 4110
-projects:
-  - id: symphony
-    name: Symphony
-    enabled: true
-    workflow_path: /home/agent/proj/symphony/WORKFLOW.md
-    repo_path: /home/agent/proj/symphony
-    branch:
-      base: agent-server/opencode-runner-extension
-      worktree_root: /home/agent/.symphony/workspaces/opencode/symphony
-    linear:
-      team_key: SYM
-      project_id: 07df87ce-4e93-4d2c-a73d-84aee1f27e07
-      project_milestone_id: 7a04f8cf-dece-48b9-a2ec-0356ed639943
-    opencode:
-      command: /usr/local/bin/opencode
-      args: ["acp"]
-      agent: build
-      model: openai/gpt-5.5
-      effort: high
-      permission_policy: reject
-    eval:
-      default_suite: symphony-vnext-smoke
-    concurrency:
-      max_sessions: 2
+[server]
+host = "127.0.0.1"
+port = 4110
+
+[[projects]]
+id = "symphony"
+name = "Symphony"
+enabled = true
+workflow_path = "/home/agent/proj/symphony/WORKFLOW.md"
+repo_path = "/home/agent/proj/symphony"
+
+[projects.branch]
+base = "agent-server/opencode-runner-extension"
+worktree_root = "/home/agent/.symphony/workspaces/opencode/symphony"
+
+[projects.linear]
+team_key = "SYM"
+project_id = "07df87ce-4e93-4d2c-a73d-84aee1f27e07"
+
+[projects.opencode]
+command = "/usr/local/bin/opencode"
+args = ["acp"]
+agent = "build"
+model = "openai/gpt-5.5"
+effort = "high"
+permission_policy = "reject"
+
+[projects.eval]
+default_suite = "symphony-vnext-smoke"
+
+[projects.concurrency]
+max_sessions = 2
+"#
+}
+
+fn two_project_config_toml() -> &'static str {
+    r#"
+[server]
+host = "127.0.0.1"
+port = 4110
+
+[[projects]]
+id = "alpha"
+name = "Alpha"
+enabled = true
+workflow_path = "/home/agent/proj/alpha/WORKFLOW.md"
+repo_path = "/home/agent/proj/alpha"
+
+[projects.branch]
+base = "main"
+worktree_root = "/home/agent/.symphony/workspaces/opencode/alpha"
+
+[projects.linear]
+team_key = "ALPHA"
+project_id = "alpha-project"
+
+[projects.opencode]
+command = "/usr/local/bin/opencode"
+args = ["acp"]
+agent = "build"
+model = "openai/gpt-5.5"
+effort = "high"
+permission_policy = "reject"
+
+[projects.eval]
+default_suite = "alpha-smoke"
+
+[projects.concurrency]
+max_sessions = 1
+
+[[projects]]
+id = "symphony"
+name = "Symphony"
+enabled = true
+workflow_path = "/home/agent/proj/symphony/WORKFLOW.md"
+repo_path = "/home/agent/proj/symphony"
+
+[projects.branch]
+base = "agent-server/opencode-runner-extension"
+worktree_root = "/home/agent/.symphony/workspaces/opencode/symphony"
+
+[projects.linear]
+team_key = "SYM"
+project_id = "07df87ce-4e93-4d2c-a73d-84aee1f27e07"
+
+[projects.opencode]
+command = "/usr/local/bin/opencode"
+args = ["acp"]
+agent = "build"
+model = "openai/gpt-5.5"
+effort = "high"
+permission_policy = "reject"
+
+[projects.eval]
+default_suite = "symphony-vnext-smoke"
+
+[projects.concurrency]
+max_sessions = 2
 "#
 }
 
@@ -86,6 +157,10 @@ fn linear_issue(
         branch_name: None,
         url: None,
         labels: Vec::new(),
+        project_milestone: Some(symphony_vnext::linear::LinearMilestone {
+            id: "test-milestone-id".into(),
+            name: "Test Milestone".into(),
+        }),
         blocked_by: Vec::new(),
         has_new_owner_answer: false,
         owner_answer_created_at: None,
@@ -425,6 +500,7 @@ fn linear_issue_node_json(
         "priority": priority,
         "branchName": "agent-server/opencode-runner-extension",
         "url": format!("https://linear.example/{identifier}"),
+        "projectMilestone": { "id": "test-milestone-id", "name": "Test Milestone" },
         "labels": { "nodes": [] },
         "comments": { "nodes": [] },
         "relations": { "nodes": [] },

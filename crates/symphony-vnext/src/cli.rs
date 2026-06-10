@@ -47,7 +47,7 @@ where
             let input = tokio::fs::read_to_string(&config)
                 .await
                 .with_context(|| format!("read config {}", config.display()))?;
-            RootConfig::from_yaml_str(&input)?;
+            RootConfig::from_toml_str(&input)?;
             Ok(())
         }
         Command::InitStore { database } => {

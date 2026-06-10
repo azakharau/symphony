@@ -6,7 +6,6 @@ use thiserror::Error;
 pub struct LinearProjectConfig {
     pub team_key: String,
     pub project_id: Option<String>,
-    pub project_milestone_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -21,11 +20,19 @@ pub struct LinearIssue {
     pub branch_name: Option<String>,
     pub url: Option<String>,
     pub labels: Vec<String>,
+    pub project_milestone: Option<LinearMilestone>,
     pub blocked_by: Vec<LinearBlocker>,
     pub has_new_owner_answer: bool,
     pub owner_answer_created_at: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinearMilestone {
+    pub id: String,
+    pub name: String,
 }
 
 impl LinearIssue {

@@ -21,9 +21,9 @@ libsql = { version = "0.10.0-pre.4", default-features = false, features = ["core
 lineark-sdk = "3.0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "0.9"
 thiserror = "2.0"
 tokio = { version = "1.45", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "time"] }
+toml = "0.9"
 tracing = "0.1"
 tracing-journald = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

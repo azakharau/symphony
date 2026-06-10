@@ -1,9 +1,9 @@
 use super::*;
 
 #[tokio::test]
-async fn multiproject_config_loads_deterministically_and_validates_required_fields() {
-    let first = RootConfig::from_yaml_str(valid_config_yaml()).expect("valid root config");
-    let second = RootConfig::from_yaml_str(valid_config_yaml()).expect("valid root config");
+async fn multiproject_toml_config_loads_deterministically_and_validates_required_fields() {
+    let first = RootConfig::from_toml_str(valid_config_toml()).expect("valid root config");
+    let second = RootConfig::from_toml_str(valid_config_toml()).expect("valid root config");
 
     assert_eq!(first, second);
     assert_eq!(first.projects().len(), 1);
@@ -18,26 +18,38 @@ async fn multiproject_config_loads_deterministically_and_validates_required_fiel
     assert_eq!(project.concurrency.max_sessions, 2);
 
     let missing_required =
-        valid_config_yaml().replace("    repo_path: /home/agent/proj/symphony\n", "");
-    let err = RootConfig::from_yaml_str(&missing_required).expect_err("repo_path is required");
+        valid_config_toml().replace("repo_path = \"/home/agent/proj/symphony\"\n", "");
+    let err = RootConfig::from_toml_str(&missing_required).expect_err("repo_path is required");
     assert!(err.to_string().contains("repo_path"), "{err}");
 }
 
 #[tokio::test]
 async fn config_rejects_codex_compatibility_fields() {
-    let with_codex = valid_config_yaml().replace(
-        "    opencode:\n",
-        "    codex:\n      command: codex\n    opencode:\n",
+    let with_codex = valid_config_toml().replace(
+        "[projects.opencode]\n",
+        "[projects.codex]\ncommand = \"codex\"\n\n[projects.opencode]\n",
     );
 
     let err =
-        RootConfig::from_yaml_str(&with_codex).expect_err("codex config must not be accepted");
+        RootConfig::from_toml_str(&with_codex).expect_err("codex config must not be accepted");
     assert!(err.to_string().contains("codex"), "{err}");
 }
 
 #[tokio::test]
+async fn config_rejects_milestone_selection_fields() {
+    let with_milestone = valid_config_toml().replace(
+        "project_id = \"07df87ce-4e93-4d2c-a73d-84aee1f27e07\"\n",
+        "project_id = \"07df87ce-4e93-4d2c-a73d-84aee1f27e07\"\nproject_milestone_id = \"must-not-live-in-config\"\n",
+    );
+
+    let err = RootConfig::from_toml_str(&with_milestone)
+        .expect_err("runtime milestone selection must not be accepted in config");
+    assert!(err.to_string().contains("project_milestone_id"), "{err}");
+}
+
+#[tokio::test]
 async fn linear_graphql_client_fetches_project_candidates_transitions_and_records_evidence() {
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
     let transport = RecordingGraphqlTransport::new(vec![
         serde_json::json!({
@@ -53,6 +65,10 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
                             "priority": 1,
                             "branchName": "agent-server/opencode-runner-extension",
                             "url": "https://linear.example/SYM-100",
+                            "projectMilestone": {
+                                "id": "milestone-from-linear",
+                                "name": "Milestone From Linear"
+                            },
                             "labels": { "nodes": [{ "name": "vnext" }] },
                             "comments": {
                                 "nodes": [
@@ -87,6 +103,10 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
                             "priority": 2,
                             "branchName": "agent-server/opencode-runner-extension",
                             "url": "https://linear.example/SYM-101",
+                            "projectMilestone": {
+                                "id": "milestone-from-linear",
+                                "name": "Milestone From Linear"
+                            },
                             "labels": { "nodes": [] },
                             "comments": {
                                 "nodes": [
@@ -159,6 +179,13 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
     assert_eq!(issues.len(), 2);
     assert_eq!(issues[0].identifier, "SYM-100");
     assert_eq!(issues[0].state, "Todo");
+    assert_eq!(
+        issues[0]
+            .project_milestone
+            .as_ref()
+            .map(|milestone| milestone.id.as_str()),
+        Some("milestone-from-linear")
+    );
     assert_eq!(issues[0].labels, vec!["vnext"]);
     assert_eq!(
         issues[0].blocked_by[0].identifier.as_deref(),
@@ -179,16 +206,20 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
         requests[0]["variables"]["projectId"],
         "07df87ce-4e93-4d2c-a73d-84aee1f27e07"
     );
-    assert_eq!(
-        requests[0]["variables"]["projectMilestoneId"],
-        "7a04f8cf-dece-48b9-a2ec-0356ed639943"
-    );
+    assert!(requests[0]["variables"].get("projectMilestoneId").is_none());
     assert!(
-        requests[0]["variables"]["states"]
-            .as_array()
-            .expect("states")
-            .contains(&serde_json::json!("Preparing"))
+        requests[0]["query"]
+            .as_str()
+            .expect("candidate query")
+            .contains("projectMilestone { id name }")
     );
+    let states = requests[0]["variables"]["states"]
+        .as_array()
+        .expect("states");
+    assert!(states.contains(&serde_json::json!("Todo")));
+    assert!(!states.contains(&serde_json::json!("Preparing")));
+    assert!(!states.contains(&serde_json::json!("In Review")));
+    assert!(!states.contains(&serde_json::json!("RCA Required")));
     assert!(
         requests[0]["query"]
             .as_str()
@@ -206,7 +237,7 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
 
 #[tokio::test]
 async fn linear_graphql_client_paginates_candidate_issues_until_exhausted() {
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
     let transport = RecordingGraphqlTransport::new(vec![
         serde_json::json!({
@@ -410,7 +441,7 @@ async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
 async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
@@ -561,7 +592,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
 async fn dashboard_api_json_routes_aggregate_project_and_issue_paths() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");

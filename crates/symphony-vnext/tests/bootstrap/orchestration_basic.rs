@@ -3,9 +3,9 @@ use super::*;
 #[tokio::test]
 async fn daemon_once_entrypoint_validates_config_migrates_and_reconciles_projects() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let config_path = dir.path().join("projects.yml");
+    let config_path = dir.path().join("projects.toml");
     let db_path = dir.path().join("runtime.sqlite3");
-    fs::write(&config_path, valid_config_yaml()).expect("write config");
+    fs::write(&config_path, valid_config_toml()).expect("write config");
 
     cli::run_with_args([
         "symphony-vnext",
@@ -36,7 +36,7 @@ async fn daemon_once_entrypoint_validates_config_migrates_and_reconciles_project
 async fn orchestration_dispatches_one_eligible_todo_by_project_capacity_and_order() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
@@ -82,7 +82,7 @@ async fn orchestration_dispatches_one_eligible_todo_by_project_capacity_and_orde
 async fn orchestration_never_dispatches_nonterminal_blockers_or_backlog() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
@@ -131,10 +131,48 @@ async fn orchestration_never_dispatches_nonterminal_blockers_or_backlog() {
 }
 
 #[tokio::test]
+async fn orchestration_leaves_todo_queued_when_todo_spans_multiple_milestones() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let first = linear_issue("first", "SYM-42", "Todo", Some(1));
+    let mut second = linear_issue("second", "SYM-43", "Todo", Some(2));
+    second.project_milestone = Some(symphony_vnext::linear::LinearMilestone {
+        id: "different-milestone-id".into(),
+        name: "Different Milestone".into(),
+    });
+    let client = RecordingLinearClient::new(vec![first, second]);
+
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
+
+    assert!(report.dispatched.is_empty());
+    assert!(report.blocked.is_empty());
+    assert!(client.transitions().is_empty());
+    let first = store
+        .issue("symphony", "first")
+        .await
+        .expect("query first")
+        .expect("first issue");
+    assert_eq!(first.lifecycle_stage, LifecycleStage::Queued);
+    let second = store
+        .issue("symphony", "second")
+        .await
+        .expect("query second")
+        .expect("second issue");
+    assert_eq!(second.lifecycle_stage, LifecycleStage::Queued);
+}
+
+#[tokio::test]
 async fn orchestration_reconciles_persisted_backlog_without_counting_capacity() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
@@ -186,7 +224,7 @@ async fn orchestration_reconciles_persisted_backlog_without_counting_capacity() 
 async fn orchestration_keeps_owner_input_parked_until_answer_or_manual_todo() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
@@ -224,7 +262,7 @@ async fn orchestration_keeps_owner_input_parked_until_answer_or_manual_todo() {
 async fn orchestration_ignores_owner_input_comments_that_predate_the_parked_record() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
@@ -265,7 +303,7 @@ async fn orchestration_ignores_owner_input_comments_that_predate_the_parked_reco
 async fn orchestration_ignores_new_symphony_evidence_comments_after_parked_record() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
@@ -337,7 +375,7 @@ async fn orchestration_ignores_new_symphony_evidence_comments_after_parked_recor
 async fn orchestration_reconciles_terminal_issues_and_avoids_duplicate_dispatch_after_restart() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
@@ -389,7 +427,7 @@ async fn terminal_reconciliation_marks_cleanup_complete_when_worktree_is_already
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let missing_worktree = dir.path().join("already-removed").join("SYM-63");
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
@@ -429,7 +467,7 @@ async fn orchestration_restores_requeued_issue_with_existing_session_without_dup
     let db_path = dir.path().join("runtime.sqlite3");
     let worktree = dir.path().join("SYM-62-worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
@@ -468,4 +506,36 @@ async fn orchestration_restores_requeued_issue_with_existing_session_without_dup
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn orchestration_returns_in_progress_issue_without_session_to_todo() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "lost-session",
+        "SYM-64",
+        "In Progress",
+        Some(1),
+    )]);
+
+    daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("poll");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("lost-session".into(), LinearTransition::Todo)]
+    );
+    let issue = store
+        .issue("symphony", "lost-session")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    assert_eq!(issue.state, "Todo");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Queued);
 }

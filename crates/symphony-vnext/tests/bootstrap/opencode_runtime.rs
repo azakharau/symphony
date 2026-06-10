@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_issue_prompt() {
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
     let issue = linear_issue("issue-27", "SYM-27", "Todo", Some(1))
         .with_description("Implement the OpenCode ACP lifecycle runner with stage telemetry.");
@@ -367,7 +367,7 @@ async fn stdio_launcher_rejects_issue_identifier_path_separators_before_worktree
 
 #[tokio::test]
 async fn opencode_event_ingestion_updates_stage_telemetry_without_losing_session_linkage() {
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
     let issue = linear_issue("issue-27", "SYM-27", "In Progress", Some(1));
     let spec = opencode::build_acp_launch_spec(project, &issue);
@@ -415,7 +415,7 @@ async fn opencode_event_ingestion_updates_stage_telemetry_without_losing_session
 
 #[tokio::test]
 async fn opencode_silence_is_observable_without_marking_session_failed() {
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
     let issue = linear_issue("issue-27", "SYM-27", "In Progress", Some(1));
     let spec = opencode::build_acp_launch_spec(project, &issue);

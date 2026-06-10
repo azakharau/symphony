@@ -7,11 +7,11 @@ mod records;
 use std::path::PathBuf;
 
 use anyhow::Context;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::{
     config::{ProjectConfig, RootConfig},
-    linear::{EmptyLinearClient, LinearClient, LinearTransition},
+    linear::{EmptyLinearClient, LinearClient, LinearIssue, LinearTransition},
     opencode::{
         DeterministicOpenCodeLauncher, OpenCodeLauncher, StdioOpenCodeLauncher,
         build_acp_launch_spec, new_session_record,
@@ -19,7 +19,7 @@ use crate::{
     state::{BlockerRecord, CleanupStatus, LifecycleStage},
     storage::SqliteStore,
 };
-use handoff::{park_need_owner_input, process_in_progress_handoff};
+use handoff::process_in_progress_handoff;
 use http::run_continuous;
 use policy::{
     blocker_record, compare_issues_for_dispatch, has_existing_session, has_new_owner_response,
@@ -38,7 +38,7 @@ pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
     let input = tokio::fs::read_to_string(&options.config_path)
         .await
         .with_context(|| format!("read config {}", options.config_path.display()))?;
-    let config = RootConfig::from_yaml_str(&input)?;
+    let config = RootConfig::from_toml_str(&input)?;
     info!(
         config_path = %options.config_path.display(),
         database_path = %options.database_path.display(),
@@ -105,13 +105,23 @@ async fn reconcile_project(
 ) -> anyhow::Result<()> {
     let mut eligible = Vec::new();
     let mut issues = linear.fetch_candidate_issues(project).await?;
+    issues.sort_by(compare_issues_for_dispatch);
+    let active_todo_milestone = active_todo_milestone(&issues);
+    let todo_milestone_count = todo_milestone_count(&issues);
     debug!(
         project_id = %project.id,
+        active_todo_milestone = active_todo_milestone.as_deref().unwrap_or("none"),
+        todo_milestone_count,
         issues = issues.len(),
         "fetched Linear candidate issues"
     );
-    issues.sort_by(compare_issues_for_dispatch);
-
+    if todo_milestone_count > 1 {
+        info!(
+            project_id = %project.id,
+            todo_milestone_count,
+            "Todo queue spans multiple Linear milestones; dispatch is suppressed until Todo contains one active milestone"
+        );
+    }
     for issue in issues {
         match issue.state.as_str() {
             "Backlog" => {
@@ -224,33 +234,81 @@ async fn reconcile_project(
                     record.git_ref = existing.git_ref.clone().or(record.git_ref);
                     record.cleanup_status = existing.cleanup_status;
                 }
+                if !has_existing_session(store, &project.id, &issue.id).await? {
+                    info!(
+                        project_id = %project.id,
+                        issue = %issue.identifier,
+                        "In Progress issue has no recorded OpenCode session; returning to Todo"
+                    );
+                    linear
+                        .transition_issue(&issue.id, LinearTransition::Todo)
+                        .await?;
+                    let record = issue_record(
+                        project,
+                        &issue,
+                        LinearTransition::Todo.state_name(),
+                        LifecycleStage::Queued,
+                        None,
+                        CleanupStatus::Clean,
+                    );
+                    store.upsert_issue(&record).await?;
+                    continue;
+                }
                 store.upsert_issue(&record).await?;
                 process_in_progress_handoff(project, store, linear, opencode, &issue, existing)
                     .await?;
             }
-            "Preparing" | "In Review" | "RCA Required" => {
-                warn!(
-                    project_id = %project.id,
-                    issue = %issue.identifier,
-                    state = %issue.state,
-                    "legacy state observed in Rust vNext state machine; parking"
-                );
-                park_need_owner_input(
-                    project,
-                    store,
-                    linear,
-                    &issue,
-                    "legacy_runtime_state",
-                    format!(
-                        "Rust vNext does not preserve `{}` as a runtime state; OpenCode must repair or close inside its handoff lifecycle",
-                        issue.state
-                    ),
-                    None,
-                )
-                .await?;
-            }
             "Todo" => {
-                if let Some(blocker) = nonterminal_blocker(&issue.blocked_by) {
+                let Some(issue_milestone) = issue.project_milestone.as_ref() else {
+                    info!(
+                        project_id = %project.id,
+                        issue = %issue.identifier,
+                        "Todo issue suppressed because it has no Linear milestone"
+                    );
+                    let record = issue_record(
+                        project,
+                        &issue,
+                        "Todo",
+                        LifecycleStage::Blocked,
+                        Some(BlockerRecord {
+                            kind: "missing_todo_milestone".into(),
+                            message: "Todo issue has no Linear milestone; Symphony cannot infer the active milestone".into(),
+                            observed_at: issue.updated_at.clone(),
+                        }),
+                        CleanupStatus::Clean,
+                    );
+                    store.upsert_issue(&record).await?;
+                    report.blocked.push(issue.identifier);
+                    continue;
+                };
+                if active_todo_milestone.as_deref() != Some(issue_milestone.id.as_str()) {
+                    debug!(
+                        project_id = %project.id,
+                        issue = %issue.identifier,
+                        issue_milestone = %issue_milestone.id,
+                        active_todo_milestone = active_todo_milestone.as_deref().unwrap_or("none"),
+                        "Todo issue is outside the active Todo milestone; leaving queued"
+                    );
+                    let record = issue_record(
+                        project,
+                        &issue,
+                        "Todo",
+                        LifecycleStage::Queued,
+                        None,
+                        CleanupStatus::Clean,
+                    );
+                    store.upsert_issue(&record).await?;
+                } else if todo_milestone_count > 1 {
+                    let record = issue_record(
+                        project,
+                        &issue,
+                        "Todo",
+                        LifecycleStage::Queued,
+                        None,
+                        CleanupStatus::Clean,
+                    );
+                    store.upsert_issue(&record).await?;
+                } else if let Some(blocker) = nonterminal_blocker(&issue.blocked_by) {
                     info!(
                         project_id = %project.id,
                         issue = %issue.identifier,
@@ -363,4 +421,29 @@ async fn reconcile_project(
     }
 
     Ok(())
+}
+
+fn active_todo_milestone(issues: &[LinearIssue]) -> Option<String> {
+    issues
+        .iter()
+        .filter(|issue| issue.state == "Todo")
+        .find_map(|issue| {
+            issue
+                .project_milestone
+                .as_ref()
+                .map(|milestone| milestone.id.clone())
+        })
+}
+
+fn todo_milestone_count(issues: &[LinearIssue]) -> usize {
+    let mut milestones = Vec::<&str>::new();
+    for issue in issues.iter().filter(|issue| issue.state == "Todo") {
+        let Some(milestone) = issue.project_milestone.as_ref() else {
+            continue;
+        };
+        if !milestones.contains(&milestone.id.as_str()) {
+            milestones.push(milestone.id.as_str());
+        }
+    }
+    milestones.len()
 }

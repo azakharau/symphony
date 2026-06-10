@@ -12,8 +12,8 @@ use queries::{
     UPDATE_ISSUE_STATE_MUTATION,
 };
 pub use types::{
-    LinearBlocker, LinearClientError, LinearIssue, LinearIssueEvidence, LinearProjectConfig,
-    LinearTransition,
+    LinearBlocker, LinearClientError, LinearIssue, LinearIssueEvidence, LinearMilestone,
+    LinearProjectConfig, LinearTransition,
 };
 
 const CANDIDATE_STATES: &[&str] = &[
@@ -21,9 +21,6 @@ const CANDIDATE_STATES: &[&str] = &[
     "Todo",
     "In Progress",
     "Need Owner Input",
-    "Preparing",
-    "In Review",
-    "RCA Required",
     "Done",
     "Canceled",
     "Cancelled",
@@ -348,13 +345,6 @@ where
         .project_id
         .as_deref()
         .ok_or_else(|| LinearClientError::Message("linear.project_id is required".into()))?;
-    let project_milestone_id = project
-        .linear
-        .project_milestone_id
-        .as_deref()
-        .ok_or_else(|| {
-            LinearClientError::Message("linear.project_milestone_id is required".into())
-        })?;
     let mut issues = Vec::new();
     let mut after: Option<String> = None;
 
@@ -364,7 +354,6 @@ where
             variables: json!({
                 "teamKey": project.linear.team_key,
                 "projectId": project_id,
-                "projectMilestoneId": project_milestone_id,
                 "states": CANDIDATE_STATES,
                 "after": after,
             }),

@@ -26,16 +26,16 @@ async fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_wo
         ],
     );
     fs::write(worktree.join("artifact.txt"), "done").expect("artifact");
-    let config_yaml = valid_config_yaml()
+    let config_toml = valid_config_toml()
         .replace(
-            "repo_path: /home/agent/proj/symphony",
-            &format!("repo_path: {}", repo.display()),
+            "repo_path = \"/home/agent/proj/symphony\"",
+            &format!("repo_path = \"{}\"", repo.display()),
         )
         .replace(
             "/home/agent/.symphony/workspaces/opencode/symphony",
             &worktree_root.display().to_string(),
         );
-    let config = RootConfig::from_yaml_str(&config_yaml).expect("config");
+    let config = RootConfig::from_toml_str(&config_toml).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
@@ -150,16 +150,16 @@ async fn no_code_success_handoff_can_close_without_commit_sha() {
             "agent-server/opencode-runner-extension",
         ],
     );
-    let config_yaml = valid_config_yaml()
+    let config_toml = valid_config_toml()
         .replace(
-            "repo_path: /home/agent/proj/symphony",
-            &format!("repo_path: {}", repo.display()),
+            "repo_path = \"/home/agent/proj/symphony\"",
+            &format!("repo_path = \"{}\"", repo.display()),
         )
         .replace(
             "/home/agent/.symphony/workspaces/opencode/symphony",
             &worktree_root.display().to_string(),
         );
-    let config = RootConfig::from_yaml_str(&config_yaml).expect("config");
+    let config = RootConfig::from_toml_str(&config_toml).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
@@ -234,7 +234,7 @@ async fn successful_handoff_with_worktree_outside_configured_root_is_parked_with
     let outside = dir.path().join("outside-worktree");
     fs::create_dir_all(&outside).expect("outside worktree");
     fs::write(outside.join("artifact.txt"), "must survive").expect("artifact");
-    let config = RootConfig::from_yaml_str(&valid_config_yaml().replace(
+    let config = RootConfig::from_toml_str(&valid_config_toml().replace(
         "/home/agent/.symphony/workspaces/opencode/symphony",
         allowed_root.to_str().expect("allowed root utf8"),
     ))
@@ -292,7 +292,7 @@ async fn successful_handoff_with_sibling_worktree_is_parked_without_cleanup() {
     fs::create_dir_all(&active).expect("active worktree");
     fs::create_dir_all(&sibling).expect("sibling worktree");
     fs::write(sibling.join("artifact.txt"), "must survive").expect("artifact");
-    let config = RootConfig::from_yaml_str(&valid_config_yaml().replace(
+    let config = RootConfig::from_toml_str(&valid_config_toml().replace(
         "/home/agent/.symphony/workspaces/opencode/symphony",
         allowed_root.to_str().expect("allowed root utf8"),
     ))
@@ -348,7 +348,7 @@ async fn successful_handoff_with_whitespace_worktree_path_is_parked_without_clea
     let active = allowed_root.join("SYM-80");
     fs::create_dir_all(&active).expect("active worktree");
     fs::write(active.join("artifact.txt"), "must survive").expect("artifact");
-    let config = RootConfig::from_yaml_str(&valid_config_yaml().replace(
+    let config = RootConfig::from_toml_str(&valid_config_toml().replace(
         "/home/agent/.symphony/workspaces/opencode/symphony",
         allowed_root.to_str().expect("allowed root utf8"),
     ))
@@ -398,7 +398,7 @@ async fn eval_failure_stays_in_opencode_repair_loop_without_linear_churn() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let worktree = dir.path().join("SYM-81-worktree");
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
@@ -446,7 +446,7 @@ async fn repeated_identical_eval_failure_parks_owner_input_with_typed_evidence()
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let worktree = dir.path().join("SYM-82-worktree");
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
@@ -496,7 +496,7 @@ async fn repeated_identical_eval_failure_parks_owner_input_with_typed_evidence()
 async fn provider_blocker_owner_question_and_malformed_handoff_park_without_closing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
@@ -601,52 +601,10 @@ async fn provider_blocker_owner_question_and_malformed_handoff_park_without_clos
 }
 
 #[tokio::test]
-async fn rust_path_parks_legacy_steward_states_instead_of_preserving_them() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = dir.path().join("runtime.sqlite3");
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
-    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
-    store.migrate().await.expect("migrate");
-    store.reconcile_projects(&config).await.expect("projects");
-    let client = RecordingLinearClient::new(vec![
-        linear_issue("preparing", "SYM-85", "Preparing", Some(0)),
-        linear_issue("review", "SYM-86", "In Review", Some(1)),
-        linear_issue("rca", "SYM-87", "RCA Required", Some(2)),
-    ]);
-
-    daemon::run_once_with_linear_client(&config, &store, &client)
-        .await
-        .expect("orchestrate once");
-
-    assert_eq!(
-        client.transitions(),
-        vec![
-            ("preparing".into(), LinearTransition::NeedOwnerInput),
-            ("review".into(), LinearTransition::NeedOwnerInput),
-            ("rca".into(), LinearTransition::NeedOwnerInput),
-        ]
-    );
-    for issue_id in ["preparing", "review", "rca"] {
-        let issue = store
-            .issue("symphony", issue_id)
-            .await
-            .expect("query parked")
-            .expect("parked issue");
-        assert_eq!(issue.state, "Need Owner Input");
-        assert_eq!(issue.lifecycle_stage, LifecycleStage::Blocked);
-        assert_eq!(issue.blocker.expect("blocker").kind, "legacy_runtime_state");
-    }
-}
-
-#[tokio::test]
 async fn orchestration_processes_multiple_projects_in_config_order() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
-    let config = RootConfig::from_yaml_str(&valid_config_yaml().replace(
-        "  - id: symphony\n",
-        "  - id: alpha\n    name: Alpha\n    enabled: true\n    workflow_path: /home/agent/proj/alpha/WORKFLOW.md\n    repo_path: /home/agent/proj/alpha\n    branch:\n      base: main\n      worktree_root: /home/agent/.symphony/workspaces/opencode/alpha\n    linear:\n      team_key: ALPHA\n      project_id: alpha-project\n      project_milestone_id: alpha-milestone\n    opencode:\n      command: /usr/local/bin/opencode\n      args: [\"acp\"]\n      agent: build\n      model: openai/gpt-5.5\n      effort: high\n      permission_policy: reject\n    eval:\n      default_suite: alpha-smoke\n    concurrency:\n      max_sessions: 1\n  - id: symphony\n",
-    ))
-    .expect("config");
+    let config = RootConfig::from_toml_str(two_project_config_toml()).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");

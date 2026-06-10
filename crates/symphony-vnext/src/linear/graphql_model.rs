@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use super::{LinearBlocker, LinearIssue};
+use super::{LinearBlocker, LinearIssue, LinearMilestone};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct LinearIssueConnection {
@@ -28,6 +28,8 @@ pub(super) struct LinearIssueNode {
     #[serde(rename = "branchName")]
     branch_name: Option<String>,
     url: Option<String>,
+    #[serde(rename = "projectMilestone")]
+    project_milestone: Option<LinearMilestoneNode>,
     labels: LinearLabelConnection,
     relations: LinearRelationConnection,
     comments: LinearCommentConnection,
@@ -50,6 +52,9 @@ impl LinearIssueNode {
             priority: self.priority,
             branch_name: self.branch_name,
             url: self.url,
+            project_milestone: self
+                .project_milestone
+                .map(LinearMilestoneNode::into_milestone),
             labels: self
                 .labels
                 .nodes
@@ -71,6 +76,21 @@ impl LinearIssueNode {
             owner_answer_created_at,
             created_at: self.created_at,
             updated_at: self.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearMilestoneNode {
+    id: String,
+    name: String,
+}
+
+impl LinearMilestoneNode {
+    fn into_milestone(self) -> LinearMilestone {
+        LinearMilestone {
+            id: self.id,
+            name: self.name,
         }
     }
 }

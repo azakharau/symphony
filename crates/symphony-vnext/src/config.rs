@@ -13,8 +13,8 @@ pub struct RootConfig {
 }
 
 impl RootConfig {
-    pub fn from_yaml_str(input: &str) -> Result<Self, ConfigError> {
-        let config: Self = serde_yaml::from_str(input)?;
+    pub fn from_toml_str(input: &str) -> Result<Self, ConfigError> {
+        let config: Self = toml::from_str(input)?;
         config.validate()?;
         Ok(config)
     }
@@ -125,7 +125,7 @@ pub struct ConcurrencyConfig {
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("invalid root config: {0}")]
-    Parse(#[from] serde_yaml::Error),
+    Parse(#[from] toml::de::Error),
     #[error("invalid root config: {0}")]
     Validation(String),
 }

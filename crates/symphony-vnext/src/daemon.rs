@@ -4,12 +4,17 @@ use anyhow::{Context, bail};
 
 use crate::{
     config::{ProjectConfig, RootConfig},
-    linear::{EmptyLinearClient, LinearBlocker, LinearClient, LinearIssue, LinearTransition},
-    opencode::{
-        DeterministicOpenCodeLauncher, OpenCodeLauncher, StdioOpenCodeLauncher,
-        build_acp_launch_spec, new_session_record,
+    linear::{
+        EmptyLinearClient, LinearBlocker, LinearClient, LinearIssue, LinearIssueEvidence,
+        LinearTransition,
     },
-    state::{BlockerRecord, CleanupStatus, GitRefRecord, IssueStateRecord, LifecycleStage},
+    opencode::{
+        DeterministicOpenCodeLauncher, OpenCodeHandoff, OpenCodeLauncher, OpenCodeStopReason,
+        StdioOpenCodeLauncher, build_acp_launch_spec, new_session_record,
+    },
+    state::{
+        BlockerRecord, CleanupStatus, FailureRecord, GitRefRecord, IssueStateRecord, LifecycleStage,
+    },
     storage::SqliteStore,
 };
 
@@ -135,14 +140,36 @@ fn reconcile_project(
                 }
             }
             "In Progress" => {
-                store.upsert_issue(issue_record(
+                let existing = store.issue(&project.id, &issue.id)?;
+                let mut record = issue_record(
                     project,
                     &issue,
                     "In Progress",
                     LifecycleStage::Running,
                     None,
                     CleanupStatus::Clean,
-                ))?;
+                );
+                if let Some(existing) = &existing {
+                    record.failure = existing.failure.clone();
+                    record.git_ref = existing.git_ref.clone().or(record.git_ref);
+                    record.cleanup_status = existing.cleanup_status;
+                }
+                store.upsert_issue(record)?;
+                process_in_progress_handoff(project, store, linear, opencode, &issue, existing)?;
+            }
+            "In Review" | "RCA Required" => {
+                park_need_owner_input(
+                    project,
+                    store,
+                    linear,
+                    &issue,
+                    "legacy_runtime_state",
+                    format!(
+                        "Rust vNext does not preserve `{}` as a runtime state; OpenCode must repair or close inside its handoff lifecycle",
+                        issue.state
+                    ),
+                    None,
+                )?;
             }
             "Todo" => {
                 if let Some(blocker) = nonterminal_blocker(&issue.blocked_by) {
@@ -238,9 +265,304 @@ fn issue_record(
                 .display()
                 .to_string(),
             head_sha: None,
+            pr_url: None,
         }),
         cleanup_status,
     }
+}
+
+fn process_in_progress_handoff(
+    project: &ProjectConfig,
+    store: &SqliteStore,
+    linear: &impl LinearClient,
+    opencode: &impl OpenCodeLauncher,
+    issue: &LinearIssue,
+    existing_issue: Option<IssueStateRecord>,
+) -> anyhow::Result<()> {
+    let Some(session) = latest_session(store, &project.id, &issue.id)? else {
+        return Ok(());
+    };
+    let Some(handoff) = opencode.latest_handoff(&session)? else {
+        return Ok(());
+    };
+
+    if handoff.session_id != session.session_id {
+        park_need_owner_input(
+            project,
+            store,
+            linear,
+            issue,
+            "malformed_handoff",
+            format!(
+                "handoff session `{}` did not match active session `{}`",
+                handoff.session_id, session.session_id
+            ),
+            Some(FailureRecord {
+                kind: "malformed_handoff".into(),
+                message: "session id mismatch".into(),
+                fingerprint: Some("session_id_mismatch".into()),
+                occurrence_count: 1,
+            }),
+        )?;
+        return Ok(());
+    }
+
+    match &handoff.stop_reason {
+        OpenCodeStopReason::Success => {
+            if let Some(message) = successful_handoff_error(&handoff) {
+                park_need_owner_input(
+                    project,
+                    store,
+                    linear,
+                    issue,
+                    "malformed_handoff",
+                    message.clone(),
+                    Some(FailureRecord {
+                        kind: "malformed_handoff".into(),
+                        message,
+                        fingerprint: Some("incomplete_success_handoff".into()),
+                        occurrence_count: 1,
+                    }),
+                )?;
+                return Ok(());
+            }
+
+            let git = handoff.git.as_ref().expect("validated git evidence");
+            linear.record_issue_evidence(
+                &issue.id,
+                LinearIssueEvidence {
+                    kind: "opencode_git_closure".into(),
+                    body: git_closure_evidence_body(&handoff),
+                },
+            )?;
+            linear.transition_issue(&issue.id, LinearTransition::Done)?;
+            cleanup_worktree(&git.worktree_path)?;
+            store.upsert_issue(IssueStateRecord {
+                project_id: project.id.clone(),
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                title: issue.title.clone(),
+                state: LinearTransition::Done.state_name().into(),
+                lifecycle_stage: LifecycleStage::Completed,
+                blocker: None,
+                failure: None,
+                git_ref: Some(GitRefRecord {
+                    branch: git.branch.clone(),
+                    worktree_path: git.worktree_path.clone(),
+                    head_sha: git.head_sha.clone(),
+                    pr_url: git.pr_url.clone(),
+                }),
+                cleanup_status: CleanupStatus::Complete,
+            })?;
+        }
+        OpenCodeStopReason::EvalFailed {
+            failure_fingerprint,
+        } => {
+            let previous_count = matching_failure_count(
+                existing_issue
+                    .as_ref()
+                    .and_then(|issue| issue.failure.as_ref()),
+                failure_fingerprint,
+            );
+            let occurrence_count = previous_count.saturating_add(1);
+            let max_identical = project.eval.max_identical_failure_fingerprints.max(1);
+            if occurrence_count >= max_identical {
+                park_need_owner_input(
+                    project,
+                    store,
+                    linear,
+                    issue,
+                    "repeated_eval_failure",
+                    format!("OpenCode reported `{failure_fingerprint}` {occurrence_count} times"),
+                    Some(FailureRecord {
+                        kind: "eval_failure".into(),
+                        message: failure_fingerprint.clone(),
+                        fingerprint: Some(failure_fingerprint.clone()),
+                        occurrence_count,
+                    }),
+                )?;
+            } else {
+                opencode.continue_repair(&session, failure_fingerprint)?;
+                let mut record = issue_record(
+                    project,
+                    issue,
+                    "In Progress",
+                    LifecycleStage::Running,
+                    None,
+                    CleanupStatus::Clean,
+                );
+                record.failure = Some(FailureRecord {
+                    kind: "eval_failure".into(),
+                    message: failure_fingerprint.clone(),
+                    fingerprint: Some(failure_fingerprint.clone()),
+                    occurrence_count,
+                });
+                store.upsert_issue(record)?;
+            }
+        }
+        OpenCodeStopReason::ProviderBlocker { message } => {
+            park_need_owner_input(
+                project,
+                store,
+                linear,
+                issue,
+                "provider_blocker",
+                message.clone(),
+                Some(FailureRecord {
+                    kind: "provider_blocker".into(),
+                    message: message.clone(),
+                    fingerprint: Some(stable_fingerprint(message)),
+                    occurrence_count: 1,
+                }),
+            )?;
+        }
+        OpenCodeStopReason::OwnerQuestion { question } => {
+            park_need_owner_input(
+                project,
+                store,
+                linear,
+                issue,
+                "owner_question",
+                question.clone(),
+                None,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn latest_session(
+    store: &SqliteStore,
+    project_id: &str,
+    issue_id: &str,
+) -> anyhow::Result<Option<crate::state::OpenCodeSessionRecord>> {
+    let mut sessions = store.opencode_sessions_for_issue(project_id, issue_id)?;
+    Ok(sessions.pop())
+}
+
+fn successful_handoff_error(handoff: &OpenCodeHandoff) -> Option<String> {
+    if handoff.eval_results.is_empty() {
+        return Some("successful handoff did not include eval results".into());
+    }
+    if let Some(eval) = handoff.eval_results.iter().find(|eval| !eval.passed) {
+        return Some(format!("eval `{}` did not pass", eval.suite));
+    }
+    if handoff.changed_files.is_empty() {
+        return Some("successful handoff did not include changed files".into());
+    }
+    let Some(git) = &handoff.git else {
+        return Some("successful handoff did not include git closure evidence".into());
+    };
+    if git.branch.trim().is_empty() {
+        return Some("git closure evidence did not include a branch".into());
+    }
+    if git
+        .head_sha
+        .as_deref()
+        .is_none_or(|head_sha| head_sha.trim().is_empty())
+    {
+        return Some("git closure evidence did not include a commit SHA".into());
+    }
+    if git.worktree_path.trim().is_empty() {
+        return Some("git closure evidence did not include a worktree path".into());
+    }
+
+    None
+}
+
+fn park_need_owner_input(
+    project: &ProjectConfig,
+    store: &SqliteStore,
+    linear: &impl LinearClient,
+    issue: &LinearIssue,
+    blocker_kind: &str,
+    message: String,
+    failure: Option<FailureRecord>,
+) -> anyhow::Result<()> {
+    linear.record_issue_evidence(
+        &issue.id,
+        LinearIssueEvidence {
+            kind: blocker_kind.into(),
+            body: message.clone(),
+        },
+    )?;
+    linear.transition_issue(&issue.id, LinearTransition::NeedOwnerInput)?;
+    store.upsert_issue(IssueStateRecord {
+        project_id: project.id.clone(),
+        issue_id: issue.id.clone(),
+        identifier: issue.identifier.clone(),
+        title: issue.title.clone(),
+        state: LinearTransition::NeedOwnerInput.state_name().into(),
+        lifecycle_stage: LifecycleStage::Blocked,
+        blocker: Some(BlockerRecord {
+            kind: blocker_kind.into(),
+            message,
+        }),
+        failure,
+        git_ref: None,
+        cleanup_status: CleanupStatus::Clean,
+    })?;
+    Ok(())
+}
+
+fn git_closure_evidence_body(handoff: &OpenCodeHandoff) -> String {
+    let git = handoff.git.as_ref().expect("validated git evidence");
+    format!(
+        "session_id: {}\nbranch: {}\nhead_sha: {}\npr_url: {}\nchanged_files: {}\nevals: {}\nrisks: {}",
+        handoff.session_id,
+        git.branch,
+        git.head_sha.as_deref().unwrap_or(""),
+        git.pr_url.as_deref().unwrap_or("none"),
+        handoff.changed_files.join(", "),
+        handoff
+            .eval_results
+            .iter()
+            .map(|eval| format!(
+                "{}={}",
+                eval.suite,
+                if eval.passed { "passed" } else { "failed" }
+            ))
+            .collect::<Vec<_>>()
+            .join(", "),
+        if handoff.risks.is_empty() {
+            "none".into()
+        } else {
+            handoff.risks.join(", ")
+        },
+    )
+}
+
+fn cleanup_worktree(worktree_path: &str) -> anyhow::Result<()> {
+    let path = PathBuf::from(worktree_path);
+    if path.exists() {
+        fs::remove_dir_all(&path)
+            .with_context(|| format!("remove accepted worktree {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn matching_failure_count(failure: Option<&FailureRecord>, fingerprint: &str) -> u32 {
+    failure
+        .filter(|failure| {
+            failure.kind == "eval_failure"
+                && failure.fingerprint.as_deref().unwrap_or(&failure.message) == fingerprint
+        })
+        .map(|failure| failure.occurrence_count.max(1))
+        .unwrap_or(0)
+}
+
+fn stable_fingerprint(input: &str) -> String {
+    input
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 fn compare_issues_for_dispatch(left: &LinearIssue, right: &LinearIssue) -> Ordering {

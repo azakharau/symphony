@@ -62,8 +62,63 @@ pub struct OpenCodeSessionEvent {
     pub last_event: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenCodeHandoff {
+    pub session_id: String,
+    pub lifecycle_stages: Vec<OpenCodeStage>,
+    pub subagents: Vec<String>,
+    pub eval_results: Vec<OpenCodeEvalResult>,
+    pub changed_files: Vec<String>,
+    pub git: Option<GitClosureEvidence>,
+    pub risks: Vec<String>,
+    pub stop_reason: OpenCodeStopReason,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenCodeEvalResult {
+    pub suite: String,
+    pub passed: bool,
+    pub failure_fingerprint: Option<String>,
+    pub details: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitClosureEvidence {
+    pub branch: String,
+    pub head_sha: Option<String>,
+    pub pr_url: Option<String>,
+    pub worktree_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum OpenCodeStopReason {
+    Success,
+    EvalFailed { failure_fingerprint: String },
+    ProviderBlocker { message: String },
+    OwnerQuestion { question: String },
+}
+
 pub trait OpenCodeLauncher {
     fn launch(&self, spec: &OpenCodeLaunchSpec) -> Result<OpenCodeStartedSession, OpenCodeError>;
+
+    fn latest_handoff(
+        &self,
+        _session: &OpenCodeSessionRecord,
+    ) -> Result<Option<OpenCodeHandoff>, OpenCodeError> {
+        Ok(None)
+    }
+
+    fn continue_repair(
+        &self,
+        _session: &OpenCodeSessionRecord,
+        _failure_fingerprint: &str,
+    ) -> Result<(), OpenCodeError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]

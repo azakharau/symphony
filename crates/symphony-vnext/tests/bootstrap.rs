@@ -5,8 +5,14 @@ use symphony_vnext::{
     cli,
     config::RootConfig,
     daemon,
-    linear::{LinearBlocker, LinearClient, LinearClientError, LinearIssue, LinearTransition},
-    opencode::{self, OpenCodeLauncher, OpenCodeSessionEvent, PermissionPolicy},
+    linear::{
+        LinearBlocker, LinearClient, LinearClientError, LinearIssue, LinearIssueEvidence,
+        LinearTransition,
+    },
+    opencode::{
+        self, GitClosureEvidence, OpenCodeEvalResult, OpenCodeHandoff, OpenCodeLauncher,
+        OpenCodeSessionEvent, OpenCodeStopReason, PermissionPolicy,
+    },
     state::{
         CleanupStatus, FailureRecord, GitRefRecord, IssueStateRecord, LifecycleStage,
         OpenCodeSessionRecord, OpenCodeStage, ProjectStateRecord,
@@ -127,11 +133,14 @@ fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
                 failure: Some(FailureRecord {
                     kind: "validation".into(),
                     message: "last run pending".into(),
+                    fingerprint: None,
+                    occurrence_count: 1,
                 }),
                 git_ref: Some(GitRefRecord {
                     branch: "agent-server/opencode-runner-extension".into(),
                     worktree_path: "/home/agent/.symphony/workspaces/codex/symphony/SYM-25".into(),
                     head_sha: None,
+                    pr_url: None,
                 }),
                 cleanup_status: CleanupStatus::Pending,
             })
@@ -598,6 +607,293 @@ fn orchestration_reconciles_terminal_issues_and_avoids_duplicate_dispatch_after_
 }
 
 #[test]
+fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_worktree() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let worktree = dir.path().join("SYM-80-worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    fs::write(worktree.join("artifact.txt"), "done").expect("artifact");
+    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let store = SqliteStore::open(&db_path).expect("open sqlite");
+    store.migrate().expect("migrate");
+    store.reconcile_projects(&config).expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "completed", "SYM-80", "In Progress"))
+        .expect("running issue");
+    store
+        .upsert_opencode_session(test_session("symphony", "completed", "oc-80", &worktree))
+        .expect("running session");
+
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "completed",
+        "SYM-80",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(Some(success_handoff(
+        "oc-80",
+        &worktree,
+        "agent-server/opencode-runner-extension",
+        "abc123def456",
+    )));
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode).expect("orchestrate once");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("completed".into(), LinearTransition::Done)]
+    );
+    assert!(client.evidence().iter().any(|(_, evidence)| {
+        evidence.body.contains("abc123def456")
+            && evidence
+                .body
+                .contains("agent-server/opencode-runner-extension")
+    }));
+    let completed = store
+        .issue("symphony", "completed")
+        .expect("query completed")
+        .expect("completed issue");
+    assert_eq!(completed.state, "Done");
+    assert_eq!(completed.lifecycle_stage, LifecycleStage::Completed);
+    assert_eq!(completed.cleanup_status, CleanupStatus::Complete);
+    let git_ref = completed.git_ref.expect("git ref");
+    assert_eq!(git_ref.branch, "agent-server/opencode-runner-extension");
+    assert_eq!(git_ref.head_sha.as_deref(), Some("abc123def456"));
+    assert_eq!(
+        git_ref.pr_url.as_deref(),
+        Some("https://example.test/pr/80")
+    );
+    assert!(!worktree.exists(), "accepted handoff must remove worktree");
+}
+
+#[test]
+fn eval_failure_stays_in_opencode_repair_loop_without_linear_churn() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let worktree = dir.path().join("SYM-81-worktree");
+    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let store = SqliteStore::open(&db_path).expect("open sqlite");
+    store.migrate().expect("migrate");
+    store.reconcile_projects(&config).expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "repair", "SYM-81", "In Progress"))
+        .expect("running issue");
+    store
+        .upsert_opencode_session(test_session("symphony", "repair", "oc-81", &worktree))
+        .expect("running session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "repair",
+        "SYM-81",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode =
+        ScriptedOpenCodeLauncher::new(Some(eval_failed_handoff("oc-81", "fmt-check-7f")));
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode).expect("orchestrate once");
+
+    assert!(client.transitions().is_empty());
+    assert_eq!(
+        opencode.repairs(),
+        vec![("oc-81".into(), "fmt-check-7f".into())]
+    );
+    let issue = store
+        .issue("symphony", "repair")
+        .expect("query repair")
+        .expect("repair issue");
+    assert_eq!(issue.state, "In Progress");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    let failure = issue.failure.expect("failure");
+    assert_eq!(failure.kind, "eval_failure");
+    assert_eq!(failure.fingerprint.as_deref(), Some("fmt-check-7f"));
+    assert_eq!(failure.occurrence_count, 1);
+}
+
+#[test]
+fn repeated_identical_eval_failure_parks_owner_input_with_typed_evidence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let worktree = dir.path().join("SYM-82-worktree");
+    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let store = SqliteStore::open(&db_path).expect("open sqlite");
+    store.migrate().expect("migrate");
+    store.reconcile_projects(&config).expect("projects");
+    let mut issue = test_issue("symphony", "repeat", "SYM-82", "In Progress");
+    issue.failure = Some(FailureRecord {
+        kind: "eval_failure".into(),
+        message: "lint-loop".into(),
+        fingerprint: Some("lint-loop".into()),
+        occurrence_count: 1,
+    });
+    store.upsert_issue(issue).expect("running issue");
+    store
+        .upsert_opencode_session(test_session("symphony", "repeat", "oc-82", &worktree))
+        .expect("running session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "repeat",
+        "SYM-82",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(Some(eval_failed_handoff("oc-82", "lint-loop")));
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode).expect("orchestrate once");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("repeat".into(), LinearTransition::NeedOwnerInput)]
+    );
+    assert!(opencode.repairs().is_empty());
+    let issue = store
+        .issue("symphony", "repeat")
+        .expect("query repeat")
+        .expect("repeat issue");
+    assert_eq!(issue.state, "Need Owner Input");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Blocked);
+    assert_eq!(
+        issue.blocker.expect("blocker").kind,
+        "repeated_eval_failure"
+    );
+}
+
+#[test]
+fn provider_blocker_owner_question_and_malformed_handoff_park_without_closing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let store = SqliteStore::open(&db_path).expect("open sqlite");
+    store.migrate().expect("migrate");
+    store.reconcile_projects(&config).expect("projects");
+
+    let cases = [
+        (
+            "provider",
+            "SYM-83",
+            OpenCodeHandoff {
+                session_id: "oc-provider".into(),
+                lifecycle_stages: vec![OpenCodeStage::Running, OpenCodeStage::Failed],
+                subagents: vec!["rust-engineer".into()],
+                eval_results: Vec::new(),
+                changed_files: Vec::new(),
+                git: None,
+                risks: vec!["provider quota exhausted".into()],
+                stop_reason: OpenCodeStopReason::ProviderBlocker {
+                    message: "provider quota exhausted".into(),
+                },
+            },
+            "provider_blocker",
+        ),
+        (
+            "owner",
+            "SYM-84",
+            OpenCodeHandoff {
+                session_id: "oc-owner".into(),
+                lifecycle_stages: vec![OpenCodeStage::Running, OpenCodeStage::Handoff],
+                subagents: vec!["rust-engineer".into()],
+                eval_results: Vec::new(),
+                changed_files: Vec::new(),
+                git: None,
+                risks: Vec::new(),
+                stop_reason: OpenCodeStopReason::OwnerQuestion {
+                    question: "Which branch should receive the PR?".into(),
+                },
+            },
+            "owner_question",
+        ),
+        (
+            "malformed",
+            "SYM-85",
+            OpenCodeHandoff {
+                session_id: "oc-malformed".into(),
+                lifecycle_stages: vec![OpenCodeStage::Eval, OpenCodeStage::Handoff],
+                subagents: vec!["rust-engineer".into()],
+                eval_results: vec![OpenCodeEvalResult {
+                    suite: "cargo test".into(),
+                    passed: true,
+                    failure_fingerprint: None,
+                    details: None,
+                }],
+                changed_files: vec!["crates/symphony-vnext/src/opencode.rs".into()],
+                git: None,
+                risks: Vec::new(),
+                stop_reason: OpenCodeStopReason::Success,
+            },
+            "malformed_handoff",
+        ),
+    ];
+
+    for (issue_id, identifier, handoff, expected_kind) in cases {
+        let worktree = dir.path().join(format!("{identifier}-worktree"));
+        store
+            .upsert_issue(test_issue("symphony", issue_id, identifier, "In Progress"))
+            .expect("running issue");
+        store
+            .upsert_opencode_session(test_session(
+                "symphony",
+                issue_id,
+                &handoff.session_id,
+                &worktree,
+            ))
+            .expect("running session");
+        let client = RecordingLinearClient::new(vec![linear_issue(
+            issue_id,
+            identifier,
+            "In Progress",
+            Some(1),
+        )]);
+        let opencode = ScriptedOpenCodeLauncher::new(Some(handoff));
+
+        daemon::run_once_with_clients(&config, &store, &client, &opencode)
+            .expect("orchestrate once");
+
+        assert_eq!(
+            client.transitions(),
+            vec![(issue_id.into(), LinearTransition::NeedOwnerInput)]
+        );
+        let issue = store
+            .issue("symphony", issue_id)
+            .expect("query parked")
+            .expect("parked issue");
+        assert_eq!(issue.state, "Need Owner Input");
+        assert_eq!(issue.lifecycle_stage, LifecycleStage::Blocked);
+        assert_eq!(issue.blocker.expect("blocker").kind, expected_kind);
+    }
+}
+
+#[test]
+fn rust_path_parks_legacy_review_and_rca_states_instead_of_preserving_them() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let store = SqliteStore::open(&db_path).expect("open sqlite");
+    store.migrate().expect("migrate");
+    store.reconcile_projects(&config).expect("projects");
+    let client = RecordingLinearClient::new(vec![
+        linear_issue("review", "SYM-86", "In Review", Some(1)),
+        linear_issue("rca", "SYM-87", "RCA Required", Some(2)),
+    ]);
+
+    daemon::run_once_with_linear_client(&config, &store, &client).expect("orchestrate once");
+
+    assert_eq!(
+        client.transitions(),
+        vec![
+            ("review".into(), LinearTransition::NeedOwnerInput),
+            ("rca".into(), LinearTransition::NeedOwnerInput),
+        ]
+    );
+    for issue_id in ["review", "rca"] {
+        let issue = store
+            .issue("symphony", issue_id)
+            .expect("query parked")
+            .expect("parked issue");
+        assert_eq!(issue.state, "Need Owner Input");
+        assert_eq!(issue.lifecycle_stage, LifecycleStage::Blocked);
+        assert_eq!(issue.blocker.expect("blocker").kind, "legacy_runtime_state");
+    }
+}
+
+#[test]
 fn orchestration_processes_multiple_projects_in_config_order() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
@@ -677,10 +973,94 @@ fn test_issue(
     }
 }
 
+fn test_session(
+    project_id: impl Into<String>,
+    issue_id: impl Into<String>,
+    session_id: impl Into<String>,
+    worktree_path: impl AsRef<std::path::Path>,
+) -> OpenCodeSessionRecord {
+    OpenCodeSessionRecord {
+        project_id: project_id.into(),
+        issue_id: issue_id.into(),
+        session_id: session_id.into(),
+        agent: "build".into(),
+        model: None,
+        worktree_path: worktree_path.as_ref().display().to_string(),
+        lifecycle_stage: LifecycleStage::Running,
+        stage: OpenCodeStage::Running,
+        active_agent: Some("rust-engineer".into()),
+        active_model: None,
+        message_count: 1,
+        todo_count: 1,
+        part_count: 1,
+        token_count: 100,
+        cost_micros: 10,
+        subagent_count: 1,
+        eval_stage: Some("symphony-vnext-smoke".into()),
+        lifecycle_marker: Some("implementation".into()),
+        last_event: Some("working".into()),
+        silence_observed: false,
+    }
+}
+
+fn success_handoff(
+    session_id: &str,
+    worktree_path: impl AsRef<std::path::Path>,
+    branch: &str,
+    head_sha: &str,
+) -> OpenCodeHandoff {
+    OpenCodeHandoff {
+        session_id: session_id.into(),
+        lifecycle_stages: vec![
+            OpenCodeStage::Running,
+            OpenCodeStage::Eval,
+            OpenCodeStage::Handoff,
+            OpenCodeStage::Completed,
+        ],
+        subagents: vec!["rust-engineer".into(), "evaluator".into()],
+        eval_results: vec![OpenCodeEvalResult {
+            suite: "cargo test".into(),
+            passed: true,
+            failure_fingerprint: None,
+            details: Some("ok".into()),
+        }],
+        changed_files: vec!["crates/symphony-vnext/src/opencode.rs".into()],
+        git: Some(GitClosureEvidence {
+            branch: branch.into(),
+            head_sha: Some(head_sha.into()),
+            pr_url: Some("https://example.test/pr/80".into()),
+            worktree_path: worktree_path.as_ref().display().to_string(),
+        }),
+        risks: Vec::new(),
+        stop_reason: OpenCodeStopReason::Success,
+    }
+}
+
+fn eval_failed_handoff(session_id: &str, fingerprint: &str) -> OpenCodeHandoff {
+    OpenCodeHandoff {
+        session_id: session_id.into(),
+        lifecycle_stages: vec![OpenCodeStage::Running, OpenCodeStage::Eval],
+        subagents: vec!["rust-engineer".into(), "evaluator".into()],
+        eval_results: vec![OpenCodeEvalResult {
+            suite: "cargo clippy".into(),
+            passed: false,
+            failure_fingerprint: Some(fingerprint.into()),
+            details: Some("clippy failed".into()),
+        }],
+        changed_files: vec!["crates/symphony-vnext/src/daemon.rs".into()],
+        git: None,
+        risks: vec!["repair pending".into()],
+        stop_reason: OpenCodeStopReason::EvalFailed {
+            failure_fingerprint: fingerprint.into(),
+        },
+    }
+}
+
 #[derive(Debug)]
 struct RecordingLinearClient {
     issues: Vec<LinearIssue>,
     transitions: std::cell::RefCell<Vec<(String, LinearTransition)>>,
+    evidence: std::cell::RefCell<Vec<(String, LinearIssueEvidence)>>,
 }
 
 impl RecordingLinearClient {
@@ -688,11 +1068,16 @@ impl RecordingLinearClient {
         Self {
             issues,
             transitions: std::cell::RefCell::new(Vec::new()),
+            evidence: std::cell::RefCell::new(Vec::new()),
         }
     }
 
     fn transitions(&self) -> Vec<(String, LinearTransition)> {
         self.transitions.borrow().clone()
+    }
+
+    fn evidence(&self) -> Vec<(String, LinearIssueEvidence)> {
+        self.evidence.borrow().clone()
     }
 }
 
@@ -712,6 +1097,17 @@ impl LinearClient for RecordingLinearClient {
         self.transitions
             .borrow_mut()
             .push((issue_id.to_string(), transition));
+        Ok(())
+    }
+
+    fn record_issue_evidence(
+        &self,
+        issue_id: &str,
+        evidence: LinearIssueEvidence,
+    ) -> Result<(), LinearClientError> {
+        self.evidence
+            .borrow_mut()
+            .push((issue_id.to_string(), evidence));
         Ok(())
     }
 }
@@ -758,6 +1154,57 @@ impl LinearClient for ProjectAwareLinearClient {
         self.transitions
             .borrow_mut()
             .push((issue_id.to_string(), transition));
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+struct ScriptedOpenCodeLauncher {
+    handoff: Option<OpenCodeHandoff>,
+    repairs: std::cell::RefCell<Vec<(String, String)>>,
+}
+
+impl ScriptedOpenCodeLauncher {
+    fn new(handoff: Option<OpenCodeHandoff>) -> Self {
+        Self {
+            handoff,
+            repairs: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    fn repairs(&self) -> Vec<(String, String)> {
+        self.repairs.borrow().clone()
+    }
+}
+
+impl OpenCodeLauncher for ScriptedOpenCodeLauncher {
+    fn launch(
+        &self,
+        spec: &opencode::OpenCodeLaunchSpec,
+    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+        Ok(opencode::OpenCodeStartedSession {
+            session_id: format!("scripted:{}", spec.cwd.display()),
+        })
+    }
+
+    fn latest_handoff(
+        &self,
+        session: &OpenCodeSessionRecord,
+    ) -> Result<Option<OpenCodeHandoff>, opencode::OpenCodeError> {
+        Ok(self
+            .handoff
+            .clone()
+            .filter(|handoff| handoff.session_id == session.session_id))
+    }
+
+    fn continue_repair(
+        &self,
+        session: &OpenCodeSessionRecord,
+        failure_fingerprint: &str,
+    ) -> Result<(), opencode::OpenCodeError> {
+        self.repairs
+            .borrow_mut()
+            .push((session.session_id.clone(), failure_fingerprint.to_string()));
         Ok(())
     }
 }

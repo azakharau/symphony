@@ -80,6 +80,10 @@ pub struct BlockerRecord {
 pub struct FailureRecord {
     pub kind: String,
     pub message: String,
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+    #[serde(default)]
+    pub occurrence_count: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -87,6 +91,8 @@ pub struct GitRefRecord {
     pub branch: String,
     pub worktree_path: String,
     pub head_sha: Option<String>,
+    #[serde(default)]
+    pub pr_url: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

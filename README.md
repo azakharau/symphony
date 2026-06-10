@@ -49,6 +49,15 @@ dispatch. The persisted session read model includes stage telemetry, active agen
 todo, part, token, cost, subagent, eval-stage, worktree, lifecycle marker, last-event, and observable
 silence fields.
 
+OpenCode handoff acceptance in vNext is git-closure based. Symphony accepts completion only from a
+structured OpenCode handoff with passing eval results, changed-file evidence, and git closure
+metadata including branch, commit SHA, PR URL when present, and worktree path. Eval failures stay in
+the same OpenCode repair loop until they pass or hit the configured repeated-fingerprint policy,
+which defaults to parking after two identical failure fingerprints. Provider blockers, explicit owner
+questions, and malformed handoffs park in `Need Owner Input` with typed operator evidence. Symphony
+records closure metadata but does not commit or push code itself, and accepted `Done` reconciliation
+removes the per-issue worktree.
+
 Default validation does not start OpenCode or require live Linear. Live ACP smoke runs must stay
 opt-in under the active steward workflow because they spawn `/usr/local/bin/opencode acp`.
 

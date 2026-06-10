@@ -22,6 +22,14 @@ pub trait LinearClient {
         issue_id: &str,
         transition: LinearTransition,
     ) -> Result<(), LinearClientError>;
+
+    fn record_issue_evidence(
+        &self,
+        _issue_id: &str,
+        _evidence: LinearIssueEvidence,
+    ) -> Result<(), LinearClientError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -87,11 +95,20 @@ pub struct LinearBlocker {
     pub state: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinearIssueEvidence {
+    pub kind: String,
+    pub body: String,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinearTransition {
     Todo,
     InProgress,
+    NeedOwnerInput,
+    Done,
 }
 
 impl LinearTransition {
@@ -99,6 +116,8 @@ impl LinearTransition {
         match self {
             Self::Todo => "Todo",
             Self::InProgress => "In Progress",
+            Self::NeedOwnerInput => "Need Owner Input",
+            Self::Done => "Done",
         }
     }
 }

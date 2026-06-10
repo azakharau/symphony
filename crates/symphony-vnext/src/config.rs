@@ -108,6 +108,12 @@ pub struct BranchPolicy {
 #[serde(deny_unknown_fields)]
 pub struct EvalDefaults {
     pub default_suite: String,
+    #[serde(default = "default_max_identical_failure_fingerprints")]
+    pub max_identical_failure_fingerprints: u32,
+}
+
+fn default_max_identical_failure_fingerprints() -> u32 {
+    2
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

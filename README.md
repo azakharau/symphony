@@ -18,7 +18,8 @@ The Rust workspace contains:
 
 - Typed multiproject config loading.
 - Linear project and milestone scoping.
-- OpenCode-only ACP launch configuration.
+- OpenCode-only ACP launch configuration with nd-JSON stdio, `session/set_config_option` model and
+  effort selection, and per-issue git worktrees.
 - SQLite runtime state bootstrap and restart-safe state queries.
 - Issue orchestration for `Todo`, `In Progress`, `Need Owner Input`, backlog, blockers, terminal
   reconciliation, eval repair loops, and git-closure handoffs.
@@ -57,6 +58,9 @@ cargo test
 Live cutover validation requires host credentials and operator control:
 
 ```bash
+SYMPHONY_VNEXT_LIVE_OPENCODE_ACP=1 cargo test -p symphony-vnext --test bootstrap \
+  installed_opencode_acp_supports_ndjson_config_options_without_prompting -- --nocapture
+cargo build --release -p symphony-vnext
 /usr/local/bin/opencode acp
 systemctl status symphony-vnext.service
 curl -fsS http://127.0.0.1:4110/api/dashboard

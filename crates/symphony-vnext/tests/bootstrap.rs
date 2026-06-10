@@ -1,4 +1,12 @@
-use std::{fs, path::PathBuf, thread, time::Duration};
+use std::{
+    fs,
+    io::{BufRead, Write},
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    thread,
+    time::Duration,
+};
 
 use symphony_vnext::{
     api::{RuntimeDashboardApi, RuntimeReadModel},
@@ -43,7 +51,8 @@ projects:
       command: /usr/local/bin/opencode
       args: ["acp"]
       agent: build
-      model: null
+      model: openai/gpt-5.5
+      effort: high
       permission_policy: reject
     eval:
       default_suite: symphony-vnext-smoke
@@ -146,6 +155,16 @@ fn linear_graphql_client_fetches_project_candidates_transitions_and_records_evid
                                         "body": "yes, continue",
                                         "parent": null,
                                         "createdAt": "2026-06-10T00:03:00Z"
+                                    },
+                                    {
+                                        "body": "## OpenCode Handoff\nmachine status update",
+                                        "parent": { "id": "owner-comment-thread" },
+                                        "createdAt": "2026-06-10T00:04:00Z"
+                                    },
+                                    {
+                                        "body": "kind: owner_question\n\nwaiting for owner input",
+                                        "parent": null,
+                                        "createdAt": "2026-06-10T00:05:00Z"
                                     }
                                 ]
                             },
@@ -204,6 +223,10 @@ fn linear_graphql_client_fetches_project_candidates_transitions_and_records_evid
     assert!(!issues[0].has_new_owner_answer);
     assert_eq!(issues[1].identifier, "SYM-101");
     assert!(issues[1].has_new_owner_answer);
+    assert_eq!(
+        issues[1].owner_answer_created_at.as_deref(),
+        Some("2026-06-10T00:03:00Z")
+    );
 
     let requests = transport.requests();
     assert_eq!(requests.len(), 4);
@@ -222,6 +245,12 @@ fn linear_graphql_client_fetches_project_candidates_transitions_and_records_evid
             .expect("states")
             .contains(&serde_json::json!("Preparing"))
     );
+    assert!(
+        requests[0]["query"]
+            .as_str()
+            .expect("candidate query")
+            .contains("comments(last: 50, orderBy: createdAt)")
+    );
     assert_eq!(requests[2]["variables"]["stateId"], "state-in-progress");
     assert!(
         requests[3]["variables"]["body"]
@@ -229,6 +258,55 @@ fn linear_graphql_client_fetches_project_candidates_transitions_and_records_evid
             .unwrap()
             .contains("cutover_smoke")
     );
+}
+
+#[test]
+fn linear_graphql_client_paginates_candidate_issues_until_exhausted() {
+    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let project = config.project("symphony").expect("project");
+    let transport = RecordingGraphqlTransport::new(vec![
+        serde_json::json!({
+            "data": {
+                "issues": {
+                    "nodes": [linear_issue_node_json("issue-1", "SYM-100", "Todo", 1)],
+                    "pageInfo": {
+                        "hasNextPage": true,
+                        "endCursor": "cursor-1"
+                    }
+                }
+            }
+        }),
+        serde_json::json!({
+            "data": {
+                "issues": {
+                    "nodes": [linear_issue_node_json("issue-2", "SYM-101", "Todo", 2)],
+                    "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                    }
+                }
+            }
+        }),
+    ]);
+    let client = LinearGraphqlClient::new(
+        "https://linear.example/graphql",
+        "linear-token",
+        transport.clone(),
+    );
+
+    let issues = client.fetch_candidate_issues(project).expect("issues");
+
+    assert_eq!(
+        issues
+            .iter()
+            .map(|issue| issue.identifier.as_str())
+            .collect::<Vec<_>>(),
+        vec!["SYM-100", "SYM-101"]
+    );
+    let requests = transport.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0]["variables"]["after"].is_null());
+    assert_eq!(requests[1]["variables"]["after"], "cursor-1");
 }
 
 #[test]
@@ -401,6 +479,7 @@ fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() {
     provider_blocked.blocker = Some(BlockerRecord {
         kind: "provider_blocker".into(),
         message: "provider quota exhausted".into(),
+        observed_at: None,
     });
     store
         .upsert_issue(provider_blocked)
@@ -579,13 +658,22 @@ fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_issue_
 }
 
 #[test]
-fn stdio_launcher_writes_prompt_to_child_stdin() {
+fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let captured_prompt_path = dir.path().join("captured_prompt.txt");
+    let transcript_path = dir.path().join("acp-transcript.jsonl");
+    let script_path = write_fake_acp_script(dir.path(), &transcript_path);
+    let worktree = dir.path().join("worktree");
     let spec = opencode::OpenCodeLaunchSpec {
-        command: PathBuf::from("/bin/sh"),
-        args: vec!["-c".into(), "cat > captured_prompt.txt".into()],
-        cwd: dir.path().to_path_buf(),
+        command: script_path,
+        args: Vec::new(),
+        cwd: worktree.clone(),
+        worktree_root: None,
+        issue_identifier: "SYM-200".into(),
+        repo_path: None,
+        base_ref: None,
+        agent: "build".into(),
+        model: Some("openai/gpt-5.5".into()),
+        effort: Some("high".into()),
         prompt: "Full Linear issue spec with eval defaults".into(),
         permission_policy: PermissionPolicy::Reject,
     };
@@ -593,19 +681,256 @@ fn stdio_launcher_writes_prompt_to_child_stdin() {
 
     let started = launcher.launch(&spec).expect("launch stdio child");
 
-    assert!(started.session_id.starts_with("pid:"));
+    assert_eq!(started.session_id, "ses-test");
     for _ in 0..50 {
-        if let Ok(captured) = fs::read_to_string(&captured_prompt_path)
-            && captured == spec.prompt
+        if let Ok(transcript) = fs::read_to_string(&transcript_path)
+            && transcript.contains(r#""method": "session/prompt""#)
         {
+            assert!(
+                transcript.contains(r#""method": "initialize""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(r#""method": "session/new""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(r#""method": "session/set_config_option""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(r#""configId": "mode""#)
+                    && transcript.contains(r#""value": "build""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(r#""configId": "model""#)
+                    && transcript.contains(r#""value": "openai/gpt-5.5""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(r#""configId": "effort""#)
+                    && transcript.contains(r#""value": "high""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.find(r#""configId": "effort""#)
+                    < transcript.find(r#""method": "session/prompt""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains("Full Linear issue spec"),
+                "{transcript}"
+            );
+
+            let session = test_session("symphony", "issue-27", "ses-test", &worktree);
+            let handoff = launcher
+                .latest_handoff(&session)
+                .expect("handoff read")
+                .expect("fake acp handoff");
+            assert_eq!(handoff.session_id, "ses-test");
+            assert_eq!(handoff.stop_reason, OpenCodeStopReason::Success);
             return;
         }
         thread::sleep(Duration::from_millis(20));
     }
 
     panic!(
-        "prompt was not written to child stdin; captured={:?}",
-        fs::read_to_string(captured_prompt_path)
+        "ACP JSON-RPC lifecycle was not observed; transcript={:?}",
+        fs::read_to_string(transcript_path)
+    );
+}
+
+#[test]
+fn installed_opencode_acp_supports_ndjson_config_options_without_prompting() {
+    if std::env::var("SYMPHONY_VNEXT_LIVE_OPENCODE_ACP")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        eprintln!("set SYMPHONY_VNEXT_LIVE_OPENCODE_ACP=1 to run installed OpenCode ACP smoke");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut child = Command::new("/usr/local/bin/opencode")
+        .args(["acp", "--pure", "--cwd"])
+        .arg(dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn installed opencode acp");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    let mut stdout = std::io::BufReader::new(stdout);
+
+    let initialized = acp_test_request(
+        &mut stdin,
+        &mut stdout,
+        1,
+        "initialize",
+        serde_json::json!({
+            "protocolVersion": 1,
+            "clientInfo": {"name": "symphony-vnext-test", "version": "0"},
+            "capabilities": {}
+        }),
+    );
+    assert_eq!(initialized["protocolVersion"], serde_json::json!(1));
+
+    let created = acp_test_request(
+        &mut stdin,
+        &mut stdout,
+        2,
+        "session/new",
+        serde_json::json!({
+            "cwd": dir.path(),
+            "mcpServers": [],
+            "title": "Symphony vNext ACP contract smoke"
+        }),
+    );
+    let session_id = created["sessionId"]
+        .as_str()
+        .expect("session id")
+        .to_string();
+    assert!(
+        created["configOptions"]
+            .as_array()
+            .expect("config options")
+            .iter()
+            .any(|option| option["id"] == "model"),
+        "{created}"
+    );
+
+    let mode = acp_test_request(
+        &mut stdin,
+        &mut stdout,
+        3,
+        "session/set_config_option",
+        serde_json::json!({
+            "sessionId": session_id,
+            "configId": "mode",
+            "value": "build"
+        }),
+    );
+    assert_config_option_value(&mode, "mode", "build");
+
+    let model = acp_test_request(
+        &mut stdin,
+        &mut stdout,
+        4,
+        "session/set_config_option",
+        serde_json::json!({
+            "sessionId": session_id,
+            "configId": "model",
+            "value": "openai/gpt-5.5"
+        }),
+    );
+    assert_config_option_value(&model, "model", "openai/gpt-5.5");
+
+    let effort = acp_test_request(
+        &mut stdin,
+        &mut stdout,
+        5,
+        "session/set_config_option",
+        serde_json::json!({
+            "sessionId": session_id,
+            "configId": "effort",
+            "value": "high"
+        }),
+    );
+    assert_config_option_value(&effort, "effort", "high");
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn stdio_launcher_creates_git_worktree_from_project_repo_and_base_ref() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    run_git(&repo, ["init"]);
+    run_git(&repo, ["config", "user.email", "symphony@example.test"]);
+    run_git(&repo, ["config", "user.name", "Symphony Test"]);
+    fs::write(repo.join("README.md"), "base checkout").expect("readme");
+    run_git(&repo, ["add", "README.md"]);
+    run_git(&repo, ["commit", "-m", "base"]);
+    run_git(&repo, ["branch", "agent-server/opencode-runner-extension"]);
+
+    let worktree = dir.path().join("worktrees").join("SYM-200");
+    let transcript_path = dir.path().join("acp-transcript.jsonl");
+    let script_path = write_fake_acp_script(dir.path(), &transcript_path);
+    let spec = opencode::OpenCodeLaunchSpec {
+        command: script_path,
+        args: Vec::new(),
+        cwd: worktree.clone(),
+        worktree_root: Some(dir.path().join("worktrees")),
+        issue_identifier: "SYM-200".into(),
+        repo_path: Some(repo.clone()),
+        base_ref: Some("agent-server/opencode-runner-extension".into()),
+        agent: "build".into(),
+        model: Some("openai/gpt-5.5".into()),
+        effort: Some("high".into()),
+        prompt: "Full Linear issue spec with eval defaults".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+    let launcher = opencode::StdioOpenCodeLauncher;
+
+    let started = launcher.launch(&spec).expect("launch stdio child");
+
+    assert_eq!(started.session_id, "ses-test");
+    for _ in 0..50 {
+        if let Ok(transcript) = fs::read_to_string(&transcript_path)
+            && transcript.contains(r#""method": "session/prompt""#)
+        {
+            assert_eq!(
+                git_output(&worktree, ["rev-parse", "--is-inside-work-tree"]).trim(),
+                "true"
+            );
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    panic!(
+        "ACP prompt was not sent from a git worktree; transcript={:?}",
+        fs::read_to_string(transcript_path)
+    );
+}
+
+#[test]
+fn stdio_launcher_rejects_issue_identifier_path_separators_before_worktree_creation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("worktrees");
+    let nested = root.join("SYM").join("200");
+    let spec = opencode::OpenCodeLaunchSpec {
+        command: PathBuf::from("/bin/false"),
+        args: Vec::new(),
+        cwd: nested.clone(),
+        worktree_root: Some(root.clone()),
+        issue_identifier: "SYM/200".into(),
+        repo_path: Some(dir.path().join("repo")),
+        base_ref: Some("main".into()),
+        agent: "build".into(),
+        model: Some("openai/gpt-5.5".into()),
+        effort: Some("high".into()),
+        prompt: "Full Linear issue spec with eval defaults".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+    let launcher = opencode::StdioOpenCodeLauncher;
+
+    let error = launcher
+        .launch(&spec)
+        .expect_err("unsafe identifier must be rejected before spawn");
+
+    assert!(
+        matches!(error, opencode::OpenCodeError::InvalidWorktree(_)),
+        "{error:?}"
+    );
+    assert!(
+        !nested.exists(),
+        "unsafe nested worktree must not be created"
     );
 }
 
@@ -863,8 +1188,8 @@ fn orchestration_keeps_owner_input_parked_until_answer_or_manual_todo() {
     store.reconcile_projects(&config).expect("projects");
 
     let parked = linear_issue("parked", "SYM-50", "Need Owner Input", Some(1));
-    let answered =
-        linear_issue("answered", "SYM-51", "Need Owner Input", Some(2)).with_new_owner_answer(true);
+    let answered = linear_issue("answered", "SYM-51", "Need Owner Input", Some(2))
+        .with_new_owner_answer_at("2026-06-10T00:02:00Z");
     let manually_requeued = linear_issue("manual", "SYM-52", "Todo", Some(3));
     let client = RecordingLinearClient::new(vec![parked, answered, manually_requeued]);
 
@@ -882,6 +1207,113 @@ fn orchestration_keeps_owner_input_parked_until_answer_or_manual_todo() {
     assert_eq!(
         store
             .issue("symphony", "parked")
+            .expect("query parked")
+            .expect("parked")
+            .lifecycle_stage,
+        LifecycleStage::Blocked
+    );
+}
+
+#[test]
+fn orchestration_ignores_owner_input_comments_that_predate_the_parked_record() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let store = SqliteStore::open(&db_path).expect("open sqlite");
+    store.migrate().expect("migrate");
+    store.reconcile_projects(&config).expect("projects");
+    let mut stale = test_issue("symphony", "stale", "SYM-53", "Need Owner Input");
+    stale.lifecycle_stage = LifecycleStage::Blocked;
+    stale.blocker = Some(BlockerRecord {
+        kind: "owner_question".into(),
+        message: "waiting for owner answer".into(),
+        observed_at: Some("2026-06-10T00:05:00Z".into()),
+    });
+    store.upsert_issue(stale).expect("stale issue");
+
+    let client = RecordingLinearClient::new(vec![
+        linear_issue("stale", "SYM-53", "Need Owner Input", Some(1))
+            .with_new_owner_answer_at("2026-06-10T00:03:00Z"),
+    ]);
+
+    daemon::run_once_with_linear_client(&config, &store, &client).expect("orchestrate once");
+
+    assert_eq!(
+        client.transitions(),
+        Vec::<(String, LinearTransition)>::new()
+    );
+    assert_eq!(
+        store
+            .issue("symphony", "stale")
+            .expect("query stale")
+            .expect("stale")
+            .lifecycle_stage,
+        LifecycleStage::Blocked
+    );
+}
+
+#[test]
+fn orchestration_ignores_new_symphony_evidence_comments_after_parked_record() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let project = config.project("symphony").expect("project");
+    let store = SqliteStore::open(&db_path).expect("open sqlite");
+    store.migrate().expect("migrate");
+    store.reconcile_projects(&config).expect("projects");
+    let mut parked = test_issue("symphony", "parked", "SYM-54", "Need Owner Input");
+    parked.lifecycle_stage = LifecycleStage::Blocked;
+    parked.blocker = Some(BlockerRecord {
+        kind: "owner_question".into(),
+        message: "waiting for owner answer".into(),
+        observed_at: Some("2026-06-10T00:05:00Z".into()),
+    });
+    store.upsert_issue(parked).expect("parked issue");
+
+    let transport = RecordingGraphqlTransport::new(vec![serde_json::json!({
+        "data": {
+            "issues": {
+                "nodes": [
+                    {
+                        "id": "parked",
+                        "identifier": "SYM-54",
+                        "title": "Parked owner question",
+                        "description": "Wait for owner input",
+                        "state": { "name": "Need Owner Input" },
+                        "priority": 1,
+                        "branchName": "agent-server/opencode-runner-extension",
+                        "url": "https://linear.example/SYM-54",
+                        "labels": { "nodes": [] },
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "body": "kind: owner_question\n\nwaiting for owner input",
+                                    "parent": null,
+                                    "createdAt": "2026-06-10T00:06:00Z"
+                                }
+                            ]
+                        },
+                        "relations": { "nodes": [] },
+                        "createdAt": "2026-06-10T00:00:00Z",
+                        "updatedAt": "2026-06-10T00:06:00Z"
+                    }
+                ],
+                "pageInfo": { "hasNextPage": false, "endCursor": null }
+            }
+        }
+    })]);
+    let client = LinearGraphqlClient::new(
+        "https://linear.example/graphql",
+        "linear-token",
+        transport.clone(),
+    );
+
+    daemon::run_once_with_linear_client(&config, &store, &client).expect("orchestrate once");
+
+    assert_eq!(transport.requests().len(), 1);
+    assert_eq!(
+        store
+            .issue(project.id.as_str(), "parked")
             .expect("query parked")
             .expect("parked")
             .lifecycle_stage,
@@ -978,10 +1410,38 @@ fn orchestration_restores_requeued_issue_with_existing_session_without_duplicate
 fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_worktree() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
-    let worktree = dir.path().join("SYM-80-worktree");
-    fs::create_dir_all(&worktree).expect("worktree");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    run_git(&repo, ["init"]);
+    run_git(&repo, ["config", "user.email", "symphony@example.test"]);
+    run_git(&repo, ["config", "user.name", "Symphony Test"]);
+    fs::write(repo.join("README.md"), "base checkout").expect("readme");
+    run_git(&repo, ["add", "README.md"]);
+    run_git(&repo, ["commit", "-m", "base"]);
+    run_git(&repo, ["branch", "agent-server/opencode-runner-extension"]);
+    let worktree_root = dir.path().join("allowed-worktrees");
+    let worktree = worktree_root.join("SYM-80");
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "--detach",
+            worktree.to_str().expect("worktree path utf8"),
+            "agent-server/opencode-runner-extension",
+        ],
+    );
     fs::write(worktree.join("artifact.txt"), "done").expect("artifact");
-    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let config_yaml = valid_config_yaml()
+        .replace(
+            "repo_path: /home/agent/proj/symphony",
+            &format!("repo_path: {}", repo.display()),
+        )
+        .replace(
+            "/home/agent/.symphony/workspaces/opencode/symphony",
+            &worktree_root.display().to_string(),
+        );
+    let config = RootConfig::from_yaml_str(&config_yaml).expect("config");
     let store = SqliteStore::open(&db_path).expect("open sqlite");
     store.migrate().expect("migrate");
     store.reconcile_projects(&config).expect("projects");
@@ -1032,6 +1492,176 @@ fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_worktree
         Some("https://example.test/pr/80")
     );
     assert!(!worktree.exists(), "accepted handoff must remove worktree");
+    assert!(
+        !git_output(&repo, ["worktree", "list", "--porcelain"])
+            .contains(worktree.to_str().expect("worktree path utf8")),
+        "accepted handoff must unregister the git worktree"
+    );
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "--detach",
+            worktree.to_str().expect("worktree path utf8"),
+            "agent-server/opencode-runner-extension",
+        ],
+    );
+}
+
+#[test]
+fn successful_handoff_with_worktree_outside_configured_root_is_parked_without_cleanup() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let allowed_root = dir.path().join("allowed-worktrees");
+    let outside = dir.path().join("outside-worktree");
+    fs::create_dir_all(&outside).expect("outside worktree");
+    fs::write(outside.join("artifact.txt"), "must survive").expect("artifact");
+    let config = RootConfig::from_yaml_str(&valid_config_yaml().replace(
+        "/home/agent/.symphony/workspaces/opencode/symphony",
+        allowed_root.to_str().expect("allowed root utf8"),
+    ))
+    .expect("config");
+    let store = SqliteStore::open(&db_path).expect("open sqlite");
+    store.migrate().expect("migrate");
+    store.reconcile_projects(&config).expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "completed", "SYM-80", "In Progress"))
+        .expect("running issue");
+    store
+        .upsert_opencode_session(test_session("symphony", "completed", "oc-80", &outside))
+        .expect("running session");
+
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "completed",
+        "SYM-80",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(Some(success_handoff(
+        "oc-80",
+        &outside,
+        "agent-server/opencode-runner-extension",
+        "abc123def456",
+    )));
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode).expect("orchestrate once");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("completed".into(), LinearTransition::NeedOwnerInput)]
+    );
+    assert!(outside.exists(), "outside path must not be removed");
+    assert!(
+        client
+            .evidence()
+            .iter()
+            .any(|(_, evidence)| evidence.kind == "malformed_handoff"
+                && evidence.body.contains("outside configured worktree root"))
+    );
+}
+
+#[test]
+fn successful_handoff_with_sibling_worktree_is_parked_without_cleanup() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let allowed_root = dir.path().join("allowed-worktrees");
+    let active = allowed_root.join("SYM-80");
+    let sibling = allowed_root.join("SYM-81");
+    fs::create_dir_all(&active).expect("active worktree");
+    fs::create_dir_all(&sibling).expect("sibling worktree");
+    fs::write(sibling.join("artifact.txt"), "must survive").expect("artifact");
+    let config = RootConfig::from_yaml_str(&valid_config_yaml().replace(
+        "/home/agent/.symphony/workspaces/opencode/symphony",
+        allowed_root.to_str().expect("allowed root utf8"),
+    ))
+    .expect("config");
+    let store = SqliteStore::open(&db_path).expect("open sqlite");
+    store.migrate().expect("migrate");
+    store.reconcile_projects(&config).expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "completed", "SYM-80", "In Progress"))
+        .expect("running issue");
+    store
+        .upsert_opencode_session(test_session("symphony", "completed", "oc-80", &active))
+        .expect("running session");
+
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "completed",
+        "SYM-80",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(Some(success_handoff(
+        "oc-80",
+        &sibling,
+        "agent-server/opencode-runner-extension",
+        "abc123def456",
+    )));
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode).expect("orchestrate once");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("completed".into(), LinearTransition::NeedOwnerInput)]
+    );
+    assert!(active.exists(), "active worktree must not be removed");
+    assert!(sibling.exists(), "sibling worktree must not be removed");
+    assert!(client.evidence().iter().any(|(_, evidence)| {
+        evidence.kind == "malformed_handoff"
+            && evidence
+                .body
+                .contains("does not match active session worktree")
+    }));
+}
+
+#[test]
+fn successful_handoff_with_whitespace_worktree_path_is_parked_without_cleanup() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let allowed_root = dir.path().join("allowed-worktrees");
+    let active = allowed_root.join("SYM-80");
+    fs::create_dir_all(&active).expect("active worktree");
+    fs::write(active.join("artifact.txt"), "must survive").expect("artifact");
+    let config = RootConfig::from_yaml_str(&valid_config_yaml().replace(
+        "/home/agent/.symphony/workspaces/opencode/symphony",
+        allowed_root.to_str().expect("allowed root utf8"),
+    ))
+    .expect("config");
+    let store = SqliteStore::open(&db_path).expect("open sqlite");
+    store.migrate().expect("migrate");
+    store.reconcile_projects(&config).expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "completed", "SYM-80", "In Progress"))
+        .expect("running issue");
+    store
+        .upsert_opencode_session(test_session("symphony", "completed", "oc-80", &active))
+        .expect("running session");
+
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "completed",
+        "SYM-80",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(Some(success_handoff(
+        "oc-80",
+        PathBuf::from(format!("{} ", active.display())),
+        "agent-server/opencode-runner-extension",
+        "abc123def456",
+    )));
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode).expect("orchestrate once");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("completed".into(), LinearTransition::NeedOwnerInput)]
+    );
+    assert!(active.exists(), "active worktree must not be removed");
+    assert!(client.evidence().iter().any(|(_, evidence)| {
+        evidence.kind == "malformed_handoff"
+            && evidence.body.contains("leading or trailing whitespace")
+    }));
 }
 
 #[test]
@@ -1269,7 +1899,7 @@ fn orchestration_processes_multiple_projects_in_config_order() {
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_yaml_str(&valid_config_yaml().replace(
         "  - id: symphony\n",
-        "  - id: alpha\n    name: Alpha\n    enabled: true\n    workflow_path: /home/agent/proj/alpha/WORKFLOW.md\n    repo_path: /home/agent/proj/alpha\n    branch:\n      base: main\n      worktree_root: /home/agent/.symphony/workspaces/opencode/alpha\n    linear:\n      team_key: ALPHA\n      project_id: alpha-project\n      project_milestone_id: alpha-milestone\n    opencode:\n      command: /usr/local/bin/opencode\n      args: [\"acp\"]\n      agent: build\n      model: null\n      permission_policy: reject\n    eval:\n      default_suite: alpha-smoke\n    concurrency:\n      max_sessions: 1\n  - id: symphony\n",
+        "  - id: alpha\n    name: Alpha\n    enabled: true\n    workflow_path: /home/agent/proj/alpha/WORKFLOW.md\n    repo_path: /home/agent/proj/alpha\n    branch:\n      base: main\n      worktree_root: /home/agent/.symphony/workspaces/opencode/alpha\n    linear:\n      team_key: ALPHA\n      project_id: alpha-project\n      project_milestone_id: alpha-milestone\n    opencode:\n      command: /usr/local/bin/opencode\n      args: [\"acp\"]\n      agent: build\n      model: openai/gpt-5.5\n      effort: high\n      permission_policy: reject\n    eval:\n      default_suite: alpha-smoke\n    concurrency:\n      max_sessions: 1\n  - id: symphony\n",
     ))
     .expect("config");
     let store = SqliteStore::open(&db_path).expect("open sqlite");
@@ -1318,6 +1948,7 @@ fn linear_issue(
         labels: Vec::new(),
         blocked_by: Vec::new(),
         has_new_owner_answer: false,
+        owner_answer_created_at: None,
         created_at: None,
         updated_at: None,
     }
@@ -1424,6 +2055,199 @@ fn eval_failed_handoff(session_id: &str, fingerprint: &str) -> OpenCodeHandoff {
             failure_fingerprint: fingerprint.into(),
         },
     }
+}
+
+fn run_git<const N: usize>(repo: &std::path::Path, args: [&str; N]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git command");
+    assert!(
+        output.status.success(),
+        "git failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn git_output<const N: usize>(repo: &std::path::Path, args: [&str; N]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("git command");
+    assert!(
+        output.status.success(),
+        "git failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("git stdout utf8")
+}
+
+fn write_fake_acp_script(dir: &Path, transcript_path: &Path) -> PathBuf {
+    let script_path = dir.join("fake-opencode-acp.py");
+    let transcript_literal =
+        serde_json::to_string(&transcript_path.display().to_string()).expect("json path");
+    fs::write(
+        &script_path,
+        format!(
+            r#"#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+transcript_path = pathlib.Path({transcript_literal})
+cwd = None
+config = {{"mode": "build", "model": "opencode/big-pickle", "effort": "none"}}
+
+def config_options():
+    return [
+        {{
+            "id": "mode",
+            "name": "Session Mode",
+            "category": "mode",
+            "type": "select",
+            "currentValue": config["mode"],
+            "options": [{{"value": "build", "name": "build"}}],
+        }},
+        {{
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": config["model"],
+            "options": [{{"value": "openai/gpt-5.5", "name": "OpenAI/GPT-5.5"}}],
+        }},
+        {{
+            "id": "effort",
+            "name": "Effort",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": config["effort"],
+            "options": [{{"value": "high", "name": "High"}}],
+        }},
+    ]
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    with transcript_path.open("a", encoding="utf-8") as transcript:
+        transcript.write(json.dumps(message, sort_keys=True) + "\n")
+
+    if method == "initialize":
+        print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "result": {{"protocolVersion": 1}}}}), flush=True)
+    elif method == "session/new":
+        cwd = pathlib.Path(message["params"]["cwd"])
+        (cwd / ".symphony").mkdir(parents=True, exist_ok=True)
+        print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "result": {{"sessionId": "ses-test", "configOptions": config_options()}}}}), flush=True)
+    elif method == "session/set_config_option":
+        config[message["params"]["configId"]] = message["params"]["value"]
+        print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "result": {{"configOptions": config_options()}}}}), flush=True)
+    elif method == "session/prompt":
+        if config["model"] != "openai/gpt-5.5" or config["effort"] != "high":
+            print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "error": {{"code": -32000, "message": "model/effort was not configured before prompt"}}}}), flush=True)
+            break
+        handoff = {{
+            "session_id": "ses-test",
+            "lifecycle_stages": ["starting", "running", "eval", "handoff"],
+            "subagents": ["build"],
+            "eval_results": [{{"suite": "fake-smoke", "passed": True, "failure_fingerprint": None, "details": "ok"}}],
+            "changed_files": ["README.md"],
+            "git": {{"branch": "agent-server/opencode-runner-extension", "head_sha": "abc123", "pr_url": None, "worktree_path": str(cwd)}},
+            "risks": [],
+            "stop_reason": {{"type": "success"}}
+        }}
+        (cwd / ".symphony" / "opencode-handoff.json").write_text(json.dumps(handoff), encoding="utf-8")
+        print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "result": {{"stopReason": "end_turn"}}}}), flush=True)
+        break
+    else:
+        print(json.dumps({{"jsonrpc": "2.0", "id": message.get("id"), "error": {{"code": -32601, "message": "unknown method"}}}}), flush=True)
+"#
+        ),
+    )
+    .expect("fake acp script");
+    let mut permissions = fs::metadata(&script_path)
+        .expect("fake acp metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script_path, permissions).expect("fake acp executable");
+    script_path
+}
+
+fn acp_test_request<R: BufRead, W: Write>(
+    stdin: &mut W,
+    stdout: &mut R,
+    id: u64,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        })
+    )
+    .expect("write acp request");
+    stdin.flush().expect("flush acp request");
+
+    for _ in 0..200 {
+        let mut line = String::new();
+        if stdout.read_line(&mut line).expect("read acp response") == 0 {
+            panic!("ACP stdout closed before {method} response");
+        }
+        let message: serde_json::Value = serde_json::from_str(&line).expect("acp json response");
+        if message.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
+            if let Some(error) = message.get("error") {
+                panic!("ACP {method} failed: {error}");
+            }
+            return message
+                .get("result")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+        }
+    }
+
+    panic!("ACP response for {method} was not observed");
+}
+
+fn assert_config_option_value(response: &serde_json::Value, id: &str, value: &str) {
+    assert!(
+        response["configOptions"]
+            .as_array()
+            .expect("config options")
+            .iter()
+            .any(|option| option["id"] == id && option["currentValue"] == value),
+        "{response}"
+    );
+}
+
+fn linear_issue_node_json(
+    id: &str,
+    identifier: &str,
+    state: &str,
+    priority: i64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "identifier": identifier,
+        "title": format!("{identifier} title"),
+        "description": format!("{identifier} description"),
+        "state": { "name": state },
+        "priority": priority,
+        "branchName": "agent-server/opencode-runner-extension",
+        "url": format!("https://linear.example/{identifier}"),
+        "labels": { "nodes": [] },
+        "comments": { "nodes": [] },
+        "relations": { "nodes": [] },
+        "createdAt": "2026-06-10T00:00:00Z",
+        "updatedAt": "2026-06-10T00:00:00Z"
+    })
 }
 
 #[derive(Debug)]

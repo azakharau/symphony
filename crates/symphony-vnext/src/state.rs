@@ -84,6 +84,8 @@ pub struct EvalRunRecord {
 pub struct BlockerRecord {
     pub kind: String,
     pub message: String,
+    #[serde(default)]
+    pub observed_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

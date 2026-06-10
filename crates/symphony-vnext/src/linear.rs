@@ -163,24 +163,45 @@ where
                 .ok_or_else(|| {
                     LinearClientError::Message("linear.project_milestone_id is required".into())
                 })?;
-        let request = json!({
-            "query": CANDIDATE_ISSUES_QUERY,
-            "variables": {
-                "teamKey": project.linear.team_key,
-                "projectId": project_id,
-                "projectMilestoneId": project_milestone_id,
-                "states": CANDIDATE_STATES,
-            },
-        });
-        let response = self.post(request)?;
-        let nodes = response
-            .pointer("/data/issues/nodes")
-            .cloned()
-            .ok_or_else(|| LinearClientError::Message("missing issues nodes".into()))?;
-        let nodes = serde_json::from_value::<Vec<LinearIssueNode>>(nodes)
-            .map_err(|error| LinearClientError::Message(format!("decode issues: {error}")))?;
+        let mut issues = Vec::new();
+        let mut after: Option<String> = None;
 
-        Ok(nodes.into_iter().map(LinearIssueNode::into_issue).collect())
+        loop {
+            let request = json!({
+                "query": CANDIDATE_ISSUES_QUERY,
+                "variables": {
+                    "teamKey": project.linear.team_key,
+                    "projectId": project_id,
+                    "projectMilestoneId": project_milestone_id,
+                    "states": CANDIDATE_STATES,
+                    "after": after,
+                },
+            });
+            let response = self.post(request)?;
+            let connection = response
+                .pointer("/data/issues")
+                .cloned()
+                .ok_or_else(|| LinearClientError::Message("missing issues connection".into()))?;
+            let connection = serde_json::from_value::<LinearIssueConnection>(connection)
+                .map_err(|error| LinearClientError::Message(format!("decode issues: {error}")))?;
+
+            issues.extend(
+                connection
+                    .nodes
+                    .into_iter()
+                    .map(LinearIssueNode::into_issue),
+            );
+
+            if !connection.page_info.has_next_page {
+                return Ok(issues);
+            }
+            after = connection.page_info.end_cursor;
+            if after.as_deref().is_none_or(str::is_empty) {
+                return Err(LinearClientError::Message(
+                    "linear issues pageInfo requested next page without endCursor".into(),
+                ));
+            }
+        }
     }
 
     fn transition_issue(
@@ -286,8 +307,24 @@ pub struct LinearIssue {
     pub labels: Vec<String>,
     pub blocked_by: Vec<LinearBlocker>,
     pub has_new_owner_answer: bool,
+    pub owner_answer_created_at: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearIssueConnection {
+    nodes: Vec<LinearIssueNode>,
+    #[serde(default, rename = "pageInfo")]
+    page_info: LinearPageInfo,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct LinearPageInfo {
+    #[serde(default, rename = "hasNextPage")]
+    has_next_page: bool,
+    #[serde(default, rename = "endCursor")]
+    end_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -312,6 +349,8 @@ struct LinearIssueNode {
 
 impl LinearIssueNode {
     fn into_issue(self) -> LinearIssue {
+        let owner_answer_created_at = latest_owner_answer_comment(&self.comments.nodes)
+            .and_then(|comment| comment.created_at.clone());
         LinearIssue {
             id: self.id,
             identifier: self.identifier,
@@ -338,7 +377,8 @@ impl LinearIssueNode {
                     state: Some(relation.related_issue.state.name),
                 })
                 .collect(),
-            has_new_owner_answer: has_owner_answer_comment(&self.comments.nodes),
+            has_new_owner_answer: owner_answer_created_at.is_some(),
+            owner_answer_created_at,
             created_at: self.created_at,
             updated_at: self.updated_at,
         }
@@ -397,14 +437,25 @@ struct LinearCommentParentNode {
     id: String,
 }
 
-fn has_owner_answer_comment(comments: &[LinearCommentNode]) -> bool {
+fn latest_owner_answer_comment(comments: &[LinearCommentNode]) -> Option<&LinearCommentNode> {
     comments
         .iter()
+        .filter(|comment| owner_answer_comment(comment))
         .max_by_key(|comment| comment.created_at.as_deref().unwrap_or_default())
-        .is_some_and(owner_answer_comment)
 }
 
 fn owner_answer_comment(comment: &LinearCommentNode) -> bool {
+    let Some(body) = comment.body.as_deref() else {
+        return false;
+    };
+    let normalized = body.trim().to_lowercase();
+    if normalized.is_empty()
+        || machine_generated_owner_input_comment(&normalized)
+        || long_question_comment(&normalized)
+    {
+        return false;
+    }
+
     if comment
         .parent
         .as_ref()
@@ -413,16 +464,14 @@ fn owner_answer_comment(comment: &LinearCommentNode) -> bool {
         return true;
     }
 
-    let Some(body) = comment.body.as_deref() else {
-        return false;
-    };
-    let normalized = body.trim().to_lowercase();
-    !normalized.is_empty()
-        && !machine_generated_owner_input_comment(&normalized)
-        && !long_question_comment(&normalized)
+    true
 }
 
 fn machine_generated_owner_input_comment(body: &str) -> bool {
+    if body.starts_with("kind: ") || body.starts_with("kind:\n") {
+        return true;
+    }
+
     [
         "<!-- symphony:",
         "## opencode handoff",
@@ -463,6 +512,12 @@ impl LinearIssue {
 
     pub fn with_new_owner_answer(mut self, has_new_owner_answer: bool) -> Self {
         self.has_new_owner_answer = has_new_owner_answer;
+        self
+    }
+
+    pub fn with_new_owner_answer_at(mut self, created_at: impl Into<String>) -> Self {
+        self.has_new_owner_answer = true;
+        self.owner_answer_created_at = Some(created_at.into());
         self
     }
 
@@ -514,7 +569,7 @@ pub enum LinearClientError {
 }
 
 const CANDIDATE_ISSUES_QUERY: &str = r#"
-query CandidateIssues($teamKey: String!, $projectId: ID!, $projectMilestoneId: ID!, $states: [String!]) {
+query CandidateIssues($teamKey: String!, $projectId: ID!, $projectMilestoneId: ID!, $states: [String!], $after: String) {
   issues(
     filter: {
       team: { key: { eq: $teamKey } }
@@ -523,7 +578,12 @@ query CandidateIssues($teamKey: String!, $projectId: ID!, $projectMilestoneId: I
       state: { name: { in: $states } }
     }
     first: 100
+    after: $after
   ) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
     nodes {
       id
       identifier
@@ -534,7 +594,7 @@ query CandidateIssues($teamKey: String!, $projectId: ID!, $projectMilestoneId: I
       branchName
       url
       labels { nodes { name } }
-      comments(first: 20) {
+      comments(last: 50, orderBy: createdAt) {
         nodes {
           body
           parent { id }

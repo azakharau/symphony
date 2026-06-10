@@ -17,6 +17,23 @@ Purpose: Define the active Symphony runtime that orchestrates project work throu
 - Per-project policy may point at a repository `WORKFLOW.md`, but lifecycle ownership is enforced by
   the Rust runtime and OpenCode handoff contract, not by legacy workflow-local state aliases.
 
+## OpenCode ACP Launch Contract
+
+- `opencode.command` and `opencode.args` are explicit project config fields; the checked-in
+  Symphony project config sets `/usr/local/bin/opencode` with `["acp"]`.
+- `opencode acp` is an ACP subprocess transport: Symphony writes one JSON-RPC object per line to
+  stdin and reads newline-delimited JSON responses/events from stdout.
+- The launch sequence is deterministic: create the per-issue git worktree, start OpenCode with that
+  worktree as `cwd`, send `initialize`, send `session/new`, apply `session/set_config_option` for
+  `mode`, `model`, and optional `effort`, then send `session/prompt`.
+- `session/new` response `configOptions` is the runtime source of truth for configurable model,
+  mode, and effort selectors. Symphony must not assume that putting `model` in `session/new` applies
+  the selected model.
+- The default checked-in OpenCode policy for this project is `agent: build`, `model:
+  openai/gpt-5.5`, `effort: high`, and unattended permission rejection.
+- OpenCode sessions run only inside `branch.worktree_root/<issue identifier>`. Completion cleanup is
+  allowed only when the handoff worktree exactly matches the active session worktree.
+
 ## Issue Lifecycle
 
 Rust vNext uses this executable lifecycle:
@@ -56,7 +73,7 @@ The root config contains one or more projects with:
 
 - Linear team/project/milestone identity.
 - Repository path and branch/worktree policy.
-- OpenCode command, args, agent, model, and permission policy.
+- OpenCode command, args, agent, model, optional effort, and permission policy.
 - Eval defaults.
 - Per-project concurrency.
 
@@ -86,9 +103,17 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
+Host-dependent live OpenCode smoke:
+
+```bash
+SYMPHONY_VNEXT_LIVE_OPENCODE_ACP=1 cargo test -p symphony-vnext --test bootstrap \
+  installed_opencode_acp_supports_ndjson_config_options_without_prompting -- --nocapture
+```
+
 Live cutover verification:
 
 ```bash
+cargo build --release -p symphony-vnext
 cargo run -p symphony-vnext -- validate-config --config config/symphony.projects.yml
 cargo run -p symphony-vnext -- daemon --config config/symphony.projects.yml --database /var/lib/symphony-vnext/runtime.sqlite3
 /usr/local/bin/opencode acp

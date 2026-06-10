@@ -3,12 +3,13 @@ use std::{
     fs,
     io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
+    process::Command,
     thread,
     time::Duration,
 };
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 
 use crate::{
     api::runtime_api_json_response,
@@ -19,7 +20,7 @@ use crate::{
     },
     opencode::{
         DeterministicOpenCodeLauncher, OpenCodeHandoff, OpenCodeLauncher, OpenCodeStopReason,
-        StdioOpenCodeLauncher, build_acp_launch_spec, new_session_record,
+        StdioOpenCodeLauncher, build_acp_launch_spec, new_session_record, worktree_path_allowed,
     },
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, GitRefRecord, IssueStateRecord, LifecycleStage,
@@ -195,7 +196,8 @@ fn reconcile_project(
                 report.terminal_reconciled.push(issue.identifier);
             }
             "Need Owner Input" => {
-                if issue.has_new_owner_answer {
+                let existing = store.issue(&project.id, &issue.id)?;
+                if has_new_owner_response(existing.as_ref(), &issue) {
                     linear.transition_issue(&issue.id, LinearTransition::Todo)?;
                     store.upsert_issue(issue_record(
                         project,
@@ -214,6 +216,7 @@ fn reconcile_project(
                         Some(BlockerRecord {
                             kind: "owner_input".into(),
                             message: "waiting for owner-visible answer".into(),
+                            observed_at: issue.updated_at.clone(),
                         }),
                         CleanupStatus::Clean,
                     ))?;
@@ -410,6 +413,24 @@ fn process_in_progress_handoff(
             }
 
             let git = handoff.git.as_ref().expect("validated git evidence");
+            if let Some(message) = successful_handoff_worktree_error(project, &session, git) {
+                park_need_owner_input(
+                    project,
+                    store,
+                    linear,
+                    issue,
+                    "malformed_handoff",
+                    message.clone(),
+                    Some(FailureRecord {
+                        kind: "malformed_handoff".into(),
+                        message,
+                        fingerprint: Some("unsafe_worktree_path".into()),
+                        occurrence_count: 1,
+                    }),
+                )?;
+                return Ok(());
+            }
+
             linear.record_issue_evidence(
                 &issue.id,
                 LinearIssueEvidence {
@@ -418,7 +439,7 @@ fn process_in_progress_handoff(
                 },
             )?;
             linear.transition_issue(&issue.id, LinearTransition::Done)?;
-            cleanup_worktree(&git.worktree_path)?;
+            cleanup_worktree(&project.repo_path, &git.worktree_path)?;
             store.upsert_issue(IssueStateRecord {
                 project_id: project.id.clone(),
                 issue_id: issue.id.clone(),
@@ -553,6 +574,40 @@ fn successful_handoff_error(handoff: &OpenCodeHandoff) -> Option<String> {
     None
 }
 
+fn successful_handoff_worktree_error(
+    project: &ProjectConfig,
+    session: &crate::state::OpenCodeSessionRecord,
+    git: &crate::opencode::GitClosureEvidence,
+) -> Option<String> {
+    let raw_path = git.worktree_path.as_str();
+    let trimmed_path = raw_path.trim();
+    if raw_path != trimmed_path {
+        return Some("git closure worktree path included leading or trailing whitespace".into());
+    }
+
+    let path = PathBuf::from(trimmed_path);
+    if path.as_os_str().is_empty() {
+        return Some("git closure evidence did not include a worktree path".into());
+    }
+    if !worktree_path_allowed(&project.branch.worktree_root, &path) {
+        return Some(format!(
+            "git closure worktree path `{}` is outside configured worktree root `{}`",
+            path.display(),
+            project.branch.worktree_root.display()
+        ));
+    }
+    let active_path = PathBuf::from(session.worktree_path.trim());
+    if path != active_path {
+        return Some(format!(
+            "git closure worktree path `{}` does not match active session worktree `{}`",
+            path.display(),
+            active_path.display()
+        ));
+    }
+
+    None
+}
+
 fn park_need_owner_input(
     project: &ProjectConfig,
     store: &SqliteStore,
@@ -580,6 +635,7 @@ fn park_need_owner_input(
         blocker: Some(BlockerRecord {
             kind: blocker_kind.into(),
             message,
+            observed_at: issue.updated_at.clone(),
         }),
         failure,
         git_ref: None,
@@ -615,11 +671,53 @@ fn git_closure_evidence_body(handoff: &OpenCodeHandoff) -> String {
     )
 }
 
-fn cleanup_worktree(worktree_path: &str) -> anyhow::Result<()> {
+fn cleanup_worktree(repo_path: &Path, worktree_path: &str) -> anyhow::Result<()> {
     let path = PathBuf::from(worktree_path);
-    if path.exists() {
-        fs::remove_dir_all(&path)
-            .with_context(|| format!("remove accepted worktree {}", path.display()))?;
+    if !path.exists() {
+        prune_git_worktrees(repo_path)?;
+        return Ok(());
+    }
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["worktree", "remove", "--force"])
+        .arg(&path)
+        .output()
+        .with_context(|| format!("remove git worktree {}", path.display()))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    if path.join(".git").exists() {
+        bail!(
+            "git worktree remove failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fs::remove_dir_all(&path)
+        .with_context(|| format!("remove accepted non-git worktree {}", path.display()))?;
+    prune_git_worktrees(repo_path)?;
+    Ok(())
+}
+
+fn prune_git_worktrees(repo_path: &Path) -> anyhow::Result<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["worktree", "prune"])
+        .output()
+        .with_context(|| format!("prune git worktrees for {}", repo_path.display()))?;
+
+    if !output.status.success() {
+        bail!(
+            "git worktree prune failed for {}: {}",
+            repo_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
     Ok(())
 }
@@ -681,7 +779,27 @@ fn blocker_record(blocker: &LinearBlocker) -> BlockerRecord {
     BlockerRecord {
         kind: "linear_blocker".into(),
         message: format!("{label} is {state}"),
+        observed_at: None,
     }
+}
+
+fn has_new_owner_response(existing: Option<&IssueStateRecord>, issue: &LinearIssue) -> bool {
+    if !issue.has_new_owner_answer {
+        return false;
+    }
+
+    let Some(observed_at) = existing
+        .and_then(|record| record.blocker.as_ref())
+        .and_then(|blocker| blocker.observed_at.as_deref())
+    else {
+        return true;
+    };
+
+    let Some(answer_created_at) = issue.owner_answer_created_at.as_deref() else {
+        return true;
+    };
+
+    answer_created_at > observed_at
 }
 
 fn has_existing_session(

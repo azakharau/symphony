@@ -8,3 +8,4 @@ pub mod linear;
 pub mod opencode;
 pub mod state;
 pub mod storage;
+pub mod telemetry;

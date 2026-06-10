@@ -1,8 +1,20 @@
-use serde::{Deserialize, Serialize};
+mod graphql_model;
+mod queries;
+mod types;
+
 use serde_json::{Value, json};
-use thiserror::Error;
+use tracing::{debug, info};
 
 use crate::config::ProjectConfig;
+use graphql_model::{LinearIssueConnection, LinearIssueNode, WorkflowStateNode};
+use queries::{
+    CANDIDATE_ISSUES_QUERY, CREATE_COMMENT_MUTATION, ISSUE_STATES_QUERY,
+    UPDATE_ISSUE_STATE_MUTATION,
+};
+pub use types::{
+    LinearBlocker, LinearClientError, LinearIssue, LinearIssueEvidence, LinearProjectConfig,
+    LinearTransition,
+};
 
 const CANDIDATE_STATES: &[&str] = &[
     "Backlog",
@@ -18,14 +30,6 @@ const CANDIDATE_STATES: &[&str] = &[
     "Closed",
     "Duplicate",
 ];
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct LinearProjectConfig {
-    pub team_key: String,
-    pub project_id: Option<String>,
-    pub project_milestone_id: Option<String>,
-}
 
 #[async_trait::async_trait]
 pub trait LinearClient: Sync {
@@ -118,7 +122,7 @@ impl LinearClient for LinearSdkClient {
         &self,
         project: &ProjectConfig,
     ) -> Result<Vec<LinearIssue>, LinearClientError> {
-        fetch_candidate_issues_with(
+        let issues = fetch_candidate_issues_with(
             |request| async move {
                 self.client
                     .execute::<LinearIssueConnection>(
@@ -131,7 +135,13 @@ impl LinearClient for LinearSdkClient {
             },
             project,
         )
-        .await
+        .await?;
+        debug!(
+            project_id = %project.id,
+            issues = issues.len(),
+            "Linear SDK fetched candidate issues"
+        );
+        Ok(issues)
     }
 
     async fn transition_issue(
@@ -161,7 +171,13 @@ impl LinearClient for LinearSdkClient {
                 "issueUpdate",
             )
             .await?;
-        ensure_success(&response, "/success", "issueUpdate")
+        ensure_success(&response, "/success", "issueUpdate")?;
+        info!(
+            issue_id,
+            state = transition.state_name(),
+            "Linear SDK transitioned issue"
+        );
+        Ok(())
     }
 
     async fn record_issue_evidence(
@@ -181,7 +197,13 @@ impl LinearClient for LinearSdkClient {
                 "commentCreate",
             )
             .await?;
-        ensure_success(&response, "/success", "commentCreate")
+        ensure_success(&response, "/success", "commentCreate")?;
+        info!(
+            issue_id,
+            kind = %evidence.kind,
+            "Linear SDK recorded issue evidence"
+        );
+        Ok(())
     }
 }
 
@@ -194,7 +216,7 @@ where
         &self,
         project: &ProjectConfig,
     ) -> Result<Vec<LinearIssue>, LinearClientError> {
-        fetch_candidate_issues_with(
+        let issues = fetch_candidate_issues_with(
             |request| async move {
                 let response = self
                     .post(json!({
@@ -210,7 +232,13 @@ where
             },
             project,
         )
-        .await
+        .await?;
+        debug!(
+            project_id = %project.id,
+            issues = issues.len(),
+            "Linear GraphQL fetched candidate issues"
+        );
+        Ok(issues)
     }
 
     async fn transition_issue(
@@ -230,7 +258,13 @@ where
                 },
             }))
             .await?;
-        ensure_success(&response, "/data/issueUpdate/success", "issueUpdate")
+        ensure_success(&response, "/data/issueUpdate/success", "issueUpdate")?;
+        info!(
+            issue_id,
+            state = transition.state_name(),
+            "Linear GraphQL transitioned issue"
+        );
+        Ok(())
     }
 
     async fn record_issue_evidence(
@@ -248,7 +282,13 @@ where
                 },
             }))
             .await?;
-        ensure_success(&response, "/data/commentCreate/success", "commentCreate")
+        ensure_success(&response, "/data/commentCreate/success", "commentCreate")?;
+        info!(
+            issue_id,
+            kind = %evidence.kind,
+            "Linear GraphQL recorded issue evidence"
+        );
+        Ok(())
     }
 }
 
@@ -393,361 +433,3 @@ fn ensure_success(
         ))),
     }
 }
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct LinearIssue {
-    pub id: String,
-    pub identifier: String,
-    pub title: String,
-    pub description: Option<String>,
-    pub state: String,
-    pub priority: Option<i64>,
-    pub branch_name: Option<String>,
-    pub url: Option<String>,
-    pub labels: Vec<String>,
-    pub blocked_by: Vec<LinearBlocker>,
-    pub has_new_owner_answer: bool,
-    pub owner_answer_created_at: Option<String>,
-    pub created_at: Option<String>,
-    pub updated_at: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LinearIssueConnection {
-    nodes: Vec<LinearIssueNode>,
-    #[serde(default, rename = "pageInfo")]
-    page_info: LinearPageInfo,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct LinearPageInfo {
-    #[serde(default, rename = "hasNextPage")]
-    has_next_page: bool,
-    #[serde(default, rename = "endCursor")]
-    end_cursor: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LinearIssueNode {
-    id: String,
-    identifier: String,
-    title: String,
-    description: Option<String>,
-    state: WorkflowStateName,
-    priority: Option<i64>,
-    #[serde(rename = "branchName")]
-    branch_name: Option<String>,
-    url: Option<String>,
-    labels: LinearLabelConnection,
-    relations: LinearRelationConnection,
-    comments: LinearCommentConnection,
-    #[serde(rename = "createdAt")]
-    created_at: Option<String>,
-    #[serde(rename = "updatedAt")]
-    updated_at: Option<String>,
-}
-
-impl LinearIssueNode {
-    fn into_issue(self) -> LinearIssue {
-        let owner_answer_created_at = latest_owner_answer_comment(&self.comments.nodes)
-            .and_then(|comment| comment.created_at.clone());
-        LinearIssue {
-            id: self.id,
-            identifier: self.identifier,
-            title: self.title,
-            description: self.description,
-            state: self.state.name,
-            priority: self.priority,
-            branch_name: self.branch_name,
-            url: self.url,
-            labels: self
-                .labels
-                .nodes
-                .into_iter()
-                .map(|label| label.name)
-                .collect(),
-            blocked_by: self
-                .relations
-                .nodes
-                .into_iter()
-                .filter(|relation| relation.relation_type == "blocked_by")
-                .map(|relation| LinearBlocker {
-                    id: Some(relation.related_issue.id),
-                    identifier: Some(relation.related_issue.identifier),
-                    state: Some(relation.related_issue.state.name),
-                })
-                .collect(),
-            has_new_owner_answer: owner_answer_created_at.is_some(),
-            owner_answer_created_at,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkflowStateName {
-    name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkflowStateNode {
-    id: String,
-    name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct LinearLabelConnection {
-    nodes: Vec<LinearLabelNode>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LinearLabelNode {
-    name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct LinearRelationConnection {
-    nodes: Vec<LinearRelationNode>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LinearRelationNode {
-    #[serde(rename = "type")]
-    relation_type: String,
-    #[serde(rename = "relatedIssue")]
-    related_issue: RelatedIssueNode,
-}
-
-#[derive(Debug, Deserialize)]
-struct LinearCommentConnection {
-    nodes: Vec<LinearCommentNode>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LinearCommentNode {
-    body: Option<String>,
-    parent: Option<LinearCommentParentNode>,
-    #[serde(rename = "createdAt")]
-    created_at: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LinearCommentParentNode {
-    id: String,
-}
-
-fn latest_owner_answer_comment(comments: &[LinearCommentNode]) -> Option<&LinearCommentNode> {
-    comments
-        .iter()
-        .filter(|comment| owner_answer_comment(comment))
-        .max_by_key(|comment| comment.created_at.as_deref().unwrap_or_default())
-}
-
-fn owner_answer_comment(comment: &LinearCommentNode) -> bool {
-    let Some(body) = comment.body.as_deref() else {
-        return false;
-    };
-    let normalized = body.trim().to_lowercase();
-    if normalized.is_empty()
-        || machine_generated_owner_input_comment(&normalized)
-        || long_question_comment(&normalized)
-    {
-        return false;
-    }
-
-    if comment
-        .parent
-        .as_ref()
-        .is_some_and(|parent| !parent.id.is_empty())
-    {
-        return true;
-    }
-
-    true
-}
-
-fn machine_generated_owner_input_comment(body: &str) -> bool {
-    if body.starts_with("kind: ") || body.starts_with("kind:\n") {
-        return true;
-    }
-
-    [
-        "<!-- symphony:",
-        "## opencode handoff",
-        "## opencode session attached",
-        "## symphony stop rule",
-        "## benchmark",
-        "## validation",
-        "## changed files",
-        "```text\nstatus:",
-        "symphony stop rule",
-        "opencode handoff",
-        "opencode session attached",
-        "changed files",
-        "validation results",
-        "codex implementation handoff",
-        "codex repair handoff",
-    ]
-    .iter()
-    .any(|marker| body.contains(marker))
-}
-
-fn long_question_comment(body: &str) -> bool {
-    body.len() > 80 && body.contains('?')
-}
-
-#[derive(Debug, Deserialize)]
-struct RelatedIssueNode {
-    id: String,
-    identifier: String,
-    state: WorkflowStateName,
-}
-
-impl LinearIssue {
-    pub fn blocked_by(mut self, blockers: Vec<LinearBlocker>) -> Self {
-        self.blocked_by = blockers;
-        self
-    }
-
-    pub fn with_new_owner_answer(mut self, has_new_owner_answer: bool) -> Self {
-        self.has_new_owner_answer = has_new_owner_answer;
-        self
-    }
-
-    pub fn with_new_owner_answer_at(mut self, created_at: impl Into<String>) -> Self {
-        self.has_new_owner_answer = true;
-        self.owner_answer_created_at = Some(created_at.into());
-        self
-    }
-
-    pub fn with_description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct LinearBlocker {
-    pub id: Option<String>,
-    pub identifier: Option<String>,
-    pub state: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct LinearIssueEvidence {
-    pub kind: String,
-    pub body: String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LinearTransition {
-    Todo,
-    InProgress,
-    NeedOwnerInput,
-    Done,
-}
-
-impl LinearTransition {
-    pub fn state_name(self) -> &'static str {
-        match self {
-            Self::Todo => "Todo",
-            Self::InProgress => "In Progress",
-            Self::NeedOwnerInput => "Need Owner Input",
-            Self::Done => "Done",
-        }
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum LinearClientError {
-    #[error("linear client error: {0}")]
-    Message(String),
-    #[error("linear sdk error: {0}")]
-    Sdk(#[from] lineark_sdk::LinearError),
-}
-
-const CANDIDATE_ISSUES_QUERY: &str = r#"
-query CandidateIssues($teamKey: String!, $projectId: ID!, $projectMilestoneId: ID!, $states: [String!], $after: String) {
-  issues(
-    filter: {
-      team: { key: { eq: $teamKey } }
-      project: { id: { eq: $projectId } }
-      projectMilestone: { id: { eq: $projectMilestoneId } }
-      state: { name: { in: $states } }
-    }
-    first: 100
-    after: $after
-  ) {
-    pageInfo {
-      hasNextPage
-      endCursor
-    }
-    nodes {
-      id
-      identifier
-      title
-      description
-      state { name }
-      priority
-      branchName
-      url
-      labels { nodes { name } }
-      comments(last: 50, orderBy: createdAt) {
-        nodes {
-          body
-          parent { id }
-          createdAt
-        }
-      }
-      relations {
-        nodes {
-          type
-          relatedIssue {
-            id
-            identifier
-            state { name }
-          }
-        }
-      }
-      createdAt
-      updatedAt
-    }
-  }
-}
-"#;
-
-const ISSUE_STATES_QUERY: &str = r#"
-query IssueStates($issueId: String!) {
-  issue(id: $issueId) {
-    team {
-      states {
-        nodes {
-          id
-          name
-        }
-      }
-    }
-  }
-}
-"#;
-
-const UPDATE_ISSUE_STATE_MUTATION: &str = r#"
-mutation UpdateIssueState($issueId: String!, $stateId: String!) {
-  issueUpdate(id: $issueId, input: { stateId: $stateId }) {
-    success
-  }
-}
-"#;
-
-const CREATE_COMMENT_MUTATION: &str = r#"
-mutation CreateIssueEvidence($issueId: String!, $body: String!) {
-  commentCreate(input: { issueId: $issueId, body: $body }) {
-    success
-  }
-}
-"#;

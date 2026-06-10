@@ -1,114 +1,28 @@
-use std::path::{Component, Path, PathBuf};
+mod acp;
+mod types;
+mod worktree;
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 use thiserror::Error;
-use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
-    process::Command,
-};
+use tokio::{io::BufReader, process::Command};
+use tracing::{debug, info, warn};
 
 use crate::{
     config::ProjectConfig,
     linear::LinearIssue,
     state::{LifecycleStage, OpenCodeSessionRecord, OpenCodeStage},
 };
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct OpenCodeRuntimeConfig {
-    pub command: PathBuf,
-    #[serde(default)]
-    pub args: Vec<String>,
-    pub agent: String,
-    pub model: Option<String>,
-    pub effort: Option<String>,
-    pub permission_policy: PermissionPolicy,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PermissionPolicy {
-    Reject,
-    Cancel,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OpenCodeLaunchSpec {
-    pub command: PathBuf,
-    pub args: Vec<String>,
-    pub cwd: PathBuf,
-    pub worktree_root: Option<PathBuf>,
-    pub issue_identifier: String,
-    pub repo_path: Option<PathBuf>,
-    pub base_ref: Option<String>,
-    pub agent: String,
-    pub model: Option<String>,
-    pub effort: Option<String>,
-    pub prompt: String,
-    pub permission_policy: PermissionPolicy,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OpenCodeStartedSession {
-    pub session_id: String,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct OpenCodeSessionEvent {
-    pub stage: Option<OpenCodeStage>,
-    pub active_agent: Option<String>,
-    pub active_model: Option<String>,
-    pub message_delta: u64,
-    pub todo_delta: u64,
-    pub part_delta: u64,
-    pub token_delta: u64,
-    pub cost_micros_delta: u64,
-    pub subagent_delta: u64,
-    pub eval_stage: Option<String>,
-    pub lifecycle_marker: Option<String>,
-    pub last_event: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct OpenCodeHandoff {
-    pub session_id: String,
-    pub lifecycle_stages: Vec<OpenCodeStage>,
-    pub subagents: Vec<String>,
-    pub eval_results: Vec<OpenCodeEvalResult>,
-    pub changed_files: Vec<String>,
-    pub git: Option<GitClosureEvidence>,
-    pub risks: Vec<String>,
-    pub stop_reason: OpenCodeStopReason,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct OpenCodeEvalResult {
-    pub suite: String,
-    pub passed: bool,
-    pub failure_fingerprint: Option<String>,
-    pub details: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct GitClosureEvidence {
-    pub branch: String,
-    pub head_sha: Option<String>,
-    pub pr_url: Option<String>,
-    pub worktree_path: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
-pub enum OpenCodeStopReason {
-    Success,
-    EvalFailed { failure_fingerprint: String },
-    ProviderBlocker { message: String },
-    OwnerQuestion { question: String },
-}
+use acp::{
+    acp_request, extract_session_id, read_acp_response, session_new_params,
+    set_session_config_option, write_acp_request,
+};
+pub use types::{
+    GitClosureEvidence, OpenCodeEvalResult, OpenCodeHandoff, OpenCodeLaunchSpec,
+    OpenCodeRuntimeConfig, OpenCodeSessionEvent, OpenCodeStartedSession, OpenCodeStopReason,
+    PermissionPolicy,
+};
+pub use worktree::worktree_path_allowed;
+use worktree::{ensure_worktree, handoff_sidecar_path, remove_stale_handoff_sidecar};
 
 #[async_trait::async_trait]
 pub trait OpenCodeLauncher: Sync {
@@ -157,6 +71,14 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         &self,
         spec: &OpenCodeLaunchSpec,
     ) -> Result<OpenCodeStartedSession, OpenCodeError> {
+        info!(
+            issue = %spec.issue_identifier,
+            cwd = %spec.cwd.display(),
+            command = %spec.command.display(),
+            agent = %spec.agent,
+            model = spec.model.as_deref().unwrap_or("default"),
+            "launching OpenCode ACP session"
+        );
         ensure_worktree(spec).await?;
         remove_stale_handoff_sidecar(&spec.cwd).await?;
         let mut child = Command::new(&spec.command)
@@ -197,6 +119,12 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         .await?;
         next_id += 1;
         let session_id = extract_session_id(&session_result)?;
+        info!(
+            issue = %spec.issue_identifier,
+            session_id = %session_id,
+            cwd = %spec.cwd.display(),
+            "OpenCode ACP session created"
+        );
         set_session_config_option(
             &mut stdin,
             &mut stdout,
@@ -253,14 +181,17 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         let permission_policy = spec.permission_policy.clone();
 
         tokio::spawn(async move {
-            let _ = read_acp_response(
+            if let Err(error) = read_acp_response(
                 &mut stdout,
                 &mut stdin,
                 &permission_policy,
                 prompt_request_id,
                 "session/prompt",
             )
-            .await;
+            .await
+            {
+                warn!(error = %error, "OpenCode ACP prompt stream ended with error");
+            }
             let _ = child.wait().await;
         });
 
@@ -273,12 +204,22 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
     ) -> Result<Option<OpenCodeHandoff>, OpenCodeError> {
         let path = handoff_sidecar_path(&session.worktree_path);
         if !tokio::fs::try_exists(&path).await? {
+            debug!(
+                session_id = %session.session_id,
+                worktree_path = %session.worktree_path,
+                "OpenCode handoff sidecar absent"
+            );
             return Ok(None);
         }
 
         let input = tokio::fs::read_to_string(&path).await?;
         let handoff = serde_json::from_str(&input)
             .map_err(|error| OpenCodeError::MalformedHandoff(format!("{path:?}: {error}")))?;
+        info!(
+            session_id = %session.session_id,
+            path = %path.display(),
+            "OpenCode handoff sidecar loaded"
+        );
         Ok(Some(handoff))
     }
 }
@@ -399,282 +340,6 @@ fn build_issue_prompt(project: &ProjectConfig, issue: &LinearIssue) -> String {
 
 fn deterministic_session_id(input: &str) -> String {
     format!("opencode:{input}")
-}
-
-async fn ensure_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), OpenCodeError> {
-    validate_launch_worktree(spec)?;
-
-    let Some(repo_path) = &spec.repo_path else {
-        tokio::fs::create_dir_all(&spec.cwd).await?;
-        return Ok(());
-    };
-    let Some(base_ref) = &spec.base_ref else {
-        tokio::fs::create_dir_all(&spec.cwd).await?;
-        return Ok(());
-    };
-
-    if tokio::fs::try_exists(spec.cwd.join(".git")).await? {
-        return Ok(());
-    }
-
-    if tokio::fs::try_exists(&spec.cwd).await? && directory_has_entries(&spec.cwd).await? {
-        return Err(OpenCodeError::InvalidWorktree(format!(
-            "target worktree {} exists but is not a git worktree",
-            spec.cwd.display()
-        )));
-    }
-
-    if let Some(parent) = spec.cwd.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(["worktree", "add", "--detach"])
-        .arg(&spec.cwd)
-        .arg(base_ref)
-        .output()
-        .await?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(OpenCodeError::GitCommand {
-            command: format!(
-                "git -C {} worktree add --detach {} {}",
-                repo_path.display(),
-                spec.cwd.display(),
-                base_ref
-            ),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        })
-    }
-}
-
-async fn directory_has_entries(path: &Path) -> Result<bool, OpenCodeError> {
-    let mut entries = tokio::fs::read_dir(path).await?;
-    Ok(entries.next_entry().await?.is_some())
-}
-
-fn validate_launch_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), OpenCodeError> {
-    if !safe_worktree_name(&spec.issue_identifier) {
-        return Err(OpenCodeError::InvalidWorktree(format!(
-            "issue identifier `{}` is not a safe worktree path component",
-            spec.issue_identifier
-        )));
-    }
-
-    if let Some(root) = &spec.worktree_root {
-        let expected = root.join(&spec.issue_identifier);
-        if spec.cwd != expected {
-            return Err(OpenCodeError::InvalidWorktree(format!(
-                "worktree path {} does not match configured root plus issue identifier {}",
-                spec.cwd.display(),
-                expected.display()
-            )));
-        }
-    }
-
-    Ok(())
-}
-
-fn safe_worktree_name(identifier: &str) -> bool {
-    !identifier.is_empty()
-        && identifier
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-}
-
-async fn set_session_config_option<R, W>(
-    stdin: &mut W,
-    stdout: &mut R,
-    permission_policy: &PermissionPolicy,
-    id: u64,
-    session_id: &str,
-    config_id: &str,
-    value: Option<&str>,
-) -> Result<(), OpenCodeError>
-where
-    R: AsyncBufRead + Unpin + Send,
-    W: AsyncWrite + Unpin + Send,
-{
-    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
-        return Ok(());
-    };
-    acp_request(
-        stdin,
-        stdout,
-        permission_policy,
-        id,
-        "session/set_config_option",
-        json!({
-            "sessionId": session_id,
-            "configId": config_id,
-            "value": value,
-        }),
-    )
-    .await?;
-    Ok(())
-}
-
-fn session_new_params(spec: &OpenCodeLaunchSpec) -> Value {
-    json!({
-        "cwd": spec.cwd,
-        "title": spec
-            .prompt
-            .lines()
-            .next()
-            .unwrap_or("Symphony OpenCode issue"),
-        "agent": spec.agent,
-        "mcpServers": [],
-    })
-}
-
-async fn acp_request<R, W>(
-    stdin: &mut W,
-    stdout: &mut R,
-    permission_policy: &PermissionPolicy,
-    id: u64,
-    method: &str,
-    params: Value,
-) -> Result<Value, OpenCodeError>
-where
-    R: AsyncBufRead + Unpin + Send,
-    W: AsyncWrite + Unpin + Send,
-{
-    write_acp_request(stdin, id, method, params).await?;
-    read_acp_response(stdout, stdin, permission_policy, id, method).await
-}
-
-async fn read_acp_response<R, W>(
-    stdout: &mut R,
-    stdin: &mut W,
-    permission_policy: &PermissionPolicy,
-    id: u64,
-    method: &str,
-) -> Result<Value, OpenCodeError>
-where
-    R: AsyncBufRead + Unpin + Send,
-    W: AsyncWrite + Unpin + Send,
-{
-    loop {
-        let mut line = String::new();
-        let bytes = stdout.read_line(&mut line).await?;
-        if bytes == 0 {
-            return Err(OpenCodeError::AcpProtocol(format!(
-                "ACP stdout closed before `{method}` response"
-            )));
-        }
-        let message: Value = serde_json::from_str(&line).map_err(|error| {
-            OpenCodeError::AcpProtocol(format!("invalid ACP JSON `{line}`: {error}"))
-        })?;
-
-        if message.get("id").and_then(Value::as_u64) == Some(id) {
-            if let Some(error) = message.get("error") {
-                return Err(OpenCodeError::AcpProtocol(format!(
-                    "ACP `{method}` failed: {error}"
-                )));
-            }
-            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
-        }
-
-        if message.get("id").is_some() && message.get("method").is_some() {
-            respond_to_acp_request(stdin, permission_policy, &message).await?;
-        }
-    }
-}
-
-async fn write_acp_request<W>(
-    stdin: &mut W,
-    id: u64,
-    method: &str,
-    params: Value,
-) -> Result<(), OpenCodeError>
-where
-    W: AsyncWrite + Unpin + Send,
-{
-    let request = json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": method,
-        "params": params,
-    });
-    stdin.write_all(format!("{request}\n").as_bytes()).await?;
-    stdin.flush().await?;
-    Ok(())
-}
-
-async fn respond_to_acp_request<W>(
-    stdin: &mut W,
-    permission_policy: &PermissionPolicy,
-    request: &Value,
-) -> Result<(), OpenCodeError>
-where
-    W: AsyncWrite + Unpin + Send,
-{
-    let Some(id) = request.get("id").cloned() else {
-        return Ok(());
-    };
-    let method = request
-        .get("method")
-        .and_then(Value::as_str)
-        .unwrap_or("request");
-    let result = match permission_policy {
-        PermissionPolicy::Reject => json!({
-            "outcome": "rejected",
-            "message": format!("Symphony rejects ACP `{method}` requests in unattended mode"),
-        }),
-        PermissionPolicy::Cancel => json!({
-            "outcome": "cancelled",
-            "message": format!("Symphony cancels ACP `{method}` requests in unattended mode"),
-        }),
-    };
-    let response = json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": result,
-    });
-    stdin.write_all(format!("{response}\n").as_bytes()).await?;
-    stdin.flush().await?;
-    Ok(())
-}
-
-fn extract_session_id(result: &Value) -> Result<String, OpenCodeError> {
-    result
-        .get("sessionId")
-        .or_else(|| result.get("id"))
-        .and_then(Value::as_str)
-        .filter(|session_id| !session_id.trim().is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| {
-            OpenCodeError::AcpProtocol(format!(
-                "ACP session/new response did not include session id: {result}"
-            ))
-        })
-}
-
-fn handoff_sidecar_path(path: impl AsRef<Path>) -> PathBuf {
-    path.as_ref()
-        .join(".symphony")
-        .join("opencode-handoff.json")
-}
-
-async fn remove_stale_handoff_sidecar(worktree_path: &Path) -> Result<(), OpenCodeError> {
-    let path = handoff_sidecar_path(worktree_path);
-    match tokio::fs::remove_file(path).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-pub fn worktree_path_allowed(root: &Path, candidate: &Path) -> bool {
-    candidate.is_absolute()
-        && candidate.starts_with(root)
-        && !candidate
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
 }
 
 #[derive(Debug, Error)]

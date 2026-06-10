@@ -64,8 +64,11 @@ pub(super) fn issue_from_row(row: &Row) -> Result<IssueStateRecord, StorageError
 }
 
 pub(super) fn session_from_row(row: &Row) -> Result<OpenCodeSessionRecord, StorageError> {
-    let lifecycle_stage: String = row.get(6)?;
-    let stage: String = row.get(7)?;
+    let lifecycle_stage: String = row.get(7)?;
+    let stage: String = row.get(8)?;
+    let process_id = row
+        .get::<Option<i64>>(6)?
+        .and_then(|value| u32::try_from(value).ok());
     Ok(OpenCodeSessionRecord {
         project_id: row.get(0)?,
         issue_id: row.get(1)?,
@@ -73,20 +76,21 @@ pub(super) fn session_from_row(row: &Row) -> Result<OpenCodeSessionRecord, Stora
         agent: row.get(3)?,
         model: row.get(4)?,
         worktree_path: row.get(5)?,
+        process_id,
         lifecycle_stage: parse_lifecycle(&lifecycle_stage)?,
         stage: parse_opencode_stage(&stage)?,
-        active_agent: row.get(8)?,
-        active_model: row.get(9)?,
-        message_count: get_u64(row, 10)?,
-        todo_count: get_u64(row, 11)?,
-        part_count: get_u64(row, 12)?,
-        token_count: get_u64(row, 13)?,
-        cost_micros: get_u64(row, 14)?,
-        subagent_count: get_u64(row, 15)?,
-        eval_stage: row.get(16)?,
-        lifecycle_marker: row.get(17)?,
-        last_event: row.get(18)?,
-        silence_observed: row.get::<bool>(19)?,
+        active_agent: row.get(9)?,
+        active_model: row.get(10)?,
+        message_count: get_u64(row, 11)?,
+        todo_count: get_u64(row, 12)?,
+        part_count: get_u64(row, 13)?,
+        token_count: get_u64(row, 14)?,
+        cost_micros: get_u64(row, 15)?,
+        subagent_count: get_u64(row, 16)?,
+        eval_stage: row.get(17)?,
+        lifecycle_marker: row.get(18)?,
+        last_event: row.get(19)?,
+        silence_observed: row.get::<bool>(20)?,
     })
 }
 

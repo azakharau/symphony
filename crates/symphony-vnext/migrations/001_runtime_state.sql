@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS opencode_sessions (
     agent TEXT NOT NULL,
     model TEXT,
     worktree_path TEXT NOT NULL,
+    process_id INTEGER,
     lifecycle_stage TEXT NOT NULL,
     stage TEXT NOT NULL,
     active_agent TEXT,

@@ -13,11 +13,11 @@ use crate::{
     config::{OpenCodeStorageConfig, ProjectConfig, RootConfig},
     linear::{EmptyLinearClient, LinearClient, LinearIssue, LinearTransition},
     opencode::{
-        DeterministicOpenCodeLauncher, OpenCodeLauncher, StdioOpenCodeLauncher,
-        apply_session_tree_metrics, build_acp_launch_spec, new_session_record,
-        read_session_tree_metrics,
+        DeterministicOpenCodeLauncher, OpenCodeLauncher, OpenCodeStartedSession,
+        StdioOpenCodeLauncher, apply_session_tree_metrics, build_acp_launch_spec,
+        new_session_record, read_session_tree_metrics,
     },
-    state::{BlockerRecord, CleanupStatus, LifecycleStage},
+    state::{BlockerRecord, CleanupStatus, LifecycleStage, OpenCodeSessionRecord, OpenCodeStage},
     storage::SqliteStore,
 };
 use handoff::process_in_progress_handoff;
@@ -263,6 +263,7 @@ async fn reconcile_project(
                     store.upsert_issue(&record).await?;
                     continue;
                 }
+                resume_stale_opencode_session(project, store, opencode, &issue).await?;
                 if let Some(storage) = opencode_storage
                     && let Err(error) =
                         refresh_opencode_session_metrics(storage, store, project, &issue).await
@@ -441,6 +442,77 @@ async fn reconcile_project(
     }
 
     Ok(())
+}
+
+async fn resume_stale_opencode_session(
+    project: &ProjectConfig,
+    store: &SqliteStore,
+    opencode: &impl OpenCodeLauncher,
+    issue: &LinearIssue,
+) -> anyhow::Result<()> {
+    let Some(mut session) = latest_session_for_issue(store, &project.id, &issue.id).await? else {
+        return Ok(());
+    };
+    if !session_requires_resume(&session).await {
+        return Ok(());
+    }
+    let launch_spec = build_acp_launch_spec(project, issue);
+    let started = opencode.resume(&launch_spec, &session).await?;
+    apply_resumed_process(&mut session, started);
+    info!(
+        project_id = %project.id,
+        issue = %issue.identifier,
+        session_id = %session.session_id,
+        process_id = session.process_id,
+        "OpenCode ACP session resumed"
+    );
+    store.upsert_opencode_session(&session).await?;
+    Ok(())
+}
+
+async fn latest_session_for_issue(
+    store: &SqliteStore,
+    project_id: &str,
+    issue_id: &str,
+) -> anyhow::Result<Option<OpenCodeSessionRecord>> {
+    let mut sessions = store
+        .opencode_sessions_for_issue(project_id, issue_id)
+        .await?;
+    sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    Ok(sessions.into_iter().next_back())
+}
+
+async fn session_requires_resume(session: &OpenCodeSessionRecord) -> bool {
+    if session.lifecycle_stage != LifecycleStage::Running {
+        return false;
+    }
+    let Some(process_id) = session.process_id else {
+        return true;
+    };
+    !opencode_process_is_alive(process_id).await
+}
+
+async fn opencode_process_is_alive(process_id: u32) -> bool {
+    let path = format!("/proc/{process_id}/cmdline");
+    let Ok(cmdline) = tokio::fs::read(path).await else {
+        return false;
+    };
+    cmdline
+        .split(|byte| *byte == 0)
+        .filter_map(|part| std::str::from_utf8(part).ok())
+        .any(|part| part.contains("opencode"))
+}
+
+fn apply_resumed_process(session: &mut OpenCodeSessionRecord, started: OpenCodeStartedSession) {
+    session.process_id = started.process_id;
+    session.lifecycle_stage = LifecycleStage::Running;
+    session.stage = OpenCodeStage::Running;
+    session.lifecycle_marker = Some("acp_resumed".into());
+    session.last_event = started
+        .process_id
+        .map(|process_id| format!("acp_process_resumed:{process_id}"))
+        .or_else(|| Some("acp_process_resumed".into()));
+    session.silence_observed = false;
 }
 
 async fn refresh_opencode_session_metrics(

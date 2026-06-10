@@ -391,6 +391,7 @@ async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
                 agent: "build".into(),
                 model: None,
                 worktree_path: "/home/agent/.symphony/workspaces/opencode/symphony/SYM-25".into(),
+                process_id: None,
                 lifecycle_stage: LifecycleStage::Running,
                 stage: OpenCodeStage::Running,
                 active_agent: Some("rust-engineer".into()),

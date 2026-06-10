@@ -42,6 +42,7 @@ pub struct OpenCodeLaunchSpec {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OpenCodeStartedSession {
     pub session_id: String,
+    pub process_id: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

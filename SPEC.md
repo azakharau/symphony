@@ -34,6 +34,10 @@ Purpose: Define the active Symphony runtime that orchestrates project work throu
   openai/gpt-5.5`, `effort: high`, and unattended permission rejection.
 - OpenCode sessions run only inside `branch.worktree_root/<issue identifier>`. Completion cleanup is
   allowed only when the handoff worktree exactly matches the active session worktree.
+- OpenCode ACP process identity is runtime state. If Symphony observes an `In Progress` issue with
+  a persisted session id but no live OpenCode ACP process, it starts a new ACP transport and calls
+  `session/resume` for that session id. It must not call `session/new` or replay the original task
+  prompt for restart recovery.
 - OpenCode activity and cost telemetry are derived from the OpenCode SQLite session tree:
   the root ACP session plus direct child sessions count as one issue execution. Symphony reads
   messages, parts, todos, token counters, cost, active agent/model, and subagent count from that

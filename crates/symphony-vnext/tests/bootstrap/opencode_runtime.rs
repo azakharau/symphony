@@ -250,6 +250,65 @@ async fn stdio_launcher_removes_stale_handoff_before_prompting_new_session() {
 }
 
 #[tokio::test]
+async fn stdio_launcher_resumes_existing_session_without_replaying_prompt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transcript_path = dir.path().join("acp-transcript.jsonl");
+    let script_path = write_fake_acp_resume_script(dir.path(), &transcript_path);
+    let worktree = dir.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let spec = opencode::OpenCodeLaunchSpec {
+        command: script_path,
+        args: Vec::new(),
+        cwd: worktree.clone(),
+        worktree_root: None,
+        issue_identifier: "SYM-202".into(),
+        repo_path: None,
+        base_ref: None,
+        agent: "build".into(),
+        model: Some("openai/gpt-5.5".into()),
+        effort: Some("high".into()),
+        prompt: "Original prompt must not be replayed on resume".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+    let mut session = test_session("symphony", "issue-202", "ses-existing", &worktree);
+    session.process_id = None;
+    let launcher = opencode::StdioOpenCodeLauncher;
+
+    let resumed = launcher
+        .resume(&spec, &session)
+        .await
+        .expect("resume existing session");
+
+    assert_eq!(resumed.session_id, "ses-existing");
+    assert!(resumed.process_id.is_some());
+    let transcript = fs::read_to_string(&transcript_path).expect("transcript");
+    assert!(
+        transcript.contains(r#""method": "initialize""#),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains(r#""method": "session/resume""#),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains(r#""sessionId": "ses-existing""#),
+        "{transcript}"
+    );
+    assert!(
+        !transcript.contains(r#""method": "session/new""#),
+        "{transcript}"
+    );
+    assert!(
+        !transcript.contains(r#""method": "session/prompt""#),
+        "{transcript}"
+    );
+    assert!(
+        !transcript.contains("Original prompt must not be replayed"),
+        "{transcript}"
+    );
+}
+
+#[tokio::test]
 async fn installed_opencode_acp_supports_ndjson_config_options_without_prompting() {
     if std::env::var("SYMPHONY_VNEXT_LIVE_OPENCODE_ACP")
         .ok()
@@ -454,6 +513,7 @@ async fn opencode_event_ingestion_updates_stage_telemetry_without_losing_session
         &issue,
         opencode::OpenCodeStartedSession {
             session_id: "oc-session-27".into(),
+            process_id: None,
         },
         &spec,
     );
@@ -502,6 +562,7 @@ async fn opencode_silence_is_observable_without_marking_session_failed() {
         &issue,
         opencode::OpenCodeStartedSession {
             session_id: "oc-session-27".into(),
+            process_id: None,
         },
         &spec,
     );

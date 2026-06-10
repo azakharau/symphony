@@ -1,6 +1,8 @@
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::state::OpenCodeSessionRecord;
+
 use super::{OpenCodeError, OpenCodeLaunchSpec, PermissionPolicy};
 
 pub(super) async fn set_session_config_option<R, W>(
@@ -44,6 +46,17 @@ pub(super) fn session_new_params(spec: &OpenCodeLaunchSpec) -> Value {
             .next()
             .unwrap_or("Symphony OpenCode issue"),
         "agent": spec.agent,
+        "mcpServers": [],
+    })
+}
+
+pub(super) fn session_resume_params(
+    spec: &OpenCodeLaunchSpec,
+    session: &OpenCodeSessionRecord,
+) -> Value {
+    json!({
+        "sessionId": session.session_id,
+        "cwd": spec.cwd,
         "mcpServers": [],
     })
 }
@@ -98,6 +111,30 @@ where
 
         if message.get("id").is_some() && message.get("method").is_some() {
             respond_to_acp_request(stdin, permission_policy, &message).await?;
+        }
+    }
+}
+
+pub(super) async fn drain_acp_stream<R, W>(
+    mut stdout: R,
+    mut stdin: W,
+    permission_policy: PermissionPolicy,
+) -> Result<(), OpenCodeError>
+where
+    R: AsyncBufRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
+{
+    loop {
+        let mut line = String::new();
+        let bytes = stdout.read_line(&mut line).await?;
+        if bytes == 0 {
+            return Ok(());
+        }
+        let message: Value = serde_json::from_str(&line).map_err(|error| {
+            OpenCodeError::AcpProtocol(format!("invalid ACP JSON `{line}`: {error}"))
+        })?;
+        if message.get("id").is_some() && message.get("method").is_some() {
+            respond_to_acp_request(&mut stdin, &permission_policy, &message).await?;
         }
     }
 }

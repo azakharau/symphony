@@ -34,6 +34,7 @@ pub struct OpenCodeSessionRecord {
     pub agent: String,
     pub model: Option<String>,
     pub worktree_path: String,
+    pub process_id: Option<u32>,
     pub lifecycle_stage: LifecycleStage,
     pub stage: OpenCodeStage,
     pub active_agent: Option<String>,

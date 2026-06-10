@@ -202,6 +202,7 @@ fn test_session(
         agent: "build".into(),
         model: None,
         worktree_path: worktree_path.as_ref().display().to_string(),
+        process_id: None,
         lifecycle_stage: LifecycleStage::Running,
         stage: OpenCodeStage::Running,
         active_agent: Some("rust-engineer".into()),
@@ -434,6 +435,57 @@ for line in sys.stdin:
     script_path
 }
 
+fn write_fake_acp_resume_script(dir: &Path, transcript_path: &Path) -> PathBuf {
+    let script_path = dir.join("fake-opencode-acp-resume.py");
+    let transcript_literal =
+        serde_json::to_string(&transcript_path.display().to_string()).expect("json path");
+    fs::write(
+        &script_path,
+        format!(
+            r#"#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+transcript_path = pathlib.Path({transcript_literal})
+config = {{"mode": "build", "model": "opencode/big-pickle", "effort": "none"}}
+
+def ok(mid, result):
+    print(json.dumps({{"jsonrpc": "2.0", "id": mid, "result": result}}), flush=True)
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    with transcript_path.open("a", encoding="utf-8") as transcript:
+        transcript.write(json.dumps(message, sort_keys=True) + "\n")
+
+    if method == "initialize":
+        ok(message["id"], {{"protocolVersion": 1, "agentCapabilities": {{"sessionCapabilities": {{"resume": {{}}}}}}}})
+    elif method == "session/resume":
+        ok(message["id"], {{"sessionId": message["params"]["sessionId"], "resumed": True}})
+    elif method == "session/set_config_option":
+        config[message["params"]["configId"]] = message["params"]["value"]
+        ok(message["id"], {{"configOptions": []}})
+    elif method == "session/new":
+        print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "error": {{"code": -32000, "message": "session/new must not be called on resume"}}}}), flush=True)
+        break
+    elif method == "session/prompt":
+        print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "error": {{"code": -32000, "message": "prompt must not be replayed on resume"}}}}), flush=True)
+        break
+    else:
+        ok(message.get("id"), {{}})
+"#
+        ),
+    )
+    .expect("fake resume acp script");
+    let mut permissions = fs::metadata(&script_path)
+        .expect("fake resume acp metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script_path, permissions).expect("fake resume acp executable");
+    script_path
+}
+
 fn acp_test_request<R: BufRead, W: Write>(
     stdin: &mut W,
     stdout: &mut R,
@@ -635,6 +687,63 @@ impl ScriptedOpenCodeLauncher {
     }
 }
 
+#[derive(Debug)]
+struct ResumeRecordingOpenCodeLauncher {
+    resumed_process_id: u32,
+    launches: std::sync::Mutex<Vec<String>>,
+    resumes: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+impl ResumeRecordingOpenCodeLauncher {
+    fn new(resumed_process_id: u32) -> Self {
+        Self {
+            resumed_process_id,
+            launches: std::sync::Mutex::new(Vec::new()),
+            resumes: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn launches(&self) -> Vec<String> {
+        self.launches.lock().expect("launches lock").clone()
+    }
+
+    fn resumes(&self) -> Vec<(String, String)> {
+        self.resumes.lock().expect("resumes lock").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl OpenCodeLauncher for ResumeRecordingOpenCodeLauncher {
+    async fn launch(
+        &self,
+        spec: &opencode::OpenCodeLaunchSpec,
+    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+        self.launches
+            .lock()
+            .expect("launches lock")
+            .push(spec.issue_identifier.clone());
+        Ok(opencode::OpenCodeStartedSession {
+            session_id: format!("new:{}", spec.issue_identifier),
+            process_id: Some(self.resumed_process_id + 1),
+        })
+    }
+
+    async fn resume(
+        &self,
+        spec: &opencode::OpenCodeLaunchSpec,
+        session: &OpenCodeSessionRecord,
+    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+        self.resumes
+            .lock()
+            .expect("resumes lock")
+            .push((spec.issue_identifier.clone(), session.session_id.clone()));
+        Ok(opencode::OpenCodeStartedSession {
+            session_id: session.session_id.clone(),
+            process_id: Some(self.resumed_process_id),
+        })
+    }
+}
+
 #[async_trait::async_trait]
 impl OpenCodeLauncher for ScriptedOpenCodeLauncher {
     async fn launch(
@@ -643,6 +752,7 @@ impl OpenCodeLauncher for ScriptedOpenCodeLauncher {
     ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
         Ok(opencode::OpenCodeStartedSession {
             session_id: format!("scripted:{}", spec.cwd.display()),
+            process_id: None,
         })
     }
 

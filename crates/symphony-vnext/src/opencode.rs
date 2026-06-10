@@ -14,8 +14,8 @@ use crate::{
     state::{LifecycleStage, OpenCodeSessionRecord, OpenCodeStage},
 };
 use acp::{
-    acp_request, extract_session_id, read_acp_response, session_new_params,
-    set_session_config_option, write_acp_request,
+    acp_request, drain_acp_stream, extract_session_id, read_acp_response, session_new_params,
+    session_resume_params, set_session_config_option, write_acp_request,
 };
 pub use archive::{
     OpenCodeSessionArchiveReport, OpenCodeSessionArchiveRequest, OpenCodeSessionTreeMetrics,
@@ -50,6 +50,17 @@ pub trait OpenCodeLauncher: Sync {
     ) -> Result<(), OpenCodeError> {
         Ok(())
     }
+
+    async fn resume(
+        &self,
+        _spec: &OpenCodeLaunchSpec,
+        session: &OpenCodeSessionRecord,
+    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
+        Ok(OpenCodeStartedSession {
+            session_id: session.session_id.clone(),
+            process_id: session.process_id,
+        })
+    }
 }
 
 #[derive(Debug, Default)]
@@ -63,6 +74,7 @@ impl OpenCodeLauncher for DeterministicOpenCodeLauncher {
     ) -> Result<OpenCodeStartedSession, OpenCodeError> {
         Ok(OpenCodeStartedSession {
             session_id: deterministic_session_id(&spec.cwd.display().to_string()),
+            process_id: None,
         })
     }
 }
@@ -93,6 +105,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()?;
+        let process_id = child.id();
         let mut stdin = child.stdin.take().ok_or(OpenCodeError::MissingStdin)?;
         let stdout = child.stdout.take().ok_or(OpenCodeError::MissingStdout)?;
         let mut stdout = BufReader::new(stdout);
@@ -200,7 +213,116 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             let _ = child.wait().await;
         });
 
-        Ok(OpenCodeStartedSession { session_id })
+        Ok(OpenCodeStartedSession {
+            session_id,
+            process_id,
+        })
+    }
+
+    async fn resume(
+        &self,
+        spec: &OpenCodeLaunchSpec,
+        session: &OpenCodeSessionRecord,
+    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
+        info!(
+            issue = %spec.issue_identifier,
+            session_id = %session.session_id,
+            cwd = %spec.cwd.display(),
+            command = %spec.command.display(),
+            "resuming OpenCode ACP session"
+        );
+        ensure_worktree(spec).await?;
+        let mut child = Command::new(&spec.command)
+            .args(&spec.args)
+            .current_dir(&spec.cwd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let process_id = child.id();
+        let mut stdin = child.stdin.take().ok_or(OpenCodeError::MissingStdin)?;
+        let stdout = child.stdout.take().ok_or(OpenCodeError::MissingStdout)?;
+        let mut stdout = BufReader::new(stdout);
+
+        let mut next_id = 1_u64;
+        acp_request(
+            &mut stdin,
+            &mut stdout,
+            &spec.permission_policy,
+            next_id,
+            "initialize",
+            json!({
+                "protocolVersion": 1,
+                "agent": spec.agent,
+                "model": spec.model,
+            }),
+        )
+        .await?;
+        next_id += 1;
+
+        let resume_result = acp_request(
+            &mut stdin,
+            &mut stdout,
+            &spec.permission_policy,
+            next_id,
+            "session/resume",
+            session_resume_params(spec, session),
+        )
+        .await?;
+        next_id += 1;
+        let resumed_session_id =
+            extract_session_id(&resume_result).unwrap_or_else(|_| session.session_id.clone());
+        if resumed_session_id != session.session_id {
+            return Err(OpenCodeError::AcpProtocol(format!(
+                "ACP session/resume returned `{resumed_session_id}` for `{}`",
+                session.session_id
+            )));
+        }
+        set_session_config_option(
+            &mut stdin,
+            &mut stdout,
+            &spec.permission_policy,
+            next_id,
+            &session.session_id,
+            "mode",
+            Some(spec.agent.as_str()),
+        )
+        .await?;
+        next_id += 1;
+        set_session_config_option(
+            &mut stdin,
+            &mut stdout,
+            &spec.permission_policy,
+            next_id,
+            &session.session_id,
+            "model",
+            spec.model.as_deref(),
+        )
+        .await?;
+        next_id += 1;
+        set_session_config_option(
+            &mut stdin,
+            &mut stdout,
+            &spec.permission_policy,
+            next_id,
+            &session.session_id,
+            "effort",
+            spec.effort.as_deref(),
+        )
+        .await?;
+
+        let permission_policy = spec.permission_policy.clone();
+        tokio::spawn(async move {
+            if let Err(error) = drain_acp_stream(stdout, stdin, permission_policy).await {
+                warn!(error = %error, "OpenCode ACP resumed stream ended with error");
+            }
+            let _ = child.wait().await;
+        });
+
+        Ok(OpenCodeStartedSession {
+            session_id: session.session_id.clone(),
+            process_id,
+        })
     }
 
     async fn latest_handoff(
@@ -259,6 +381,7 @@ pub fn new_session_record(
         agent: project.opencode.agent.clone(),
         model: project.opencode.model.clone(),
         worktree_path: spec.cwd.display().to_string(),
+        process_id: started.process_id,
         lifecycle_stage: LifecycleStage::Running,
         stage: OpenCodeStage::Starting,
         active_agent: Some(project.opencode.agent.clone()),

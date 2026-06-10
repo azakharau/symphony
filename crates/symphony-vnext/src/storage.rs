@@ -58,6 +58,33 @@ impl SqliteStore {
 
     pub async fn migrate(&self) -> Result<(), StorageError> {
         self.conn.execute_batch(RUNTIME_STATE_MIGRATION).await?;
+        self.ensure_column("opencode_sessions", "process_id", "INTEGER")
+            .await?;
+        Ok(())
+    }
+
+    async fn ensure_column(
+        &self,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> Result<(), StorageError> {
+        let mut rows = self
+            .conn
+            .query(format!("PRAGMA table_info({table})").as_str(), ())
+            .await?;
+        while let Some(row) = rows.next().await? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(());
+            }
+        }
+        self.conn
+            .execute(
+                format!("ALTER TABLE {table} ADD COLUMN {column} {definition}").as_str(),
+                (),
+            )
+            .await?;
         Ok(())
     }
 
@@ -249,6 +276,7 @@ impl SqliteStore {
                     agent,
                     model,
                     worktree_path,
+                    process_id,
                     lifecycle_stage,
                     stage,
                     active_agent,
@@ -264,11 +292,12 @@ impl SqliteStore {
                     last_event,
                     silence_observed
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
                 ON CONFLICT(project_id, issue_id, session_id) DO UPDATE SET
                     agent = excluded.agent,
                     model = excluded.model,
                     worktree_path = excluded.worktree_path,
+                    process_id = excluded.process_id,
                     lifecycle_stage = excluded.lifecycle_stage,
                     stage = excluded.stage,
                     active_agent = excluded.active_agent,
@@ -292,6 +321,7 @@ impl SqliteStore {
                     session.agent.as_str(),
                     session.model.as_deref(),
                     session.worktree_path.as_str(),
+                    session.process_id.map(i64::from),
                     session.lifecycle_stage.as_str(),
                     session.stage.as_str(),
                     session.active_agent.as_deref(),
@@ -323,7 +353,7 @@ impl SqliteStore {
             .query(
                 r#"
                 SELECT project_id, issue_id, session_id, agent, model, worktree_path,
-                       lifecycle_stage, stage, active_agent, active_model, message_count,
+                       process_id, lifecycle_stage, stage, active_agent, active_model, message_count,
                        todo_count, part_count, token_count, cost_micros, subagent_count,
                        eval_stage, lifecycle_marker, last_event, silence_observed
                 FROM opencode_sessions
@@ -345,7 +375,7 @@ impl SqliteStore {
             .query(
                 r#"
                 SELECT project_id, issue_id, session_id, agent, model, worktree_path,
-                       lifecycle_stage, stage, active_agent, active_model, message_count,
+                       process_id, lifecycle_stage, stage, active_agent, active_model, message_count,
                        todo_count, part_count, token_count, cost_micros, subagent_count,
                        eval_stage, lifecycle_marker, last_event, silence_observed
                 FROM opencode_sessions

@@ -485,6 +485,64 @@ async fn orchestration_refreshes_active_opencode_session_metrics_from_persisted_
 }
 
 #[tokio::test]
+async fn orchestration_resumes_stale_in_progress_session_without_duplicate_launch() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "work", "SYM-65", "In Progress"))
+        .await
+        .expect("issue");
+    let mut session = test_session(
+        "symphony",
+        "work",
+        "ses-existing",
+        "/home/agent/.symphony/workspaces/opencode/symphony/SYM-65",
+    );
+    session.process_id = None;
+    session.stage = OpenCodeStage::Starting;
+    session.lifecycle_marker = Some("acp_started".into());
+    session.last_event = Some("acp_process_started".into());
+    store
+        .upsert_opencode_session(session)
+        .await
+        .expect("session");
+    let client =
+        RecordingLinearClient::new(vec![linear_issue("work", "SYM-65", "In Progress", Some(1))]);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert!(
+        opencode.launches().is_empty(),
+        "existing issue session must not launch a fresh session"
+    );
+    assert_eq!(
+        opencode.resumes(),
+        vec![("SYM-65".to_string(), "ses-existing".to_string())]
+    );
+    let resumed = store
+        .opencode_session("symphony", "work", "ses-existing")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(resumed.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(resumed.stage, OpenCodeStage::Running);
+    assert_eq!(resumed.process_id, Some(4242));
+    assert_eq!(resumed.lifecycle_marker.as_deref(), Some("acp_resumed"));
+    assert_eq!(
+        resumed.last_event.as_deref(),
+        Some("acp_process_resumed:4242")
+    );
+    assert!(!resumed.silence_observed);
+}
+
+#[tokio::test]
 async fn terminal_reconciliation_marks_cleanup_complete_when_worktree_is_already_absent() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

@@ -1,75 +1,52 @@
 # Symphony
 
-Symphony turns project work into isolated, autonomous implementation runs, allowing teams to manage
-work instead of supervising coding agents.
+Symphony turns project work into isolated implementation runs. The active vNext runtime is the Rust
+`symphony-vnext` service, which schedules Linear issues and runs OpenCode ACP in per-issue
+worktrees.
 
 [![Symphony demo video preview](.github/media/symphony-demo-poster.jpg)](https://player.vimeo.com/video/1186371009?h=5626e4b899)
 
-_In this [demo video](https://player.vimeo.com/video/1186371009?h=5626e4b899), Symphony monitors a Linear board for work and spawns agents to handle the tasks. The agents complete the tasks and provide proof of work: CI status, PR review feedback, complexity analysis, and walkthrough videos. When accepted, the agents land the PR safely. Engineers do not need to supervise Codex; they can manage the work at a higher level._
-
 > [!WARNING]
-> Symphony is a low-key engineering preview for testing in trusted environments.
+> Symphony vNext is an engineering preview for trusted operator environments.
 
-## Running Symphony
+## Active Runtime
 
-### Requirements
+Rust vNext is the only active service implementation in this repository. The old Elixir runtime and
+Codex runner integration have been removed from active code, CI, and operator docs.
 
-Symphony works best in codebases that have adopted
-[harness engineering](https://openai.com/index/harness-engineering/). Symphony is the next step --
-moving from managing coding agents to managing work that needs to get done.
+The Rust workspace contains:
 
-### Option 1. Make your own
+- Typed multiproject config loading.
+- Linear project and milestone scoping.
+- OpenCode-only ACP launch configuration.
+- SQLite runtime state bootstrap and restart-safe state queries.
+- Issue orchestration for `Todo`, `In Progress`, `Need Owner Input`, backlog, blockers, terminal
+  reconciliation, eval repair loops, and git-closure handoffs.
+- Dashboard/API read models for aggregate, project, and issue drilldown views.
 
-Tell your favorite coding agent to build Symphony in a programming language of your choice:
+Rust vNext parks legacy steward states (`Preparing`, `In Review`, `RCA Required`) instead of treating
+them as executable runtime aliases.
 
-> Implement Symphony according to the following spec:
-> https://github.com/openai/symphony/blob/main/SPEC.md
+## Configuration
 
-### Option 2. Use our experimental reference implementation
+Use the checked-in sample as the active service shape:
 
-Check out [elixir/README.md](elixir/README.md) for instructions on how to set up your environment
-and run the Elixir-based Symphony implementation. You can also ask your favorite coding agent to
-help with the setup:
+```bash
+cargo run -p symphony-vnext -- validate-config --config config/symphony.projects.yml
+cargo run -p symphony-vnext -- init-store --database /var/lib/symphony-vnext/runtime.sqlite3
+cargo run -p symphony-vnext -- daemon --config config/symphony.projects.yml --database /var/lib/symphony-vnext/runtime.sqlite3
+```
 
-> Set up Symphony for my repository based on
-> https://github.com/openai/symphony/blob/main/elixir/README.md
+Continuous service mode uses the systemd unit template in
+`deploy/systemd/symphony-vnext.service` after the operator approves the host cutover. Use `--once`
+only for non-live bootstrap validation. Continuous mode requires `LINEAR_API_KEY` so the daemon can
+poll and mutate Linear through the Rust adapter. The service reads that key from the existing
+file-backed Symphony environment at `/home/agent/.symphony/env/linear.env`; do not duplicate the key
+in project workflow files.
 
-### Rust vNext foundation
+## Validation
 
-The Rust vNext workspace is an additive foundation for the next Symphony runtime. It currently
-contains typed multiproject config loading, OpenCode-only project runtime settings, SQLite runtime
-state bootstrap, restart-safe state queries, mocked Linear polling orchestration, and a basic
-validation CLI.
-
-The vNext state machine treats `Backlog` as planning inventory, keeps blocked `Todo` issues and
-parked `Need Owner Input` issues out of dispatch, moves only eligible work to `In Progress` through
-Symphony's Linear writer path, constructs the `/usr/local/bin/opencode acp` stdio launch from an
-isolated per-issue worktree, and records OpenCode session state so a restart does not duplicate a
-dispatch. The persisted session read model includes stage telemetry, active agent/model, message,
-todo, part, token, cost, subagent, eval-stage, worktree, lifecycle marker, last-event, and observable
-silence fields.
-
-The Rust dashboard API projection exposes deterministic JSON-compatible read models for
-`/api/dashboard`, `/api/projects/{project_id}`, and
-`/api/projects/{project_id}/issues/{issue_id}`. The aggregate projection reports project activity
-counts, parked and terminal counts, runner health, last event, capacity, and cleanup state. Project
-and issue drilldowns include Linear state, vNext lifecycle status, blockers, OpenCode session and
-worktree metadata, active agent/model, subagent count, eval results, token/cost usage, git refs,
-failure/stop reason, cleanup status, and a human-readable display status for repair loops, evals,
-silence, provider blockers, owner input, and completed cleanup. Rust vNext does not yet include a
-web dashboard server; these projections are the stable API contract for that UI.
-
-OpenCode handoff acceptance in vNext is git-closure based. Symphony accepts completion only from a
-structured OpenCode handoff with passing eval results, changed-file evidence, and git closure
-metadata including branch, commit SHA, PR URL when present, and worktree path. Eval failures stay in
-the same OpenCode repair loop until they pass or hit the configured repeated-fingerprint policy,
-which defaults to parking after two identical failure fingerprints. Provider blockers, explicit owner
-questions, and malformed handoffs park in `Need Owner Input` with typed operator evidence. Symphony
-records closure metadata but does not commit or push code itself, and accepted `Done` reconciliation
-removes the per-issue worktree.
-
-Default validation does not start OpenCode or require live Linear. Live ACP smoke runs must stay
-opt-in under the active steward workflow because they spawn `/usr/local/bin/opencode acp`.
+Default validation does not start OpenCode, mutate Linear, or restart systemd:
 
 ```bash
 cargo fmt --all -- --check
@@ -77,15 +54,18 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
-The CLI can validate a root project config or initialize an empty runtime store:
+Live cutover validation requires host credentials and operator control:
 
 ```bash
-cargo run -p symphony-vnext -- validate-config --config /path/to/projects.yml
-cargo run -p symphony-vnext -- init-store --database /path/to/runtime.sqlite3
-cargo run -p symphony-vnext -- daemon --config /path/to/projects.yml --database /path/to/runtime.sqlite3 --once
+/usr/local/bin/opencode acp
+systemctl status symphony-vnext.service
+curl -fsS http://127.0.0.1:4110/api/dashboard
+curl -fsS http://127.0.0.1:4110/api/projects/symphony
 ```
 
----
+## Runtime Contract
+
+See [SPEC.md](SPEC.md) for the Rust/OpenCode-only vNext service contract.
 
 ## License
 

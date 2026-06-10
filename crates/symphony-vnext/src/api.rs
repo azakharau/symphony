@@ -13,6 +13,48 @@ pub const AGGREGATE_DASHBOARD_ENDPOINT: &str = "/api/dashboard";
 pub const PROJECT_DRILLDOWN_ENDPOINT_TEMPLATE: &str = "/api/projects/{project_id}";
 pub const ISSUE_DETAIL_ENDPOINT_TEMPLATE: &str = "/api/projects/{project_id}/issues/{issue_id}";
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApiJsonResponse {
+    pub status: u16,
+    pub body: String,
+}
+
+pub fn runtime_api_json_response(
+    config: &RootConfig,
+    store: &SqliteStore,
+    path: &str,
+) -> Result<ApiJsonResponse, StorageError> {
+    let api = RuntimeDashboardApi::from_store(config, store)?;
+
+    if path == AGGREGATE_DASHBOARD_ENDPOINT {
+        return json_response(200, api.aggregate());
+    }
+
+    let Some(rest) = path.strip_prefix("/api/projects/") else {
+        return json_response(404, &serde_json::json!({ "error": "not_found" }));
+    };
+    let parts = rest.split('/').collect::<Vec<_>>();
+
+    match parts.as_slice() {
+        [project_id] => match api.project_drilldown(project_id)? {
+            Some(project) => json_response(200, project),
+            None => json_response(404, &serde_json::json!({ "error": "project_not_found" })),
+        },
+        [project_id, "issues", issue_id] => match api.issue_detail(project_id, issue_id)? {
+            Some(issue) => json_response(200, issue),
+            None => json_response(404, &serde_json::json!({ "error": "issue_not_found" })),
+        },
+        _ => json_response(404, &serde_json::json!({ "error": "not_found" })),
+    }
+}
+
+fn json_response<T: Serialize>(status: u16, value: &T) -> Result<ApiJsonResponse, StorageError> {
+    Ok(ApiJsonResponse {
+        status,
+        body: serde_json::to_string(value).map_err(StorageError::from)?,
+    })
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RuntimeReadModel {
     pub projects: Vec<ProjectReadModel>,

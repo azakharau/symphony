@@ -6,8 +6,8 @@ use symphony_vnext::{
     config::RootConfig,
     daemon,
     linear::{
-        LinearBlocker, LinearClient, LinearClientError, LinearIssue, LinearIssueEvidence,
-        LinearTransition,
+        LinearBlocker, LinearClient, LinearClientError, LinearGraphqlClient,
+        LinearGraphqlTransport, LinearIssue, LinearIssueEvidence, LinearTransition,
     },
     opencode::{
         self, GitClosureEvidence, OpenCodeEvalResult, OpenCodeHandoff, OpenCodeLauncher,
@@ -30,7 +30,7 @@ projects:
   - id: symphony
     name: Symphony
     enabled: true
-    workflow_path: /home/agent/proj/symphony/elixir/WORKFLOW.md
+    workflow_path: /home/agent/proj/symphony/WORKFLOW.md
     repo_path: /home/agent/proj/symphony
     branch:
       base: agent-server/opencode-runner-extension
@@ -85,6 +85,150 @@ fn config_rejects_codex_compatibility_fields() {
     let err =
         RootConfig::from_yaml_str(&with_codex).expect_err("codex config must not be accepted");
     assert!(err.to_string().contains("codex"), "{err}");
+}
+
+#[test]
+fn linear_graphql_client_fetches_project_candidates_transitions_and_records_evidence() {
+    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let project = config.project("symphony").expect("project");
+    let transport = RecordingGraphqlTransport::new(vec![
+        serde_json::json!({
+            "data": {
+                "issues": {
+                    "nodes": [
+                        {
+                            "id": "issue-1",
+                            "identifier": "SYM-100",
+                            "title": "Live issue",
+                            "description": "Implement live polling",
+                            "state": { "name": "Todo" },
+                            "priority": 1,
+                            "branchName": "agent-server/opencode-runner-extension",
+                            "url": "https://linear.example/SYM-100",
+                            "labels": { "nodes": [{ "name": "vnext" }] },
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "body": "Codex repair handoff for SYM-100",
+                                        "parent": null,
+                                        "createdAt": "2026-06-10T00:01:00Z"
+                                    }
+                                ]
+                            },
+                            "relations": {
+                                "nodes": [
+                                    {
+                                        "type": "blocked_by",
+                                        "relatedIssue": {
+                                            "id": "blocker-1",
+                                            "identifier": "SYM-99",
+                                            "state": { "name": "Done" }
+                                        }
+                                    }
+                                ]
+                            },
+                            "createdAt": "2026-06-10T00:00:00Z",
+                            "updatedAt": "2026-06-10T00:01:00Z"
+                        },
+                        {
+                            "id": "issue-2",
+                            "identifier": "SYM-101",
+                            "title": "Owner answered issue",
+                            "description": "Resume after owner input",
+                            "state": { "name": "Need Owner Input" },
+                            "priority": 2,
+                            "branchName": "agent-server/opencode-runner-extension",
+                            "url": "https://linear.example/SYM-101",
+                            "labels": { "nodes": [] },
+                            "comments": {
+                                "nodes": [
+                                    {
+                                        "body": "yes, continue",
+                                        "parent": null,
+                                        "createdAt": "2026-06-10T00:03:00Z"
+                                    }
+                                ]
+                            },
+                            "relations": { "nodes": [] },
+                            "createdAt": "2026-06-10T00:00:00Z",
+                            "updatedAt": "2026-06-10T00:03:00Z"
+                        }
+                    ]
+                }
+            }
+        }),
+        serde_json::json!({
+            "data": {
+                "issue": {
+                    "team": {
+                        "states": {
+                            "nodes": [
+                                { "id": "state-in-progress", "name": "In Progress" }
+                            ]
+                        }
+                    }
+                }
+            }
+        }),
+        serde_json::json!({ "data": { "issueUpdate": { "success": true } } }),
+        serde_json::json!({ "data": { "commentCreate": { "success": true } } }),
+    ]);
+    let client = LinearGraphqlClient::new(
+        "https://linear.example/graphql",
+        "linear-token",
+        transport.clone(),
+    );
+
+    let issues = client.fetch_candidate_issues(project).expect("issues");
+    client
+        .transition_issue("issue-1", LinearTransition::InProgress)
+        .expect("transition");
+    client
+        .record_issue_evidence(
+            "issue-1",
+            LinearIssueEvidence {
+                kind: "cutover_smoke".into(),
+                body: "live evidence".into(),
+            },
+        )
+        .expect("evidence");
+
+    assert_eq!(issues.len(), 2);
+    assert_eq!(issues[0].identifier, "SYM-100");
+    assert_eq!(issues[0].state, "Todo");
+    assert_eq!(issues[0].labels, vec!["vnext"]);
+    assert_eq!(
+        issues[0].blocked_by[0].identifier.as_deref(),
+        Some("SYM-99")
+    );
+    assert!(!issues[0].has_new_owner_answer);
+    assert_eq!(issues[1].identifier, "SYM-101");
+    assert!(issues[1].has_new_owner_answer);
+
+    let requests = transport.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0]["variables"]["teamKey"], "SYM");
+    assert_eq!(
+        requests[0]["variables"]["projectId"],
+        "07df87ce-4e93-4d2c-a73d-84aee1f27e07"
+    );
+    assert_eq!(
+        requests[0]["variables"]["projectMilestoneId"],
+        "7a04f8cf-dece-48b9-a2ec-0356ed639943"
+    );
+    assert!(
+        requests[0]["variables"]["states"]
+            .as_array()
+            .expect("states")
+            .contains(&serde_json::json!("Preparing"))
+    );
+    assert_eq!(requests[2]["variables"]["stateId"], "state-in-progress");
+    assert!(
+        requests[3]["variables"]["body"]
+            .as_str()
+            .unwrap()
+            .contains("cutover_smoke")
+    );
 }
 
 #[test]
@@ -367,6 +511,42 @@ fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() {
     assert!(issue_json.contains(r#""subagents_used": 2"#));
     assert!(issue_json.contains(r#""eval_results""#));
     assert!(issue_json.contains(r#""pr_url": "https://example.test/pr/91""#));
+}
+
+#[test]
+fn dashboard_api_json_routes_aggregate_project_and_issue_paths() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let store = SqliteStore::open(&db_path).expect("open sqlite");
+    store.migrate().expect("migrate");
+    store.reconcile_projects(&config).expect("projects");
+    let issue = test_issue("symphony", "api-issue", "SYM-94", "In Progress");
+    store.upsert_issue(issue).expect("issue");
+
+    let aggregate =
+        symphony_vnext::api::runtime_api_json_response(&config, &store, "/api/dashboard")
+            .expect("aggregate response");
+    let project =
+        symphony_vnext::api::runtime_api_json_response(&config, &store, "/api/projects/symphony")
+            .expect("project response");
+    let issue = symphony_vnext::api::runtime_api_json_response(
+        &config,
+        &store,
+        "/api/projects/symphony/issues/api-issue",
+    )
+    .expect("issue response");
+    let missing =
+        symphony_vnext::api::runtime_api_json_response(&config, &store, "/api/projects/missing")
+            .expect("missing response");
+
+    assert_eq!(aggregate.status, 200);
+    assert_eq!(project.status, 200);
+    assert_eq!(issue.status, 200);
+    assert_eq!(missing.status, 404);
+    assert!(aggregate.body.contains(r#""project_id":"symphony""#));
+    assert!(project.body.contains(r#""active_issues""#));
+    assert!(issue.body.contains(r#""identifier":"SYM-94""#));
 }
 
 #[test]
@@ -721,18 +901,23 @@ fn orchestration_reconciles_terminal_issues_and_avoids_duplicate_dispatch_after_
         .upsert_issue(test_issue("symphony", "finished", "SYM-60", "In Progress"))
         .expect("finished issue");
 
-    let client = RecordingLinearClient::new(vec![
+    let first_poll = RecordingLinearClient::new(vec![
         linear_issue("finished", "SYM-60", "Done", Some(1)),
         linear_issue("new-work", "SYM-61", "Todo", Some(2)),
     ]);
+    let restart_poll = RecordingLinearClient::new(vec![
+        linear_issue("finished", "SYM-60", "Done", Some(1)),
+        linear_issue("new-work", "SYM-61", "In Progress", Some(2)),
+    ]);
 
-    daemon::run_once_with_linear_client(&config, &store, &client).expect("first poll");
-    daemon::run_once_with_linear_client(&config, &store, &client).expect("restart poll");
+    daemon::run_once_with_linear_client(&config, &store, &first_poll).expect("first poll");
+    daemon::run_once_with_linear_client(&config, &store, &restart_poll).expect("restart poll");
 
     assert_eq!(
-        client.transitions(),
+        first_poll.transitions(),
         vec![("new-work".into(), LinearTransition::InProgress)]
     );
+    assert!(restart_poll.transitions().is_empty());
     let finished = store
         .issue("symphony", "finished")
         .expect("query finished")
@@ -742,6 +927,47 @@ fn orchestration_reconciles_terminal_issues_and_avoids_duplicate_dispatch_after_
     assert_eq!(
         store
             .opencode_sessions_for_issue("symphony", "new-work")
+            .expect("sessions")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn orchestration_restores_requeued_issue_with_existing_session_without_duplicate_launch() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let worktree = dir.path().join("SYM-62-worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let store = SqliteStore::open(&db_path).expect("open sqlite");
+    store.migrate().expect("migrate");
+    store.reconcile_projects(&config).expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "requeued", "SYM-62", "In Progress"))
+        .expect("running issue");
+    store
+        .upsert_opencode_session(test_session("symphony", "requeued", "oc-62", &worktree))
+        .expect("running session");
+
+    let client =
+        RecordingLinearClient::new(vec![linear_issue("requeued", "SYM-62", "Todo", Some(1))]);
+
+    daemon::run_once_with_linear_client(&config, &store, &client).expect("poll");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("requeued".into(), LinearTransition::InProgress)]
+    );
+    let issue = store
+        .issue("symphony", "requeued")
+        .expect("query requeued")
+        .expect("requeued");
+    assert_eq!(issue.state, "In Progress");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(
+        store
+            .opencode_sessions_for_issue("symphony", "requeued")
             .expect("sessions")
             .len(),
         1
@@ -1003,7 +1229,7 @@ fn provider_blocker_owner_question_and_malformed_handoff_park_without_closing() 
 }
 
 #[test]
-fn rust_path_parks_legacy_review_and_rca_states_instead_of_preserving_them() {
+fn rust_path_parks_legacy_steward_states_instead_of_preserving_them() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
@@ -1011,6 +1237,7 @@ fn rust_path_parks_legacy_review_and_rca_states_instead_of_preserving_them() {
     store.migrate().expect("migrate");
     store.reconcile_projects(&config).expect("projects");
     let client = RecordingLinearClient::new(vec![
+        linear_issue("preparing", "SYM-85", "Preparing", Some(0)),
         linear_issue("review", "SYM-86", "In Review", Some(1)),
         linear_issue("rca", "SYM-87", "RCA Required", Some(2)),
     ]);
@@ -1020,11 +1247,12 @@ fn rust_path_parks_legacy_review_and_rca_states_instead_of_preserving_them() {
     assert_eq!(
         client.transitions(),
         vec![
+            ("preparing".into(), LinearTransition::NeedOwnerInput),
             ("review".into(), LinearTransition::NeedOwnerInput),
             ("rca".into(), LinearTransition::NeedOwnerInput),
         ]
     );
-    for issue_id in ["review", "rca"] {
+    for issue_id in ["preparing", "review", "rca"] {
         let issue = store
             .issue("symphony", issue_id)
             .expect("query parked")
@@ -1348,5 +1576,42 @@ impl OpenCodeLauncher for ScriptedOpenCodeLauncher {
             .borrow_mut()
             .push((session.session_id.clone(), failure_fingerprint.to_string()));
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RecordingGraphqlTransport {
+    responses: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<serde_json::Value>>>,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+}
+
+impl RecordingGraphqlTransport {
+    fn new(responses: Vec<serde_json::Value>) -> Self {
+        Self {
+            responses: std::sync::Arc::new(std::sync::Mutex::new(responses.into())),
+            requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    fn requests(&self) -> Vec<serde_json::Value> {
+        self.requests.lock().expect("requests lock").clone()
+    }
+}
+
+impl LinearGraphqlTransport for RecordingGraphqlTransport {
+    fn post_graphql(
+        &self,
+        endpoint: &str,
+        api_key: &str,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, LinearClientError> {
+        assert_eq!(endpoint, "https://linear.example/graphql");
+        assert_eq!(api_key, "linear-token");
+        self.requests.lock().expect("requests lock").push(request);
+        self.responses
+            .lock()
+            .expect("responses lock")
+            .pop_front()
+            .ok_or_else(|| LinearClientError::Message("missing fake response".into()))
     }
 }

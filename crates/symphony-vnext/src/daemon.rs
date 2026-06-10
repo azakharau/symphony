@@ -1,12 +1,21 @@
-use std::{cmp::Ordering, fs, path::PathBuf};
+use std::{
+    cmp::Ordering,
+    fs,
+    io::{BufRead, BufReader, Write},
+    net::{TcpListener, TcpStream},
+    path::PathBuf,
+    thread,
+    time::Duration,
+};
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 
 use crate::{
+    api::runtime_api_json_response,
     config::{ProjectConfig, RootConfig},
     linear::{
-        EmptyLinearClient, LinearBlocker, LinearClient, LinearIssue, LinearIssueEvidence,
-        LinearTransition,
+        EmptyLinearClient, LinearBlocker, LinearClient, LinearGraphqlClient, LinearIssue,
+        LinearIssueEvidence, LinearTransition,
     },
     opencode::{
         DeterministicOpenCodeLauncher, OpenCodeHandoff, OpenCodeLauncher, OpenCodeStopReason,
@@ -26,12 +35,6 @@ pub struct DaemonOptions {
 }
 
 pub fn run(options: DaemonOptions) -> anyhow::Result<()> {
-    if !options.once {
-        bail!(
-            "continuous daemon mode is not implemented yet; pass --once for bootstrap validation"
-        );
-    }
-
     let input = fs::read_to_string(&options.config_path)
         .with_context(|| format!("read config {}", options.config_path.display()))?;
     let config = RootConfig::from_yaml_str(&input)?;
@@ -39,7 +42,13 @@ pub fn run(options: DaemonOptions) -> anyhow::Result<()> {
         .with_context(|| format!("open sqlite database {}", options.database_path.display()))?;
     store.migrate()?;
     store.reconcile_projects(&config)?;
-    run_once_with_clients(&config, &store, &EmptyLinearClient, &StdioOpenCodeLauncher)?;
+
+    if options.once {
+        run_once_with_clients(&config, &store, &EmptyLinearClient, &StdioOpenCodeLauncher)?;
+        return Ok(());
+    }
+
+    run_continuous(config, options.database_path)?;
 
     Ok(())
 }
@@ -50,6 +59,78 @@ pub struct OrchestrationReport {
     pub blocked: Vec<String>,
     pub parked_owner_input: Vec<String>,
     pub terminal_reconciled: Vec<String>,
+}
+
+fn run_continuous(config: RootConfig, database_path: PathBuf) -> anyhow::Result<()> {
+    let server = config
+        .server
+        .clone()
+        .context("continuous daemon mode requires server.host and server.port")?;
+    let bind_addr = format!("{}:{}", server.host, server.port);
+    let listener =
+        TcpListener::bind(&bind_addr).with_context(|| format!("bind dashboard API {bind_addr}"))?;
+    let poll_config = config.clone();
+    let poll_database_path = database_path.clone();
+    let linear = LinearGraphqlClient::from_env()?;
+
+    thread::spawn(move || {
+        loop {
+            if let Ok(store) = SqliteStore::open(&poll_database_path)
+                && store.migrate().is_ok()
+            {
+                let _ =
+                    run_once_with_clients(&poll_config, &store, &linear, &StdioOpenCodeLauncher);
+            }
+            thread::sleep(Duration::from_secs(30));
+        }
+    });
+
+    for stream in listener.incoming() {
+        let stream = stream?;
+        handle_http_stream(&config, &database_path, stream)?;
+    }
+
+    Ok(())
+}
+
+fn handle_http_stream(
+    config: &RootConfig,
+    database_path: &PathBuf,
+    mut stream: TcpStream,
+) -> anyhow::Result<()> {
+    let mut first_line = String::new();
+    {
+        let mut reader = BufReader::new(&mut stream);
+        reader.read_line(&mut first_line)?;
+    }
+    let mut parts = first_line.split_whitespace();
+    let method = parts.next().unwrap_or_default();
+    let path = parts.next().unwrap_or("/");
+
+    if method != "GET" {
+        write_http_response(&mut stream, 405, r#"{"error":"method_not_allowed"}"#)?;
+        return Ok(());
+    }
+
+    let store = SqliteStore::open(database_path)?;
+    store.migrate()?;
+    let response = runtime_api_json_response(config, &store, path)?;
+    write_http_response(&mut stream, response.status, &response.body)?;
+    Ok(())
+}
+
+fn write_http_response(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result<()> {
+    let reason = match status {
+        200 => "OK",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        _ => "Internal Server Error",
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
 }
 
 pub fn run_once_with_linear_client(
@@ -157,7 +238,7 @@ fn reconcile_project(
                 store.upsert_issue(record)?;
                 process_in_progress_handoff(project, store, linear, opencode, &issue, existing)?;
             }
-            "In Review" | "RCA Required" => {
+            "Preparing" | "In Review" | "RCA Required" => {
                 park_need_owner_input(
                     project,
                     store,
@@ -183,6 +264,7 @@ fn reconcile_project(
                     ))?;
                     report.blocked.push(issue.identifier);
                 } else if has_existing_session(store, &project.id, &issue.id)? {
+                    linear.transition_issue(&issue.id, LinearTransition::InProgress)?;
                     store.upsert_issue(issue_record(
                         project,
                         &issue,

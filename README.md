@@ -34,6 +34,26 @@ help with the setup:
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
+### Rust vNext foundation
+
+The Rust vNext workspace is an additive foundation for the next Symphony runtime. It currently
+contains typed multiproject config loading, OpenCode-only project runtime settings, SQLite runtime
+state bootstrap, restart-safe state queries, and a basic validation CLI.
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+```
+
+The CLI can validate a root project config or initialize an empty runtime store:
+
+```bash
+cargo run -p symphony-vnext -- validate-config --config /path/to/projects.yml
+cargo run -p symphony-vnext -- init-store --database /path/to/runtime.sqlite3
+cargo run -p symphony-vnext -- daemon --config /path/to/projects.yml --database /path/to/runtime.sqlite3 --once
+```
+
 ---
 
 ## License

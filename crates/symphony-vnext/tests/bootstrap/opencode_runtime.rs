@@ -1,6 +1,84 @@
 use super::*;
 
 #[tokio::test]
+async fn opencode_session_archive_preserves_session_tree_before_deleting_sqlite_rows() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("opencode.db");
+    seed_opencode_session_tree(&db_path).await;
+    let archive_root = dir.path().join("archives");
+
+    let report =
+        opencode::archive_and_delete_session_tree(opencode::OpenCodeSessionArchiveRequest {
+            opencode_database_path: db_path.clone(),
+            archive_root: archive_root.clone(),
+            project_id: "mnemesh".into(),
+            issue_id: "issue-100".into(),
+            issue_identifier: "MNE-100".into(),
+            root_session_id: "ses-root".into(),
+        })
+        .await
+        .expect("archive session tree");
+
+    assert_eq!(report.sessions_archived, 2);
+    assert_eq!(report.messages_archived, 2);
+    assert_eq!(report.parts_archived, 2);
+    assert_eq!(report.todos_archived, 1);
+    assert_eq!(report.sessions_deleted, 2);
+    assert_eq!(
+        report.artifact_root,
+        archive_root
+            .join("mnemesh")
+            .join("MNE-100")
+            .join("ses-root")
+    );
+
+    let manifest =
+        fs::read_to_string(report.artifact_root.join("manifest.json")).expect("manifest archived");
+    assert!(manifest.contains("symphony.opencode_session_archive.v1"));
+    assert!(manifest.contains("OpenCode SQLite session tables across root and child sessions"));
+    assert!(manifest.contains("\"raw_transcripts_retained_locally\": true"));
+    assert!(report.artifact_root.join("sessions.json").exists());
+    assert!(report.artifact_root.join("raw").join("parts.json").exists());
+
+    let remaining_sessions = opencode_row_count(&db_path, "session").await;
+    let remaining_messages = opencode_row_count(&db_path, "message").await;
+    let remaining_parts = opencode_row_count(&db_path, "part").await;
+    let remaining_todos = opencode_row_count(&db_path, "todo").await;
+    assert_eq!(remaining_sessions, 0);
+    assert_eq!(remaining_messages, 0);
+    assert_eq!(remaining_parts, 0);
+    assert_eq!(remaining_todos, 0);
+}
+
+#[tokio::test]
+async fn opencode_session_tree_metrics_count_subagent_activity_and_tokens() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("opencode.db");
+    seed_opencode_session_tree(&db_path).await;
+
+    let metrics = opencode::read_session_tree_metrics(&db_path, "ses-root")
+        .await
+        .expect("read metrics")
+        .expect("session tree exists");
+
+    assert_eq!(metrics.root_session_id, "ses-root");
+    assert_eq!(metrics.session_count, 2);
+    assert_eq!(metrics.subagent_count, 1);
+    assert_eq!(metrics.message_count, 2);
+    assert_eq!(metrics.part_count, 2);
+    assert_eq!(metrics.todo_count, 1);
+    assert_eq!(metrics.tokens_input, 150);
+    assert_eq!(metrics.tokens_output, 30);
+    assert_eq!(metrics.tokens_reasoning, 4);
+    assert_eq!(metrics.tokens_cache_read, 600);
+    assert_eq!(metrics.tokens_cache_write, 0);
+    assert_eq!(metrics.tokens_total, 784);
+    assert_eq!(metrics.active_agent.as_deref(), Some("rust-engineer"));
+    assert_eq!(metrics.active_model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(metrics.last_updated_ms, Some(2000));
+}
+
+#[tokio::test]
 async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_issue_prompt() {
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
@@ -438,4 +516,173 @@ async fn opencode_silence_is_observable_without_marking_session_failed() {
     );
     assert!(session.silence_observed);
     assert!(session.failure_marker().is_none());
+}
+
+pub(crate) async fn seed_opencode_session_tree(path: &std::path::Path) {
+    let database = libsql::Builder::new_local(path.display().to_string())
+        .build()
+        .await
+        .expect("build opencode db");
+    let conn = database.connect().expect("connect opencode db");
+    conn.execute_batch(
+        r#"
+        PRAGMA foreign_keys = ON;
+        CREATE TABLE session (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            parent_id TEXT,
+            slug TEXT NOT NULL,
+            directory TEXT NOT NULL,
+            title TEXT NOT NULL,
+            version TEXT NOT NULL,
+            share_url TEXT,
+            summary_additions INTEGER,
+            summary_deletions INTEGER,
+            summary_files INTEGER,
+            summary_diffs TEXT,
+            revert TEXT,
+            permission TEXT,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            time_compacting INTEGER,
+            time_archived INTEGER,
+            workspace_id TEXT,
+            path TEXT,
+            agent TEXT,
+            model TEXT,
+            cost REAL DEFAULT 0 NOT NULL,
+            tokens_input INTEGER DEFAULT 0 NOT NULL,
+            tokens_output INTEGER DEFAULT 0 NOT NULL,
+            tokens_reasoning INTEGER DEFAULT 0 NOT NULL,
+            tokens_cache_read INTEGER DEFAULT 0 NOT NULL,
+            tokens_cache_write INTEGER DEFAULT 0 NOT NULL
+        );
+        CREATE TABLE message (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES session(id) ON DELETE CASCADE
+        );
+        CREATE TABLE part (
+            id TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data TEXT NOT NULL,
+            FOREIGN KEY (message_id) REFERENCES message(id) ON DELETE CASCADE,
+            FOREIGN KEY (session_id) REFERENCES session(id) ON DELETE CASCADE
+        );
+        CREATE TABLE session_message (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            data TEXT NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES session(id) ON DELETE CASCADE
+        );
+        CREATE TABLE todo (
+            session_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            status TEXT NOT NULL,
+            priority TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL,
+            PRIMARY KEY(session_id, position),
+            FOREIGN KEY (session_id) REFERENCES session(id) ON DELETE CASCADE
+        );
+        CREATE TABLE event (
+            id TEXT PRIMARY KEY,
+            aggregate_id TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            type TEXT NOT NULL,
+            data TEXT NOT NULL
+        );
+        CREATE TABLE event_sequence (
+            aggregate_id TEXT PRIMARY KEY,
+            seq INTEGER NOT NULL
+        );
+        "#,
+    )
+    .await
+    .expect("schema");
+
+    for (id, parent_id, title, agent, input, output) in [
+        ("ses-root", None, "Root build", "build", 100_i64, 20_i64),
+        (
+            "ses-child",
+            Some("ses-root"),
+            "Child engineer",
+            "rust-engineer",
+            50_i64,
+            10_i64,
+        ),
+    ] {
+        conn.execute(
+            r#"
+            INSERT INTO session (
+                id, project_id, parent_id, slug, directory, title, version,
+                time_created, time_updated, agent, model, cost, tokens_input,
+                tokens_output, tokens_reasoning, tokens_cache_read,
+                tokens_cache_write
+            )
+            VALUES (?1, 'project-row', ?2, ?1, '/tmp/work', ?3, '0',
+                    1000, 2000, ?4, '{"id":"gpt-5.5","providerID":"openai"}',
+                    0.0, ?5, ?6, 2, 300, 0)
+            "#,
+            libsql::params![id, parent_id, title, agent, input, output],
+        )
+        .await
+        .expect("insert session");
+    }
+
+    for (session_id, message_id, part_id) in [
+        ("ses-root", "msg-root", "part-root"),
+        ("ses-child", "msg-child", "part-child"),
+    ] {
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, 1000, 2000, ?3)",
+            libsql::params![message_id, session_id, serde_json::json!({"role":"assistant"}).to_string()],
+        )
+        .await
+        .expect("insert message");
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, 1000, 2000, ?4)",
+            libsql::params![part_id, message_id, session_id, serde_json::json!({"type":"text","text":"local raw transcript"}).to_string()],
+        )
+        .await
+        .expect("insert part");
+    }
+    conn.execute(
+        "INSERT INTO session_message (id, session_id, type, time_created, time_updated, data) VALUES ('switch-root', 'ses-root', 'agent-switched', 1000, 2000, '{}')",
+        (),
+    )
+    .await
+    .expect("insert session message");
+    conn.execute(
+        "INSERT INTO todo (session_id, content, status, priority, position, time_created, time_updated) VALUES ('ses-root', 'Run eval', 'completed', 'high', 0, 1000, 2000)",
+        (),
+    )
+    .await
+    .expect("insert todo");
+}
+
+async fn opencode_row_count(path: &std::path::Path, table: &str) -> u64 {
+    assert!(matches!(table, "session" | "message" | "part" | "todo"));
+    let database = libsql::Builder::new_local(path.display().to_string())
+        .build()
+        .await
+        .expect("build opencode db");
+    let conn = database.connect().expect("connect opencode db");
+    let mut rows = conn
+        .query(format!("SELECT count(*) FROM {table}").as_str(), ())
+        .await
+        .expect("count rows");
+    let row = rows.next().await.expect("row result").expect("row");
+    let count: i64 = row.get(0).expect("count value");
+    count as u64
 }

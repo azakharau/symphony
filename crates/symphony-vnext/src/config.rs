@@ -11,6 +11,7 @@ pub struct RootConfig {
     pub server: Option<ServerConfig>,
     #[serde(default)]
     pub cleanup: CleanupConfig,
+    pub opencode_storage: Option<OpenCodeStorageConfig>,
     projects: Vec<ProjectConfig>,
 }
 
@@ -34,6 +35,9 @@ impl RootConfig {
             return Err(ConfigError::Validation("projects must not be empty".into()));
         }
         self.cleanup.validate()?;
+        if let Some(storage) = &self.opencode_storage {
+            storage.validate()?;
+        }
 
         let mut seen_ids = HashSet::new();
         for project in &self.projects {
@@ -83,6 +87,29 @@ impl RootConfig {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenCodeStorageConfig {
+    pub database_path: PathBuf,
+    pub archive_root: PathBuf,
+}
+
+impl OpenCodeStorageConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.database_path.as_os_str().is_empty() {
+            return Err(ConfigError::Validation(
+                "opencode_storage.database_path must not be empty".into(),
+            ));
+        }
+        if self.archive_root.as_os_str().is_empty() {
+            return Err(ConfigError::Validation(
+                "opencode_storage.archive_root must not be empty".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

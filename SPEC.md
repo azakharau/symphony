@@ -12,8 +12,9 @@ Purpose: Define the active Symphony runtime that orchestrates project work throu
   from an isolated per-issue worktree.
 - Codex runner integration is not an active runtime path.
 - The removed Elixir implementation is not a compatibility target.
-- Configuration is loaded from a root multiproject YAML file such as
-  `config/symphony.projects.yml`.
+- Configuration is loaded from a root multiproject TOML file. Configuration contains generic
+  project/runtime policy only; it must not encode active milestone, active issue, or lifecycle
+  anchors.
 - Per-project policy may point at a repository `WORKFLOW.md`, but lifecycle ownership is enforced by
   the Rust runtime and OpenCode handoff contract, not by legacy workflow-local state aliases.
 
@@ -33,6 +34,10 @@ Purpose: Define the active Symphony runtime that orchestrates project work throu
   openai/gpt-5.5`, `effort: high`, and unattended permission rejection.
 - OpenCode sessions run only inside `branch.worktree_root/<issue identifier>`. Completion cleanup is
   allowed only when the handoff worktree exactly matches the active session worktree.
+- OpenCode activity and cost telemetry are derived from the OpenCode SQLite session tree:
+  the root ACP session plus direct child sessions count as one issue execution. Symphony reads
+  messages, parts, todos, token counters, cost, active agent/model, and subagent count from that
+  persisted tree, so missing incremental ACP stream events do not produce false silence.
 
 ## Issue Lifecycle
 
@@ -71,15 +76,25 @@ configured repeated-fingerprint policy.
 
 The root config contains one or more projects with:
 
-- Linear team/project/milestone identity.
+- Linear team/project identity.
 - Repository path and branch/worktree policy.
 - OpenCode command, args, agent, model, optional effort, and permission policy.
 - Eval defaults.
 - Per-project concurrency.
+- Optional root `opencode_storage` with the OpenCode SQLite database path and local archive root.
 
 Only enabled projects are reconciled. Work is ordered by Linear priority, then identifier, then
 issue id. Running sessions consume project capacity and survive restarts through the SQLite runtime
 store.
+
+## Runtime Cleanup
+
+Runtime cleanup removes stale completed runtime rows after the configured retention window. If an
+issue has a recorded OpenCode session, cleanup first exports the OpenCode root+subagent session tree
+to a local archive under `opencode_storage.archive_root`, then deletes the corresponding OpenCode
+SQLite rows and finally removes the runtime session row. Raw transcript payloads may be retained in
+the local archive for operator debugging, but committed benchmark/report artifacts must use derived
+metrics only and must not commit raw prompt, response, or transcript bodies.
 
 ## Dashboard/API Projection
 
@@ -91,7 +106,8 @@ The Rust runtime exposes stable read-model builders for:
 
 These projections report project activity, parked and terminal counts, runner health, capacity,
 cleanup state, Linear state, vNext lifecycle state, blocker/failure details, OpenCode session
-metadata, eval results, git refs, worktree paths, token/cost counters, and display status.
+metadata, eval results, git refs, worktree paths, token/cost counters, subagent count/activity, and
+display status.
 
 ## Operator Validation
 
@@ -114,8 +130,8 @@ Live cutover verification:
 
 ```bash
 cargo build --release -p symphony-vnext
-cargo run -p symphony-vnext -- validate-config --config config/symphony.projects.yml
-cargo run -p symphony-vnext -- daemon --config config/symphony.projects.yml --database /var/lib/symphony-vnext/runtime.sqlite3
+cargo run -p symphony-vnext -- validate-config --config config/symphony.projects.toml
+cargo run -p symphony-vnext -- daemon --config config/symphony.projects.toml --database /var/lib/symphony-vnext/runtime.sqlite3
 /usr/local/bin/opencode acp
 systemctl status symphony-vnext.service
 curl -fsS http://127.0.0.1:4110/api/dashboard

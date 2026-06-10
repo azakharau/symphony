@@ -7,14 +7,15 @@ mod records;
 use std::path::PathBuf;
 
 use anyhow::Context;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::{
-    config::{ProjectConfig, RootConfig},
+    config::{OpenCodeStorageConfig, ProjectConfig, RootConfig},
     linear::{EmptyLinearClient, LinearClient, LinearIssue, LinearTransition},
     opencode::{
         DeterministicOpenCodeLauncher, OpenCodeLauncher, StdioOpenCodeLauncher,
-        build_acp_launch_spec, new_session_record,
+        apply_session_tree_metrics, build_acp_launch_spec, new_session_record,
+        read_session_tree_metrics,
     },
     state::{BlockerRecord, CleanupStatus, LifecycleStage},
     storage::SqliteStore,
@@ -88,9 +89,16 @@ pub async fn run_once_with_clients(
 
     let mut report = OrchestrationReport::default();
     for project in config.projects().iter().filter(|project| project.enabled) {
-        reconcile_project(project, store, linear, opencode, &mut report)
-            .await
-            .with_context(|| format!("orchestrate project `{}`", project.id))?;
+        reconcile_project(
+            project,
+            config.opencode_storage.as_ref(),
+            store,
+            linear,
+            opencode,
+            &mut report,
+        )
+        .await
+        .with_context(|| format!("orchestrate project `{}`", project.id))?;
     }
 
     Ok(report)
@@ -98,6 +106,7 @@ pub async fn run_once_with_clients(
 
 async fn reconcile_project(
     project: &ProjectConfig,
+    opencode_storage: Option<&OpenCodeStorageConfig>,
     store: &SqliteStore,
     linear: &impl LinearClient,
     opencode: &impl OpenCodeLauncher,
@@ -253,6 +262,17 @@ async fn reconcile_project(
                     );
                     store.upsert_issue(&record).await?;
                     continue;
+                }
+                if let Some(storage) = opencode_storage
+                    && let Err(error) =
+                        refresh_opencode_session_metrics(storage, store, project, &issue).await
+                {
+                    warn!(
+                        project_id = %project.id,
+                        issue = %issue.identifier,
+                        error = %error,
+                        "OpenCode persisted session metric refresh failed"
+                    );
                 }
                 store.upsert_issue(&record).await?;
                 process_in_progress_handoff(project, store, linear, opencode, &issue, existing)
@@ -420,6 +440,53 @@ async fn reconcile_project(
         report.dispatched.push(issue.identifier);
     }
 
+    Ok(())
+}
+
+async fn refresh_opencode_session_metrics(
+    storage: &OpenCodeStorageConfig,
+    store: &SqliteStore,
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+) -> anyhow::Result<()> {
+    let mut sessions = store
+        .opencode_sessions_for_issue(&project.id, &issue.id)
+        .await?;
+    sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    let Some(mut session) = sessions.into_iter().next_back() else {
+        return Ok(());
+    };
+    let Some(metrics) =
+        read_session_tree_metrics(&storage.database_path, &session.session_id).await?
+    else {
+        debug!(
+            project_id = %project.id,
+            issue = %issue.identifier,
+            session_id = %session.session_id,
+            "OpenCode persisted session tree was not found during metric refresh"
+        );
+        return Ok(());
+    };
+    let previous_last_event = session.last_event.clone();
+    apply_session_tree_metrics(&mut session, &metrics);
+    if session.last_event != previous_last_event {
+        info!(
+            project_id = %project.id,
+            issue = %issue.identifier,
+            session_id = %session.session_id,
+            sessions = metrics.session_count,
+            subagents = metrics.subagent_count,
+            messages = metrics.message_count,
+            parts = metrics.part_count,
+            todos = metrics.todo_count,
+            tokens = metrics.tokens_total,
+            cost_micros = metrics.cost_micros,
+            active_agent = metrics.active_agent.as_deref().unwrap_or("unknown"),
+            active_model = metrics.active_model.as_deref().unwrap_or("unknown"),
+            "OpenCode persisted session metrics refreshed"
+        );
+    }
+    store.upsert_opencode_session(&session).await?;
     Ok(())
 }
 

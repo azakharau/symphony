@@ -1,4 +1,5 @@
 mod acp;
+mod archive;
 mod types;
 mod worktree;
 
@@ -15,6 +16,10 @@ use crate::{
 use acp::{
     acp_request, extract_session_id, read_acp_response, session_new_params,
     set_session_config_option, write_acp_request,
+};
+pub use archive::{
+    OpenCodeSessionArchiveReport, OpenCodeSessionArchiveRequest, OpenCodeSessionTreeMetrics,
+    archive_and_delete_session_tree, read_session_tree_metrics,
 };
 pub use types::{
     GitClosureEvidence, OpenCodeEvalResult, OpenCodeHandoff, OpenCodeLaunchSpec,
@@ -299,6 +304,38 @@ pub fn ingest_session_event(session: &mut OpenCodeSessionRecord, event: OpenCode
     session.subagent_count = session.subagent_count.saturating_add(event.subagent_delta);
 }
 
+pub fn apply_session_tree_metrics(
+    session: &mut OpenCodeSessionRecord,
+    metrics: &OpenCodeSessionTreeMetrics,
+) {
+    if metrics.message_count > 0 || metrics.part_count > 0 || metrics.todo_count > 0 {
+        session.stage = match session.stage {
+            OpenCodeStage::Starting | OpenCodeStage::Silent => OpenCodeStage::Running,
+            stage => stage,
+        };
+        session.silence_observed = false;
+    }
+    session.active_agent = metrics
+        .active_agent
+        .clone()
+        .or(session.active_agent.clone());
+    session.active_model = metrics
+        .active_model
+        .clone()
+        .or(session.active_model.clone());
+    session.message_count = metrics.message_count;
+    session.todo_count = metrics.todo_count;
+    session.part_count = metrics.part_count;
+    session.token_count = metrics.tokens_total;
+    session.cost_micros = metrics.cost_micros;
+    session.subagent_count = metrics.subagent_count;
+    session.lifecycle_marker = Some("opencode_db_activity".into());
+    session.last_event = metrics
+        .last_updated_ms
+        .map(|updated| format!("opencode_db_updated:{updated}"))
+        .or_else(|| Some("opencode_db_snapshot".into()));
+}
+
 pub fn mark_session_silence(session: &mut OpenCodeSessionRecord, reason: &str) {
     session.stage = OpenCodeStage::Silent;
     session.silence_observed = true;
@@ -358,4 +395,10 @@ pub enum OpenCodeError {
     GitCommand { command: String, stderr: String },
     #[error("malformed opencode handoff: {0}")]
     MalformedHandoff(String),
+    #[error("opencode sqlite error: {0}")]
+    Sqlite(#[from] libsql::Error),
+    #[error("opencode json error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("opencode archive error: {0}")]
+    Archive(String),
 }

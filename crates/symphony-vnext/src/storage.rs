@@ -27,6 +27,14 @@ pub struct CleanupReport {
     pub eval_runs_deleted: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenCodeCleanupCandidate {
+    pub project_id: String,
+    pub issue_id: String,
+    pub issue_identifier: String,
+    pub session_id: String,
+}
+
 #[derive(Clone)]
 pub struct SqliteStore {
     conn: Connection,
@@ -525,6 +533,12 @@ impl SqliteStore {
                 DELETE FROM issues
                 WHERE lifecycle_stage NOT IN ('running', 'blocked')
                   AND updated_at <= datetime('now', ?1)
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM opencode_sessions
+                    WHERE opencode_sessions.project_id = issues.project_id
+                      AND opencode_sessions.issue_id = issues.issue_id
+                  )
                 "#,
                 params![cutoff_modifier.as_str()],
             )
@@ -536,6 +550,59 @@ impl SqliteStore {
             stage_events_deleted,
             eval_runs_deleted,
         })
+    }
+
+    pub async fn opencode_cleanup_candidates(
+        &self,
+        retention: Duration,
+    ) -> Result<Vec<OpenCodeCleanupCandidate>, StorageError> {
+        let retention_seconds = i64::try_from(retention.as_secs()).unwrap_or(i64::MAX);
+        let cutoff_modifier = format!("-{retention_seconds} seconds");
+        let mut rows = self
+            .conn
+            .query(
+                r#"
+                SELECT issues.project_id, issues.issue_id, issues.identifier, opencode_sessions.session_id
+                FROM issues
+                INNER JOIN opencode_sessions
+                  ON opencode_sessions.project_id = issues.project_id
+                 AND opencode_sessions.issue_id = issues.issue_id
+                WHERE issues.lifecycle_stage = 'completed'
+                  AND opencode_sessions.updated_at <= datetime('now', ?1)
+                ORDER BY issues.project_id ASC, issues.identifier ASC, opencode_sessions.session_id ASC
+                "#,
+                params![cutoff_modifier.as_str()],
+            )
+            .await?;
+
+        let mut candidates = Vec::new();
+        while let Some(row) = rows.next().await? {
+            candidates.push(OpenCodeCleanupCandidate {
+                project_id: row.get(0)?,
+                issue_id: row.get(1)?,
+                issue_identifier: row.get(2)?,
+                session_id: row.get(3)?,
+            });
+        }
+        Ok(candidates)
+    }
+
+    pub async fn delete_opencode_session_record(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+    ) -> Result<u64, StorageError> {
+        Ok(self
+            .conn
+            .execute(
+                r#"
+                DELETE FROM opencode_sessions
+                WHERE project_id = ?1 AND issue_id = ?2 AND session_id = ?3
+                "#,
+                params![project_id, issue_id, session_id],
+            )
+            .await?)
     }
 }
 

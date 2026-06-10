@@ -19,11 +19,42 @@ async fn multiproject_toml_config_loads_deterministically_and_validates_required
     assert!(first.cleanup.enabled);
     assert_eq!(first.cleanup.interval_secs, 300);
     assert_eq!(first.cleanup.retention_secs, 86_400);
+    assert!(first.opencode_storage.is_none());
 
     let missing_required =
         valid_config_toml().replace("repo_path = \"/home/agent/proj/symphony\"\n", "");
     let err = RootConfig::from_toml_str(&missing_required).expect_err("repo_path is required");
     assert!(err.to_string().contains("repo_path"), "{err}");
+}
+
+#[tokio::test]
+async fn opencode_storage_config_loads_and_validates_archive_paths() {
+    let configured = valid_config_toml().replace(
+        "[[projects]]\n",
+        "[opencode_storage]\ndatabase_path = \"/home/agent/.local/share/opencode/opencode.db\"\narchive_root = \"/home/agent/mnemesh-benchmark-runs/symphony-opencode-session-archives\"\n\n[[projects]]\n",
+    );
+    let config = RootConfig::from_toml_str(&configured).expect("opencode storage config");
+    let storage = config.opencode_storage.expect("storage config");
+
+    assert_eq!(
+        storage.database_path,
+        PathBuf::from("/home/agent/.local/share/opencode/opencode.db")
+    );
+    assert_eq!(
+        storage.archive_root,
+        PathBuf::from("/home/agent/mnemesh-benchmark-runs/symphony-opencode-session-archives")
+    );
+
+    let invalid = configured.replace(
+        "database_path = \"/home/agent/.local/share/opencode/opencode.db\"",
+        "database_path = \"\"",
+    );
+    let err =
+        RootConfig::from_toml_str(&invalid).expect_err("empty OpenCode database path rejected");
+    assert!(
+        err.to_string().contains("opencode_storage.database_path"),
+        "{err}"
+    );
 }
 
 #[tokio::test]

@@ -423,6 +423,68 @@ async fn orchestration_reconciles_terminal_issues_and_avoids_duplicate_dispatch_
 }
 
 #[tokio::test]
+async fn orchestration_refreshes_active_opencode_session_metrics_from_persisted_database() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let opencode_db_path = dir.path().join("opencode.db");
+    opencode_runtime::seed_opencode_session_tree(&opencode_db_path).await;
+    let config_toml = valid_config_toml().replace(
+        "[[projects]]\n",
+        &format!(
+            "[opencode_storage]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]\n",
+            opencode_db_path.display(),
+            dir.path().join("archives").display()
+        ),
+    );
+    let config = RootConfig::from_toml_str(&config_toml).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "work", "SYM-64", "In Progress"))
+        .await
+        .expect("issue");
+    store
+        .upsert_opencode_session(test_session(
+            "symphony",
+            "work",
+            "ses-root",
+            "/home/agent/.symphony/workspaces/opencode/symphony/SYM-64",
+        ))
+        .await
+        .expect("session");
+    let client =
+        RecordingLinearClient::new(vec![linear_issue("work", "SYM-64", "In Progress", Some(1))]);
+
+    daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
+
+    let session = store
+        .opencode_session("symphony", "work", "ses-root")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(session.stage, OpenCodeStage::Running);
+    assert_eq!(session.message_count, 2);
+    assert_eq!(session.part_count, 2);
+    assert_eq!(session.todo_count, 1);
+    assert_eq!(session.token_count, 784);
+    assert_eq!(session.subagent_count, 1);
+    assert_eq!(session.active_agent.as_deref(), Some("rust-engineer"));
+    assert_eq!(session.active_model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(
+        session.lifecycle_marker.as_deref(),
+        Some("opencode_db_activity")
+    );
+    assert_eq!(
+        session.last_event.as_deref(),
+        Some("opencode_db_updated:2000")
+    );
+    assert!(!session.silence_observed);
+}
+
+#[tokio::test]
 async fn terminal_reconciliation_marks_cleanup_complete_when_worktree_is_already_absent() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

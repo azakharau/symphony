@@ -8,8 +8,13 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    api::runtime_api_json_response, config::RootConfig, linear::LinearSdkClient,
-    opencode::StdioOpenCodeLauncher, storage::SqliteStore,
+    api::runtime_api_json_response,
+    config::{OpenCodeStorageConfig, RootConfig},
+    linear::LinearSdkClient,
+    opencode::{
+        OpenCodeSessionArchiveRequest, StdioOpenCodeLauncher, archive_and_delete_session_tree,
+    },
+    storage::SqliteStore,
 };
 
 use super::run_once_with_clients;
@@ -60,6 +65,7 @@ pub(super) async fn run_continuous(
         let cleanup_database_path = database_path.clone();
         let cleanup_interval = Duration::from_secs(config.cleanup.interval_secs);
         let cleanup_retention = Duration::from_secs(config.cleanup.retention_secs);
+        let opencode_storage = config.opencode_storage.clone();
         info!(
             interval_secs = cleanup_interval.as_secs(),
             retention_secs = cleanup_retention.as_secs(),
@@ -78,6 +84,13 @@ pub(super) async fn run_continuous(
                         if let Err(error) = store.migrate().await {
                             error!(error = %error, "runtime cleanup storage migration failed");
                         } else {
+                            if let Some(storage) = opencode_storage.as_ref()
+                                && let Err(error) =
+                                    cleanup_opencode_sessions(&store, storage, cleanup_retention)
+                                        .await
+                            {
+                                error!(error = %error, "OpenCode session cleanup failed");
+                            }
                             match store.cleanup_runtime_state(cleanup_retention).await {
                                 Ok(report) => {
                                     if report.issues_deleted > 0
@@ -120,6 +133,56 @@ pub(super) async fn run_continuous(
             warn!(error = %error, "dashboard HTTP request failed");
         }
     }
+}
+
+async fn cleanup_opencode_sessions(
+    store: &SqliteStore,
+    storage: &OpenCodeStorageConfig,
+    retention: Duration,
+) -> anyhow::Result<()> {
+    let candidates = store.opencode_cleanup_candidates(retention).await?;
+    if candidates.is_empty() {
+        debug!("OpenCode session cleanup found no archive candidates");
+        return Ok(());
+    }
+    for candidate in candidates {
+        let report = archive_and_delete_session_tree(OpenCodeSessionArchiveRequest {
+            opencode_database_path: storage.database_path.clone(),
+            archive_root: storage.archive_root.clone(),
+            project_id: candidate.project_id.clone(),
+            issue_id: candidate.issue_id.clone(),
+            issue_identifier: candidate.issue_identifier.clone(),
+            root_session_id: candidate.session_id.clone(),
+        })
+        .await?;
+        if report.sessions_archived > 0 || report.sessions_deleted > 0 {
+            let runtime_records_deleted = store
+                .delete_opencode_session_record(
+                    &candidate.project_id,
+                    &candidate.issue_id,
+                    &candidate.session_id,
+                )
+                .await?;
+            info!(
+                project_id = %candidate.project_id,
+                issue = %candidate.issue_identifier,
+                session_id = %candidate.session_id,
+                artifact_root = %report.artifact_root.display(),
+                sessions_archived = report.sessions_archived,
+                sessions_deleted = report.sessions_deleted,
+                runtime_records_deleted,
+                "OpenCode session tree archived and cleaned"
+            );
+        } else {
+            debug!(
+                project_id = %candidate.project_id,
+                issue = %candidate.issue_identifier,
+                session_id = %candidate.session_id,
+                "OpenCode session cleanup candidate had no persisted OpenCode rows"
+            );
+        }
+    }
+    Ok(())
 }
 
 async fn handle_http_stream(

@@ -56,6 +56,63 @@ pub(super) async fn run_continuous(
         }
     });
 
+    if config.cleanup.enabled {
+        let cleanup_database_path = database_path.clone();
+        let cleanup_interval = Duration::from_secs(config.cleanup.interval_secs);
+        let cleanup_retention = Duration::from_secs(config.cleanup.retention_secs);
+        info!(
+            interval_secs = cleanup_interval.as_secs(),
+            retention_secs = cleanup_retention.as_secs(),
+            "runtime cleanup worker scheduled"
+        );
+        tokio::spawn(async move {
+            tokio::time::sleep(cleanup_interval).await;
+            loop {
+                debug!(
+                    interval_secs = cleanup_interval.as_secs(),
+                    retention_secs = cleanup_retention.as_secs(),
+                    "runtime cleanup tick started"
+                );
+                match SqliteStore::open(&cleanup_database_path).await {
+                    Ok(store) => {
+                        if let Err(error) = store.migrate().await {
+                            error!(error = %error, "runtime cleanup storage migration failed");
+                        } else {
+                            match store.cleanup_runtime_state(cleanup_retention).await {
+                                Ok(report) => {
+                                    if report.issues_deleted > 0
+                                        || report.sessions_deleted > 0
+                                        || report.stage_events_deleted > 0
+                                        || report.eval_runs_deleted > 0
+                                    {
+                                        info!(
+                                            issues_deleted = report.issues_deleted,
+                                            sessions_deleted = report.sessions_deleted,
+                                            stage_events_deleted = report.stage_events_deleted,
+                                            eval_runs_deleted = report.eval_runs_deleted,
+                                            "runtime cleanup removed stale rows"
+                                        );
+                                    } else {
+                                        debug!("runtime cleanup found no stale rows");
+                                    }
+                                }
+                                Err(error) => {
+                                    error!(error = %error, "runtime cleanup failed");
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        error!(error = %error, "runtime cleanup storage open failed");
+                    }
+                }
+                tokio::time::sleep(cleanup_interval).await;
+            }
+        });
+    } else {
+        info!("runtime cleanup worker disabled by config");
+    }
+
     loop {
         let (stream, peer) = listener.accept().await?;
         debug!(%peer, "dashboard HTTP connection accepted");

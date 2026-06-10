@@ -189,8 +189,6 @@ fn machine_generated_owner_input_comment(body: &str) -> bool {
         "opencode session attached",
         "changed files",
         "validation results",
-        "codex implementation handoff",
-        "codex repair handoff",
     ]
     .iter()
     .any(|marker| body.contains(marker))

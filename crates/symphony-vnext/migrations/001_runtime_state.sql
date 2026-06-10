@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS projects (
     name TEXT NOT NULL,
     enabled INTEGER NOT NULL,
     lifecycle_stage TEXT NOT NULL,
-    cleanup_status TEXT NOT NULL
+    cleanup_status TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS issues (
@@ -22,6 +23,7 @@ CREATE TABLE IF NOT EXISTS issues (
     failure_json TEXT,
     git_ref_json TEXT,
     cleanup_status TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (project_id, issue_id),
     FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
 );
@@ -47,6 +49,7 @@ CREATE TABLE IF NOT EXISTS opencode_sessions (
     lifecycle_marker TEXT,
     last_event TEXT,
     silence_observed INTEGER NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (project_id, issue_id, session_id),
     FOREIGN KEY (project_id, issue_id) REFERENCES issues(project_id, issue_id) ON DELETE CASCADE
 );
@@ -58,6 +61,7 @@ CREATE TABLE IF NOT EXISTS opencode_stage_events (
     sequence INTEGER NOT NULL,
     stage TEXT NOT NULL,
     event TEXT,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (project_id, issue_id, session_id, sequence),
     FOREIGN KEY (project_id, issue_id, session_id) REFERENCES opencode_sessions(project_id, issue_id, session_id) ON DELETE CASCADE
 );
@@ -69,6 +73,7 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     suite TEXT NOT NULL,
     status TEXT NOT NULL,
     details_json TEXT,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (project_id, issue_id, run_id),
     FOREIGN KEY (project_id, issue_id) REFERENCES issues(project_id, issue_id) ON DELETE CASCADE
 );

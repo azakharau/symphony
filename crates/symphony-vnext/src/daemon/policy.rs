@@ -41,10 +41,7 @@ fn priority_order(priority: Option<i64>) -> (i64, i64) {
 }
 
 pub(super) fn is_terminal_state(state: &str) -> bool {
-    matches!(
-        state,
-        "Done" | "Canceled" | "Cancelled" | "Closed" | "Duplicate"
-    )
+    matches!(state, "Done" | "Canceled")
 }
 
 pub(super) fn nonterminal_blocker(blockers: &[LinearBlocker]) -> Option<&LinearBlocker> {

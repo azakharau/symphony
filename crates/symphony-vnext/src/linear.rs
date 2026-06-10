@@ -23,9 +23,6 @@ const CANDIDATE_STATES: &[&str] = &[
     "Need Owner Input",
     "Done",
     "Canceled",
-    "Cancelled",
-    "Closed",
-    "Duplicate",
 ];
 
 #[async_trait::async_trait]

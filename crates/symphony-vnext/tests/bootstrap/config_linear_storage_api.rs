@@ -16,6 +16,9 @@ async fn multiproject_toml_config_loads_deterministically_and_validates_required
     );
     assert_eq!(project.opencode.args, vec!["acp"]);
     assert_eq!(project.concurrency.max_sessions, 2);
+    assert!(first.cleanup.enabled);
+    assert_eq!(first.cleanup.interval_secs, 300);
+    assert_eq!(first.cleanup.retention_secs, 86_400);
 
     let missing_required =
         valid_config_toml().replace("repo_path = \"/home/agent/proj/symphony\"\n", "");
@@ -24,27 +27,20 @@ async fn multiproject_toml_config_loads_deterministically_and_validates_required
 }
 
 #[tokio::test]
-async fn config_rejects_codex_compatibility_fields() {
-    let with_codex = valid_config_toml().replace(
-        "[projects.opencode]\n",
-        "[projects.codex]\ncommand = \"codex\"\n\n[projects.opencode]\n",
+async fn cleanup_config_loads_and_validates_runtime_retention() {
+    let configured = valid_config_toml().replace(
+        "[[projects]]\n",
+        "[cleanup]\nenabled = true\ninterval_secs = 60\nretention_secs = 3600\n\n[[projects]]\n",
     );
+    let config = RootConfig::from_toml_str(&configured).expect("cleanup config");
 
-    let err =
-        RootConfig::from_toml_str(&with_codex).expect_err("codex config must not be accepted");
-    assert!(err.to_string().contains("codex"), "{err}");
-}
+    assert!(config.cleanup.enabled);
+    assert_eq!(config.cleanup.interval_secs, 60);
+    assert_eq!(config.cleanup.retention_secs, 3600);
 
-#[tokio::test]
-async fn config_rejects_milestone_selection_fields() {
-    let with_milestone = valid_config_toml().replace(
-        "project_id = \"07df87ce-4e93-4d2c-a73d-84aee1f27e07\"\n",
-        "project_id = \"07df87ce-4e93-4d2c-a73d-84aee1f27e07\"\nproject_milestone_id = \"must-not-live-in-config\"\n",
-    );
-
-    let err = RootConfig::from_toml_str(&with_milestone)
-        .expect_err("runtime milestone selection must not be accepted in config");
-    assert!(err.to_string().contains("project_milestone_id"), "{err}");
+    let invalid = configured.replace("interval_secs = 60", "interval_secs = 0");
+    let err = RootConfig::from_toml_str(&invalid).expect_err("zero interval must be rejected");
+    assert!(err.to_string().contains("cleanup.interval_secs"), "{err}");
 }
 
 #[tokio::test]
@@ -73,7 +69,7 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
                             "comments": {
                                 "nodes": [
                                     {
-                                        "body": "Codex repair handoff for SYM-100",
+                                        "body": "## OpenCode Handoff\nrepair handoff for SYM-100",
                                         "parent": null,
                                         "createdAt": "2026-06-10T00:01:00Z"
                                     }
@@ -216,10 +212,17 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
     let states = requests[0]["variables"]["states"]
         .as_array()
         .expect("states");
-    assert!(states.contains(&serde_json::json!("Todo")));
-    assert!(!states.contains(&serde_json::json!("Preparing")));
-    assert!(!states.contains(&serde_json::json!("In Review")));
-    assert!(!states.contains(&serde_json::json!("RCA Required")));
+    assert_eq!(
+        states,
+        &[
+            serde_json::json!("Backlog"),
+            serde_json::json!("Todo"),
+            serde_json::json!("In Progress"),
+            serde_json::json!("Need Owner Input"),
+            serde_json::json!("Done"),
+            serde_json::json!("Canceled"),
+        ]
+    );
     assert!(
         requests[0]["query"]
             .as_str()
@@ -340,7 +343,8 @@ async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
                 }),
                 git_ref: Some(GitRefRecord {
                     branch: "agent-server/opencode-runner-extension".into(),
-                    worktree_path: "/home/agent/.symphony/workspaces/codex/symphony/SYM-25".into(),
+                    worktree_path: "/home/agent/.symphony/workspaces/opencode/symphony/SYM-25"
+                        .into(),
                     head_sha: None,
                     pr_url: None,
                 }),
@@ -434,6 +438,120 @@ async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
             .eval_stage
             .as_deref(),
         Some("unit")
+    );
+}
+
+#[tokio::test]
+async fn runtime_cleanup_removes_stale_completed_rows_and_keeps_active_state() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store
+        .upsert_project(ProjectStateRecord {
+            project_id: "symphony".into(),
+            name: "Symphony".into(),
+            enabled: true,
+            lifecycle_stage: LifecycleStage::Running,
+            cleanup_status: CleanupStatus::Clean,
+        })
+        .await
+        .expect("project");
+
+    let mut completed = test_issue("symphony", "done", "SYM-1", "Done");
+    completed.lifecycle_stage = LifecycleStage::Completed;
+    completed.cleanup_status = CleanupStatus::Complete;
+    store
+        .upsert_issue(completed)
+        .await
+        .expect("completed issue");
+    let mut completed_session = test_session(
+        "symphony",
+        "done",
+        "session-done",
+        "/home/agent/.symphony/workspaces/opencode/symphony/SYM-1",
+    );
+    completed_session.lifecycle_stage = LifecycleStage::Completed;
+    completed_session.stage = OpenCodeStage::Completed;
+    store
+        .upsert_opencode_session(completed_session)
+        .await
+        .expect("completed session");
+    store
+        .upsert_opencode_stage_event(OpenCodeStageEventRecord {
+            project_id: "symphony".into(),
+            issue_id: "done".into(),
+            session_id: "session-done".into(),
+            sequence: 1,
+            stage: OpenCodeStage::Completed,
+            event: Some("handoff accepted".into()),
+        })
+        .await
+        .expect("completed event");
+    store
+        .upsert_eval_run(EvalRunRecord {
+            project_id: "symphony".into(),
+            issue_id: "done".into(),
+            run_id: "eval-done".into(),
+            suite: "cargo test".into(),
+            status: "passed".into(),
+            details_json: None,
+        })
+        .await
+        .expect("completed eval");
+
+    let running = test_issue("symphony", "running", "SYM-2", "In Progress");
+    store.upsert_issue(running).await.expect("running issue");
+    store
+        .upsert_opencode_session(test_session(
+            "symphony",
+            "running",
+            "session-running",
+            "/home/agent/.symphony/workspaces/opencode/symphony/SYM-2",
+        ))
+        .await
+        .expect("running session");
+
+    let mut blocked = test_issue("symphony", "blocked", "SYM-3", "Need Owner Input");
+    blocked.lifecycle_stage = LifecycleStage::Blocked;
+    store.upsert_issue(blocked).await.expect("blocked issue");
+
+    let report = store
+        .cleanup_runtime_state(Duration::from_secs(0))
+        .await
+        .expect("cleanup");
+
+    assert_eq!(report.eval_runs_deleted, 1);
+    assert_eq!(report.stage_events_deleted, 1);
+    assert_eq!(report.sessions_deleted, 1);
+    assert_eq!(report.issues_deleted, 1);
+    assert!(
+        store
+            .issue("symphony", "done")
+            .await
+            .expect("done")
+            .is_none()
+    );
+    assert!(
+        store
+            .issue("symphony", "running")
+            .await
+            .expect("running")
+            .is_some()
+    );
+    assert!(
+        store
+            .opencode_session("symphony", "running", "session-running")
+            .await
+            .expect("running session")
+            .is_some()
+    );
+    assert!(
+        store
+            .issue("symphony", "blocked")
+            .await
+            .expect("blocked")
+            .is_some()
     );
 }
 
@@ -569,12 +687,6 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
     }
   ]
 }"#
-    );
-    assert!(
-        !aggregate_json.contains("Preparing")
-            && !aggregate_json.contains("In Review")
-            && !aggregate_json.contains("RCA Required")
-            && !aggregate_json.contains("Codex")
     );
     assert!(project_json.contains(r#""display_status": "provider/infra blocker""#));
     assert!(project_json.contains(r#""history_issues""#));

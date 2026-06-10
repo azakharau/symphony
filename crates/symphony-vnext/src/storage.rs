@@ -1,6 +1,6 @@
 mod rows;
 
-use std::{borrow::Borrow, path::Path};
+use std::{borrow::Borrow, path::Path, time::Duration};
 
 use libsql::{Builder, Connection, params};
 use thiserror::Error;
@@ -19,6 +19,14 @@ use rows::{
 
 const RUNTIME_STATE_MIGRATION: &str = include_str!("../migrations/001_runtime_state.sql");
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CleanupReport {
+    pub issues_deleted: u64,
+    pub sessions_deleted: u64,
+    pub stage_events_deleted: u64,
+    pub eval_runs_deleted: u64,
+}
+
 #[derive(Clone)]
 pub struct SqliteStore {
     conn: Connection,
@@ -30,7 +38,13 @@ impl SqliteStore {
             .build()
             .await?;
         let conn = database.connect()?;
-        conn.execute("PRAGMA foreign_keys = ON", ()).await?;
+        conn.execute_batch(
+            r#"
+            PRAGMA foreign_keys = ON;
+            PRAGMA busy_timeout = 5000;
+            "#,
+        )
+        .await?;
         Ok(Self { conn })
     }
 
@@ -65,7 +79,8 @@ impl SqliteStore {
                     name = excluded.name,
                     enabled = excluded.enabled,
                     lifecycle_stage = excluded.lifecycle_stage,
-                    cleanup_status = excluded.cleanup_status
+                    cleanup_status = excluded.cleanup_status,
+                    updated_at = CURRENT_TIMESTAMP
                 "#,
                 params![
                     project.project_id.as_str(),
@@ -151,7 +166,8 @@ impl SqliteStore {
                     blocker_json = excluded.blocker_json,
                     failure_json = excluded.failure_json,
                     git_ref_json = excluded.git_ref_json,
-                    cleanup_status = excluded.cleanup_status
+                    cleanup_status = excluded.cleanup_status,
+                    updated_at = CURRENT_TIMESTAMP
                 "#,
                 params![
                     issue.project_id.as_str(),
@@ -258,7 +274,8 @@ impl SqliteStore {
                     eval_stage = excluded.eval_stage,
                     lifecycle_marker = excluded.lifecycle_marker,
                     last_event = excluded.last_event,
-                    silence_observed = excluded.silence_observed
+                    silence_observed = excluded.silence_observed,
+                    updated_at = CURRENT_TIMESTAMP
                 "#,
                 params![
                     session.project_id.as_str(),
@@ -352,7 +369,8 @@ impl SqliteStore {
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                 ON CONFLICT(project_id, issue_id, session_id, sequence) DO UPDATE SET
                     stage = excluded.stage,
-                    event = excluded.event
+                    event = excluded.event,
+                    updated_at = CURRENT_TIMESTAMP
                 "#,
                 params![
                     event.project_id.as_str(),
@@ -408,7 +426,8 @@ impl SqliteStore {
                 ON CONFLICT(project_id, issue_id, run_id) DO UPDATE SET
                     suite = excluded.suite,
                     status = excluded.status,
-                    details_json = excluded.details_json
+                    details_json = excluded.details_json,
+                    updated_at = CURRENT_TIMESTAMP
                 "#,
                 params![
                     eval.project_id.as_str(),
@@ -441,6 +460,82 @@ impl SqliteStore {
             )
             .await?;
         collect_rows(&mut rows, eval_run_from_row).await
+    }
+
+    pub async fn cleanup_runtime_state(
+        &self,
+        retention: Duration,
+    ) -> Result<CleanupReport, StorageError> {
+        let retention_seconds = i64::try_from(retention.as_secs()).unwrap_or(i64::MAX);
+        let cutoff_modifier = format!("-{retention_seconds} seconds");
+
+        let eval_runs_deleted = self
+            .conn
+            .execute(
+                r#"
+                DELETE FROM eval_runs
+                WHERE updated_at <= datetime('now', ?1)
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM issues
+                    WHERE issues.project_id = eval_runs.project_id
+                      AND issues.issue_id = eval_runs.issue_id
+                      AND issues.lifecycle_stage IN ('running', 'blocked')
+                  )
+                "#,
+                params![cutoff_modifier.as_str()],
+            )
+            .await?;
+
+        let stage_events_deleted = self
+            .conn
+            .execute(
+                r#"
+                DELETE FROM opencode_stage_events
+                WHERE updated_at <= datetime('now', ?1)
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM opencode_sessions
+                    WHERE opencode_sessions.project_id = opencode_stage_events.project_id
+                      AND opencode_sessions.issue_id = opencode_stage_events.issue_id
+                      AND opencode_sessions.session_id = opencode_stage_events.session_id
+                      AND opencode_sessions.lifecycle_stage = 'running'
+                  )
+                "#,
+                params![cutoff_modifier.as_str()],
+            )
+            .await?;
+
+        let sessions_deleted = self
+            .conn
+            .execute(
+                r#"
+                DELETE FROM opencode_sessions
+                WHERE lifecycle_stage != 'running'
+                  AND updated_at <= datetime('now', ?1)
+                "#,
+                params![cutoff_modifier.as_str()],
+            )
+            .await?;
+
+        let issues_deleted = self
+            .conn
+            .execute(
+                r#"
+                DELETE FROM issues
+                WHERE lifecycle_stage NOT IN ('running', 'blocked')
+                  AND updated_at <= datetime('now', ?1)
+                "#,
+                params![cutoff_modifier.as_str()],
+            )
+            .await?;
+
+        Ok(CleanupReport {
+            issues_deleted,
+            sessions_deleted,
+            stage_events_deleted,
+            eval_runs_deleted,
+        })
     }
 }
 

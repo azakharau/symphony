@@ -9,6 +9,8 @@ use crate::{linear::LinearProjectConfig, opencode::OpenCodeRuntimeConfig};
 #[serde(deny_unknown_fields)]
 pub struct RootConfig {
     pub server: Option<ServerConfig>,
+    #[serde(default)]
+    pub cleanup: CleanupConfig,
     projects: Vec<ProjectConfig>,
 }
 
@@ -31,6 +33,7 @@ impl RootConfig {
         if self.projects.is_empty() {
             return Err(ConfigError::Validation("projects must not be empty".into()));
         }
+        self.cleanup.validate()?;
 
         let mut seen_ids = HashSet::new();
         for project in &self.projects {
@@ -80,6 +83,58 @@ impl RootConfig {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanupConfig {
+    #[serde(default = "default_cleanup_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_cleanup_interval_secs")]
+    pub interval_secs: u64,
+    #[serde(default = "default_cleanup_retention_secs")]
+    pub retention_secs: u64,
+}
+
+impl Default for CleanupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_cleanup_enabled(),
+            interval_secs: default_cleanup_interval_secs(),
+            retention_secs: default_cleanup_retention_secs(),
+        }
+    }
+}
+
+impl CleanupConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.interval_secs == 0 {
+            return Err(ConfigError::Validation(
+                "cleanup.interval_secs must be greater than zero".into(),
+            ));
+        }
+        if self.retention_secs == 0 {
+            return Err(ConfigError::Validation(
+                "cleanup.retention_secs must be greater than zero".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn default_cleanup_enabled() -> bool {
+    true
+}
+
+fn default_cleanup_interval_secs() -> u64 {
+    300
+}
+
+fn default_cleanup_retention_secs() -> u64 {
+    86_400
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

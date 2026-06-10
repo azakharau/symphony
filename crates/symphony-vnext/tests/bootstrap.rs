@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, thread, time::Duration};
 
 use symphony_vnext::{
     api::RuntimeReadModel,
@@ -6,9 +6,10 @@ use symphony_vnext::{
     config::RootConfig,
     daemon,
     linear::{LinearBlocker, LinearClient, LinearClientError, LinearIssue, LinearTransition},
+    opencode::{self, OpenCodeLauncher, OpenCodeSessionEvent, PermissionPolicy},
     state::{
         CleanupStatus, FailureRecord, GitRefRecord, IssueStateRecord, LifecycleStage,
-        OpenCodeSessionRecord, ProjectStateRecord,
+        OpenCodeSessionRecord, OpenCodeStage, ProjectStateRecord,
     },
     storage::SqliteStore,
 };
@@ -142,8 +143,21 @@ fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
                 session_id: "oc-session-1".into(),
                 agent: "build".into(),
                 model: None,
+                worktree_path: "/home/agent/.symphony/workspaces/opencode/symphony/SYM-25".into(),
                 lifecycle_stage: LifecycleStage::Running,
+                stage: OpenCodeStage::Running,
+                active_agent: Some("rust-engineer".into()),
+                active_model: Some("claude-sonnet-4".into()),
+                message_count: 2,
+                todo_count: 1,
+                part_count: 3,
+                token_count: 1440,
+                cost_micros: 250_000,
+                subagent_count: 1,
+                eval_stage: Some("unit".into()),
+                lifecycle_marker: Some("implementation".into()),
                 last_event: Some("started".into()),
+                silence_observed: false,
             })
             .expect("session");
     }
@@ -182,6 +196,13 @@ fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
         .expect("query session")
         .expect("session row");
     assert_eq!(session.agent, "build");
+    assert_eq!(session.stage, OpenCodeStage::Running);
+    assert_eq!(
+        session.worktree_path,
+        "/home/agent/.symphony/workspaces/opencode/symphony/SYM-25"
+    );
+    assert_eq!(session.active_agent.as_deref(), Some("rust-engineer"));
+    assert_eq!(session.token_count, 1440);
 
     let read_model = RuntimeReadModel::from_store(&reloaded).expect("read model");
     assert_eq!(read_model.projects[0].project_id, "symphony");
@@ -189,6 +210,147 @@ fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
         read_model.projects[0].issues[0].opencode_sessions[0].session_id,
         "oc-session-1"
     );
+    assert_eq!(
+        read_model.projects[0].issues[0].opencode_sessions[0]
+            .eval_stage
+            .as_deref(),
+        Some("unit")
+    );
+}
+
+#[test]
+fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_issue_prompt() {
+    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let project = config.project("symphony").expect("project");
+    let issue = linear_issue("issue-27", "SYM-27", "Todo", Some(1))
+        .with_description("Implement the OpenCode ACP lifecycle runner with stage telemetry.");
+
+    let spec = opencode::build_acp_launch_spec(project, &issue);
+
+    assert_eq!(spec.command, PathBuf::from("/usr/local/bin/opencode"));
+    assert_eq!(spec.args, vec!["acp"]);
+    assert_eq!(
+        spec.cwd,
+        PathBuf::from("/home/agent/.symphony/workspaces/opencode/symphony/SYM-27")
+    );
+    assert!(spec.prompt.contains("SYM-27"), "{}", spec.prompt);
+    assert!(
+        spec.prompt.contains("symphony-vnext-smoke"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt
+            .contains("Implement the OpenCode ACP lifecycle runner"),
+        "{}",
+        spec.prompt
+    );
+}
+
+#[test]
+fn stdio_launcher_writes_prompt_to_child_stdin() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let captured_prompt_path = dir.path().join("captured_prompt.txt");
+    let spec = opencode::OpenCodeLaunchSpec {
+        command: PathBuf::from("/bin/sh"),
+        args: vec!["-c".into(), "cat > captured_prompt.txt".into()],
+        cwd: dir.path().to_path_buf(),
+        prompt: "Full Linear issue spec with eval defaults".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+    let launcher = opencode::StdioOpenCodeLauncher;
+
+    let started = launcher.launch(&spec).expect("launch stdio child");
+
+    assert!(started.session_id.starts_with("pid:"));
+    for _ in 0..50 {
+        if let Ok(captured) = fs::read_to_string(&captured_prompt_path)
+            && captured == spec.prompt
+        {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    panic!(
+        "prompt was not written to child stdin; captured={:?}",
+        fs::read_to_string(captured_prompt_path)
+    );
+}
+
+#[test]
+fn opencode_event_ingestion_updates_stage_telemetry_without_losing_session_linkage() {
+    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let project = config.project("symphony").expect("project");
+    let issue = linear_issue("issue-27", "SYM-27", "In Progress", Some(1));
+    let spec = opencode::build_acp_launch_spec(project, &issue);
+    let mut session = opencode::new_session_record(
+        project,
+        &issue,
+        opencode::OpenCodeStartedSession {
+            session_id: "oc-session-27".into(),
+        },
+        &spec,
+    );
+
+    opencode::ingest_session_event(
+        &mut session,
+        OpenCodeSessionEvent {
+            stage: Some(OpenCodeStage::Eval),
+            active_agent: Some("evaluator".into()),
+            active_model: Some("gpt-5".into()),
+            message_delta: 2,
+            todo_delta: 1,
+            part_delta: 4,
+            token_delta: 2048,
+            cost_micros_delta: 325_000,
+            subagent_delta: 1,
+            eval_stage: Some("targeted-tests".into()),
+            lifecycle_marker: Some("eval".into()),
+            last_event: Some("tests_started".into()),
+        },
+    );
+
+    assert_eq!(session.session_id, "oc-session-27");
+    assert_eq!(session.stage, OpenCodeStage::Eval);
+    assert_eq!(session.active_agent.as_deref(), Some("evaluator"));
+    assert_eq!(session.active_model.as_deref(), Some("gpt-5"));
+    assert_eq!(session.message_count, 2);
+    assert_eq!(session.todo_count, 1);
+    assert_eq!(session.part_count, 4);
+    assert_eq!(session.token_count, 2048);
+    assert_eq!(session.cost_micros, 325_000);
+    assert_eq!(session.subagent_count, 1);
+    assert_eq!(session.eval_stage.as_deref(), Some("targeted-tests"));
+    assert_eq!(session.lifecycle_marker.as_deref(), Some("eval"));
+    assert_eq!(session.last_event.as_deref(), Some("tests_started"));
+}
+
+#[test]
+fn opencode_silence_is_observable_without_marking_session_failed() {
+    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let project = config.project("symphony").expect("project");
+    let issue = linear_issue("issue-27", "SYM-27", "In Progress", Some(1));
+    let spec = opencode::build_acp_launch_spec(project, &issue);
+    let mut session = opencode::new_session_record(
+        project,
+        &issue,
+        opencode::OpenCodeStartedSession {
+            session_id: "oc-session-27".into(),
+        },
+        &spec,
+    );
+
+    opencode::mark_session_silence(&mut session, "read_timeout_without_acp_event");
+
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(session.stage, OpenCodeStage::Silent);
+    assert_eq!(
+        session.last_event.as_deref(),
+        Some("silence:read_timeout_without_acp_event")
+    );
+    assert!(session.silence_observed);
+    assert!(session.failure_marker().is_none());
 }
 
 #[test]
@@ -482,6 +644,7 @@ fn linear_issue(
         id: id.into(),
         identifier: identifier.into(),
         title: "Test issue".into(),
+        description: None,
         state: state.into(),
         priority,
         branch_name: None,

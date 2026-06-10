@@ -50,6 +50,7 @@ pub struct LinearIssue {
     pub id: String,
     pub identifier: String,
     pub title: String,
+    pub description: Option<String>,
     pub state: String,
     pub priority: Option<i64>,
     pub branch_name: Option<String>,
@@ -69,6 +70,11 @@ impl LinearIssue {
 
     pub fn with_new_owner_answer(mut self, has_new_owner_answer: bool) -> Self {
         self.has_new_owner_answer = has_new_owner_answer;
+        self
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
         self
     }
 }

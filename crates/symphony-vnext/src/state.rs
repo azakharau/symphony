@@ -33,8 +33,31 @@ pub struct OpenCodeSessionRecord {
     pub session_id: String,
     pub agent: String,
     pub model: Option<String>,
+    pub worktree_path: String,
     pub lifecycle_stage: LifecycleStage,
+    pub stage: OpenCodeStage,
+    pub active_agent: Option<String>,
+    pub active_model: Option<String>,
+    pub message_count: u64,
+    pub todo_count: u64,
+    pub part_count: u64,
+    pub token_count: u64,
+    pub cost_micros: u64,
+    pub subagent_count: u64,
+    pub eval_stage: Option<String>,
+    pub lifecycle_marker: Option<String>,
     pub last_event: Option<String>,
+    pub silence_observed: bool,
+}
+
+impl OpenCodeSessionRecord {
+    pub fn failure_marker(&self) -> Option<&str> {
+        if self.lifecycle_stage == LifecycleStage::Failed {
+            self.lifecycle_marker.as_deref()
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -74,6 +97,58 @@ pub enum LifecycleStage {
     Blocked,
     Completed,
     Failed,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenCodeStage {
+    Starting,
+    Running,
+    Eval,
+    Review,
+    Handoff,
+    Silent,
+    Completed,
+    Failed,
+}
+
+impl OpenCodeStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Eval => "eval",
+            Self::Review => "review",
+            Self::Handoff => "handoff",
+            Self::Silent => "silent",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl fmt::Display for OpenCodeStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for OpenCodeStage {
+    type Err = StateParseError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input {
+            "starting" => Ok(Self::Starting),
+            "running" => Ok(Self::Running),
+            "eval" => Ok(Self::Eval),
+            "review" => Ok(Self::Review),
+            "handoff" => Ok(Self::Handoff),
+            "silent" => Ok(Self::Silent),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            other => Err(StateParseError::OpenCodeStage(other.into())),
+        }
+    }
 }
 
 impl LifecycleStage {
@@ -156,6 +231,8 @@ impl FromStr for CleanupStatus {
 pub enum StateParseError {
     #[error("unknown lifecycle stage `{0}`")]
     LifecycleStage(String),
+    #[error("unknown OpenCode stage `{0}`")]
+    OpenCodeStage(String),
     #[error("unknown cleanup status `{0}`")]
     CleanupStatus(String),
 }

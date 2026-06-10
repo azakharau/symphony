@@ -5,10 +5,11 @@ use anyhow::{Context, bail};
 use crate::{
     config::{ProjectConfig, RootConfig},
     linear::{EmptyLinearClient, LinearBlocker, LinearClient, LinearIssue, LinearTransition},
-    state::{
-        BlockerRecord, CleanupStatus, GitRefRecord, IssueStateRecord, LifecycleStage,
-        OpenCodeSessionRecord,
+    opencode::{
+        DeterministicOpenCodeLauncher, OpenCodeLauncher, StdioOpenCodeLauncher,
+        build_acp_launch_spec, new_session_record,
     },
+    state::{BlockerRecord, CleanupStatus, GitRefRecord, IssueStateRecord, LifecycleStage},
     storage::SqliteStore,
 };
 
@@ -33,7 +34,7 @@ pub fn run(options: DaemonOptions) -> anyhow::Result<()> {
         .with_context(|| format!("open sqlite database {}", options.database_path.display()))?;
     store.migrate()?;
     store.reconcile_projects(&config)?;
-    run_once_with_linear_client(&config, &store, &EmptyLinearClient)?;
+    run_once_with_clients(&config, &store, &EmptyLinearClient, &StdioOpenCodeLauncher)?;
 
     Ok(())
 }
@@ -51,11 +52,20 @@ pub fn run_once_with_linear_client(
     store: &SqliteStore,
     linear: &impl LinearClient,
 ) -> anyhow::Result<OrchestrationReport> {
+    run_once_with_clients(config, store, linear, &DeterministicOpenCodeLauncher)
+}
+
+pub fn run_once_with_clients(
+    config: &RootConfig,
+    store: &SqliteStore,
+    linear: &impl LinearClient,
+    opencode: &impl OpenCodeLauncher,
+) -> anyhow::Result<OrchestrationReport> {
     store.reconcile_projects(config)?;
 
     let mut report = OrchestrationReport::default();
     for project in config.projects().iter().filter(|project| project.enabled) {
-        reconcile_project(project, store, linear, &mut report)
+        reconcile_project(project, store, linear, opencode, &mut report)
             .with_context(|| format!("orchestrate project `{}`", project.id))?;
     }
 
@@ -66,6 +76,7 @@ fn reconcile_project(
     project: &ProjectConfig,
     store: &SqliteStore,
     linear: &impl LinearClient,
+    opencode: &impl OpenCodeLauncher,
     report: &mut OrchestrationReport,
 ) -> anyhow::Result<()> {
     let mut eligible = Vec::new();
@@ -179,6 +190,8 @@ fn reconcile_project(
 
     for issue in eligible.into_iter().take(capacity) {
         linear.transition_issue(&issue.id, LinearTransition::InProgress)?;
+        let launch_spec = build_acp_launch_spec(project, &issue);
+        let started = opencode.launch(&launch_spec)?;
         store.upsert_issue(issue_record(
             project,
             &issue,
@@ -187,15 +200,12 @@ fn reconcile_project(
             None,
             CleanupStatus::Clean,
         ))?;
-        store.upsert_opencode_session(OpenCodeSessionRecord {
-            project_id: project.id.clone(),
-            issue_id: issue.id.clone(),
-            session_id: deterministic_session_id(&issue.id),
-            agent: project.opencode.agent.clone(),
-            model: project.opencode.model.clone(),
-            lifecycle_stage: LifecycleStage::Running,
-            last_event: Some("linear_dispatch".into()),
-        })?;
+        store.upsert_opencode_session(new_session_record(
+            project,
+            &issue,
+            started,
+            &launch_spec,
+        ))?;
         report.dispatched.push(issue.identifier);
     }
 
@@ -278,8 +288,4 @@ fn has_existing_session(
     Ok(!store
         .opencode_sessions_for_issue(project_id, issue_id)?
         .is_empty())
-}
-
-fn deterministic_session_id(issue_id: &str) -> String {
-    format!("opencode:{issue_id}")
 }

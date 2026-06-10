@@ -43,8 +43,14 @@ validation CLI.
 
 The vNext state machine treats `Backlog` as planning inventory, keeps blocked `Todo` issues and
 parked `Need Owner Input` issues out of dispatch, moves only eligible work to `In Progress` through
-Symphony's Linear writer path, and records deterministic OpenCode session state so a restart does
-not duplicate a dispatch.
+Symphony's Linear writer path, constructs the `/usr/local/bin/opencode acp` stdio launch from an
+isolated per-issue worktree, and records OpenCode session state so a restart does not duplicate a
+dispatch. The persisted session read model includes stage telemetry, active agent/model, message,
+todo, part, token, cost, subagent, eval-stage, worktree, lifecycle marker, last-event, and observable
+silence fields.
+
+Default validation does not start OpenCode or require live Linear. Live ACP smoke runs must stay
+opt-in under the active steward workflow because they spawn `/usr/local/bin/opencode acp`.
 
 ```bash
 cargo fmt --all -- --check

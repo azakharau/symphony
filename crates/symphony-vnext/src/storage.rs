@@ -8,7 +8,7 @@ use crate::{
     config::RootConfig,
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, GitRefRecord, IssueStateRecord,
-        LifecycleStage, OpenCodeSessionRecord, ProjectStateRecord, StateParseError,
+        LifecycleStage, OpenCodeSessionRecord, OpenCodeStage, ProjectStateRecord, StateParseError,
     },
 };
 
@@ -191,15 +191,41 @@ impl SqliteStore {
                 session_id,
                 agent,
                 model,
+                worktree_path,
                 lifecycle_stage,
-                last_event
+                stage,
+                active_agent,
+                active_model,
+                message_count,
+                todo_count,
+                part_count,
+                token_count,
+                cost_micros,
+                subagent_count,
+                eval_stage,
+                lifecycle_marker,
+                last_event,
+                silence_observed
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
             ON CONFLICT(project_id, issue_id, session_id) DO UPDATE SET
                 agent = excluded.agent,
                 model = excluded.model,
+                worktree_path = excluded.worktree_path,
                 lifecycle_stage = excluded.lifecycle_stage,
-                last_event = excluded.last_event
+                stage = excluded.stage,
+                active_agent = excluded.active_agent,
+                active_model = excluded.active_model,
+                message_count = excluded.message_count,
+                todo_count = excluded.todo_count,
+                part_count = excluded.part_count,
+                token_count = excluded.token_count,
+                cost_micros = excluded.cost_micros,
+                subagent_count = excluded.subagent_count,
+                eval_stage = excluded.eval_stage,
+                lifecycle_marker = excluded.lifecycle_marker,
+                last_event = excluded.last_event,
+                silence_observed = excluded.silence_observed
             "#,
             params![
                 session.project_id,
@@ -207,8 +233,21 @@ impl SqliteStore {
                 session.session_id,
                 session.agent,
                 session.model,
+                session.worktree_path,
                 session.lifecycle_stage.as_str(),
-                session.last_event
+                session.stage.as_str(),
+                session.active_agent,
+                session.active_model,
+                session.message_count,
+                session.todo_count,
+                session.part_count,
+                session.token_count,
+                session.cost_micros,
+                session.subagent_count,
+                session.eval_stage,
+                session.lifecycle_marker,
+                session.last_event,
+                session.silence_observed
             ],
         )?;
         Ok(())
@@ -223,7 +262,10 @@ impl SqliteStore {
         self.conn
             .query_row(
                 r#"
-                SELECT project_id, issue_id, session_id, agent, model, lifecycle_stage, last_event
+                SELECT project_id, issue_id, session_id, agent, model, worktree_path,
+                       lifecycle_stage, stage, active_agent, active_model, message_count,
+                       todo_count, part_count, token_count, cost_micros, subagent_count,
+                       eval_stage, lifecycle_marker, last_event, silence_observed
                 FROM opencode_sessions
                 WHERE project_id = ?1 AND issue_id = ?2 AND session_id = ?3
                 "#,
@@ -241,7 +283,10 @@ impl SqliteStore {
     ) -> Result<Vec<OpenCodeSessionRecord>, StorageError> {
         let mut statement = self.conn.prepare(
             r#"
-            SELECT project_id, issue_id, session_id, agent, model, lifecycle_stage, last_event
+            SELECT project_id, issue_id, session_id, agent, model, worktree_path,
+                   lifecycle_stage, stage, active_agent, active_model, message_count,
+                   todo_count, part_count, token_count, cost_micros, subagent_count,
+                   eval_stage, lifecycle_marker, last_event, silence_observed
             FROM opencode_sessions
             WHERE project_id = ?1 AND issue_id = ?2
             ORDER BY session_id ASC
@@ -287,15 +332,29 @@ fn issue_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IssueStateRecord>
 }
 
 fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpenCodeSessionRecord> {
-    let lifecycle_stage: String = row.get(5)?;
+    let lifecycle_stage: String = row.get(6)?;
+    let stage: String = row.get(7)?;
     Ok(OpenCodeSessionRecord {
         project_id: row.get(0)?,
         issue_id: row.get(1)?,
         session_id: row.get(2)?,
         agent: row.get(3)?,
         model: row.get(4)?,
+        worktree_path: row.get(5)?,
         lifecycle_stage: parse_lifecycle(&lifecycle_stage)?,
-        last_event: row.get(6)?,
+        stage: parse_opencode_stage(&stage)?,
+        active_agent: row.get(8)?,
+        active_model: row.get(9)?,
+        message_count: get_u64(row, 10)?,
+        todo_count: get_u64(row, 11)?,
+        part_count: get_u64(row, 12)?,
+        token_count: get_u64(row, 13)?,
+        cost_micros: get_u64(row, 14)?,
+        subagent_count: get_u64(row, 15)?,
+        eval_stage: row.get(16)?,
+        lifecycle_marker: row.get(17)?,
+        last_event: row.get(18)?,
+        silence_observed: row.get::<_, i64>(19)? != 0,
     })
 }
 
@@ -305,6 +364,15 @@ fn parse_lifecycle(input: &str) -> rusqlite::Result<LifecycleStage> {
 
 fn parse_cleanup(input: &str) -> rusqlite::Result<CleanupStatus> {
     CleanupStatus::from_str(input).map_err(sql_conversion_error)
+}
+
+fn parse_opencode_stage(input: &str) -> rusqlite::Result<OpenCodeStage> {
+    OpenCodeStage::from_str(input).map_err(sql_conversion_error)
+}
+
+fn get_u64(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value: i64 = row.get(index)?;
+    Ok(value.max(0) as u64)
 }
 
 fn sql_conversion_error(error: StateParseError) -> rusqlite::Error {

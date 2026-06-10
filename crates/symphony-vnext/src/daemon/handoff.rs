@@ -5,7 +5,9 @@ use tracing::{debug, info, warn};
 use crate::{
     config::ProjectConfig,
     linear::{LinearClient, LinearIssue, LinearIssueEvidence, LinearTransition},
-    opencode::{OpenCodeHandoff, OpenCodeLauncher, OpenCodeStopReason, worktree_path_allowed},
+    opencode::{
+        OpenCodeError, OpenCodeHandoff, OpenCodeLauncher, OpenCodeStopReason, worktree_path_allowed,
+    },
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, GitRefRecord, IssueStateRecord, LifecycleStage,
     },
@@ -34,14 +36,44 @@ pub(super) async fn process_in_progress_handoff(
         );
         return Ok(());
     };
-    let Some(handoff) = opencode.latest_handoff(&session).await? else {
-        debug!(
-            project_id = %project.id,
-            issue = %issue.identifier,
-            session_id = %session.session_id,
-            "OpenCode handoff not available yet"
-        );
-        return Ok(());
+    let handoff = match opencode.latest_handoff(&session).await {
+        Ok(Some(handoff)) => handoff,
+        Ok(None) => {
+            debug!(
+                project_id = %project.id,
+                issue = %issue.identifier,
+                session_id = %session.session_id,
+                "OpenCode handoff not available yet"
+            );
+            return Ok(());
+        }
+        Err(OpenCodeError::MalformedHandoff(message)) => {
+            warn!(
+                project_id = %project.id,
+                issue = %issue.identifier,
+                session_id = %session.session_id,
+                message,
+                "OpenCode handoff sidecar failed validation"
+            );
+            park_need_owner_input(
+                project,
+                store,
+                linear,
+                issue,
+                Some(&session),
+                "malformed_handoff",
+                message.clone(),
+                Some(FailureRecord {
+                    kind: "malformed_handoff".into(),
+                    message,
+                    fingerprint: Some("malformed_handoff_sidecar".into()),
+                    occurrence_count: 1,
+                }),
+            )
+            .await?;
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
     };
     info!(
         project_id = %project.id,
@@ -64,6 +96,7 @@ pub(super) async fn process_in_progress_handoff(
             store,
             linear,
             issue,
+            Some(&session),
             "malformed_handoff",
             format!(
                 "handoff session `{}` did not match active session `{}`",
@@ -111,6 +144,7 @@ pub(super) async fn process_in_progress_handoff(
                 store,
                 linear,
                 issue,
+                Some(&session),
                 "provider_blocker",
                 message.clone(),
                 Some(FailureRecord {
@@ -134,6 +168,7 @@ pub(super) async fn process_in_progress_handoff(
                 store,
                 linear,
                 issue,
+                Some(&session),
                 "owner_question",
                 question.clone(),
                 None,
@@ -166,6 +201,7 @@ async fn close_successful_handoff(
             store,
             linear,
             issue,
+            Some(session),
             "malformed_handoff",
             message.clone(),
             Some(FailureRecord {
@@ -191,6 +227,7 @@ async fn close_successful_handoff(
             store,
             linear,
             issue,
+            Some(session),
             "malformed_handoff",
             "successful handoff did not include git closure evidence".into(),
             Some(FailureRecord {
@@ -216,6 +253,7 @@ async fn close_successful_handoff(
             store,
             linear,
             issue,
+            Some(session),
             "malformed_handoff",
             message.clone(),
             Some(FailureRecord {
@@ -307,6 +345,7 @@ async fn handle_eval_failure(
             store,
             linear,
             issue,
+            Some(session),
             "repeated_eval_failure",
             format!("OpenCode reported `{failure_fingerprint}` {occurrence_count} times"),
             Some(FailureRecord {
@@ -422,11 +461,16 @@ fn successful_handoff_worktree_error(
     None
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "parking needs project, adapters, issue, session, owner-visible reason, and durable failure evidence"
+)]
 pub(super) async fn park_need_owner_input(
     project: &ProjectConfig,
     store: &SqliteStore,
     linear: &impl LinearClient,
     issue: &LinearIssue,
+    session: Option<&crate::state::OpenCodeSessionRecord>,
     blocker_kind: &str,
     message: String,
     failure: Option<FailureRecord>,
@@ -460,5 +504,14 @@ pub(super) async fn park_need_owner_input(
         cleanup_status: CleanupStatus::Clean,
     };
     store.upsert_issue(&record).await?;
+    if let Some(session) = session {
+        let mut parked_session = session.clone();
+        parked_session.process_id = None;
+        parked_session.lifecycle_stage = LifecycleStage::Blocked;
+        parked_session.stage = crate::state::OpenCodeStage::Failed;
+        parked_session.lifecycle_marker = Some("parked".into());
+        parked_session.last_event = Some(format!("parked:{blocker_kind}"));
+        store.upsert_opencode_session(&parked_session).await?;
+    }
     Ok(())
 }

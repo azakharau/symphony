@@ -601,6 +601,77 @@ async fn provider_blocker_owner_question_and_malformed_handoff_park_without_clos
 }
 
 #[tokio::test]
+async fn malformed_handoff_sidecar_parks_issue_without_failing_poll() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let worktree = dir.path().join("SYM-86-worktree");
+    store
+        .upsert_issue(test_issue(
+            "symphony",
+            "malformed-json",
+            "SYM-86",
+            "In Progress",
+        ))
+        .await
+        .expect("running issue");
+    store
+        .upsert_opencode_session({
+            let mut session = test_session("symphony", "malformed-json", "oc-86", &worktree);
+            session.process_id = Some(4242);
+            session
+        })
+        .await
+        .expect("running session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "malformed-json",
+        "SYM-86",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = MalformedHandoffOpenCodeLauncher::new(
+        "opencode-handoff.json: unknown field `status`, expected `session_id`",
+    );
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("malformed handoff must not fail the whole poll");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("malformed-json".into(), LinearTransition::NeedOwnerInput)]
+    );
+    assert!(client.evidence().iter().any(|(_, evidence)| {
+        evidence.kind == "malformed_handoff" && evidence.body.contains("unknown field `status`")
+    }));
+    let issue = store
+        .issue("symphony", "malformed-json")
+        .await
+        .expect("query malformed")
+        .expect("malformed issue");
+    assert_eq!(issue.state, "Need Owner Input");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Blocked);
+    let blocker = issue.blocker.expect("blocker");
+    assert_eq!(blocker.kind, "malformed_handoff");
+    assert!(blocker.message.contains("unknown field `status`"));
+    let session = store
+        .opencode_session("symphony", "malformed-json", "oc-86")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(session.process_id, None);
+    assert_eq!(session.stage, OpenCodeStage::Failed);
+    assert_eq!(session.lifecycle_marker.as_deref(), Some("parked"));
+    assert_eq!(
+        session.last_event.as_deref(),
+        Some("parked:malformed_handoff")
+    );
+}
+
+#[tokio::test]
 async fn orchestration_processes_multiple_projects_in_config_order() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

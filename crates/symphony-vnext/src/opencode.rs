@@ -480,8 +480,23 @@ fn build_issue_prompt(project: &ProjectConfig, issue: &LinearIssue) -> String {
          URL: {url}\n\n\
          On completion, write the structured Symphony handoff JSON to:\n\
          {handoff_path}\n\n\
+         The handoff file must be valid JSON matching this exact shape:\n\
+         {{\n\
+           \"session_id\": \"{session_id}\",\n\
+           \"lifecycle_stages\": [\"starting\", \"running\", \"eval\", \"handoff\", \"completed\"],\n\
+           \"subagents\": [\"agent-name:session-id\"],\n\
+           \"eval_results\": [{{\"suite\": \"suite-name\", \"passed\": true, \"failure_fingerprint\": null, \"details\": \"command outcomes\"}}],\n\
+           \"changed_files\": [\"path:start-end\"],\n\
+           \"git\": {{\"branch\": \"branch-name\", \"head_sha\": \"commit-sha\", \"pr_url\": null, \"worktree_path\": \"{worktree}\"}},\n\
+           \"risks\": [\"remaining risk or omitted validation\"],\n\
+           \"stop_reason\": {{\"type\": \"success\"}}\n\
+         }}\n\
+         For eval failures use \"stop_reason\": {{\"type\":\"eval_failed\",\"failure_fingerprint\":\"stable-id\"}}.\n\
+         For provider or owner blockers use \"provider_blocker\" or \"owner_question\" with \"message\"/\"question\".\n\
+         Do not use status, subagents_used, object-shaped eval_results, or string stop_reason values.\n\n\
          Full issue spec:\n{description}\n",
         identifier = issue.identifier,
+        session_id = "the ACP session id",
         title = issue.title,
         project_id = project.id,
         repo_path = project.repo_path.display(),

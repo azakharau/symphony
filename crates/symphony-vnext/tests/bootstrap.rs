@@ -744,6 +744,38 @@ impl OpenCodeLauncher for ResumeRecordingOpenCodeLauncher {
     }
 }
 
+#[derive(Debug)]
+struct MalformedHandoffOpenCodeLauncher {
+    message: String,
+}
+
+impl MalformedHandoffOpenCodeLauncher {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl OpenCodeLauncher for MalformedHandoffOpenCodeLauncher {
+    async fn launch(
+        &self,
+        _spec: &opencode::OpenCodeLaunchSpec,
+    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+        unreachable!("malformed handoff test should not launch OpenCode")
+    }
+
+    async fn latest_handoff(
+        &self,
+        _session: &OpenCodeSessionRecord,
+    ) -> Result<Option<OpenCodeHandoff>, opencode::OpenCodeError> {
+        Err(opencode::OpenCodeError::MalformedHandoff(
+            self.message.clone(),
+        ))
+    }
+}
+
 #[async_trait::async_trait]
 impl OpenCodeLauncher for ScriptedOpenCodeLauncher {
     async fn launch(

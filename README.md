@@ -38,7 +38,13 @@ help with the setup:
 
 The Rust vNext workspace is an additive foundation for the next Symphony runtime. It currently
 contains typed multiproject config loading, OpenCode-only project runtime settings, SQLite runtime
-state bootstrap, restart-safe state queries, and a basic validation CLI.
+state bootstrap, restart-safe state queries, mocked Linear polling orchestration, and a basic
+validation CLI.
+
+The vNext state machine treats `Backlog` as planning inventory, keeps blocked `Todo` issues and
+parked `Need Owner Input` issues out of dispatch, moves only eligible work to `In Progress` through
+Symphony's Linear writer path, and records deterministic OpenCode session state so a restart does
+not duplicate a dispatch.
 
 ```bash
 cargo fmt --all -- --check

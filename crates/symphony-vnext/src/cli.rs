@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -32,11 +32,11 @@ enum Command {
     },
 }
 
-pub fn run() -> anyhow::Result<()> {
-    run_with_args(std::env::args_os())
+pub async fn run() -> anyhow::Result<()> {
+    run_with_args(std::env::args_os()).await
 }
 
-pub fn run_with_args<I, T>(args: I) -> anyhow::Result<()>
+pub async fn run_with_args<I, T>(args: I) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
@@ -44,25 +44,30 @@ where
     let cli = Cli::parse_from(args);
     match cli.command {
         Command::ValidateConfig { config } => {
-            let input = fs::read_to_string(&config)
+            let input = tokio::fs::read_to_string(&config)
+                .await
                 .with_context(|| format!("read config {}", config.display()))?;
             RootConfig::from_yaml_str(&input)?;
             Ok(())
         }
         Command::InitStore { database } => {
             let store = SqliteStore::open(&database)
+                .await
                 .with_context(|| format!("open sqlite database {}", database.display()))?;
-            store.migrate()?;
+            store.migrate().await?;
             Ok(())
         }
         Command::Daemon {
             config,
             database,
             once,
-        } => daemon::run(daemon::DaemonOptions {
-            config_path: config,
-            database_path: database,
-            once,
-        }),
+        } => {
+            daemon::run(daemon::DaemonOptions {
+                config_path: config,
+                database_path: database,
+                once,
+            })
+            .await
+        }
     }
 }

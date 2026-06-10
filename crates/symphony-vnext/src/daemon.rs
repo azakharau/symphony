@@ -1,22 +1,21 @@
 use std::{
     cmp::Ordering,
-    fs,
-    io::{BufRead, BufReader, Write},
-    net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::Command,
-    thread,
     time::Duration,
 };
 
 use anyhow::{Context, bail};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::{TcpListener, TcpStream},
+};
 
 use crate::{
     api::runtime_api_json_response,
     config::{ProjectConfig, RootConfig},
     linear::{
-        EmptyLinearClient, LinearBlocker, LinearClient, LinearGraphqlClient, LinearIssue,
-        LinearIssueEvidence, LinearTransition,
+        EmptyLinearClient, LinearBlocker, LinearClient, LinearIssue, LinearIssueEvidence,
+        LinearSdkClient, LinearTransition,
     },
     opencode::{
         DeterministicOpenCodeLauncher, OpenCodeHandoff, OpenCodeLauncher, OpenCodeStopReason,
@@ -35,21 +34,23 @@ pub struct DaemonOptions {
     pub once: bool,
 }
 
-pub fn run(options: DaemonOptions) -> anyhow::Result<()> {
-    let input = fs::read_to_string(&options.config_path)
+pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
+    let input = tokio::fs::read_to_string(&options.config_path)
+        .await
         .with_context(|| format!("read config {}", options.config_path.display()))?;
     let config = RootConfig::from_yaml_str(&input)?;
     let store = SqliteStore::open(&options.database_path)
+        .await
         .with_context(|| format!("open sqlite database {}", options.database_path.display()))?;
-    store.migrate()?;
-    store.reconcile_projects(&config)?;
+    store.migrate().await?;
+    store.reconcile_projects(&config).await?;
 
     if options.once {
-        run_once_with_clients(&config, &store, &EmptyLinearClient, &StdioOpenCodeLauncher)?;
+        run_once_with_clients(&config, &store, &EmptyLinearClient, &StdioOpenCodeLauncher).await?;
         return Ok(());
     }
 
-    run_continuous(config, options.database_path)?;
+    run_continuous(config, options.database_path).await?;
 
     Ok(())
 }
@@ -62,104 +63,120 @@ pub struct OrchestrationReport {
     pub terminal_reconciled: Vec<String>,
 }
 
-fn run_continuous(config: RootConfig, database_path: PathBuf) -> anyhow::Result<()> {
+async fn run_continuous(config: RootConfig, database_path: PathBuf) -> anyhow::Result<()> {
     let server = config
         .server
         .clone()
         .context("continuous daemon mode requires server.host and server.port")?;
     let bind_addr = format!("{}:{}", server.host, server.port);
-    let listener =
-        TcpListener::bind(&bind_addr).with_context(|| format!("bind dashboard API {bind_addr}"))?;
+    let listener = TcpListener::bind(&bind_addr)
+        .await
+        .with_context(|| format!("bind dashboard API {bind_addr}"))?;
     let poll_config = config.clone();
     let poll_database_path = database_path.clone();
-    let linear = LinearGraphqlClient::from_env()?;
+    let linear = LinearSdkClient::from_env()?;
 
-    thread::spawn(move || {
+    tokio::spawn(async move {
         loop {
-            if let Ok(store) = SqliteStore::open(&poll_database_path)
-                && store.migrate().is_ok()
-            {
-                let _ =
-                    run_once_with_clients(&poll_config, &store, &linear, &StdioOpenCodeLauncher);
+            match SqliteStore::open(&poll_database_path).await {
+                Ok(store) => {
+                    if let Err(error) = store.migrate().await {
+                        eprintln!("symphony-vnext poll storage migration error: {error:#}");
+                    } else if let Err(error) =
+                        run_once_with_clients(&poll_config, &store, &linear, &StdioOpenCodeLauncher)
+                            .await
+                    {
+                        eprintln!("symphony-vnext poll error: {error:#}");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("symphony-vnext poll storage open error: {error:#}");
+                }
             }
-            thread::sleep(Duration::from_secs(30));
+            tokio::time::sleep(Duration::from_secs(30)).await;
         }
     });
 
-    for stream in listener.incoming() {
-        let stream = stream?;
-        handle_http_stream(&config, &database_path, stream)?;
+    loop {
+        let (stream, _) = listener.accept().await?;
+        handle_http_stream(&config, &database_path, stream).await?;
     }
-
-    Ok(())
 }
 
-fn handle_http_stream(
+async fn handle_http_stream(
     config: &RootConfig,
     database_path: &PathBuf,
-    mut stream: TcpStream,
+    stream: TcpStream,
 ) -> anyhow::Result<()> {
     let mut first_line = String::new();
-    {
-        let mut reader = BufReader::new(&mut stream);
-        reader.read_line(&mut first_line)?;
-    }
+    let mut reader = BufReader::new(stream);
+    reader.read_line(&mut first_line).await?;
+    let mut stream = reader.into_inner();
     let mut parts = first_line.split_whitespace();
     let method = parts.next().unwrap_or_default();
     let path = parts.next().unwrap_or("/");
 
     if method != "GET" {
-        write_http_response(&mut stream, 405, r#"{"error":"method_not_allowed"}"#)?;
+        write_http_response(&mut stream, 405, r#"{"error":"method_not_allowed"}"#).await?;
         return Ok(());
     }
 
-    let store = SqliteStore::open(database_path)?;
-    store.migrate()?;
-    let response = runtime_api_json_response(config, &store, path)?;
-    write_http_response(&mut stream, response.status, &response.body)?;
+    let store = SqliteStore::open(database_path).await?;
+    store.migrate().await?;
+    let response = runtime_api_json_response(config, &store, path).await?;
+    write_http_response(&mut stream, response.status, &response.body).await?;
     Ok(())
 }
 
-fn write_http_response(stream: &mut TcpStream, status: u16, body: &str) -> std::io::Result<()> {
+async fn write_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    body: &str,
+) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
         404 => "Not Found",
         405 => "Method Not Allowed",
         _ => "Internal Server Error",
     };
-    write!(
-        stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
+    stream
+        .write_all(
+            format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
 }
 
-pub fn run_once_with_linear_client(
+pub async fn run_once_with_linear_client(
     config: &RootConfig,
     store: &SqliteStore,
     linear: &impl LinearClient,
 ) -> anyhow::Result<OrchestrationReport> {
-    run_once_with_clients(config, store, linear, &DeterministicOpenCodeLauncher)
+    run_once_with_clients(config, store, linear, &DeterministicOpenCodeLauncher).await
 }
 
-pub fn run_once_with_clients(
+pub async fn run_once_with_clients(
     config: &RootConfig,
     store: &SqliteStore,
     linear: &impl LinearClient,
     opencode: &impl OpenCodeLauncher,
 ) -> anyhow::Result<OrchestrationReport> {
-    store.reconcile_projects(config)?;
+    store.reconcile_projects(config).await?;
 
     let mut report = OrchestrationReport::default();
     for project in config.projects().iter().filter(|project| project.enabled) {
         reconcile_project(project, store, linear, opencode, &mut report)
+            .await
             .with_context(|| format!("orchestrate project `{}`", project.id))?;
     }
 
     Ok(report)
 }
 
-fn reconcile_project(
+async fn reconcile_project(
     project: &ProjectConfig,
     store: &SqliteStore,
     linear: &impl LinearClient,
@@ -167,48 +184,64 @@ fn reconcile_project(
     report: &mut OrchestrationReport,
 ) -> anyhow::Result<()> {
     let mut eligible = Vec::new();
-    let mut issues = linear.fetch_candidate_issues(project)?;
+    let mut issues = linear.fetch_candidate_issues(project).await?;
     issues.sort_by(compare_issues_for_dispatch);
 
     for issue in issues {
         match issue.state.as_str() {
             "Backlog" => {
-                if store.issue(&project.id, &issue.id)?.is_some() {
-                    store.upsert_issue(issue_record(
+                if store.issue(&project.id, &issue.id).await?.is_some() {
+                    let record = issue_record(
                         project,
                         &issue,
                         "Backlog",
                         LifecycleStage::Queued,
                         None,
                         CleanupStatus::Clean,
-                    ))?;
+                    );
+                    store.upsert_issue(&record).await?;
                 }
             }
             state if is_terminal_state(state) => {
-                store.upsert_issue(issue_record(
+                let existing = store.issue(&project.id, &issue.id).await?;
+                let mut record = issue_record(
                     project,
                     &issue,
                     state,
                     LifecycleStage::Completed,
                     None,
                     CleanupStatus::Pending,
-                ))?;
+                );
+                if let Some(existing) = existing {
+                    record.git_ref = existing.git_ref;
+                    if existing.cleanup_status == CleanupStatus::Complete {
+                        record.cleanup_status = CleanupStatus::Complete;
+                    } else if let Some(git_ref) = &record.git_ref
+                        && !tokio::fs::try_exists(&git_ref.worktree_path).await?
+                    {
+                        record.cleanup_status = CleanupStatus::Complete;
+                    }
+                }
+                store.upsert_issue(&record).await?;
                 report.terminal_reconciled.push(issue.identifier);
             }
             "Need Owner Input" => {
-                let existing = store.issue(&project.id, &issue.id)?;
+                let existing = store.issue(&project.id, &issue.id).await?;
                 if has_new_owner_response(existing.as_ref(), &issue) {
-                    linear.transition_issue(&issue.id, LinearTransition::Todo)?;
-                    store.upsert_issue(issue_record(
+                    linear
+                        .transition_issue(&issue.id, LinearTransition::Todo)
+                        .await?;
+                    let record = issue_record(
                         project,
                         &issue,
                         LinearTransition::Todo.state_name(),
                         LifecycleStage::Queued,
                         None,
                         CleanupStatus::Clean,
-                    ))?;
+                    );
+                    store.upsert_issue(&record).await?;
                 } else {
-                    store.upsert_issue(issue_record(
+                    let record = issue_record(
                         project,
                         &issue,
                         "Need Owner Input",
@@ -219,12 +252,13 @@ fn reconcile_project(
                             observed_at: issue.updated_at.clone(),
                         }),
                         CleanupStatus::Clean,
-                    ))?;
+                    );
+                    store.upsert_issue(&record).await?;
                     report.parked_owner_input.push(issue.identifier);
                 }
             }
             "In Progress" => {
-                let existing = store.issue(&project.id, &issue.id)?;
+                let existing = store.issue(&project.id, &issue.id).await?;
                 let mut record = issue_record(
                     project,
                     &issue,
@@ -238,8 +272,9 @@ fn reconcile_project(
                     record.git_ref = existing.git_ref.clone().or(record.git_ref);
                     record.cleanup_status = existing.cleanup_status;
                 }
-                store.upsert_issue(record)?;
-                process_in_progress_handoff(project, store, linear, opencode, &issue, existing)?;
+                store.upsert_issue(&record).await?;
+                process_in_progress_handoff(project, store, linear, opencode, &issue, existing)
+                    .await?;
             }
             "Preparing" | "In Review" | "RCA Required" => {
                 park_need_owner_input(
@@ -253,71 +288,77 @@ fn reconcile_project(
                         issue.state
                     ),
                     None,
-                )?;
+                )
+                .await?;
             }
             "Todo" => {
                 if let Some(blocker) = nonterminal_blocker(&issue.blocked_by) {
-                    store.upsert_issue(issue_record(
+                    let record = issue_record(
                         project,
                         &issue,
                         "Todo",
                         LifecycleStage::Blocked,
                         Some(blocker_record(blocker)),
                         CleanupStatus::Clean,
-                    ))?;
+                    );
+                    store.upsert_issue(&record).await?;
                     report.blocked.push(issue.identifier);
-                } else if has_existing_session(store, &project.id, &issue.id)? {
-                    linear.transition_issue(&issue.id, LinearTransition::InProgress)?;
-                    store.upsert_issue(issue_record(
+                } else if has_existing_session(store, &project.id, &issue.id).await? {
+                    linear
+                        .transition_issue(&issue.id, LinearTransition::InProgress)
+                        .await?;
+                    let record = issue_record(
                         project,
                         &issue,
                         "In Progress",
                         LifecycleStage::Running,
                         None,
                         CleanupStatus::Clean,
-                    ))?;
+                    );
+                    store.upsert_issue(&record).await?;
                 } else {
                     eligible.push(issue);
                 }
             }
             _ => {
-                store.upsert_issue(issue_record(
+                let record = issue_record(
                     project,
                     &issue,
                     &issue.state,
                     LifecycleStage::Queued,
                     None,
                     CleanupStatus::Clean,
-                ))?;
+                );
+                store.upsert_issue(&record).await?;
             }
         }
     }
 
     let running = store
-        .issues_for_project(&project.id)?
+        .issues_for_project(&project.id)
+        .await?
         .into_iter()
         .filter(|issue| issue.lifecycle_stage == LifecycleStage::Running)
         .count() as u32;
     let capacity = project.concurrency.max_sessions.saturating_sub(running) as usize;
 
     for issue in eligible.into_iter().take(capacity) {
-        linear.transition_issue(&issue.id, LinearTransition::InProgress)?;
+        linear
+            .transition_issue(&issue.id, LinearTransition::InProgress)
+            .await?;
         let launch_spec = build_acp_launch_spec(project, &issue);
-        let started = opencode.launch(&launch_spec)?;
-        store.upsert_issue(issue_record(
+        let started = opencode.launch(&launch_spec).await?;
+        let record = issue_record(
             project,
             &issue,
             LinearTransition::InProgress.state_name(),
             LifecycleStage::Running,
             None,
             CleanupStatus::Clean,
-        ))?;
-        store.upsert_opencode_session(new_session_record(
-            project,
-            &issue,
-            started,
-            &launch_spec,
-        ))?;
+        );
+        store.upsert_issue(&record).await?;
+        let session = new_session_record(project, &issue, started, &launch_spec);
+        store.upsert_opencode_session(&session).await?;
         report.dispatched.push(issue.identifier);
     }
 
@@ -356,7 +397,7 @@ fn issue_record(
     }
 }
 
-fn process_in_progress_handoff(
+async fn process_in_progress_handoff(
     project: &ProjectConfig,
     store: &SqliteStore,
     linear: &impl LinearClient,
@@ -364,10 +405,10 @@ fn process_in_progress_handoff(
     issue: &LinearIssue,
     existing_issue: Option<IssueStateRecord>,
 ) -> anyhow::Result<()> {
-    let Some(session) = latest_session(store, &project.id, &issue.id)? else {
+    let Some(session) = latest_session(store, &project.id, &issue.id).await? else {
         return Ok(());
     };
-    let Some(handoff) = opencode.latest_handoff(&session)? else {
+    let Some(handoff) = opencode.latest_handoff(&session).await? else {
         return Ok(());
     };
 
@@ -388,7 +429,8 @@ fn process_in_progress_handoff(
                 fingerprint: Some("session_id_mismatch".into()),
                 occurrence_count: 1,
             }),
-        )?;
+        )
+        .await?;
         return Ok(());
     }
 
@@ -408,11 +450,29 @@ fn process_in_progress_handoff(
                         fingerprint: Some("incomplete_success_handoff".into()),
                         occurrence_count: 1,
                     }),
-                )?;
+                )
+                .await?;
                 return Ok(());
             }
 
-            let git = handoff.git.as_ref().expect("validated git evidence");
+            let Some(git) = handoff.git.as_ref() else {
+                park_need_owner_input(
+                    project,
+                    store,
+                    linear,
+                    issue,
+                    "malformed_handoff",
+                    "successful handoff did not include git closure evidence".into(),
+                    Some(FailureRecord {
+                        kind: "malformed_handoff".into(),
+                        message: "missing git closure evidence".into(),
+                        fingerprint: Some("missing_git_closure".into()),
+                        occurrence_count: 1,
+                    }),
+                )
+                .await?;
+                return Ok(());
+            };
             if let Some(message) = successful_handoff_worktree_error(project, &session, git) {
                 park_need_owner_input(
                     project,
@@ -427,20 +487,26 @@ fn process_in_progress_handoff(
                         fingerprint: Some("unsafe_worktree_path".into()),
                         occurrence_count: 1,
                     }),
-                )?;
+                )
+                .await?;
                 return Ok(());
             }
 
-            linear.record_issue_evidence(
-                &issue.id,
-                LinearIssueEvidence {
-                    kind: "opencode_git_closure".into(),
-                    body: git_closure_evidence_body(&handoff),
-                },
-            )?;
-            linear.transition_issue(&issue.id, LinearTransition::Done)?;
-            cleanup_worktree(&project.repo_path, &git.worktree_path)?;
-            store.upsert_issue(IssueStateRecord {
+            let evidence_body = git_closure_evidence_body(&handoff, git);
+            linear
+                .record_issue_evidence(
+                    &issue.id,
+                    LinearIssueEvidence {
+                        kind: "opencode_git_closure".into(),
+                        body: evidence_body,
+                    },
+                )
+                .await?;
+            linear
+                .transition_issue(&issue.id, LinearTransition::Done)
+                .await?;
+            cleanup_worktree(&project.repo_path, &git.worktree_path).await?;
+            let record = IssueStateRecord {
                 project_id: project.id.clone(),
                 issue_id: issue.id.clone(),
                 identifier: issue.identifier.clone(),
@@ -456,7 +522,8 @@ fn process_in_progress_handoff(
                     pr_url: git.pr_url.clone(),
                 }),
                 cleanup_status: CleanupStatus::Complete,
-            })?;
+            };
+            store.upsert_issue(&record).await?;
         }
         OpenCodeStopReason::EvalFailed {
             failure_fingerprint,
@@ -483,9 +550,12 @@ fn process_in_progress_handoff(
                         fingerprint: Some(failure_fingerprint.clone()),
                         occurrence_count,
                     }),
-                )?;
+                )
+                .await?;
             } else {
-                opencode.continue_repair(&session, failure_fingerprint)?;
+                opencode
+                    .continue_repair(&session, failure_fingerprint)
+                    .await?;
                 let mut record = issue_record(
                     project,
                     issue,
@@ -500,7 +570,7 @@ fn process_in_progress_handoff(
                     fingerprint: Some(failure_fingerprint.clone()),
                     occurrence_count,
                 });
-                store.upsert_issue(record)?;
+                store.upsert_issue(&record).await?;
             }
         }
         OpenCodeStopReason::ProviderBlocker { message } => {
@@ -517,7 +587,8 @@ fn process_in_progress_handoff(
                     fingerprint: Some(stable_fingerprint(message)),
                     occurrence_count: 1,
                 }),
-            )?;
+            )
+            .await?;
         }
         OpenCodeStopReason::OwnerQuestion { question } => {
             park_need_owner_input(
@@ -528,19 +599,22 @@ fn process_in_progress_handoff(
                 "owner_question",
                 question.clone(),
                 None,
-            )?;
+            )
+            .await?;
         }
     }
 
     Ok(())
 }
 
-fn latest_session(
+async fn latest_session(
     store: &SqliteStore,
     project_id: &str,
     issue_id: &str,
 ) -> anyhow::Result<Option<crate::state::OpenCodeSessionRecord>> {
-    let mut sessions = store.opencode_sessions_for_issue(project_id, issue_id)?;
+    let mut sessions = store
+        .opencode_sessions_for_issue(project_id, issue_id)
+        .await?;
     Ok(sessions.pop())
 }
 
@@ -551,19 +625,17 @@ fn successful_handoff_error(handoff: &OpenCodeHandoff) -> Option<String> {
     if let Some(eval) = handoff.eval_results.iter().find(|eval| !eval.passed) {
         return Some(format!("eval `{}` did not pass", eval.suite));
     }
-    if handoff.changed_files.is_empty() {
-        return Some("successful handoff did not include changed files".into());
-    }
     let Some(git) = &handoff.git else {
         return Some("successful handoff did not include git closure evidence".into());
     };
     if git.branch.trim().is_empty() {
         return Some("git closure evidence did not include a branch".into());
     }
-    if git
-        .head_sha
-        .as_deref()
-        .is_none_or(|head_sha| head_sha.trim().is_empty())
+    if !handoff.changed_files.is_empty()
+        && git
+            .head_sha
+            .as_deref()
+            .is_none_or(|head_sha| head_sha.trim().is_empty())
     {
         return Some("git closure evidence did not include a commit SHA".into());
     }
@@ -608,7 +680,7 @@ fn successful_handoff_worktree_error(
     None
 }
 
-fn park_need_owner_input(
+async fn park_need_owner_input(
     project: &ProjectConfig,
     store: &SqliteStore,
     linear: &impl LinearClient,
@@ -617,15 +689,19 @@ fn park_need_owner_input(
     message: String,
     failure: Option<FailureRecord>,
 ) -> anyhow::Result<()> {
-    linear.record_issue_evidence(
-        &issue.id,
-        LinearIssueEvidence {
-            kind: blocker_kind.into(),
-            body: message.clone(),
-        },
-    )?;
-    linear.transition_issue(&issue.id, LinearTransition::NeedOwnerInput)?;
-    store.upsert_issue(IssueStateRecord {
+    linear
+        .record_issue_evidence(
+            &issue.id,
+            LinearIssueEvidence {
+                kind: blocker_kind.into(),
+                body: message.clone(),
+            },
+        )
+        .await?;
+    linear
+        .transition_issue(&issue.id, LinearTransition::NeedOwnerInput)
+        .await?;
+    let record = IssueStateRecord {
         project_id: project.id.clone(),
         issue_id: issue.id.clone(),
         identifier: issue.identifier.clone(),
@@ -640,12 +716,15 @@ fn park_need_owner_input(
         failure,
         git_ref: None,
         cleanup_status: CleanupStatus::Clean,
-    })?;
+    };
+    store.upsert_issue(&record).await?;
     Ok(())
 }
 
-fn git_closure_evidence_body(handoff: &OpenCodeHandoff) -> String {
-    let git = handoff.git.as_ref().expect("validated git evidence");
+fn git_closure_evidence_body(
+    handoff: &OpenCodeHandoff,
+    git: &crate::opencode::GitClosureEvidence,
+) -> String {
     format!(
         "session_id: {}\nbranch: {}\nhead_sha: {}\npr_url: {}\nchanged_files: {}\nevals: {}\nrisks: {}",
         handoff.session_id,
@@ -671,19 +750,20 @@ fn git_closure_evidence_body(handoff: &OpenCodeHandoff) -> String {
     )
 }
 
-fn cleanup_worktree(repo_path: &Path, worktree_path: &str) -> anyhow::Result<()> {
+async fn cleanup_worktree(repo_path: &Path, worktree_path: &str) -> anyhow::Result<()> {
     let path = PathBuf::from(worktree_path);
     if !path.exists() {
-        prune_git_worktrees(repo_path)?;
+        prune_git_worktrees(repo_path).await?;
         return Ok(());
     }
 
-    let output = Command::new("git")
+    let output = tokio::process::Command::new("git")
         .arg("-C")
         .arg(repo_path)
         .args(["worktree", "remove", "--force"])
         .arg(&path)
         .output()
+        .await
         .with_context(|| format!("remove git worktree {}", path.display()))?;
 
     if output.status.success() {
@@ -698,18 +778,20 @@ fn cleanup_worktree(repo_path: &Path, worktree_path: &str) -> anyhow::Result<()>
         );
     }
 
-    fs::remove_dir_all(&path)
+    tokio::fs::remove_dir_all(&path)
+        .await
         .with_context(|| format!("remove accepted non-git worktree {}", path.display()))?;
-    prune_git_worktrees(repo_path)?;
+    prune_git_worktrees(repo_path).await?;
     Ok(())
 }
 
-fn prune_git_worktrees(repo_path: &Path) -> anyhow::Result<()> {
-    let output = Command::new("git")
+async fn prune_git_worktrees(repo_path: &Path) -> anyhow::Result<()> {
+    let output = tokio::process::Command::new("git")
         .arg("-C")
         .arg(repo_path)
         .args(["worktree", "prune"])
         .output()
+        .await
         .with_context(|| format!("prune git worktrees for {}", repo_path.display()))?;
 
     if !output.status.success() {
@@ -802,12 +884,13 @@ fn has_new_owner_response(existing: Option<&IssueStateRecord>, issue: &LinearIss
     answer_created_at > observed_at
 }
 
-fn has_existing_session(
+async fn has_existing_session(
     store: &SqliteStore,
     project_id: &str,
     issue_id: &str,
 ) -> anyhow::Result<bool> {
     Ok(!store
-        .opencode_sessions_for_issue(project_id, issue_id)?
+        .opencode_sessions_for_issue(project_id, issue_id)
+        .await?
         .is_empty())
 }

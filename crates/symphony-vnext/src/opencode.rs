@@ -1,14 +1,12 @@
-use std::{
-    fs,
-    io::{BufRead, BufReader, Write},
-    path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
-    thread,
-};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
+use tokio::{
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
+    process::Command,
+};
 
 use crate::{
     config::ProjectConfig,
@@ -112,17 +110,21 @@ pub enum OpenCodeStopReason {
     OwnerQuestion { question: String },
 }
 
-pub trait OpenCodeLauncher {
-    fn launch(&self, spec: &OpenCodeLaunchSpec) -> Result<OpenCodeStartedSession, OpenCodeError>;
+#[async_trait::async_trait]
+pub trait OpenCodeLauncher: Sync {
+    async fn launch(
+        &self,
+        spec: &OpenCodeLaunchSpec,
+    ) -> Result<OpenCodeStartedSession, OpenCodeError>;
 
-    fn latest_handoff(
+    async fn latest_handoff(
         &self,
         _session: &OpenCodeSessionRecord,
     ) -> Result<Option<OpenCodeHandoff>, OpenCodeError> {
         Ok(None)
     }
 
-    fn continue_repair(
+    async fn continue_repair(
         &self,
         _session: &OpenCodeSessionRecord,
         _failure_fingerprint: &str,
@@ -134,8 +136,12 @@ pub trait OpenCodeLauncher {
 #[derive(Debug, Default)]
 pub struct DeterministicOpenCodeLauncher;
 
+#[async_trait::async_trait]
 impl OpenCodeLauncher for DeterministicOpenCodeLauncher {
-    fn launch(&self, spec: &OpenCodeLaunchSpec) -> Result<OpenCodeStartedSession, OpenCodeError> {
+    async fn launch(
+        &self,
+        spec: &OpenCodeLaunchSpec,
+    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
         Ok(OpenCodeStartedSession {
             session_id: deterministic_session_id(&spec.cwd.display().to_string()),
         })
@@ -145,15 +151,20 @@ impl OpenCodeLauncher for DeterministicOpenCodeLauncher {
 #[derive(Debug, Default)]
 pub struct StdioOpenCodeLauncher;
 
+#[async_trait::async_trait]
 impl OpenCodeLauncher for StdioOpenCodeLauncher {
-    fn launch(&self, spec: &OpenCodeLaunchSpec) -> Result<OpenCodeStartedSession, OpenCodeError> {
-        ensure_worktree(spec)?;
+    async fn launch(
+        &self,
+        spec: &OpenCodeLaunchSpec,
+    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
+        ensure_worktree(spec).await?;
+        remove_stale_handoff_sidecar(&spec.cwd).await?;
         let mut child = Command::new(&spec.command)
             .args(&spec.args)
             .current_dir(&spec.cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .spawn()?;
         let mut stdin = child.stdin.take().ok_or(OpenCodeError::MissingStdin)?;
         let stdout = child.stdout.take().ok_or(OpenCodeError::MissingStdout)?;
@@ -171,7 +182,8 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
                 "agent": spec.agent,
                 "model": spec.model,
             }),
-        )?;
+        )
+        .await?;
         next_id += 1;
 
         let session_result = acp_request(
@@ -181,7 +193,8 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             next_id,
             "session/new",
             session_new_params(spec),
-        )?;
+        )
+        .await?;
         next_id += 1;
         let session_id = extract_session_id(&session_result)?;
         set_session_config_option(
@@ -192,7 +205,8 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             &session_id,
             "mode",
             Some(spec.agent.as_str()),
-        )?;
+        )
+        .await?;
         next_id += 1;
         set_session_config_option(
             &mut stdin,
@@ -202,7 +216,8 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             &session_id,
             "model",
             spec.model.as_deref(),
-        )?;
+        )
+        .await?;
         next_id += 1;
         set_session_config_option(
             &mut stdin,
@@ -212,45 +227,56 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             &session_id,
             "effort",
             spec.effort.as_deref(),
-        )?;
+        )
+        .await?;
         next_id += 1;
-        let background_session_id = session_id.clone();
+        let prompt_request_id = next_id;
+        let prompt = format!(
+            "OpenCode ACP session id: {session_id}\n\n{task_prompt}",
+            task_prompt = spec.prompt.as_str()
+        );
+        write_acp_request(
+            &mut stdin,
+            prompt_request_id,
+            "session/prompt",
+            json!({
+                "sessionId": session_id.as_str(),
+                "prompt": [
+                    {
+                        "type": "text",
+                        "text": prompt.as_str(),
+                    }
+                ],
+            }),
+        )
+        .await?;
         let permission_policy = spec.permission_policy.clone();
-        let prompt = spec.prompt.clone();
 
-        thread::spawn(move || {
-            let _ = acp_request(
-                &mut stdin,
+        tokio::spawn(async move {
+            let _ = read_acp_response(
                 &mut stdout,
+                &mut stdin,
                 &permission_policy,
-                next_id,
+                prompt_request_id,
                 "session/prompt",
-                json!({
-                    "sessionId": background_session_id,
-                    "prompt": [
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        }
-                    ],
-                }),
-            );
-            let _ = child.wait();
+            )
+            .await;
+            let _ = child.wait().await;
         });
 
         Ok(OpenCodeStartedSession { session_id })
     }
 
-    fn latest_handoff(
+    async fn latest_handoff(
         &self,
         session: &OpenCodeSessionRecord,
     ) -> Result<Option<OpenCodeHandoff>, OpenCodeError> {
         let path = handoff_sidecar_path(&session.worktree_path);
-        if !path.exists() {
+        if !tokio::fs::try_exists(&path).await? {
             return Ok(None);
         }
 
-        let input = fs::read_to_string(&path)?;
+        let input = tokio::fs::read_to_string(&path).await?;
         let handoff = serde_json::from_str(&input)
             .map_err(|error| OpenCodeError::MalformedHandoff(format!("{path:?}: {error}")))?;
         Ok(Some(handoff))
@@ -375,23 +401,23 @@ fn deterministic_session_id(input: &str) -> String {
     format!("opencode:{input}")
 }
 
-fn ensure_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), OpenCodeError> {
+async fn ensure_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), OpenCodeError> {
     validate_launch_worktree(spec)?;
 
     let Some(repo_path) = &spec.repo_path else {
-        fs::create_dir_all(&spec.cwd)?;
+        tokio::fs::create_dir_all(&spec.cwd).await?;
         return Ok(());
     };
     let Some(base_ref) = &spec.base_ref else {
-        fs::create_dir_all(&spec.cwd)?;
+        tokio::fs::create_dir_all(&spec.cwd).await?;
         return Ok(());
     };
 
-    if spec.cwd.join(".git").exists() {
+    if tokio::fs::try_exists(spec.cwd.join(".git")).await? {
         return Ok(());
     }
 
-    if spec.cwd.exists() && spec.cwd.read_dir()?.next().is_some() {
+    if tokio::fs::try_exists(&spec.cwd).await? && directory_has_entries(&spec.cwd).await? {
         return Err(OpenCodeError::InvalidWorktree(format!(
             "target worktree {} exists but is not a git worktree",
             spec.cwd.display()
@@ -399,7 +425,7 @@ fn ensure_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), OpenCodeError> {
     }
 
     if let Some(parent) = spec.cwd.parent() {
-        fs::create_dir_all(parent)?;
+        tokio::fs::create_dir_all(parent).await?;
     }
 
     let output = Command::new("git")
@@ -408,7 +434,8 @@ fn ensure_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), OpenCodeError> {
         .args(["worktree", "add", "--detach"])
         .arg(&spec.cwd)
         .arg(base_ref)
-        .output()?;
+        .output()
+        .await?;
 
     if output.status.success() {
         Ok(())
@@ -423,6 +450,11 @@ fn ensure_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), OpenCodeError> {
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
     }
+}
+
+async fn directory_has_entries(path: &Path) -> Result<bool, OpenCodeError> {
+    let mut entries = tokio::fs::read_dir(path).await?;
+    Ok(entries.next_entry().await?.is_some())
 }
 
 fn validate_launch_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), OpenCodeError> {
@@ -454,7 +486,7 @@ fn safe_worktree_name(identifier: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
 }
 
-fn set_session_config_option<R: BufRead, W: Write>(
+async fn set_session_config_option<R, W>(
     stdin: &mut W,
     stdout: &mut R,
     permission_policy: &PermissionPolicy,
@@ -462,7 +494,11 @@ fn set_session_config_option<R: BufRead, W: Write>(
     session_id: &str,
     config_id: &str,
     value: Option<&str>,
-) -> Result<(), OpenCodeError> {
+) -> Result<(), OpenCodeError>
+where
+    R: AsyncBufRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
+{
     let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
         return Ok(());
     };
@@ -477,7 +513,8 @@ fn set_session_config_option<R: BufRead, W: Write>(
             "configId": config_id,
             "value": value,
         }),
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -494,26 +531,36 @@ fn session_new_params(spec: &OpenCodeLaunchSpec) -> Value {
     })
 }
 
-fn acp_request<R: BufRead, W: Write>(
+async fn acp_request<R, W>(
     stdin: &mut W,
     stdout: &mut R,
     permission_policy: &PermissionPolicy,
     id: u64,
     method: &str,
     params: Value,
-) -> Result<Value, OpenCodeError> {
-    let request = json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": method,
-        "params": params,
-    });
-    writeln!(stdin, "{request}")?;
-    stdin.flush()?;
+) -> Result<Value, OpenCodeError>
+where
+    R: AsyncBufRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
+{
+    write_acp_request(stdin, id, method, params).await?;
+    read_acp_response(stdout, stdin, permission_policy, id, method).await
+}
 
+async fn read_acp_response<R, W>(
+    stdout: &mut R,
+    stdin: &mut W,
+    permission_policy: &PermissionPolicy,
+    id: u64,
+    method: &str,
+) -> Result<Value, OpenCodeError>
+where
+    R: AsyncBufRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
+{
     loop {
         let mut line = String::new();
-        let bytes = stdout.read_line(&mut line)?;
+        let bytes = stdout.read_line(&mut line).await?;
         if bytes == 0 {
             return Err(OpenCodeError::AcpProtocol(format!(
                 "ACP stdout closed before `{method}` response"
@@ -533,16 +580,39 @@ fn acp_request<R: BufRead, W: Write>(
         }
 
         if message.get("id").is_some() && message.get("method").is_some() {
-            respond_to_acp_request(stdin, permission_policy, &message)?;
+            respond_to_acp_request(stdin, permission_policy, &message).await?;
         }
     }
 }
 
-fn respond_to_acp_request<W: Write>(
+async fn write_acp_request<W>(
+    stdin: &mut W,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> Result<(), OpenCodeError>
+where
+    W: AsyncWrite + Unpin + Send,
+{
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params,
+    });
+    stdin.write_all(format!("{request}\n").as_bytes()).await?;
+    stdin.flush().await?;
+    Ok(())
+}
+
+async fn respond_to_acp_request<W>(
     stdin: &mut W,
     permission_policy: &PermissionPolicy,
     request: &Value,
-) -> Result<(), OpenCodeError> {
+) -> Result<(), OpenCodeError>
+where
+    W: AsyncWrite + Unpin + Send,
+{
     let Some(id) = request.get("id").cloned() else {
         return Ok(());
     };
@@ -560,16 +630,13 @@ fn respond_to_acp_request<W: Write>(
             "message": format!("Symphony cancels ACP `{method}` requests in unattended mode"),
         }),
     };
-    writeln!(
-        stdin,
-        "{}",
-        json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": result,
-        })
-    )?;
-    stdin.flush()?;
+    let response = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result,
+    });
+    stdin.write_all(format!("{response}\n").as_bytes()).await?;
+    stdin.flush().await?;
     Ok(())
 }
 
@@ -591,6 +658,15 @@ fn handoff_sidecar_path(path: impl AsRef<Path>) -> PathBuf {
     path.as_ref()
         .join(".symphony")
         .join("opencode-handoff.json")
+}
+
+async fn remove_stale_handoff_sidecar(worktree_path: &Path) -> Result<(), OpenCodeError> {
+    let path = handoff_sidecar_path(worktree_path);
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub fn worktree_path_allowed(root: &Path, candidate: &Path) -> bool {

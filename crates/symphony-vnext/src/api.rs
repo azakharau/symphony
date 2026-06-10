@@ -19,12 +19,12 @@ pub struct ApiJsonResponse {
     pub body: String,
 }
 
-pub fn runtime_api_json_response(
+pub async fn runtime_api_json_response(
     config: &RootConfig,
     store: &SqliteStore,
     path: &str,
 ) -> Result<ApiJsonResponse, StorageError> {
-    let api = RuntimeDashboardApi::from_store(config, store)?;
+    let api = RuntimeDashboardApi::from_store(config, store).await?;
 
     if path == AGGREGATE_DASHBOARD_ENDPOINT {
         return json_response(200, api.aggregate());
@@ -61,15 +61,15 @@ pub struct RuntimeReadModel {
 }
 
 impl RuntimeReadModel {
-    pub fn from_store(store: &SqliteStore) -> Result<Self, StorageError> {
+    pub async fn from_store(store: &SqliteStore) -> Result<Self, StorageError> {
         let mut projects = Vec::new();
 
-        for project in store.projects()? {
-            let issues = store
-                .issues_for_project(&project.project_id)?
-                .into_iter()
-                .map(|issue| issue_read_model(store, issue))
-                .collect::<Result<Vec<_>, _>>()?;
+        for project in store.projects().await? {
+            let issues = store.issues_for_project(&project.project_id).await?;
+            let mut issue_models = Vec::with_capacity(issues.len());
+            for issue in issues {
+                issue_models.push(issue_read_model(store, issue).await?);
+            }
 
             projects.push(ProjectReadModel {
                 project_id: project.project_id,
@@ -77,7 +77,7 @@ impl RuntimeReadModel {
                 enabled: project.enabled,
                 lifecycle_stage: project.lifecycle_stage,
                 cleanup_status: project.cleanup_status,
-                issues,
+                issues: issue_models,
             });
         }
 
@@ -108,8 +108,11 @@ pub struct RuntimeDashboardApi {
 }
 
 impl RuntimeDashboardApi {
-    pub fn from_store(config: &RootConfig, store: &SqliteStore) -> Result<Self, StorageError> {
-        let runtime = RuntimeReadModel::from_store(store)?;
+    pub async fn from_store(
+        config: &RootConfig,
+        store: &SqliteStore,
+    ) -> Result<Self, StorageError> {
+        let runtime = RuntimeReadModel::from_store(store).await?;
         let mut projects = Vec::new();
 
         for project in runtime.projects {
@@ -117,7 +120,7 @@ impl RuntimeDashboardApi {
             let max_sessions = configured
                 .map(|project| project.concurrency.max_sessions)
                 .unwrap_or(0);
-            projects.push(project_dashboard_response(store, project, max_sessions)?);
+            projects.push(project_dashboard_response(store, project, max_sessions).await?);
         }
 
         let aggregate = AggregateDashboardResponse {
@@ -271,19 +274,20 @@ pub struct OpenCodeSessionDetail {
     pub silence_observed: bool,
 }
 
-fn issue_read_model(
+async fn issue_read_model(
     store: &SqliteStore,
     issue: IssueStateRecord,
 ) -> Result<IssueReadModel, StorageError> {
-    let opencode_sessions =
-        store.opencode_sessions_for_issue(&issue.project_id, &issue.issue_id)?;
+    let opencode_sessions = store
+        .opencode_sessions_for_issue(&issue.project_id, &issue.issue_id)
+        .await?;
     Ok(IssueReadModel {
         issue,
         opencode_sessions,
     })
 }
 
-fn project_dashboard_response(
+async fn project_dashboard_response(
     store: &SqliteStore,
     project: ProjectReadModel,
     max_sessions: u32,
@@ -302,7 +306,7 @@ fn project_dashboard_response(
     let mut active_issues = Vec::new();
     let mut history_issues = Vec::new();
     for issue in project.issues {
-        let detail = issue_detail_response(store, issue)?;
+        let detail = issue_detail_response(store, issue).await?;
         if detail.lifecycle_stage == LifecycleStage::Completed {
             history_issues.push(detail);
         } else {
@@ -322,14 +326,16 @@ fn project_dashboard_response(
     })
 }
 
-fn issue_detail_response(
+async fn issue_detail_response(
     store: &SqliteStore,
     issue: IssueReadModel,
 ) -> Result<IssueDetailResponse, StorageError> {
-    let eval_results = store.eval_runs_for_issue(&issue.issue.project_id, &issue.issue.issue_id)?;
+    let eval_results = store
+        .eval_runs_for_issue(&issue.issue.project_id, &issue.issue.issue_id)
+        .await?;
     let mut sessions = Vec::new();
     for session in issue.opencode_sessions {
-        sessions.push(session_detail(store, session)?);
+        sessions.push(session_detail(store, session).await?);
     }
     let last_runner_event = sessions
         .iter()
@@ -368,7 +374,7 @@ fn issue_detail_response(
     })
 }
 
-fn session_detail(
+async fn session_detail(
     store: &SqliteStore,
     session: OpenCodeSessionRecord,
 ) -> Result<OpenCodeSessionDetail, StorageError> {
@@ -377,7 +383,8 @@ fn session_detail(
             &session.project_id,
             &session.issue_id,
             &session.session_id,
-        )?
+        )
+        .await?
         .into_iter()
         .map(|event| event.stage)
         .collect::<Vec<_>>();

@@ -61,8 +61,8 @@ projects:
 "#
 }
 
-#[test]
-fn multiproject_config_loads_deterministically_and_validates_required_fields() {
+#[tokio::test]
+async fn multiproject_config_loads_deterministically_and_validates_required_fields() {
     let first = RootConfig::from_yaml_str(valid_config_yaml()).expect("valid root config");
     let second = RootConfig::from_yaml_str(valid_config_yaml()).expect("valid root config");
 
@@ -84,8 +84,8 @@ fn multiproject_config_loads_deterministically_and_validates_required_fields() {
     assert!(err.to_string().contains("repo_path"), "{err}");
 }
 
-#[test]
-fn config_rejects_codex_compatibility_fields() {
+#[tokio::test]
+async fn config_rejects_codex_compatibility_fields() {
     let with_codex = valid_config_yaml().replace(
         "    opencode:\n",
         "    codex:\n      command: codex\n    opencode:\n",
@@ -96,8 +96,8 @@ fn config_rejects_codex_compatibility_fields() {
     assert!(err.to_string().contains("codex"), "{err}");
 }
 
-#[test]
-fn linear_graphql_client_fetches_project_candidates_transitions_and_records_evidence() {
+#[tokio::test]
+async fn linear_graphql_client_fetches_project_candidates_transitions_and_records_evidence() {
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
     let project = config.project("symphony").expect("project");
     let transport = RecordingGraphqlTransport::new(vec![
@@ -198,9 +198,13 @@ fn linear_graphql_client_fetches_project_candidates_transitions_and_records_evid
         transport.clone(),
     );
 
-    let issues = client.fetch_candidate_issues(project).expect("issues");
+    let issues = client
+        .fetch_candidate_issues(project)
+        .await
+        .expect("issues");
     client
         .transition_issue("issue-1", LinearTransition::InProgress)
+        .await
         .expect("transition");
     client
         .record_issue_evidence(
@@ -210,6 +214,7 @@ fn linear_graphql_client_fetches_project_candidates_transitions_and_records_evid
                 body: "live evidence".into(),
             },
         )
+        .await
         .expect("evidence");
 
     assert_eq!(issues.len(), 2);
@@ -260,8 +265,8 @@ fn linear_graphql_client_fetches_project_candidates_transitions_and_records_evid
     );
 }
 
-#[test]
-fn linear_graphql_client_paginates_candidate_issues_until_exhausted() {
+#[tokio::test]
+async fn linear_graphql_client_paginates_candidate_issues_until_exhausted() {
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
     let project = config.project("symphony").expect("project");
     let transport = RecordingGraphqlTransport::new(vec![
@@ -294,7 +299,10 @@ fn linear_graphql_client_paginates_candidate_issues_until_exhausted() {
         transport.clone(),
     );
 
-    let issues = client.fetch_candidate_issues(project).expect("issues");
+    let issues = client
+        .fetch_candidate_issues(project)
+        .await
+        .expect("issues");
 
     assert_eq!(
         issues
@@ -309,32 +317,32 @@ fn linear_graphql_client_paginates_candidate_issues_until_exhausted() {
     assert_eq!(requests[1]["variables"]["after"], "cursor-1");
 }
 
-#[test]
-fn sqlite_migrations_initialize_empty_runtime_store() {
+#[tokio::test]
+async fn sqlite_migrations_initialize_empty_runtime_store() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
 
-    store.migrate().expect("migrate");
+    store.migrate().await.expect("migrate");
 
     assert_eq!(
-        store.applied_migrations().expect("migrations"),
+        store.applied_migrations().await.expect("migrations"),
         vec!["001_runtime_state"]
     );
     assert_eq!(
-        store.projects().expect("empty projects"),
+        store.projects().await.expect("empty projects"),
         Vec::<ProjectStateRecord>::new()
     );
 }
 
-#[test]
-fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
+#[tokio::test]
+async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
 
     {
-        let store = SqliteStore::open(&db_path).expect("open sqlite");
-        store.migrate().expect("migrate");
+        let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+        store.migrate().await.expect("migrate");
         store
             .upsert_project(ProjectStateRecord {
                 project_id: "symphony".into(),
@@ -343,6 +351,7 @@ fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
                 lifecycle_stage: LifecycleStage::Running,
                 cleanup_status: CleanupStatus::Clean,
             })
+            .await
             .expect("project");
         store
             .upsert_issue(IssueStateRecord {
@@ -367,6 +376,7 @@ fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
                 }),
                 cleanup_status: CleanupStatus::Pending,
             })
+            .await
             .expect("issue");
         store
             .upsert_opencode_session(OpenCodeSessionRecord {
@@ -391,20 +401,23 @@ fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
                 last_event: Some("started".into()),
                 silence_observed: false,
             })
+            .await
             .expect("session");
     }
 
-    let reloaded = SqliteStore::open(&db_path).expect("reopen sqlite");
-    reloaded.migrate().expect("migrate idempotently");
+    let reloaded = SqliteStore::open(&db_path).await.expect("reopen sqlite");
+    reloaded.migrate().await.expect("migrate idempotently");
 
     let project = reloaded
         .project("symphony")
+        .await
         .expect("query project")
         .expect("project row");
     assert_eq!(project.lifecycle_stage, LifecycleStage::Running);
 
     let issues = reloaded
         .issues_for_project("symphony")
+        .await
         .expect("query project issues");
     assert_eq!(issues.len(), 1);
     assert_eq!(issues[0].identifier, "SYM-25");
@@ -415,6 +428,7 @@ fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
 
     let issue = reloaded
         .issue("symphony", "0af8ad67-37b9-412a-9869-82ca96b418e1")
+        .await
         .expect("query issue")
         .expect("issue row");
     assert_eq!(issue.cleanup_status, CleanupStatus::Pending);
@@ -425,6 +439,7 @@ fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
             "0af8ad67-37b9-412a-9869-82ca96b418e1",
             "oc-session-1",
         )
+        .await
         .expect("query session")
         .expect("session row");
     assert_eq!(session.agent, "build");
@@ -436,7 +451,9 @@ fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
     assert_eq!(session.active_agent.as_deref(), Some("rust-engineer"));
     assert_eq!(session.token_count, 1440);
 
-    let read_model = RuntimeReadModel::from_store(&reloaded).expect("read model");
+    let read_model = RuntimeReadModel::from_store(&reloaded)
+        .await
+        .expect("read model");
     assert_eq!(read_model.projects[0].project_id, "symphony");
     assert_eq!(
         read_model.projects[0].issues[0].opencode_sessions[0].session_id,
@@ -450,14 +467,14 @@ fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
     );
 }
 
-#[test]
-fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() {
+#[tokio::test]
+async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
 
     let mut repair = test_issue("symphony", "repair", "SYM-91", "In Progress");
     repair.failure = Some(FailureRecord {
@@ -472,7 +489,7 @@ fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() {
         head_sha: Some("abc123".into()),
         pr_url: Some("https://example.test/pr/91".into()),
     });
-    store.upsert_issue(repair).expect("repair issue");
+    store.upsert_issue(repair).await.expect("repair issue");
 
     let mut provider_blocked = test_issue("symphony", "provider", "SYM-92", "Need Owner Input");
     provider_blocked.lifecycle_stage = LifecycleStage::Blocked;
@@ -483,12 +500,13 @@ fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() {
     });
     store
         .upsert_issue(provider_blocked)
+        .await
         .expect("provider issue");
 
     let mut completed = test_issue("symphony", "done", "SYM-93", "Done");
     completed.lifecycle_stage = LifecycleStage::Completed;
     completed.cleanup_status = CleanupStatus::Complete;
-    store.upsert_issue(completed).expect("done issue");
+    store.upsert_issue(completed).await.expect("done issue");
 
     let mut session = test_session(
         "symphony",
@@ -505,7 +523,10 @@ fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() {
     session.eval_stage = Some("cargo clippy".into());
     session.lifecycle_marker = Some("repair_loop".into());
     session.last_event = Some("eval_failed:clippy-needless-collect".into());
-    store.upsert_opencode_session(session).expect("session");
+    store
+        .upsert_opencode_session(session)
+        .await
+        .expect("session");
     store
         .upsert_opencode_stage_event(OpenCodeStageEventRecord {
             project_id: "symphony".into(),
@@ -515,6 +536,7 @@ fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() {
             stage: OpenCodeStage::Running,
             event: Some("implementation_started".into()),
         })
+        .await
         .expect("running stage event");
     store
         .upsert_opencode_stage_event(OpenCodeStageEventRecord {
@@ -525,6 +547,7 @@ fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() {
             stage: OpenCodeStage::Eval,
             event: Some("eval_failed:clippy-needless-collect".into()),
         })
+        .await
         .expect("eval stage event");
     store
         .upsert_eval_run(EvalRunRecord {
@@ -535,9 +558,12 @@ fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() {
             status: "failed".into(),
             details_json: Some(r#"{"fingerprint":"clippy-needless-collect"}"#.into()),
         })
+        .await
         .expect("eval run");
 
-    let api = RuntimeDashboardApi::from_store(&config, &store).expect("dashboard api");
+    let api = RuntimeDashboardApi::from_store(&config, &store)
+        .await
+        .expect("dashboard api");
     let aggregate_json = serde_json::to_string_pretty(&api.aggregate()).expect("aggregate json");
     let project_json = serde_json::to_string_pretty(
         &api.project_drilldown("symphony")
@@ -592,31 +618,35 @@ fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() {
     assert!(issue_json.contains(r#""pr_url": "https://example.test/pr/91""#));
 }
 
-#[test]
-fn dashboard_api_json_routes_aggregate_project_and_issue_paths() {
+#[tokio::test]
+async fn dashboard_api_json_routes_aggregate_project_and_issue_paths() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
     let issue = test_issue("symphony", "api-issue", "SYM-94", "In Progress");
-    store.upsert_issue(issue).expect("issue");
+    store.upsert_issue(issue).await.expect("issue");
 
     let aggregate =
         symphony_vnext::api::runtime_api_json_response(&config, &store, "/api/dashboard")
+            .await
             .expect("aggregate response");
     let project =
         symphony_vnext::api::runtime_api_json_response(&config, &store, "/api/projects/symphony")
+            .await
             .expect("project response");
     let issue = symphony_vnext::api::runtime_api_json_response(
         &config,
         &store,
         "/api/projects/symphony/issues/api-issue",
     )
+    .await
     .expect("issue response");
     let missing =
         symphony_vnext::api::runtime_api_json_response(&config, &store, "/api/projects/missing")
+            .await
             .expect("missing response");
 
     assert_eq!(aggregate.status, 200);
@@ -628,8 +658,8 @@ fn dashboard_api_json_routes_aggregate_project_and_issue_paths() {
     assert!(issue.body.contains(r#""identifier":"SYM-94""#));
 }
 
-#[test]
-fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_issue_prompt() {
+#[tokio::test]
+async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_issue_prompt() {
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
     let project = config.project("symphony").expect("project");
     let issue = linear_issue("issue-27", "SYM-27", "Todo", Some(1))
@@ -657,8 +687,8 @@ fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_issue_
     );
 }
 
-#[test]
-fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
+#[tokio::test]
+async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
     let dir = tempfile::tempdir().expect("tempdir");
     let transcript_path = dir.path().join("acp-transcript.jsonl");
     let script_path = write_fake_acp_script(dir.path(), &transcript_path);
@@ -679,7 +709,7 @@ fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
     };
     let launcher = opencode::StdioOpenCodeLauncher;
 
-    let started = launcher.launch(&spec).expect("launch stdio child");
+    let started = launcher.launch(&spec).await.expect("launch stdio child");
 
     assert_eq!(started.session_id, "ses-test");
     for _ in 0..50 {
@@ -722,10 +752,15 @@ fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
                 transcript.contains("Full Linear issue spec"),
                 "{transcript}"
             );
+            assert!(
+                transcript.contains("OpenCode ACP session id: ses-test"),
+                "{transcript}"
+            );
 
             let session = test_session("symphony", "issue-27", "ses-test", &worktree);
             let handoff = launcher
                 .latest_handoff(&session)
+                .await
                 .expect("handoff read")
                 .expect("fake acp handoff");
             assert_eq!(handoff.session_id, "ses-test");
@@ -741,8 +776,61 @@ fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
     );
 }
 
-#[test]
-fn installed_opencode_acp_supports_ndjson_config_options_without_prompting() {
+#[tokio::test]
+async fn stdio_launcher_removes_stale_handoff_before_prompting_new_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transcript_path = dir.path().join("acp-transcript.jsonl");
+    let script_path = write_fake_acp_script_without_handoff(dir.path(), &transcript_path);
+    let worktree_root = dir.path().join("worktrees");
+    let worktree = worktree_root.join("SYM-201");
+    let sidecar_dir = worktree.join(".symphony");
+    let sidecar_path = sidecar_dir.join("opencode-handoff.json");
+    fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
+    fs::write(
+        &sidecar_path,
+        r#"{"session_id":"stale-session","stop_reason":{"type":"success"}}"#,
+    )
+    .expect("stale handoff");
+    let spec = opencode::OpenCodeLaunchSpec {
+        command: script_path,
+        args: Vec::new(),
+        cwd: worktree,
+        worktree_root: Some(worktree_root),
+        issue_identifier: "SYM-201".into(),
+        repo_path: None,
+        base_ref: None,
+        agent: "build".into(),
+        model: Some("openai/gpt-5.5".into()),
+        effort: Some("high".into()),
+        prompt: "Full Linear issue spec with eval defaults".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+    let launcher = opencode::StdioOpenCodeLauncher;
+
+    let started = launcher.launch(&spec).await.expect("launch stdio child");
+
+    assert_eq!(started.session_id, "ses-test");
+    assert!(
+        !sidecar_path.exists(),
+        "stale handoff must not survive a new ACP launch"
+    );
+    for _ in 0..50 {
+        if let Ok(transcript) = fs::read_to_string(&transcript_path)
+            && transcript.contains(r#""method": "session/prompt""#)
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    panic!(
+        "ACP prompt was not observed after stale handoff cleanup; transcript={:?}",
+        fs::read_to_string(transcript_path)
+    );
+}
+
+#[tokio::test]
+async fn installed_opencode_acp_supports_ndjson_config_options_without_prompting() {
     if std::env::var("SYMPHONY_VNEXT_LIVE_OPENCODE_ACP")
         .ok()
         .as_deref()
@@ -845,8 +933,8 @@ fn installed_opencode_acp_supports_ndjson_config_options_without_prompting() {
     let _ = child.wait();
 }
 
-#[test]
-fn stdio_launcher_creates_git_worktree_from_project_repo_and_base_ref() {
+#[tokio::test]
+async fn stdio_launcher_creates_git_worktree_from_project_repo_and_base_ref() {
     let dir = tempfile::tempdir().expect("tempdir");
     let repo = dir.path().join("repo");
     fs::create_dir_all(&repo).expect("repo dir");
@@ -877,7 +965,7 @@ fn stdio_launcher_creates_git_worktree_from_project_repo_and_base_ref() {
     };
     let launcher = opencode::StdioOpenCodeLauncher;
 
-    let started = launcher.launch(&spec).expect("launch stdio child");
+    let started = launcher.launch(&spec).await.expect("launch stdio child");
 
     assert_eq!(started.session_id, "ses-test");
     for _ in 0..50 {
@@ -899,8 +987,8 @@ fn stdio_launcher_creates_git_worktree_from_project_repo_and_base_ref() {
     );
 }
 
-#[test]
-fn stdio_launcher_rejects_issue_identifier_path_separators_before_worktree_creation() {
+#[tokio::test]
+async fn stdio_launcher_rejects_issue_identifier_path_separators_before_worktree_creation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("worktrees");
     let nested = root.join("SYM").join("200");
@@ -922,6 +1010,7 @@ fn stdio_launcher_rejects_issue_identifier_path_separators_before_worktree_creat
 
     let error = launcher
         .launch(&spec)
+        .await
         .expect_err("unsafe identifier must be rejected before spawn");
 
     assert!(
@@ -934,8 +1023,8 @@ fn stdio_launcher_rejects_issue_identifier_path_separators_before_worktree_creat
     );
 }
 
-#[test]
-fn opencode_event_ingestion_updates_stage_telemetry_without_losing_session_linkage() {
+#[tokio::test]
+async fn opencode_event_ingestion_updates_stage_telemetry_without_losing_session_linkage() {
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
     let project = config.project("symphony").expect("project");
     let issue = linear_issue("issue-27", "SYM-27", "In Progress", Some(1));
@@ -982,8 +1071,8 @@ fn opencode_event_ingestion_updates_stage_telemetry_without_losing_session_linka
     assert_eq!(session.last_event.as_deref(), Some("tests_started"));
 }
 
-#[test]
-fn opencode_silence_is_observable_without_marking_session_failed() {
+#[tokio::test]
+async fn opencode_silence_is_observable_without_marking_session_failed() {
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
     let project = config.project("symphony").expect("project");
     let issue = linear_issue("issue-27", "SYM-27", "In Progress", Some(1));
@@ -1009,8 +1098,8 @@ fn opencode_silence_is_observable_without_marking_session_failed() {
     assert!(session.failure_marker().is_none());
 }
 
-#[test]
-fn daemon_once_entrypoint_validates_config_migrates_and_reconciles_projects() {
+#[tokio::test]
+async fn daemon_once_entrypoint_validates_config_migrates_and_reconciles_projects() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config_path = dir.path().join("projects.yml");
     let db_path = dir.path().join("runtime.sqlite3");
@@ -1025,13 +1114,15 @@ fn daemon_once_entrypoint_validates_config_migrates_and_reconciles_projects() {
         db_path.to_str().expect("utf8 db path"),
         "--once",
     ])
+    .await
     .expect("daemon bootstrap");
 
-    let store = SqliteStore::open(&db_path).expect("reopen sqlite");
-    store.migrate().expect("migrate idempotently");
+    let store = SqliteStore::open(&db_path).await.expect("reopen sqlite");
+    store.migrate().await.expect("migrate idempotently");
 
     let project = store
         .project("symphony")
+        .await
         .expect("query project")
         .expect("project row");
     assert_eq!(project.name, "Symphony");
@@ -1039,16 +1130,17 @@ fn daemon_once_entrypoint_validates_config_migrates_and_reconciles_projects() {
     assert_eq!(project.cleanup_status, CleanupStatus::Clean);
 }
 
-#[test]
-fn orchestration_dispatches_one_eligible_todo_by_project_capacity_and_order() {
+#[tokio::test]
+async fn orchestration_dispatches_one_eligible_todo_by_project_capacity_and_order() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
     store
         .upsert_issue(test_issue("symphony", "running-1", "SYM-21", "In Progress"))
+        .await
         .expect("running issue");
 
     let client = RecordingLinearClient::new(vec![
@@ -1057,8 +1149,9 @@ fn orchestration_dispatches_one_eligible_todo_by_project_capacity_and_order() {
         linear_issue("todo-high-priority", "SYM-22", "Todo", Some(1)),
     ]);
 
-    let report =
-        daemon::run_once_with_linear_client(&config, &store, &client).expect("orchestrate once");
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
 
     assert_eq!(report.dispatched, vec!["SYM-22"]);
     assert_eq!(
@@ -1068,6 +1161,7 @@ fn orchestration_dispatches_one_eligible_todo_by_project_capacity_and_order() {
     assert_eq!(
         store
             .issue("symphony", "todo-high-priority")
+            .await
             .expect("query dispatched")
             .expect("dispatched")
             .lifecycle_stage,
@@ -1076,19 +1170,20 @@ fn orchestration_dispatches_one_eligible_todo_by_project_capacity_and_order() {
     assert!(
         store
             .issue("symphony", "backlog-1")
+            .await
             .expect("backlog")
             .is_none()
     );
 }
 
-#[test]
-fn orchestration_never_dispatches_nonterminal_blockers_or_backlog() {
+#[tokio::test]
+async fn orchestration_never_dispatches_nonterminal_blockers_or_backlog() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
 
     let blocked =
         linear_issue("blocked", "SYM-40", "Todo", Some(1)).blocked_by(vec![LinearBlocker {
@@ -1108,8 +1203,9 @@ fn orchestration_never_dispatches_nonterminal_blockers_or_backlog() {
         unblocked,
     ]);
 
-    let report =
-        daemon::run_once_with_linear_client(&config, &store, &client).expect("orchestrate once");
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
 
     assert_eq!(report.dispatched, vec!["SYM-41"]);
     assert_eq!(
@@ -1118,6 +1214,7 @@ fn orchestration_never_dispatches_nonterminal_blockers_or_backlog() {
     );
     let blocked_row = store
         .issue("symphony", "blocked")
+        .await
         .expect("query blocked")
         .expect("blocked row");
     assert_eq!(blocked_row.lifecycle_stage, LifecycleStage::Blocked);
@@ -1125,19 +1222,20 @@ fn orchestration_never_dispatches_nonterminal_blockers_or_backlog() {
     assert!(
         store
             .issue("symphony", "backlog")
+            .await
             .expect("backlog")
             .is_none()
     );
 }
 
-#[test]
-fn orchestration_reconciles_persisted_backlog_without_counting_capacity() {
+#[tokio::test]
+async fn orchestration_reconciles_persisted_backlog_without_counting_capacity() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
     store
         .upsert_issue(test_issue(
             "symphony",
@@ -1145,6 +1243,7 @@ fn orchestration_reconciles_persisted_backlog_without_counting_capacity() {
             "SYM-45",
             "In Progress",
         ))
+        .await
         .expect("persisted running backlog issue");
     store
         .upsert_issue(test_issue(
@@ -1153,6 +1252,7 @@ fn orchestration_reconciles_persisted_backlog_without_counting_capacity() {
             "SYM-46",
             "In Progress",
         ))
+        .await
         .expect("persisted running issue");
 
     let client = RecordingLinearClient::new(vec![
@@ -1160,13 +1260,15 @@ fn orchestration_reconciles_persisted_backlog_without_counting_capacity() {
         linear_issue("eligible", "SYM-47", "Todo", Some(2)),
     ]);
 
-    let report =
-        daemon::run_once_with_linear_client(&config, &store, &client).expect("orchestrate once");
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
 
     assert_eq!(report.dispatched, vec!["SYM-47"]);
     assert_eq!(
         store
             .issue("symphony", "parked-plan")
+            .await
             .expect("query backlog")
             .expect("backlog row")
             .lifecycle_stage,
@@ -1178,14 +1280,14 @@ fn orchestration_reconciles_persisted_backlog_without_counting_capacity() {
     );
 }
 
-#[test]
-fn orchestration_keeps_owner_input_parked_until_answer_or_manual_todo() {
+#[tokio::test]
+async fn orchestration_keeps_owner_input_parked_until_answer_or_manual_todo() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
 
     let parked = linear_issue("parked", "SYM-50", "Need Owner Input", Some(1));
     let answered = linear_issue("answered", "SYM-51", "Need Owner Input", Some(2))
@@ -1193,8 +1295,9 @@ fn orchestration_keeps_owner_input_parked_until_answer_or_manual_todo() {
     let manually_requeued = linear_issue("manual", "SYM-52", "Todo", Some(3));
     let client = RecordingLinearClient::new(vec![parked, answered, manually_requeued]);
 
-    let report =
-        daemon::run_once_with_linear_client(&config, &store, &client).expect("orchestrate once");
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
 
     assert_eq!(report.dispatched, vec!["SYM-52"]);
     assert_eq!(
@@ -1207,6 +1310,7 @@ fn orchestration_keeps_owner_input_parked_until_answer_or_manual_todo() {
     assert_eq!(
         store
             .issue("symphony", "parked")
+            .await
             .expect("query parked")
             .expect("parked")
             .lifecycle_stage,
@@ -1214,14 +1318,14 @@ fn orchestration_keeps_owner_input_parked_until_answer_or_manual_todo() {
     );
 }
 
-#[test]
-fn orchestration_ignores_owner_input_comments_that_predate_the_parked_record() {
+#[tokio::test]
+async fn orchestration_ignores_owner_input_comments_that_predate_the_parked_record() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
     let mut stale = test_issue("symphony", "stale", "SYM-53", "Need Owner Input");
     stale.lifecycle_stage = LifecycleStage::Blocked;
     stale.blocker = Some(BlockerRecord {
@@ -1229,14 +1333,16 @@ fn orchestration_ignores_owner_input_comments_that_predate_the_parked_record() {
         message: "waiting for owner answer".into(),
         observed_at: Some("2026-06-10T00:05:00Z".into()),
     });
-    store.upsert_issue(stale).expect("stale issue");
+    store.upsert_issue(stale).await.expect("stale issue");
 
     let client = RecordingLinearClient::new(vec![
         linear_issue("stale", "SYM-53", "Need Owner Input", Some(1))
             .with_new_owner_answer_at("2026-06-10T00:03:00Z"),
     ]);
 
-    daemon::run_once_with_linear_client(&config, &store, &client).expect("orchestrate once");
+    daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
 
     assert_eq!(
         client.transitions(),
@@ -1245,6 +1351,7 @@ fn orchestration_ignores_owner_input_comments_that_predate_the_parked_record() {
     assert_eq!(
         store
             .issue("symphony", "stale")
+            .await
             .expect("query stale")
             .expect("stale")
             .lifecycle_stage,
@@ -1252,15 +1359,15 @@ fn orchestration_ignores_owner_input_comments_that_predate_the_parked_record() {
     );
 }
 
-#[test]
-fn orchestration_ignores_new_symphony_evidence_comments_after_parked_record() {
+#[tokio::test]
+async fn orchestration_ignores_new_symphony_evidence_comments_after_parked_record() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
     let project = config.project("symphony").expect("project");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
     let mut parked = test_issue("symphony", "parked", "SYM-54", "Need Owner Input");
     parked.lifecycle_stage = LifecycleStage::Blocked;
     parked.blocker = Some(BlockerRecord {
@@ -1268,7 +1375,7 @@ fn orchestration_ignores_new_symphony_evidence_comments_after_parked_record() {
         message: "waiting for owner answer".into(),
         observed_at: Some("2026-06-10T00:05:00Z".into()),
     });
-    store.upsert_issue(parked).expect("parked issue");
+    store.upsert_issue(parked).await.expect("parked issue");
 
     let transport = RecordingGraphqlTransport::new(vec![serde_json::json!({
         "data": {
@@ -1308,12 +1415,15 @@ fn orchestration_ignores_new_symphony_evidence_comments_after_parked_record() {
         transport.clone(),
     );
 
-    daemon::run_once_with_linear_client(&config, &store, &client).expect("orchestrate once");
+    daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
 
     assert_eq!(transport.requests().len(), 1);
     assert_eq!(
         store
             .issue(project.id.as_str(), "parked")
+            .await
             .expect("query parked")
             .expect("parked")
             .lifecycle_stage,
@@ -1321,16 +1431,17 @@ fn orchestration_ignores_new_symphony_evidence_comments_after_parked_record() {
     );
 }
 
-#[test]
-fn orchestration_reconciles_terminal_issues_and_avoids_duplicate_dispatch_after_restart() {
+#[tokio::test]
+async fn orchestration_reconciles_terminal_issues_and_avoids_duplicate_dispatch_after_restart() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
     store
         .upsert_issue(test_issue("symphony", "finished", "SYM-60", "In Progress"))
+        .await
         .expect("finished issue");
 
     let first_poll = RecordingLinearClient::new(vec![
@@ -1342,8 +1453,12 @@ fn orchestration_reconciles_terminal_issues_and_avoids_duplicate_dispatch_after_
         linear_issue("new-work", "SYM-61", "In Progress", Some(2)),
     ]);
 
-    daemon::run_once_with_linear_client(&config, &store, &first_poll).expect("first poll");
-    daemon::run_once_with_linear_client(&config, &store, &restart_poll).expect("restart poll");
+    daemon::run_once_with_linear_client(&config, &store, &first_poll)
+        .await
+        .expect("first poll");
+    daemon::run_once_with_linear_client(&config, &store, &restart_poll)
+        .await
+        .expect("restart poll");
 
     assert_eq!(
         first_poll.transitions(),
@@ -1352,6 +1467,7 @@ fn orchestration_reconciles_terminal_issues_and_avoids_duplicate_dispatch_after_
     assert!(restart_poll.transitions().is_empty());
     let finished = store
         .issue("symphony", "finished")
+        .await
         .expect("query finished")
         .expect("finished");
     assert_eq!(finished.lifecycle_stage, LifecycleStage::Completed);
@@ -1359,33 +1475,77 @@ fn orchestration_reconciles_terminal_issues_and_avoids_duplicate_dispatch_after_
     assert_eq!(
         store
             .opencode_sessions_for_issue("symphony", "new-work")
+            .await
             .expect("sessions")
             .len(),
         1
     );
 }
 
-#[test]
-fn orchestration_restores_requeued_issue_with_existing_session_without_duplicate_launch() {
+#[tokio::test]
+async fn terminal_reconciliation_marks_cleanup_complete_when_worktree_is_already_absent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let missing_worktree = dir.path().join("already-removed").join("SYM-63");
+    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let mut closed = test_issue("symphony", "closed", "SYM-63", "Done");
+    closed.cleanup_status = CleanupStatus::Pending;
+    closed.git_ref = Some(GitRefRecord {
+        branch: "agent-server/opencode-runner-extension".into(),
+        worktree_path: missing_worktree.display().to_string(),
+        head_sha: None,
+        pr_url: None,
+    });
+    store.upsert_issue(closed).await.expect("closed issue");
+
+    let client =
+        RecordingLinearClient::new(vec![linear_issue("closed", "SYM-63", "Done", Some(1))]);
+
+    daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("terminal reconciliation");
+
+    let closed = store
+        .issue("symphony", "closed")
+        .await
+        .expect("query closed")
+        .expect("closed issue");
+    assert_eq!(closed.lifecycle_stage, LifecycleStage::Completed);
+    assert_eq!(closed.cleanup_status, CleanupStatus::Complete);
+    assert_eq!(
+        closed.git_ref.expect("git ref").worktree_path,
+        missing_worktree.display().to_string()
+    );
+}
+
+#[tokio::test]
+async fn orchestration_restores_requeued_issue_with_existing_session_without_duplicate_launch() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let worktree = dir.path().join("SYM-62-worktree");
     fs::create_dir_all(&worktree).expect("worktree");
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
     store
         .upsert_issue(test_issue("symphony", "requeued", "SYM-62", "In Progress"))
+        .await
         .expect("running issue");
     store
         .upsert_opencode_session(test_session("symphony", "requeued", "oc-62", &worktree))
+        .await
         .expect("running session");
 
     let client =
         RecordingLinearClient::new(vec![linear_issue("requeued", "SYM-62", "Todo", Some(1))]);
 
-    daemon::run_once_with_linear_client(&config, &store, &client).expect("poll");
+    daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("poll");
 
     assert_eq!(
         client.transitions(),
@@ -1393,6 +1553,7 @@ fn orchestration_restores_requeued_issue_with_existing_session_without_duplicate
     );
     let issue = store
         .issue("symphony", "requeued")
+        .await
         .expect("query requeued")
         .expect("requeued");
     assert_eq!(issue.state, "In Progress");
@@ -1400,14 +1561,15 @@ fn orchestration_restores_requeued_issue_with_existing_session_without_duplicate
     assert_eq!(
         store
             .opencode_sessions_for_issue("symphony", "requeued")
+            .await
             .expect("sessions")
             .len(),
         1
     );
 }
 
-#[test]
-fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_worktree() {
+#[tokio::test]
+async fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_worktree() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let repo = dir.path().join("repo");
@@ -1442,14 +1604,16 @@ fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_worktree
             &worktree_root.display().to_string(),
         );
     let config = RootConfig::from_yaml_str(&config_yaml).expect("config");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
     store
         .upsert_issue(test_issue("symphony", "completed", "SYM-80", "In Progress"))
+        .await
         .expect("running issue");
     store
         .upsert_opencode_session(test_session("symphony", "completed", "oc-80", &worktree))
+        .await
         .expect("running session");
 
     let client = RecordingLinearClient::new(vec![linear_issue(
@@ -1465,7 +1629,9 @@ fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_worktree
         "abc123def456",
     )));
 
-    daemon::run_once_with_clients(&config, &store, &client, &opencode).expect("orchestrate once");
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
 
     assert_eq!(
         client.transitions(),
@@ -1479,6 +1645,7 @@ fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_worktree
     }));
     let completed = store
         .issue("symphony", "completed")
+        .await
         .expect("query completed")
         .expect("completed issue");
     assert_eq!(completed.state, "Done");
@@ -1497,6 +1664,23 @@ fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_worktree
             .contains(worktree.to_str().expect("worktree path utf8")),
         "accepted handoff must unregister the git worktree"
     );
+
+    let terminal_poll =
+        RecordingLinearClient::new(vec![linear_issue("completed", "SYM-80", "Done", Some(1))]);
+    daemon::run_once_with_linear_client(&config, &store, &terminal_poll)
+        .await
+        .expect("terminal reconciliation");
+    let reconciled = store
+        .issue("symphony", "completed")
+        .await
+        .expect("query reconciled")
+        .expect("reconciled issue");
+    assert_eq!(reconciled.cleanup_status, CleanupStatus::Complete);
+    assert_eq!(
+        reconciled.git_ref.expect("git ref").head_sha.as_deref(),
+        Some("abc123def456")
+    );
+
     run_git(
         &repo,
         [
@@ -1509,8 +1693,109 @@ fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_worktree
     );
 }
 
-#[test]
-fn successful_handoff_with_worktree_outside_configured_root_is_parked_without_cleanup() {
+#[tokio::test]
+async fn no_code_success_handoff_can_close_without_commit_sha() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    run_git(&repo, ["init"]);
+    run_git(&repo, ["config", "user.email", "symphony@example.test"]);
+    run_git(&repo, ["config", "user.name", "Symphony Test"]);
+    fs::write(repo.join("README.md"), "base checkout").expect("readme");
+    run_git(&repo, ["add", "README.md"]);
+    run_git(&repo, ["commit", "-m", "base"]);
+    run_git(&repo, ["branch", "agent-server/opencode-runner-extension"]);
+    let worktree_root = dir.path().join("allowed-worktrees");
+    let worktree = worktree_root.join("SYM-79");
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "--detach",
+            worktree.to_str().expect("worktree path utf8"),
+            "agent-server/opencode-runner-extension",
+        ],
+    );
+    let config_yaml = valid_config_yaml()
+        .replace(
+            "repo_path: /home/agent/proj/symphony",
+            &format!("repo_path: {}", repo.display()),
+        )
+        .replace(
+            "/home/agent/.symphony/workspaces/opencode/symphony",
+            &worktree_root.display().to_string(),
+        );
+    let config = RootConfig::from_yaml_str(&config_yaml).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "no-code", "SYM-79", "In Progress"))
+        .await
+        .expect("running issue");
+    store
+        .upsert_opencode_session(test_session("symphony", "no-code", "oc-79", &worktree))
+        .await
+        .expect("running session");
+
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "no-code",
+        "SYM-79",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(Some(OpenCodeHandoff {
+        session_id: "oc-79".into(),
+        lifecycle_stages: vec![
+            OpenCodeStage::Running,
+            OpenCodeStage::Handoff,
+            OpenCodeStage::Completed,
+        ],
+        subagents: Vec::new(),
+        eval_results: vec![OpenCodeEvalResult {
+            suite: "symphony-vnext-smoke".into(),
+            passed: true,
+            failure_fingerprint: None,
+            details: Some("no-code smoke passed".into()),
+        }],
+        changed_files: Vec::new(),
+        git: Some(GitClosureEvidence {
+            branch: "agent-server/opencode-runner-extension".into(),
+            head_sha: None,
+            pr_url: None,
+            worktree_path: worktree.display().to_string(),
+        }),
+        risks: Vec::new(),
+        stop_reason: OpenCodeStopReason::Success,
+    }));
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("no-code".into(), LinearTransition::Done)]
+    );
+    let completed = store
+        .issue("symphony", "no-code")
+        .await
+        .expect("query no-code")
+        .expect("no-code issue");
+    assert_eq!(completed.state, "Done");
+    assert_eq!(completed.lifecycle_stage, LifecycleStage::Completed);
+    assert_eq!(completed.cleanup_status, CleanupStatus::Complete);
+    assert_eq!(
+        completed.git_ref.expect("git ref").head_sha.as_deref(),
+        None
+    );
+    assert!(!worktree.exists(), "no-code success must remove worktree");
+}
+
+#[tokio::test]
+async fn successful_handoff_with_worktree_outside_configured_root_is_parked_without_cleanup() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let allowed_root = dir.path().join("allowed-worktrees");
@@ -1522,14 +1807,16 @@ fn successful_handoff_with_worktree_outside_configured_root_is_parked_without_cl
         allowed_root.to_str().expect("allowed root utf8"),
     ))
     .expect("config");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
     store
         .upsert_issue(test_issue("symphony", "completed", "SYM-80", "In Progress"))
+        .await
         .expect("running issue");
     store
         .upsert_opencode_session(test_session("symphony", "completed", "oc-80", &outside))
+        .await
         .expect("running session");
 
     let client = RecordingLinearClient::new(vec![linear_issue(
@@ -1545,7 +1832,9 @@ fn successful_handoff_with_worktree_outside_configured_root_is_parked_without_cl
         "abc123def456",
     )));
 
-    daemon::run_once_with_clients(&config, &store, &client, &opencode).expect("orchestrate once");
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
 
     assert_eq!(
         client.transitions(),
@@ -1561,8 +1850,8 @@ fn successful_handoff_with_worktree_outside_configured_root_is_parked_without_cl
     );
 }
 
-#[test]
-fn successful_handoff_with_sibling_worktree_is_parked_without_cleanup() {
+#[tokio::test]
+async fn successful_handoff_with_sibling_worktree_is_parked_without_cleanup() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let allowed_root = dir.path().join("allowed-worktrees");
@@ -1576,14 +1865,16 @@ fn successful_handoff_with_sibling_worktree_is_parked_without_cleanup() {
         allowed_root.to_str().expect("allowed root utf8"),
     ))
     .expect("config");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
     store
         .upsert_issue(test_issue("symphony", "completed", "SYM-80", "In Progress"))
+        .await
         .expect("running issue");
     store
         .upsert_opencode_session(test_session("symphony", "completed", "oc-80", &active))
+        .await
         .expect("running session");
 
     let client = RecordingLinearClient::new(vec![linear_issue(
@@ -1599,7 +1890,9 @@ fn successful_handoff_with_sibling_worktree_is_parked_without_cleanup() {
         "abc123def456",
     )));
 
-    daemon::run_once_with_clients(&config, &store, &client, &opencode).expect("orchestrate once");
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
 
     assert_eq!(
         client.transitions(),
@@ -1615,8 +1908,8 @@ fn successful_handoff_with_sibling_worktree_is_parked_without_cleanup() {
     }));
 }
 
-#[test]
-fn successful_handoff_with_whitespace_worktree_path_is_parked_without_cleanup() {
+#[tokio::test]
+async fn successful_handoff_with_whitespace_worktree_path_is_parked_without_cleanup() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let allowed_root = dir.path().join("allowed-worktrees");
@@ -1628,14 +1921,16 @@ fn successful_handoff_with_whitespace_worktree_path_is_parked_without_cleanup() 
         allowed_root.to_str().expect("allowed root utf8"),
     ))
     .expect("config");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
     store
         .upsert_issue(test_issue("symphony", "completed", "SYM-80", "In Progress"))
+        .await
         .expect("running issue");
     store
         .upsert_opencode_session(test_session("symphony", "completed", "oc-80", &active))
+        .await
         .expect("running session");
 
     let client = RecordingLinearClient::new(vec![linear_issue(
@@ -1651,7 +1946,9 @@ fn successful_handoff_with_whitespace_worktree_path_is_parked_without_cleanup() 
         "abc123def456",
     )));
 
-    daemon::run_once_with_clients(&config, &store, &client, &opencode).expect("orchestrate once");
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
 
     assert_eq!(
         client.transitions(),
@@ -1664,20 +1961,22 @@ fn successful_handoff_with_whitespace_worktree_path_is_parked_without_cleanup() 
     }));
 }
 
-#[test]
-fn eval_failure_stays_in_opencode_repair_loop_without_linear_churn() {
+#[tokio::test]
+async fn eval_failure_stays_in_opencode_repair_loop_without_linear_churn() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let worktree = dir.path().join("SYM-81-worktree");
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
     store
         .upsert_issue(test_issue("symphony", "repair", "SYM-81", "In Progress"))
+        .await
         .expect("running issue");
     store
         .upsert_opencode_session(test_session("symphony", "repair", "oc-81", &worktree))
+        .await
         .expect("running session");
     let client = RecordingLinearClient::new(vec![linear_issue(
         "repair",
@@ -1688,7 +1987,9 @@ fn eval_failure_stays_in_opencode_repair_loop_without_linear_churn() {
     let opencode =
         ScriptedOpenCodeLauncher::new(Some(eval_failed_handoff("oc-81", "fmt-check-7f")));
 
-    daemon::run_once_with_clients(&config, &store, &client, &opencode).expect("orchestrate once");
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
 
     assert!(client.transitions().is_empty());
     assert_eq!(
@@ -1697,6 +1998,7 @@ fn eval_failure_stays_in_opencode_repair_loop_without_linear_churn() {
     );
     let issue = store
         .issue("symphony", "repair")
+        .await
         .expect("query repair")
         .expect("repair issue");
     assert_eq!(issue.state, "In Progress");
@@ -1707,15 +2009,15 @@ fn eval_failure_stays_in_opencode_repair_loop_without_linear_churn() {
     assert_eq!(failure.occurrence_count, 1);
 }
 
-#[test]
-fn repeated_identical_eval_failure_parks_owner_input_with_typed_evidence() {
+#[tokio::test]
+async fn repeated_identical_eval_failure_parks_owner_input_with_typed_evidence() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let worktree = dir.path().join("SYM-82-worktree");
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
     let mut issue = test_issue("symphony", "repeat", "SYM-82", "In Progress");
     issue.failure = Some(FailureRecord {
         kind: "eval_failure".into(),
@@ -1723,9 +2025,10 @@ fn repeated_identical_eval_failure_parks_owner_input_with_typed_evidence() {
         fingerprint: Some("lint-loop".into()),
         occurrence_count: 1,
     });
-    store.upsert_issue(issue).expect("running issue");
+    store.upsert_issue(issue).await.expect("running issue");
     store
         .upsert_opencode_session(test_session("symphony", "repeat", "oc-82", &worktree))
+        .await
         .expect("running session");
     let client = RecordingLinearClient::new(vec![linear_issue(
         "repeat",
@@ -1735,7 +2038,9 @@ fn repeated_identical_eval_failure_parks_owner_input_with_typed_evidence() {
     )]);
     let opencode = ScriptedOpenCodeLauncher::new(Some(eval_failed_handoff("oc-82", "lint-loop")));
 
-    daemon::run_once_with_clients(&config, &store, &client, &opencode).expect("orchestrate once");
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
 
     assert_eq!(
         client.transitions(),
@@ -1744,6 +2049,7 @@ fn repeated_identical_eval_failure_parks_owner_input_with_typed_evidence() {
     assert!(opencode.repairs().is_empty());
     let issue = store
         .issue("symphony", "repeat")
+        .await
         .expect("query repeat")
         .expect("repeat issue");
     assert_eq!(issue.state, "Need Owner Input");
@@ -1754,14 +2060,14 @@ fn repeated_identical_eval_failure_parks_owner_input_with_typed_evidence() {
     );
 }
 
-#[test]
-fn provider_blocker_owner_question_and_malformed_handoff_park_without_closing() {
+#[tokio::test]
+async fn provider_blocker_owner_question_and_malformed_handoff_park_without_closing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
 
     let cases = [
         (
@@ -1824,6 +2130,7 @@ fn provider_blocker_owner_question_and_malformed_handoff_park_without_closing() 
         let worktree = dir.path().join(format!("{identifier}-worktree"));
         store
             .upsert_issue(test_issue("symphony", issue_id, identifier, "In Progress"))
+            .await
             .expect("running issue");
         store
             .upsert_opencode_session(test_session(
@@ -1832,6 +2139,7 @@ fn provider_blocker_owner_question_and_malformed_handoff_park_without_closing() 
                 &handoff.session_id,
                 &worktree,
             ))
+            .await
             .expect("running session");
         let client = RecordingLinearClient::new(vec![linear_issue(
             issue_id,
@@ -1842,6 +2150,7 @@ fn provider_blocker_owner_question_and_malformed_handoff_park_without_closing() 
         let opencode = ScriptedOpenCodeLauncher::new(Some(handoff));
 
         daemon::run_once_with_clients(&config, &store, &client, &opencode)
+            .await
             .expect("orchestrate once");
 
         assert_eq!(
@@ -1850,6 +2159,7 @@ fn provider_blocker_owner_question_and_malformed_handoff_park_without_closing() 
         );
         let issue = store
             .issue("symphony", issue_id)
+            .await
             .expect("query parked")
             .expect("parked issue");
         assert_eq!(issue.state, "Need Owner Input");
@@ -1858,21 +2168,23 @@ fn provider_blocker_owner_question_and_malformed_handoff_park_without_closing() 
     }
 }
 
-#[test]
-fn rust_path_parks_legacy_steward_states_instead_of_preserving_them() {
+#[tokio::test]
+async fn rust_path_parks_legacy_steward_states_instead_of_preserving_them() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
     let client = RecordingLinearClient::new(vec![
         linear_issue("preparing", "SYM-85", "Preparing", Some(0)),
         linear_issue("review", "SYM-86", "In Review", Some(1)),
         linear_issue("rca", "SYM-87", "RCA Required", Some(2)),
     ]);
 
-    daemon::run_once_with_linear_client(&config, &store, &client).expect("orchestrate once");
+    daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
 
     assert_eq!(
         client.transitions(),
@@ -1885,6 +2197,7 @@ fn rust_path_parks_legacy_steward_states_instead_of_preserving_them() {
     for issue_id in ["preparing", "review", "rca"] {
         let issue = store
             .issue("symphony", issue_id)
+            .await
             .expect("query parked")
             .expect("parked issue");
         assert_eq!(issue.state, "Need Owner Input");
@@ -1893,8 +2206,8 @@ fn rust_path_parks_legacy_steward_states_instead_of_preserving_them() {
     }
 }
 
-#[test]
-fn orchestration_processes_multiple_projects_in_config_order() {
+#[tokio::test]
+async fn orchestration_processes_multiple_projects_in_config_order() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_yaml_str(&valid_config_yaml().replace(
@@ -1902,9 +2215,9 @@ fn orchestration_processes_multiple_projects_in_config_order() {
         "  - id: alpha\n    name: Alpha\n    enabled: true\n    workflow_path: /home/agent/proj/alpha/WORKFLOW.md\n    repo_path: /home/agent/proj/alpha\n    branch:\n      base: main\n      worktree_root: /home/agent/.symphony/workspaces/opencode/alpha\n    linear:\n      team_key: ALPHA\n      project_id: alpha-project\n      project_milestone_id: alpha-milestone\n    opencode:\n      command: /usr/local/bin/opencode\n      args: [\"acp\"]\n      agent: build\n      model: openai/gpt-5.5\n      effort: high\n      permission_policy: reject\n    eval:\n      default_suite: alpha-smoke\n    concurrency:\n      max_sessions: 1\n  - id: symphony\n",
     ))
     .expect("config");
-    let store = SqliteStore::open(&db_path).expect("open sqlite");
-    store.migrate().expect("migrate");
-    store.reconcile_projects(&config).expect("projects");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
 
     let client = ProjectAwareLinearClient::new([
         (
@@ -1917,8 +2230,9 @@ fn orchestration_processes_multiple_projects_in_config_order() {
         ),
     ]);
 
-    let report =
-        daemon::run_once_with_linear_client(&config, &store, &client).expect("orchestrate once");
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
 
     assert_eq!(report.dispatched, vec!["ALPHA-1", "SYM-70"]);
     assert_eq!(
@@ -2176,6 +2490,49 @@ for line in sys.stdin:
     script_path
 }
 
+fn write_fake_acp_script_without_handoff(dir: &Path, transcript_path: &Path) -> PathBuf {
+    let script_path = dir.join("fake-opencode-acp-no-handoff.py");
+    let transcript_literal =
+        serde_json::to_string(&transcript_path.display().to_string()).expect("json path");
+    fs::write(
+        &script_path,
+        format!(
+            r#"#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+transcript_path = pathlib.Path({transcript_literal})
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    with transcript_path.open("a", encoding="utf-8") as transcript:
+        transcript.write(json.dumps(message, sort_keys=True) + "\n")
+
+    if method == "initialize":
+        print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "result": {{"protocolVersion": 1}}}}), flush=True)
+    elif method == "session/new":
+        print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "result": {{"sessionId": "ses-test", "configOptions": []}}}}), flush=True)
+    elif method == "session/set_config_option":
+        print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "result": {{"configOptions": []}}}}), flush=True)
+    elif method == "session/prompt":
+        print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "result": {{"stopReason": "end_turn"}}}}), flush=True)
+        break
+    else:
+        print(json.dumps({{"jsonrpc": "2.0", "id": message.get("id"), "error": {{"code": -32601, "message": "unknown method"}}}}), flush=True)
+"#
+        ),
+    )
+    .expect("fake acp script");
+    let mut permissions = fs::metadata(&script_path)
+        .expect("fake acp metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script_path, permissions).expect("fake acp executable");
+    script_path
+}
+
 fn acp_test_request<R: BufRead, W: Write>(
     stdin: &mut W,
     stdout: &mut R,
@@ -2253,54 +2610,57 @@ fn linear_issue_node_json(
 #[derive(Debug)]
 struct RecordingLinearClient {
     issues: Vec<LinearIssue>,
-    transitions: std::cell::RefCell<Vec<(String, LinearTransition)>>,
-    evidence: std::cell::RefCell<Vec<(String, LinearIssueEvidence)>>,
+    transitions: std::sync::Mutex<Vec<(String, LinearTransition)>>,
+    evidence: std::sync::Mutex<Vec<(String, LinearIssueEvidence)>>,
 }
 
 impl RecordingLinearClient {
     fn new(issues: Vec<LinearIssue>) -> Self {
         Self {
             issues,
-            transitions: std::cell::RefCell::new(Vec::new()),
-            evidence: std::cell::RefCell::new(Vec::new()),
+            transitions: std::sync::Mutex::new(Vec::new()),
+            evidence: std::sync::Mutex::new(Vec::new()),
         }
     }
 
     fn transitions(&self) -> Vec<(String, LinearTransition)> {
-        self.transitions.borrow().clone()
+        self.transitions.lock().expect("transitions lock").clone()
     }
 
     fn evidence(&self) -> Vec<(String, LinearIssueEvidence)> {
-        self.evidence.borrow().clone()
+        self.evidence.lock().expect("evidence lock").clone()
     }
 }
 
+#[async_trait::async_trait]
 impl LinearClient for RecordingLinearClient {
-    fn fetch_candidate_issues(
+    async fn fetch_candidate_issues(
         &self,
         _project: &symphony_vnext::config::ProjectConfig,
     ) -> Result<Vec<LinearIssue>, LinearClientError> {
         Ok(self.issues.clone())
     }
 
-    fn transition_issue(
+    async fn transition_issue(
         &self,
         issue_id: &str,
         transition: LinearTransition,
     ) -> Result<(), LinearClientError> {
         self.transitions
-            .borrow_mut()
+            .lock()
+            .expect("transitions lock")
             .push((issue_id.to_string(), transition));
         Ok(())
     }
 
-    fn record_issue_evidence(
+    async fn record_issue_evidence(
         &self,
         issue_id: &str,
         evidence: LinearIssueEvidence,
     ) -> Result<(), LinearClientError> {
         self.evidence
-            .borrow_mut()
+            .lock()
+            .expect("evidence lock")
             .push((issue_id.to_string(), evidence));
         Ok(())
     }
@@ -2309,7 +2669,7 @@ impl LinearClient for RecordingLinearClient {
 #[derive(Debug)]
 struct ProjectAwareLinearClient {
     issues_by_project: std::collections::HashMap<String, Vec<LinearIssue>>,
-    transitions: std::cell::RefCell<Vec<(String, LinearTransition)>>,
+    transitions: std::sync::Mutex<Vec<(String, LinearTransition)>>,
 }
 
 impl ProjectAwareLinearClient {
@@ -2319,17 +2679,18 @@ impl ProjectAwareLinearClient {
                 .into_iter()
                 .map(|(project_id, issues)| (project_id.to_string(), issues))
                 .collect(),
-            transitions: std::cell::RefCell::new(Vec::new()),
+            transitions: std::sync::Mutex::new(Vec::new()),
         }
     }
 
     fn transitions(&self) -> Vec<(String, LinearTransition)> {
-        self.transitions.borrow().clone()
+        self.transitions.lock().expect("transitions lock").clone()
     }
 }
 
+#[async_trait::async_trait]
 impl LinearClient for ProjectAwareLinearClient {
-    fn fetch_candidate_issues(
+    async fn fetch_candidate_issues(
         &self,
         project: &symphony_vnext::config::ProjectConfig,
     ) -> Result<Vec<LinearIssue>, LinearClientError> {
@@ -2340,13 +2701,14 @@ impl LinearClient for ProjectAwareLinearClient {
             .unwrap_or_default())
     }
 
-    fn transition_issue(
+    async fn transition_issue(
         &self,
         issue_id: &str,
         transition: LinearTransition,
     ) -> Result<(), LinearClientError> {
         self.transitions
-            .borrow_mut()
+            .lock()
+            .expect("transitions lock")
             .push((issue_id.to_string(), transition));
         Ok(())
     }
@@ -2355,24 +2717,25 @@ impl LinearClient for ProjectAwareLinearClient {
 #[derive(Debug, Default)]
 struct ScriptedOpenCodeLauncher {
     handoff: Option<OpenCodeHandoff>,
-    repairs: std::cell::RefCell<Vec<(String, String)>>,
+    repairs: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 impl ScriptedOpenCodeLauncher {
     fn new(handoff: Option<OpenCodeHandoff>) -> Self {
         Self {
             handoff,
-            repairs: std::cell::RefCell::new(Vec::new()),
+            repairs: std::sync::Mutex::new(Vec::new()),
         }
     }
 
     fn repairs(&self) -> Vec<(String, String)> {
-        self.repairs.borrow().clone()
+        self.repairs.lock().expect("repairs lock").clone()
     }
 }
 
+#[async_trait::async_trait]
 impl OpenCodeLauncher for ScriptedOpenCodeLauncher {
-    fn launch(
+    async fn launch(
         &self,
         spec: &opencode::OpenCodeLaunchSpec,
     ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
@@ -2381,7 +2744,7 @@ impl OpenCodeLauncher for ScriptedOpenCodeLauncher {
         })
     }
 
-    fn latest_handoff(
+    async fn latest_handoff(
         &self,
         session: &OpenCodeSessionRecord,
     ) -> Result<Option<OpenCodeHandoff>, opencode::OpenCodeError> {
@@ -2391,13 +2754,14 @@ impl OpenCodeLauncher for ScriptedOpenCodeLauncher {
             .filter(|handoff| handoff.session_id == session.session_id))
     }
 
-    fn continue_repair(
+    async fn continue_repair(
         &self,
         session: &OpenCodeSessionRecord,
         failure_fingerprint: &str,
     ) -> Result<(), opencode::OpenCodeError> {
         self.repairs
-            .borrow_mut()
+            .lock()
+            .expect("repairs lock")
             .push((session.session_id.clone(), failure_fingerprint.to_string()));
         Ok(())
     }
@@ -2422,8 +2786,9 @@ impl RecordingGraphqlTransport {
     }
 }
 
+#[async_trait::async_trait]
 impl LinearGraphqlTransport for RecordingGraphqlTransport {
-    fn post_graphql(
+    async fn post_graphql(
         &self,
         endpoint: &str,
         api_key: &str,

@@ -1828,22 +1828,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp candidate_issue?(_issue, _active_states, _terminal_states), do: false
 
-  defp milestone_batch_allowed?(%Issue{}, %State{active_project_milestone_id: nil}), do: false
+  defp milestone_batch_allowed?(%Issue{}, %State{}), do: true
 
-  defp milestone_batch_allowed?(%Issue{} = issue, %State{active_project_milestone_id: milestone_id})
-       when is_binary(milestone_id) do
-    issue_project_milestone_id(issue) == milestone_id
-  end
-
-  defp milestone_batch_allowed?(_issue, _state), do: false
-
-  defp owner_input_milestone_allowed?(%Issue{} = issue, %State{active_project_milestone_id: nil}) do
-    is_binary(issue_project_milestone_id(issue))
-  end
-
-  defp owner_input_milestone_allowed?(%Issue{} = issue, %State{} = state) do
-    milestone_batch_allowed?(issue, state)
-  end
+  defp owner_input_milestone_allowed?(%Issue{}, %State{}), do: true
 
   defp maybe_select_active_project_milestone_from_poll(
          %State{active_project_milestone_id: nil} = state,
@@ -2355,8 +2342,11 @@ defmodule SymphonyElixir.Orchestrator do
       runner_phase: retry_metadata_value(:runner_phase, previous_retry, metadata),
       runner_project_root: retry_metadata_value(:runner_project_root, previous_retry, metadata),
       runner_command: retry_metadata_value(:runner_command, previous_retry, metadata),
+      runner_attach_url: retry_metadata_value(:runner_attach_url, previous_retry, metadata),
       runner_result_state: retry_metadata_value(:runner_result_state, previous_retry, metadata),
       runner_failure: retry_metadata_value(:runner_failure, previous_retry, metadata),
+      session_id: retry_metadata_value(:session_id, previous_retry, metadata),
+      delay_type: retry_metadata_value(:delay_type, previous_retry, metadata),
       project_context: retry_metadata_value(:project_context, previous_retry, metadata)
     }
   end
@@ -2380,8 +2370,11 @@ defmodule SymphonyElixir.Orchestrator do
           runner_phase: Map.get(retry_entry, :runner_phase),
           runner_project_root: Map.get(retry_entry, :runner_project_root),
           runner_command: Map.get(retry_entry, :runner_command),
+          runner_attach_url: Map.get(retry_entry, :runner_attach_url),
           runner_result_state: Map.get(retry_entry, :runner_result_state),
-          runner_failure: Map.get(retry_entry, :runner_failure)
+          runner_failure: Map.get(retry_entry, :runner_failure),
+          session_id: Map.get(retry_entry, :session_id),
+          delay_type: Map.get(retry_entry, :delay_type)
         }
 
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
@@ -2576,25 +2569,62 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_active_retry(state, issue, attempt, metadata) do
-    if retry_candidate_issue?(issue, state, terminal_state_set(state)) and
-         milestone_batch_allowed?(issue, state) and
-         dispatch_slots_available?(issue, state) and
-         worker_slots_available?(state, metadata[:worker_host], runner_kind_for_issue(issue, state)) do
-      {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host])}
-    else
-      Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
+    cond do
+      codex_continuation_retry?(issue, state, metadata) ->
+        error = "Codex completed normally while the issue is still active; suppressing automatic continuation until the issue changes"
 
-      {:noreply,
-       schedule_issue_retry(
-         state,
-         issue.id,
-         attempt + 1,
-         Map.merge(metadata, %{
-           identifier: issue.identifier,
-           error: "no available orchestrator slots"
-         })
-       )}
+        Logger.warning("Suppressing Codex continuation retry for #{issue_context(issue)}: #{error}")
+
+        {:noreply, block_issue_from_entry(state, issue.id, retry_block_entry(issue, metadata), error)}
+
+      retry_candidate_issue?(issue, state, terminal_state_set(state)) and
+        milestone_batch_allowed?(issue, state) and
+        dispatch_slots_available?(issue, state) and
+          worker_slots_available?(state, metadata[:worker_host], runner_kind_for_issue(issue, state)) ->
+        {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host])}
+
+      true ->
+        Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
+
+        {:noreply,
+         schedule_issue_retry(
+           state,
+           issue.id,
+           attempt + 1,
+           Map.merge(metadata, %{
+             identifier: issue.identifier,
+             error: "no available orchestrator slots"
+           })
+         )}
     end
+  end
+
+  defp codex_continuation_retry?(%Issue{} = issue, %State{} = state, metadata) when is_map(metadata) do
+    metadata[:delay_type] == :continuation and runner_kind_for_issue(issue, state) == "codex"
+  end
+
+  defp retry_block_entry(%Issue{} = issue, metadata) when is_map(metadata) do
+    runner_kind = Map.get(metadata, :runner_kind) || "codex"
+
+    metadata
+    |> Map.take([
+      :worker_host,
+      :workspace_path,
+      :runner_phase,
+      :runner_command,
+      :runner_project_root,
+      :runner_attach_url,
+      :runner_result_state,
+      :runner_failure,
+      :session_id,
+      :last_codex_message,
+      :last_codex_event,
+      :last_codex_timestamp
+    ])
+    |> Map.put(:identifier, issue.identifier)
+    |> Map.put(:issue, issue)
+    |> Map.put(:runner_kind, runner_kind)
+    |> Map.put(:runner_owner, Map.get(metadata, :runner_owner) || runner_kind)
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do
@@ -3003,7 +3033,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_summary_state(%{eligible_issue_count: 0}, _recent_category, _completed?) do
-    {:no_eligible_work, "No eligible issue is available for the active milestone and worker policy."}
+    {:no_eligible_work, "No eligible issue is available for the current Linear ordering and worker policy."}
   end
 
   defp dispatch_summary_state(_stewardship, _recent_category, _completed?) do

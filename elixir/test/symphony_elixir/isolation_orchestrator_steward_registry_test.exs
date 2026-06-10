@@ -268,8 +268,8 @@ defmodule SymphonyElixir.IsolationRegression.OrchestratorStewardRegistryTest do
       assert {:ok, prompt_str} = ExecutionPacket.prompt(packet)
       assert String.contains?(prompt_str, "SYM-300")
       assert String.contains?(prompt_str, "Symphony steward packet")
-      assert String.contains?(prompt_str, "OpenCode writes application code")
-      assert String.contains?(prompt_str, "Do not edit repo files")
+      assert String.contains?(prompt_str, "Use Codex as the only bootstrap runner")
+      assert String.contains?(prompt_str, "Implement the scoped change in Codex")
       assert String.contains?(prompt_str, "symphony:review-decision:v1")
     end
 

@@ -1,8 +1,10 @@
 # Symphony Service Specification
 
-Status: Draft v1 (language-agnostic)
+Status: Draft vNext (Rust runtime contract)
 
-Purpose: Define a service that orchestrates coding agents to get project work done.
+Purpose: Define the Symphony vNext service contract: a Rust runtime that uses Linear as a simple
+control plane, dispatches implementation only through OpenCode ACP, persists orchestration state in
+SQLite, and exposes dashboard/API projections for operators.
 
 ## Normative Language
 
@@ -15,17 +17,19 @@ behavior.
 
 ## 1. Problem Statement
 
-Symphony is a long-running automation service that continuously reads work from an issue tracker
-(Linear in this specification version), creates an isolated workspace for each issue, and runs a
-coding agent session for that issue inside the workspace.
+Symphony is a long-running Rust automation service that continuously reads work from Linear,
+creates an isolated OpenCode worktree for each issue, and runs an OpenCode ACP session for that
+issue inside the worktree.
 
 The service solves four operational problems:
 
 - It turns issue execution into a repeatable daemon workflow instead of manual scripts.
 - It isolates agent execution in per-issue workspaces so agent commands run only inside per-issue
   workspace directories.
-- It keeps the workflow policy in-repo (`WORKFLOW.md`) so teams version the agent prompt and runtime
-  settings with their code.
+- It keeps project policy in a root multi-project `symphony.yml` plus per-project `WORKFLOW.md`
+  issue-spec templates so teams version prompts and runtime settings with their code.
+- It persists durable orchestration state in SQLite so restart recovery can distinguish active,
+  completed, parked, and repair-loop work.
 - It provides enough observability to operate and debug multiple concurrent agent runs.
 
 Implementations are expected to document their trust and safety posture explicitly. This
@@ -35,11 +39,14 @@ stricter approvals or sandboxing.
 
 Important boundary:
 
-- Symphony is a scheduler/runner and tracker reader.
-- Ticket writes (state transitions, comments, PR links) are typically performed by the coding agent
-  using tools available in the workflow/runtime environment.
-- A successful run can end at a workflow-defined handoff state (for example `Human Review`), not
-  necessarily `Done`.
+- Symphony is the only component that writes Linear comments, state transitions, and PR/handoff
+  metadata.
+- Linear remains a simple control plane: humans edit issues/states, and Symphony mirrors runtime
+  progress back to Linear.
+- OpenCode ACP is the only code-execution integration. Codex is not a runtime route, fallback,
+  compatibility adapter, steward runner, acceptance runner, or RCA runner in vNext.
+- A successful run ends when Symphony validates an OpenCode handoff and writes the configured Linear
+  handoff state, not necessarily tracker terminal state `Done`.
 
 ## 2. Goals and Non-Goals
 
@@ -50,18 +57,20 @@ Important boundary:
 - Create deterministic per-issue workspaces and preserve them across runs.
 - Stop active runs when issue state changes make them ineligible.
 - Recover from transient failures with exponential backoff.
-- Load runtime behavior from a repository-owned `WORKFLOW.md` contract.
-- Expose operator-visible observability (at minimum structured logs).
-- Support tracker/filesystem-driven restart recovery without requiring a persistent database; exact
-  in-memory scheduler state is not restored.
+- Load runtime behavior from root `symphony.yml` plus repository-owned `WORKFLOW.md` contracts.
+- Expose operator-visible observability (at minimum structured logs, plus dashboard/API projections
+  when implemented).
+- Persist durable runtime state in SQLite so claims, OpenCode sessions, handoff hashes, repair
+  attempts, and idempotency keys survive daemon restarts.
 
 ### 2.2 Non-Goals
 
 - Rich web UI or multi-tenant control plane.
 - Prescribing a specific dashboard or terminal UI implementation.
 - General-purpose workflow engine or distributed job scheduler.
-- Built-in business logic for how to edit tickets, PRs, or comments. (That logic lives in the
-  workflow prompt and agent tooling.)
+- Built-in product-specific implementation behavior for how to edit repositories or PRs. Symphony
+  owns Linear coordination writes, while implementation behavior lives in the plain issue spec and
+  OpenCode tooling.
 - Mandating strong sandbox controls beyond what the coding agent and host OS provide.
 - Mandating a single default approval, sandbox, or operator-confirmation posture for all
   implementations.
@@ -80,36 +89,47 @@ Important boundary:
    - Applies defaults and environment variable indirection.
    - Performs validation used by the orchestrator before dispatch.
 
-3. `Issue Tracker Client`
+3. `Root Project Registry`
+   - Reads root `symphony.yml` configuration.
+   - Resolves project IDs, repository roots, execution gates, dashboard metadata, and workflow paths.
+   - Keeps configured-but-disabled projects visible to operators.
+
+4. `SQLite State Store`
+   - Persists project runtime state, issue claims, OpenCode session identities, handoff hashes,
+     repair-loop counters, and idempotency keys.
+   - Provides the durable source for restart recovery and dashboard/API projections.
+
+5. `Issue Tracker Client`
    - Fetches candidate issues in active states.
    - Fetches current states for specific issue IDs (reconciliation).
    - Fetches terminal-state issues during startup cleanup.
    - Normalizes tracker payloads into a stable issue model.
+   - Performs Linear writes only when commanded by Symphony's orchestrator policy.
 
-4. `Orchestrator`
+6. `Orchestrator`
    - Owns the poll tick.
    - Owns the in-memory runtime state.
    - Decides which issues to dispatch, retry, stop, or release.
    - Tracks session metrics and retry queue state.
 
-5. `Workspace Manager`
+7. `Workspace Manager`
    - Maps issue identifiers to workspace paths.
-   - Ensures per-issue workspace directories exist.
+   - Ensures per-issue OpenCode worktrees exist.
    - Runs workspace lifecycle hooks.
    - Cleans workspaces for terminal issues.
 
-6. `Agent Runner`
-   - Creates workspace.
-   - Builds prompt from issue + workflow template.
-   - Selects the configured runner for the issue state.
-   - Launches the selected coding-agent client.
+8. `OpenCode ACP Runner`
+   - Creates/reuses the per-issue worktree.
+   - Builds prompt from the plain Linear issue-spec template.
+   - Launches OpenCode ACP as the only coding-agent client.
    - Streams runner updates back to the orchestrator.
+   - Returns a structured OpenCode handoff for Symphony to validate and write to Linear.
 
-7. `Status Surface` (OPTIONAL)
+9. `Status Surface` (OPTIONAL)
    - Presents human-readable runtime status (for example terminal output, dashboard, or other
      operator-facing view).
 
-8. `Logging`
+10. `Logging`
    - Emits structured runtime logs to one or more configured sinks.
 
 ### 3.2 Abstraction Levels
@@ -117,7 +137,7 @@ Important boundary:
 Symphony is easiest to port when kept in these layers:
 
 1. `Policy Layer` (repo-defined)
-   - `WORKFLOW.md` prompt body.
+   - Plain Linear issue-spec template in each project's `WORKFLOW.md`.
    - Team-specific rules for ticket handling, validation, and handoff.
 
 2. `Configuration Layer` (typed getters)
@@ -127,23 +147,33 @@ Symphony is easiest to port when kept in these layers:
 3. `Coordination Layer` (orchestrator)
    - Polling loop, issue eligibility, concurrency, retries, reconciliation.
 
-4. `Execution Layer` (workspace + agent subprocess)
-   - Filesystem lifecycle, workspace preparation, coding-agent protocol.
+4. `Durability Layer` (SQLite)
+   - Claims, sessions, handoff idempotency, repair counters, and restart recovery.
 
-5. `Integration Layer` (Linear adapter)
-   - API calls and normalization for tracker data.
+5. `Execution Layer` (worktree + OpenCode ACP subprocess)
+   - Filesystem lifecycle, worktree preparation, OpenCode ACP protocol.
 
-6. `Observability Layer` (logs + OPTIONAL status surface)
+6. `Integration Layer` (Linear adapter)
+   - API calls, normalization for tracker data, and Symphony-owned Linear writes.
+
+7. `Observability Layer` (logs + OPTIONAL status surface)
    - Operator visibility into orchestrator and agent behavior.
 
 ### 3.3 External Dependencies
 
-- Issue tracker API (Linear for `tracker.kind: linear` in this specification version).
-- Local filesystem for workspaces and logs.
+- Issue tracker API (Linear only in this specification version).
+- SQLite database for durable state.
+- Local filesystem for per-issue OpenCode worktrees and logs.
 - OPTIONAL workspace population tooling (for example Git CLI, if used).
-- Coding-agent executable for each configured runner. Codex-compatible runners use the targeted
-  Codex app-server mode; OpenCode-compatible runners use the configured OpenCode protocol.
-- Host environment authentication for the issue tracker and coding agent.
+- OpenCode executable with ACP stdio support.
+- Host environment authentication for Linear and OpenCode.
+
+Unsupported vNext runtime integrations:
+
+- Codex app-server MUST NOT be configured or launched by Symphony vNext.
+- Codex MUST NOT be used as a route, compatibility adapter, steward, acceptance, RCA, or fallback
+  runner.
+- Shelling out to a prompt that asks Codex to invoke OpenCode is not a conforming implementation.
 
 ## 4. Core Domain Model
 
@@ -187,7 +217,26 @@ Parsed `WORKFLOW.md` payload:
 - `prompt_template` (string)
   - Markdown body after front matter, trimmed.
 
-#### 4.1.3 Service Config (Typed View)
+#### 4.1.3 Root Project Config
+
+Parsed root `symphony.yml` payload used to run one Symphony process across multiple repositories.
+
+Fields:
+
+- `state_db` (object)
+  - SQLite database configuration. `path` defaults to `<root-config-dir>/.symphony/state.db`.
+- `projects` (list of project objects)
+  - Each project has `id`, `name`, `root`, `workflow_path`, `enabled`, `execution_enabled`,
+    `gate_enabled`, `order`, and optional dashboard metadata.
+  - `root` is the canonical repository checkout used to create per-issue OpenCode worktrees.
+  - `workflow_path` defaults to `<project.root>/WORKFLOW.md`.
+- `server` (object, OPTIONAL)
+  - Dashboard/API extension configuration.
+
+Project IDs are stable operator-facing keys. They MUST be unique, non-empty strings containing only
+`[A-Za-z0-9._-]`.
+
+#### 4.1.4 Service Config (Typed View)
 
 Typed runtime values derived from `WorkflowDefinition.config` plus environment resolution.
 
@@ -200,17 +249,19 @@ Examples:
 - coding-agent executable/args/timeouts
 - workspace hooks
 
-#### 4.1.4 Workspace
+#### 4.1.5 Worktree
 
-Filesystem workspace assigned to one issue identifier.
+Filesystem OpenCode worktree assigned to one issue identifier in one configured project.
 
 Fields (logical):
 
 - `path` (absolute workspace path)
 - `workspace_key` (sanitized issue identifier)
+- `project_id`
+- `source_root` (canonical project root from root project config)
 - `created_now` (boolean, used to gate `after_create` hook)
 
-#### 4.1.5 Run Attempt
+#### 4.1.6 Run Attempt
 
 One execution attempt for one issue.
 
@@ -220,26 +271,28 @@ Fields (logical):
 - `issue_identifier`
 - `attempt` (integer or null, `null` for first run, `>=1` for retries/continuation)
 - `workspace_path`
+- `project_id`
 - `started_at`
 - `status`
 - `error` (OPTIONAL)
-- `runner_kind` (`codex` or `opencode`)
+- `runner_kind` (`opencode`)
 
-#### 4.1.6 Live Session (Agent Session Metadata)
+#### 4.1.7 Live Session (Agent Session Metadata)
 
 State tracked while a coding-agent subprocess is running.
 
 Fields:
 
 - `session_id` (string)
-- `runner_kind` (`codex` or `opencode`)
+- `runner_kind` (`opencode`)
 - `runner_owner` (string or null)
 - `runner_phase` (string or null)
 - `runner_command` (string or null)
 - `runner_project_root` (absolute path or null)
 - `runner_attach_url` (string or null)
-- `thread_id` (string or null)
-- `turn_id` (string or null)
+- `opencode_session_id` (OpenCode ACP session identifier, string or null)
+- `opencode_run_id` (OpenCode ACP run identifier, string or null)
+- `handoff_id` (validated OpenCode handoff identifier, string or null)
 - `runner_process_id` (string or null)
 - `last_runner_event` (string/enum or null)
 - `last_runner_timestamp` (timestamp or null)
@@ -250,10 +303,10 @@ Fields:
 - `last_reported_input_tokens` (integer)
 - `last_reported_output_tokens` (integer)
 - `last_reported_total_tokens` (integer)
-- `turn_count` (integer)
-  - Number of coding-agent turns started within the current worker lifetime.
+- `run_event_count` (integer)
+  - Number of runner events observed within the current worker lifetime.
 
-#### 4.1.7 Retry Entry
+#### 4.1.8 Retry Entry
 
 Scheduled retry state for an issue.
 
@@ -266,7 +319,7 @@ Fields:
 - `timer_handle` (runtime-specific timer reference)
 - `error` (string or null)
 
-#### 4.1.8 Orchestrator Runtime State
+#### 4.1.9 Orchestrator Runtime State
 
 Single authoritative in-memory state owned by the orchestrator.
 
@@ -280,6 +333,30 @@ Fields:
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
 - `runner_totals` (aggregate tokens + runtime seconds)
 - `runner_rate_limits` (latest rate-limit snapshot from runner events)
+- `sqlite_state_version` (latest applied durable schema version)
+- `project_states` (map `project_id -> project runtime summary`)
+
+#### 4.1.10 OpenCode Handoff
+
+Structured result returned by an OpenCode ACP implementation run and validated by Symphony before
+Linear writes.
+
+Required fields:
+
+- `status` (`completed` or `blocked`)
+- `session_id` (OpenCode ACP session identifier, string or null)
+- `attach_url` (string or null)
+- `lifecycle_stage_history` (ordered list of stage/status/timestamp entries)
+- `subagents_used` (list of subagent name/objective/outcome entries, empty when none)
+- `eval_results` (list of evaluator/check identifiers and pass/fail outcomes)
+- `changed_files` (list of `file:start-end` anchors with purpose)
+- `commit` (object with `sha`, `branch`, and `pr_url`; fields may be null when no commit/PR exists)
+- `validation` (list of command/cwd/outcome/evidence objects)
+- `risks_unresolved_assumptions` (list of strings)
+- `stop_reason` (string)
+
+Symphony MUST reject malformed handoffs and MUST NOT synthesize success from freeform chat text.
+This is the core handoff schema; implementation docs MUST NOT define a narrower duplicate schema.
 
 ### 4.2 Stable Identifiers and Normalization Rules
 
@@ -293,7 +370,7 @@ Fields:
 - `Normalized Issue State`
   - Compare states after `lowercase`.
 - `Session ID`
-  - Compose from coding-agent `thread_id` and `turn_id` as `<thread_id>-<turn_id>`.
+  - Use the OpenCode ACP session identifier returned by the targeted protocol.
 
 ## 5. Workflow Specification (Repository Contract)
 
@@ -301,8 +378,9 @@ Fields:
 
 Workflow file path precedence:
 
-1. Explicit application/runtime setting (set by CLI startup path).
-2. Default: `WORKFLOW.md` in the current process working directory.
+1. Project `workflow_path` from root `symphony.yml`.
+2. Explicit single-project runtime setting (set by CLI startup path).
+3. Default: `WORKFLOW.md` in the current process working directory for single-project mode.
 
 Loader behavior:
 
@@ -315,9 +393,9 @@ Loader behavior:
 
 Design note:
 
-- `WORKFLOW.md` SHOULD be self-contained enough to describe and run different workflows (prompt,
-  runtime settings, hooks, and tracker selection/config) without requiring out-of-band
-  service-specific configuration.
+- `WORKFLOW.md` SHOULD be self-contained enough to describe one project's Linear issue-spec
+  template, runtime settings, hooks, and tracker selection/config. Root multi-project settings live
+  in `symphony.yml`.
 
 Parsing rules:
 
@@ -342,8 +420,10 @@ Top-level keys:
 - `hooks`
 - `agent`
 - `runner`
-- `codex`
 - `opencode`
+- `issue_spec`
+- `handoff`
+- `eval_repair`
 
 Unknown keys SHOULD be ignored for forward compatibility.
 
@@ -353,6 +433,11 @@ Note:
   changing the core schema above.
 - Extensions SHOULD document their field schema, defaults, validation rules, and whether changes
   apply dynamically or require restart.
+
+Unsupported legacy key note:
+
+- `codex` is not a vNext runtime key. Implementations MUST reject or ignore it as an unsupported
+  legacy key and MUST NOT convert it into a runner route or adapter.
 
 #### 5.3.1 `tracker` (object)
 
@@ -434,7 +519,7 @@ Fields:
   - Changes SHOULD be re-applied at runtime and affect subsequent dispatch decisions.
 - `max_turns` (positive integer)
   - Default: `20`
-  - Limits the number of coding-agent turns within one worker session.
+  - Limits the number of OpenCode ACP run continuations within one worker session.
   - Invalid values fail configuration validation.
 - `max_retry_backoff_ms` (integer)
   - Default: `300000` (5 minutes)
@@ -449,85 +534,103 @@ Fields:
 Fields:
 
 - `default` (string)
-  - Default: `codex`
-  - Supported values: `codex`, `opencode`
+  - Default: `opencode`
+  - Supported value: `opencode`
 - `routes` (map `state_name -> runner_name`)
   - Default: empty map.
-  - State keys are tracker state names. Runner names use the same supported values as `default`.
+  - State keys are tracker state names. Runner names MUST be `opencode`.
   - Route lookup SHOULD be exact on tracker state name after the implementation's documented state
     normalization.
 
 Runner route intent:
 
 - `Todo` is queued work. It is not a runner execution state.
-- `Preparing` is typically routed to Codex/steward work that prepares the implementation packet.
-- `In Progress` MAY be routed to OpenCode for first-class implementation execution.
-- `In Review` SHOULD remain dispatch-eligible when the review/acceptance agent owns validation.
+- `Preparing` is a Symphony-owned planning/gating state that can validate blockers and write a
+  plain OpenCode issue-spec prompt to Linear; it is not a Codex route.
+- `In Progress` routes to OpenCode ACP for first-class implementation execution.
+- `In Review` remains dispatch-eligible when Symphony owns handoff validation and Linear closure.
 - `Need Owner Input` SHOULD NOT launch implementation work unless a newer owner-visible answer exists.
 
-When Codex is used for stewardship, it is not an implementation runner:
+Symphony-owned state actions:
 
 - For `Todo`, Symphony may promote one eligible issue to `Preparing` and stop the poll cycle.
-- For `Preparing`, Codex may verify milestone/blocker eligibility, post one complete OpenCode task
-  prompt, move the same issue to `In Progress`, and stop. It MUST NOT edit application files, run
-  implementation validation, commit, push, or open a PR.
-- For `In Review`, Codex may inspect the OpenCode handoff, direct diff, and validation evidence,
-  then post one review decision and perform accepted closure.
-- For `RCA Required`, Codex may diagnose the failure and author a redesigned OpenCode prompt, but
-  MUST NOT implement the repair itself.
-- OpenCode remains the implementation runner for application-code changes.
+- For `Preparing`, Symphony verifies configured milestone/blocker eligibility, writes one complete
+  OpenCode issue-spec prompt, moves the same issue to `In Progress`, and stops. It MUST NOT edit
+  application files, run implementation validation, commit, push, or open a PR.
+- For `In Review`, Symphony inspects the OpenCode handoff, direct diff, and validation evidence,
+  then writes one review decision and performs accepted closure when policy allows.
+- For `RCA Required`, Symphony may generate a redesigned OpenCode issue-spec prompt and dispatch a
+  bounded repair run. It MUST NOT launch Codex or any other non-OpenCode repair agent.
 
-#### 5.3.7 `codex` (object)
+#### 5.3.7 `issue_spec` (object)
 
 Fields:
 
-For Codex-owned config values such as `approval_policy`, `thread_sandbox`, and
-`turn_sandbox_policy`, supported values are defined by the targeted Codex app-server version.
-Implementors SHOULD treat them as pass-through Codex config values rather than relying on a
-hand-maintained enum in this spec. To inspect the installed Codex schema, run
-`codex app-server generate-json-schema --out <dir>` and inspect the relevant definitions referenced
-by `v2/ThreadStartParams.json` and `v2/TurnStartParams.json`. Implementations MAY validate these
-fields locally if they want stricter startup checks.
+- `packet_label` (string)
+  - Default: `symphony:opencode-task-prompt:vNext`
+  - Visible Markdown/fenced metadata label used for idempotency. It MUST NOT be hidden in an HTML
+    marker or used as a lifecycle control token.
+- `template_version` (string)
+  - Default: `vNext`.
+- `include_blockers` (boolean)
+  - Default: `true`.
+- `include_milestone_context` (boolean)
+  - Default: `true`.
 
-- `command` (string shell command)
-  - Default: `codex app-server`
-  - The runtime launches this command via `bash -lc` in the workspace directory.
-  - The launched process MUST speak a compatible app-server protocol over stdio.
-- `project_root` (path string or `$VAR`, OPTIONAL)
-  - Canonical project root used as the Codex app-server `cwd` when configured.
-  - Projects that route stewardship, acceptance, or RCA work to a pinned architect thread SHOULD set
-    this to the canonical checkout so Codex turns continue in the intended project context instead of
-    per-issue workspaces.
-- `thread_id` (string, OPTIONAL)
-  - Configured Codex architect thread to resume before starting a turn.
-  - If configured, the runner MUST use `thread/resume` and MUST NOT fall back to `thread/start` for
-    that run. A mismatched resumed thread id is a hard runner error.
-- `approval_policy` (Codex `AskForApproval` value)
-  - Default: implementation-defined.
-- `thread_sandbox` (Codex `SandboxMode` value)
-  - Default: implementation-defined.
-- `turn_sandbox_policy` (Codex `SandboxPolicy` value)
-  - Default: implementation-defined.
-- `turn_timeout_ms` (integer)
-  - Default: `3600000` (1 hour)
-- `read_timeout_ms` (integer)
-  - Default: `5000`
-- `stall_timeout_ms` (integer)
-  - Default: `300000` (5 minutes)
-  - If `<= 0`, stall detection is disabled.
+The rendered issue spec MUST be plain Markdown with only the sections named in Section 5.4.1. A
+visible parseable metadata block MAY be included inside those sections for idempotency and audit. It
+MUST describe the task, allowed mutation surface, validation requirements, review gates, and handoff
+contract without requiring OpenCode to infer policy from Linear history.
 
-#### 5.3.8 `opencode` (object)
+#### 5.3.8 `handoff` (object)
+
+Fields:
+
+- `packet_label` (string)
+  - Default: `symphony:opencode-handoff:vNext`.
+  - Visible Markdown/fenced metadata label used for idempotency, not a hidden lifecycle marker.
+- `require_validation` (boolean)
+  - Default: `true`.
+- `require_changed_file_anchors` (boolean)
+  - Default: `true`.
+- `result_state` (string)
+  - Default: `In Review`.
+
+Symphony writes accepted handoffs to Linear and records the handoff hash in SQLite to prevent
+duplicate comments or duplicate state transitions.
+
+#### 5.3.9 `eval_repair` (object)
+
+Fields:
+
+- `max_repair_attempts` (integer)
+  - Default: `1`.
+- `repair_state` (string)
+  - Default: `RCA Required`.
+- `stop_state` (string)
+  - Default: `Need Owner Input`.
+- `stop_after_repeated_failure` (boolean)
+  - Default: `true`.
+
+If evaluation fails and repair attempts remain, Symphony writes a bounded repair issue spec and
+dispatches OpenCode ACP again. If attempts are exhausted or the same failure repeats without new
+evidence, Symphony stops the repair loop, writes the failure summary to Linear, moves the issue to
+`stop_state`, and waits for owner input.
+
+#### 5.3.10 `opencode` (object)
 
 Fields:
 
 - `protocol` (string)
-  - Default: `cli`
-  - Supported values: `cli`, `acp`
+  - Default: `acp`
+  - Supported value: `acp`
+  - OpenCode ACP is required for vNext; non-ACP OpenCode launch modes are outside this spec.
 - `command` (string command path)
   - Default: `opencode`
   - In ACP mode this is the executable path, not an HTTP endpoint.
 - `args` (list of strings, OPTIONAL)
-  - In ACP stdio mode, use `["acp"]` unless the targeted OpenCode version documents another stdio
+  - Default: `["acp"]`.
+  - Use a different value only when the targeted OpenCode version documents another ACP stdio
     entrypoint.
 - `project_root` (path string or `$VAR`, OPTIONAL)
   - Canonical project root used by OpenCode sessions and persisted session keys.
@@ -553,8 +656,8 @@ Fields:
 - `stall_timeout_ms` (integer)
   - Default: `300000`; ACP mode default MUST be `0` unless explicitly configured.
   - If `<= 0`, idle-event stall detection is disabled.
-  - A nonzero stall timeout is a runner liveness policy. It MUST NOT create an automatic Codex RCA
-    loop merely because OpenCode emitted no events for that interval.
+  - A nonzero stall timeout is a runner liveness policy. It MUST NOT create an automatic
+    non-OpenCode RCA loop merely because OpenCode emitted no events for that interval.
 - `permission_policy` (string)
   - Default: `reject`
   - Passed to OpenCode when supported by the targeted protocol.
@@ -569,6 +672,39 @@ Rendering requirements:
 - Unknown variables MUST fail rendering.
 - Unknown filters MUST fail rendering.
 
+### 5.4.1 Plain Linear Issue Spec Template
+
+Symphony renders one plain Markdown issue spec for OpenCode. The packet MUST use these sections and
+no hidden lifecycle markers:
+
+1. `Context`
+2. `Change`
+3. `Acceptance Criteria`
+4. `Validation`
+5. `Handoff`
+6. `Non-goals`
+
+The template MAY include a parseable metadata block only when it is visible Markdown or fenced data
+inside those sections. It MUST NOT require milestone-local anchors, `phase_state` text, active
+milestone pointers, workflow-local lifecycle markers, hidden HTML control comments, or out-of-band
+Linear history to understand the work.
+
+`Handoff` requirements MUST ask OpenCode to return:
+
+- OpenCode session id or attach URL when known.
+- Lifecycle stage history for the run, including eval/repair attempts.
+- Subagents used.
+- Eval results and validation commands/results.
+- Changed files with line anchors.
+- Commit SHA, branch, and PR URL if OpenCode created them.
+- Risks and unresolved assumptions.
+- Stop reason.
+
+Failed evals stay inside OpenCode's repair loop until the implementation succeeds or reaches a real
+stop condition such as exhausted repair attempts, repeated failure without new evidence,
+owner-input requirement, missing prerequisite, permission boundary, or infrastructure failure.
+Symphony does not launch Codex RCA or any other non-OpenCode repair route.
+
 Template input variables:
 
 - `issue` (object)
@@ -580,7 +716,8 @@ Template input variables:
 Fallback prompt behavior:
 
 - If the workflow prompt body is empty, the runtime MAY use a minimal default prompt
-  (`You are working on an issue from Linear.`).
+  containing only the required plain Markdown sections: `Context`, `Change`,
+  `Acceptance Criteria`, `Validation`, `Handoff`, and `Non-goals`.
 - Workflow file read/parse failures are configuration/validation errors and SHOULD NOT silently fall
   back to a prompt.
 
@@ -631,7 +768,7 @@ Dynamic reload is REQUIRED:
 - The software MUST detect `WORKFLOW.md` changes.
 - On change, it MUST re-read and re-apply workflow config and prompt template without restart.
 - The software MUST attempt to adjust live behavior to the new config (for example polling
-  cadence, concurrency limits, active/terminal states, codex settings, workspace paths/hooks, and
+  cadence, concurrency limits, active/terminal states, OpenCode settings, workspace paths/hooks, and
   prompt content for future runs).
 - Reloaded config applies to future dispatch, retry scheduling, reconciliation decisions, hook
   execution, and agent launches.
@@ -668,7 +805,9 @@ Validation checks:
 - `tracker.api_key` is present after `$` resolution.
 - `tracker.project_slug` is present when REQUIRED by the selected tracker kind.
 - `runner.default` and configured `runner.routes` reference supported runners.
-- `codex.command` is present and non-empty when any eligible state can route to `codex`.
+- `runner.default` and every configured route MUST be `opencode`; legacy `codex` routes are
+  unsupported and fail validation or are ignored as non-vNext configuration, but MUST NOT be mapped
+  to a compatibility adapter.
 - `opencode.command` is present and non-empty when any eligible state can route to `opencode`.
 
 ### 6.4 Core Config Fields Summary (Cheat Sheet)
@@ -693,23 +832,18 @@ not require recognizing or validating extension fields unless that extension is 
 - `hooks.before_remove`: shell script or null
 - `hooks.timeout_ms`: integer, default `60000`
 - `agent.max_concurrent_agents`: integer, default `10`
-- `agent.max_turns`: integer, default `20`
+- `agent.max_turns`: integer, default `20`; legacy field name interpreted as the maximum number of
+  OpenCode ACP run continuations in one worker session, not a turn/thread protocol counter
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
-- `runner.default`: string, default `codex`
-- `runner.routes`: map of tracker state name to runner name, default `{}`
-- `codex.command`: shell command string, default `codex app-server`
-- `codex.project_root`: path resolved to absolute or null
-- `codex.thread_id`: pinned architect thread id or null
-- `codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
-- `codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
-- `codex.turn_sandbox_policy`: Codex `SandboxPolicy` value, default implementation-defined
-- `codex.turn_timeout_ms`: integer, default `3600000`
-- `codex.read_timeout_ms`: integer, default `5000`
-- `codex.stall_timeout_ms`: integer, default `300000`
-- `opencode.protocol`: string, default `cli`
+- `runner.default`: string, default `opencode`
+- `runner.routes`: map of tracker state name to runner name, default `{}`; all runner names MUST be
+  `opencode`
+- `codex`: unsupported legacy key; MUST NOT define a vNext route, adapter, fallback, steward,
+  acceptance, RCA, or app-server protocol surface
+- `opencode.protocol`: string, default `acp`; only `acp` is supported for vNext
 - `opencode.command`: command path, default `opencode`
-- `opencode.args`: list of strings or null; ACP stdio usually `["acp"]`
+- `opencode.args`: list of strings or null; default `["acp"]`
 - `opencode.project_root`: path resolved to absolute or null
 - `opencode.server_url`: optional OpenCode Web attach URL; not ACP transport in stdio mode
 - `opencode.agent`: string, default `build`
@@ -751,13 +885,13 @@ claim state.
 Important nuance:
 
 - A successful worker exit does not mean the issue is done forever.
-- The worker MAY continue through multiple back-to-back coding-agent turns before it exits.
-- After each normal turn completion, the worker re-checks the tracker issue state.
-- If the issue is still in an active state, the worker SHOULD start another turn on the same live
-  coding-agent thread in the same workspace, up to `agent.max_turns`.
-- The first turn SHOULD use the full rendered task prompt.
-- Continuation turns SHOULD send only continuation guidance to the existing thread, not resend the
-  original task prompt that is already present in thread history.
+- The worker MAY continue through multiple back-to-back OpenCode ACP run continuations before it exits.
+- After each normal run completion, the worker re-checks the tracker issue state.
+- If the issue is still in an active state, the worker SHOULD continue the same live OpenCode ACP
+  session in the same workspace, up to `agent.max_turns`.
+- The initial run SHOULD use the full rendered task prompt.
+- Continuation runs SHOULD send only continuation guidance to the existing OpenCode ACP session,
+  not resend the original task prompt already present in session history.
 - Once the worker exits normally, the orchestrator still schedules a short continuation retry
   (about 1 second) so it can re-check whether the issue remains active and needs another worker
   session.
@@ -792,15 +926,16 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - Remove running entry.
   - Update aggregate runtime totals.
   - Schedule continuation retry (attempt `1`) after the worker exhausts or finishes its in-process
-    turn loop.
+    OpenCode ACP run/session continuation cycle.
 
 - `Worker Exit (abnormal)`
   - Remove running entry.
   - Update aggregate runtime totals.
   - Schedule exponential-backoff retry.
 
-- `Codex Update Event`
-  - Update live session fields, token counters, and rate limits.
+- `OpenCode Runner Update Event`
+  - Update live session fields, lifecycle phase, handoff/eval status, token counters, and rate
+    limits when reported.
 
 - `Retry Timer Fired`
   - Re-fetch active candidates and attempt re-dispatch, or release claim if no longer eligible.
@@ -816,7 +951,8 @@ Distinct terminal reasons are important because retry logic and logs differ.
 - The orchestrator serializes state mutations through one authority to avoid duplicate dispatch.
 - `claimed` and `running` checks are REQUIRED before launching any worker.
 - Reconciliation runs before dispatch on every tick.
-- Restart recovery is tracker-driven and filesystem-driven (without a durable orchestrator DB).
+- Restart recovery uses SQLite durable state as the authoritative recovery ledger, reconciled with
+  Linear tracker state and filesystem worktrees.
 - Startup terminal cleanup removes stale workspaces for issues already in terminal states.
 
 ## 8. Polling, Scheduling, and Reconciliation
@@ -859,7 +995,8 @@ An issue is dispatch-eligible only if all are true:
 - State-specific stop rules pass:
   - `Need Owner Input` is eligible only when there is new owner-visible input that has not already
     been processed by the implementation's idempotency policy.
-  - `In Review` remains eligible when review/acceptance is owned by the steward/review runner.
+  - `In Review` remains eligible when Symphony owns OpenCode handoff validation and Linear
+    acceptance/closure.
 
 Sorting order (stable intent):
 
@@ -919,11 +1056,11 @@ Part A: Runner idle detection
 - For each running issue, compute `elapsed_ms` since:
   - the selected runner's last observed event timestamp if any event has been seen, else
   - `started_at`
-- Use the selected runner's idle timeout (`codex.stall_timeout_ms` or `opencode.stall_timeout_ms`).
+- Use the selected runner's idle timeout (`opencode.stall_timeout_ms`).
 - If the selected timeout is `<= 0`, skip idle detection entirely for that run.
 - If an OpenCode ACP run hits a nonzero idle timeout, treat it as a runner liveness condition. The
   implementation MUST surface a bounded diagnostic and park/retry according to policy, but MUST NOT
-  launch repeated Codex RCA work that consumes tokens while the OpenCode session state is unchanged.
+  launch repeated RCA work while the OpenCode session state is unchanged.
 
 Part B: Tracker state refresh
 
@@ -1042,34 +1179,38 @@ Invariant 3: Workspace key is sanitized.
 
 ## 10. Agent Runner Protocol (Coding Agent Integration)
 
-This section defines Symphony's language-neutral responsibilities when integrating a Codex
-app-server. The Codex app-server protocol for the targeted Codex version is the source of truth for
-protocol schemas, message payloads, transport framing, and method names.
+This section defines Symphony vNext responsibilities when integrating OpenCode ACP. OpenCode ACP is
+the only code-execution integration in vNext. Symphony MUST NOT configure, launch, route to, or fall
+back to Codex app-server for runtime work, review, RCA, acceptance, or compatibility behavior.
 
 Protocol source of truth:
 
-- Implementations MUST send messages that are valid for the targeted Codex app-server version.
-- Implementations MUST consult the targeted Codex app-server documentation or generated schema
-  instead of treating this specification as a protocol schema.
-- If this specification appears to conflict with the targeted Codex app-server protocol, the Codex
-  protocol controls protocol shape and transport behavior.
+- Implementations MUST send messages that are valid for the targeted OpenCode ACP version.
+- Implementations MUST consult the targeted OpenCode ACP documentation or generated schema instead
+  of treating this specification as a wire protocol schema.
+- If this specification appears to conflict with the targeted OpenCode ACP protocol, the ACP protocol
+  controls protocol shape and transport behavior.
 - Symphony-specific requirements in this section still control orchestration behavior, workspace
-  selection, prompt construction, continuation handling, and observability extraction.
+  selection, prompt construction, continuation handling, handoff validation, and observability
+  extraction.
 
 ### 10.1 Launch Contract
 
 Subprocess launch parameters:
 
-- Command: `codex.command`
-- Invocation: `bash -lc <codex.command>`
-- Working directory: workspace path
-- Transport/framing: the protocol transport required by the targeted Codex app-server version
+- Command: `opencode.command`
+- Arguments: `opencode.args` (default `["acp"]` for ACP stdio)
+- Working directory: `opencode.project_root` when configured, otherwise the per-issue worktree path
+- Transport/framing: stdio ACP unless the targeted OpenCode version documents another supported ACP
+  transport
 
 Notes:
 
-- The default command is `codex app-server`.
-- Approval policy, sandbox policy, cwd, prompt input, and OPTIONAL tool declarations are supplied
-  using fields supported by the targeted Codex app-server version.
+- The default executable is `opencode`.
+- `opencode.server_url` is optional attach metadata for operators. It MUST NOT be treated as ACP
+  transport in stdio mode.
+- Permission policy, model, agent, and prompt input are supplied only through fields supported by the
+  targeted OpenCode ACP version.
 
 RECOMMENDED additional process settings:
 
@@ -1077,68 +1218,67 @@ RECOMMENDED additional process settings:
 
 ### 10.2 Session Startup Responsibilities
 
-Reference: https://developers.openai.com/codex/app-server/
+Startup MUST follow the targeted OpenCode ACP contract. Symphony additionally requires the client to:
 
-Startup MUST follow the targeted Codex app-server contract. Symphony additionally requires the
-client to:
-
-- Start the app-server subprocess in the per-issue workspace.
-- Initialize the app-server session using the targeted Codex app-server protocol.
-- Create or resume a coding-agent thread according to the targeted protocol.
-- Supply the absolute per-issue workspace path as the thread/turn working directory wherever the
-  targeted protocol accepts cwd.
-- Start the first turn with the rendered issue prompt.
-- Start later in-worker continuation turns on the same live thread with continuation guidance rather
-  than resending the original issue prompt.
-- Supply the implementation's documented approval and sandbox policy using fields supported by the
-  targeted protocol.
+- Start the ACP subprocess from the canonical project root when configured, otherwise from the
+  per-issue worktree.
+- Initialize or resume the ACP session using the targeted OpenCode ACP protocol.
+- Include the absolute per-issue worktree path and canonical project root in session metadata when
+  the targeted protocol supports them.
+- Start the implementation run with the plain Markdown issue spec rendered by Symphony.
+- Refuse to invent a prompt when the required issue spec is missing or malformed.
+- Use OpenCode's configured agent, model, and permission policy only through supported ACP fields.
 - Include issue-identifying metadata, such as `<issue.identifier>: <issue.title>`, when the targeted
-  protocol supports turn or session titles.
-- Advertise implemented client-side tools using the targeted protocol.
+  protocol supports titles or session metadata.
 
 Session identifiers:
 
-- Extract `thread_id` from the thread identity returned by the targeted Codex app-server protocol.
-- Extract `turn_id` from each turn identity returned by the targeted Codex app-server protocol.
-- Emit `session_id = "<thread_id>-<turn_id>"`
-- Reuse the same `thread_id` for all continuation turns inside one worker run
+- Extract the OpenCode session id from the targeted ACP protocol.
+- Persist the session id with the canonical project root, tracker issue id, and prompt/session scope.
+- Reuse or continue an incomplete persisted session rather than creating duplicates for the same
+  issue and prompt scope.
 
-### 10.3 Streaming Turn Processing
+### 10.3 Streaming Run Processing
 
-The client processes app-server updates according to the targeted Codex app-server protocol until
-the active turn terminates.
+The client processes ACP updates according to the targeted OpenCode protocol until the active run
+terminates or a real stop condition is reached.
 
 Completion conditions:
 
-- Targeted-protocol turn completion signal -> success
-- Targeted-protocol turn failure signal -> failure
-- Targeted-protocol turn cancellation signal -> failure
-- turn timeout (`turn_timeout_ms`) -> failure
-- subprocess exit -> failure
+- Targeted-protocol success/final handoff signal -> success, pending handoff validation
+- Targeted-protocol failure/cancellation signal -> failure
+- total runner timeout (`opencode.timeout_ms`) -> failure
+- configured idle timeout (`opencode.stall_timeout_ms > 0`) -> failure or parked state according to
+  runner policy
+- subprocess exit before final handoff -> failure
 
-Continuation processing:
+Repair processing:
 
-- If the worker decides to continue after a successful turn, it SHOULD start another turn on the same
-  live thread using the targeted protocol.
-- The app-server subprocess SHOULD remain alive across those continuation turns and be stopped only
-  when the worker run is ending.
+- Failed evals remain inside OpenCode's repair loop while repair attempts remain and new evidence is
+  available.
+- Symphony MAY dispatch a bounded OpenCode repair issue spec when policy allows.
+- Symphony MUST NOT launch Codex RCA or any non-OpenCode repair runner.
+- Exhausted attempts, repeated failure without new evidence, missing prerequisites, owner-input
+  requirements, permission boundaries, and infrastructure failures are real stop conditions.
 
 Transport handling requirements:
 
-- Follow the transport and framing rules of the targeted Codex app-server version.
-- For stdio-based transports, keep protocol stream handling separate from diagnostic stderr
-  handling unless the targeted protocol specifies otherwise.
+- Follow the transport and framing rules of the targeted OpenCode ACP version.
+- Keep protocol stream handling separate from diagnostic stderr handling unless the targeted
+  protocol specifies otherwise.
 
 ### 10.4 Emitted Runtime Events (Upstream to Orchestrator)
 
-The selected runner client emits structured events to the orchestrator callback. Each event SHOULD
+The OpenCode runner client emits structured events to the orchestrator callback. Each event SHOULD
 include:
 
 - `event` (enum/string)
 - `timestamp` (UTC timestamp)
-- `runner_kind` (`codex` or `opencode`)
+- `runner_kind` (`opencode`)
 - `runner_process_id` (if available)
 - `session_id` (if available)
+- `lifecycle_stage` (for example `starting`, `running`, `evaluating`, `repairing`, `handoff`,
+  `stopped`)
 - OPTIONAL `usage` map (token counts)
 - payload fields as needed
 
@@ -1146,49 +1286,40 @@ Important emitted events include, for example:
 
 - `session_started`
 - `startup_failed`
-- `turn_completed`
-- `turn_failed`
-- `turn_cancelled`
-- `turn_ended_with_error`
-- `turn_input_required`
-- `approval_auto_approved`
-- `unsupported_tool_call`
+- `message`
+- `tool_event`
+- `eval_started`
+- `eval_passed`
+- `eval_failed`
+- `repair_started`
+- `handoff_received`
+- `handoff_validated`
+- `run_failed`
+- `run_cancelled`
+- `runner_input_required`
 - `notification`
-- `other_message`
 - `malformed`
 
 ### 10.5 Approval, Tool Calls, and User Input Policy
 
-Approval, sandbox, and user-input behavior is implementation-defined.
+Approval, permission, and user-input behavior is implementation-defined but MUST be documented.
 
 Policy requirements:
 
-- Each implementation MUST document its chosen approval, sandbox, and operator-confirmation
+- Each implementation MUST document its chosen OpenCode permission and operator-confirmation
   posture.
 - Approval requests and user-input-required events MUST NOT leave a run stalled indefinitely. An
-  implementation MAY either satisfy them, surface them to an operator, auto-resolve them, or
-  fail the run according to its documented policy.
-
-Example high-trust behavior:
-
-- Auto-approve command execution approvals for the session.
-- Auto-approve file-change approvals for the session.
-- Treat user-input-required turns as hard failure.
-
-Unsupported dynamic tool calls:
-
-- Supported dynamic tool calls that are explicitly implemented and advertised by the runtime SHOULD
-  be handled according to their extension contract.
-- If the agent requests a dynamic tool call that is not supported, return a tool failure response
-  using the targeted protocol and continue the session.
-- This prevents the session from stalling on unsupported tool execution paths.
+  implementation MAY either satisfy them, surface them to an operator, auto-resolve them, or fail
+  the run according to its documented policy.
+- Unsupported dynamic tool calls MUST fail in-session using the targeted protocol instead of
+  stalling the run.
 
 Optional client-side tool extension:
 
-- An implementation MAY expose a limited set of client-side tools to the app-server session.
+- An implementation MAY expose a limited set of client-side tools to the OpenCode ACP session.
 - Current standardized optional tool: `linear_graphql`.
-- If implemented, supported tools SHOULD be advertised to the app-server session during startup
-  using the protocol mechanism supported by the targeted Codex app-server version.
+- If implemented, supported tools SHOULD be advertised during startup using the protocol mechanism
+  supported by the targeted OpenCode ACP version.
 - Unsupported tool names SHOULD still return a failure result using the targeted protocol and
   continue the session.
 
@@ -1214,9 +1345,8 @@ Optional client-side tool extension:
 - Implementations MAY additionally accept a raw GraphQL query string as shorthand input.
 - Execute one GraphQL operation per tool call.
 - If the provided document contains multiple operations, reject the tool call as invalid input.
-- `operationName` selection is intentionally out of scope for this extension.
 - Reuse the configured Linear endpoint and auth from the active Symphony workflow/runtime config; do
-  not require the coding agent to read raw tokens from disk.
+  not require OpenCode to read raw tokens from disk.
 - Tool result semantics:
   - transport success + no top-level GraphQL `errors` -> `success=true`
   - top-level GraphQL `errors` present -> `success=false`, but preserve the GraphQL response body
@@ -1225,113 +1355,69 @@ Optional client-side tool extension:
 - Return the GraphQL response or error payload as structured tool output that the model can inspect
   in-session.
 
-User-input-required policy:
-
-- Implementations MUST document how targeted-protocol user-input-required signals are handled.
-- A run MUST NOT stall indefinitely waiting for user input.
-- A conforming implementation MAY fail the run, surface the request to an operator, satisfy it
-  through an approved operator channel, or auto-resolve it according to its documented policy.
-- The example high-trust behavior above fails user-input-required turns immediately.
-
 ### 10.6 Timeouts and Error Mapping
 
 Timeouts:
 
-- `codex.read_timeout_ms`: request/response timeout during startup and sync requests
-- `codex.turn_timeout_ms`: total turn stream timeout
-- `codex.stall_timeout_ms`: enforced by orchestrator based on event inactivity
 - `opencode.read_timeout_ms`: ACP request/handshake timeout or CLI read timeout
 - `opencode.timeout_ms`: total OpenCode runner runtime timeout
 - `opencode.stall_timeout_ms`: selected-runner idle-event timeout; ACP defaults to disabled
 
 Error mapping (RECOMMENDED normalized categories):
 
-- `codex_not_found`
 - `opencode_not_found`
 - `invalid_workspace_cwd`
 - `response_timeout`
-- `turn_timeout`
-- `port_exit`
-- `response_error`
-- `turn_failed`
-- `turn_cancelled`
-- `turn_input_required`
-- `missing_opencode_task_prompt`
+- `run_timeout`
 - `opencode_acp_start_failed`
 - `opencode_acp_stalled`
+- `opencode_run_failed`
+- `opencode_run_cancelled`
+- `opencode_input_required`
+- `missing_opencode_task_prompt`
+- `invalid_opencode_handoff`
 - `opencode_provider_limited`
 
 ### 10.7 Agent Runner Contract
 
-The `Agent Runner` wraps workspace + prompt + selected coding-agent client.
+The `Agent Runner` wraps workspace + issue spec + OpenCode ACP client.
 
 Behavior:
 
 1. Create/reuse workspace for issue.
-2. Build prompt from workflow template.
-3. Resolve selected runner from `runner.routes` / `runner.default`.
-4. Start the selected runner session.
+2. Build the plain Markdown issue spec from the workflow template.
+3. Resolve selected runner from `runner.routes` / `runner.default`; the resolved vNext runner MUST be
+   `opencode`.
+4. Start or resume the OpenCode ACP session.
 5. Forward runner events to orchestrator.
-6. Persist runner session identity when the selected runner supports session resume.
-7. On successful implementation handoff, move to the runner's configured result state when policy
-   requires a state transition.
-8. On any error, fail the worker attempt or park the issue according to the selected runner's
-   documented error mapping.
+6. Persist runner session identity.
+7. Validate the final OpenCode handoff before any Linear write or state transition.
+8. On successful validated handoff, write the handoff to Linear and move to the configured result
+   state when policy requires a state transition.
+9. On any error, fail the worker attempt, dispatch bounded OpenCode repair, or park the issue
+   according to the selected runner's documented error mapping.
 
 Note:
 
 - Workspaces are intentionally preserved after successful runs.
-
-### 10.8 OpenCode ACP Runner Contract
-
-OpenCode MUST be implementable as a first-class runner, not only as a shell command invoked by a
-Codex prompt.
-
-ACP transport:
-
-- `opencode.protocol: acp` launches `opencode.command` with `opencode.args` as a stdio child process.
-- The child process cwd MUST be `opencode.project_root` when configured; otherwise it MUST be the
-  per-issue workspace path.
-- `opencode.server_url` is optional operator-facing attach metadata only. It MUST NOT be used as the
-  ACP transport in stdio mode.
-- The runner MUST stream ACP session updates, assistant/tool messages when available, result state,
-  session id, usage/tokens when available, and terminal handoff status into orchestrator events.
-
-Prompt and handoff:
-
-- OpenCode implementation work is dispatched from a complete owner/steward packet, normally posted as
-  `<!-- symphony:opencode-task-prompt:v1 ... -->`.
-- If the required task prompt is missing or malformed, the runner MUST stop with a policy error rather
-  than inventing an implementation prompt.
-- Generated worker prompts MUST NOT rely on role declarations such as `You are ...` as the first-line
-  contract. The packet content and schema are the contract.
-- A successful OpenCode implementation MUST return an operator-visible handoff with changed files,
-  validation commands/results, unresolved risks, and any session id or attach URL known to Symphony.
-
-Session persistence and resume:
-
-- ACP session identity SHOULD be persisted under the workspace root, for example
-  `<workspace.root>/.symphony/opencode_acp_sessions.json`.
-- The persistence key MUST include the canonical project root, tracker issue id, and prompt/session
-  scope so sessions from different projects or prompt generations do not collide.
-- When a persisted OpenCode ACP session exists and no completed handoff has been processed, Symphony
-  MUST resume or continue that session instead of creating duplicate sessions for the same issue.
-- When a persisted OpenCode ACP session exists and its completed handoff has already been processed,
-  Symphony MUST suppress duplicate state/comment mutations.
 - `OpenCode Session Attached` is not a completion handoff and MUST NOT be used as an owner-input
-  request. A session-attachment guard MAY be logged for operators, but it MUST NOT move an issue to
-  `Need Owner Input` by itself and MUST NOT replace session resume.
+  request.
 
-Timeout and quota behavior:
+### 10.8 OpenCode Handoff Contract
 
-- `opencode.timeout_ms` is the total implementation runtime limit and MAY be long; production
-  implementation work can legitimately run for tens of minutes.
-- `opencode.read_timeout_ms` is only for request/handshake operations.
-- For ACP, `opencode.stall_timeout_ms` defaults to `0` so lack of incremental ACP events does not
-  create repeated RCA transitions while the session is still active.
-- Provider quota/rate-limit failures before the first useful runner event MUST be surfaced as
-  infrastructure failure evidence. Re-dispatch SHOULD be delayed or parked according to retry policy
-  instead of repeatedly recreating sessions.
+A successful OpenCode implementation MUST return an operator-visible handoff with:
+
+- session id or attach URL when known
+- lifecycle stage history
+- subagents used
+- eval results and validation commands/results
+- changed files with line anchors
+- commit SHA, branch, and PR URL if any
+- risks and unresolved assumptions
+- stop reason
+
+Symphony validates this handoff before writing to Linear. Duplicate handoff hashes MUST NOT create
+duplicate comments or duplicate state transitions.
 
 ## 11. Issue Tracker Integration Contract (Linear-Compatible)
 
@@ -1402,15 +1488,17 @@ Orchestrator behavior on tracker errors:
 
 ### 11.5 Tracker Writes (Important Boundary)
 
-Symphony does not require first-class tracker write APIs in the orchestrator.
+Symphony vNext owns Linear coordination writes. OpenCode may provide implementation evidence, but
+Symphony is the only component that writes prepared issue specs, validated handoffs, review/closure
+decisions, repair prompts, and state transitions to Linear.
 
-- Ticket mutations (state transitions, comments, PR metadata) are typically handled by the coding
-  agent using tools defined by the workflow prompt.
-- The service remains a scheduler/runner and tracker reader.
-- Workflow-specific success often means "reached the next handoff state" (for example
-  `Human Review`) rather than tracker terminal state `Done`.
-- If the `linear_graphql` client-side tool extension is implemented, it is still part of the agent
-  toolchain rather than orchestrator business logic.
+- Ticket mutations are performed through Symphony's tracker adapter under orchestrator policy.
+- OpenCode does not need raw Linear credentials to complete implementation work.
+- Workflow-specific success often means "reached the configured handoff state" (for example
+  `In Review`) rather than tracker terminal state `Done`.
+- If the `linear_graphql` client-side tool extension is implemented, scope it to the active project
+  and treat it as an optional OpenCode tool, not as the authority for Symphony-owned state changes.
+- State/comment writes MUST be idempotent using persisted handoff hashes and transition keys.
 
 ## 12. Prompt Construction and Context Assembly
 
@@ -1482,7 +1570,7 @@ If the implementation exposes a synchronous runtime snapshot (for dashboards or 
 SHOULD return:
 
 - `running` (list of running session rows)
-- each running row SHOULD include `turn_count`
+- each running row SHOULD include `run_event_count`
 - `retrying` (list of retry queue rows)
 - `runner_totals`
   - `input_tokens`
@@ -1612,7 +1700,7 @@ Minimum endpoints:
           "issue_id": "abc123",
           "issue_identifier": "MT-649",
           "state": "In Progress",
-          "session_id": "thread-1-turn-1",
+          "session_id": "ses_example",
           "runner": {
             "kind": "opencode",
             "owner": "opencode",
@@ -1622,8 +1710,8 @@ Minimum endpoints:
             "project_root": "/home/agent/proj/example",
             "attach_url": "http://127.0.0.1:3000"
           },
-          "turn_count": 7,
-          "last_event": "turn_completed",
+          "run_event_count": 7,
+          "last_event": "handoff_validated",
           "last_message": "",
           "started_at": "2026-02-24T20:10:12Z",
           "last_event_at": "2026-02-24T20:14:59Z",
@@ -1676,7 +1764,7 @@ Minimum endpoints:
         "current_retry_attempt": 2
       },
       "running": {
-        "session_id": "thread-1-turn-1",
+        "session_id": "ses_example",
         "runner": {
           "kind": "opencode",
           "owner": "opencode",
@@ -1686,7 +1774,7 @@ Minimum endpoints:
           "project_root": "/home/agent/proj/example",
           "attach_url": "http://127.0.0.1:3000"
         },
-        "turn_count": 7,
+        "run_event_count": 7,
         "state": "In Progress",
         "started_at": "2026-02-24T20:10:12Z",
         "last_event": "notification",
@@ -1829,19 +1917,30 @@ API design notes:
 
 ### 14.3 Partial State Recovery (Restart)
 
-Current design is intentionally in-memory for scheduler state.
-Restart recovery means the service can resume useful operation by polling tracker state and reusing
-preserved workspaces. It does not mean retry timers, running sessions, or live worker state survive
-process restart.
+SQLite durable state is the restart recovery ledger for orchestration decisions. Implementations MUST
+persist enough state to reconcile claims, OpenCode session identifiers, handoff hashes, repair
+counters, idempotency keys, and issue/worktree ownership after process restart.
 
-After restart:
+Restart recovery reconciles three sources of truth:
 
-- No retry timers are restored from prior process memory.
-- No running sessions are assumed recoverable.
-- Service recovers by:
-  - startup terminal workspace cleanup
-  - fresh polling of active issues
-  - re-dispatching eligible work
+- SQLite durable state for prior claims, session and handoff identity, repair-loop progress, and
+  idempotency decisions.
+- Linear tracker state for current issue eligibility, terminal states, and operator-directed state
+  changes.
+- Filesystem worktrees for preserved or stale per-issue workspace directories.
+
+Live OS processes, in-memory timers, and transient worker handles are not assumed to survive process
+restart. After restart, the service MUST rebuild runnable scheduler state from the durable ledger and
+external state instead of trusting prior process memory.
+
+After restart, service recovery includes:
+
+- startup terminal workspace cleanup for issues already terminal in Linear
+- reconciliation of SQLite claims and persisted session/handoff state against current Linear state
+- validation of preserved worktrees before reuse or cleanup
+- re-dispatching or resuming eligible work using persisted OpenCode session identifiers, handoff
+  hashes, repair counters, and idempotency keys to avoid duplicate sessions, duplicate handoffs, or
+  repeated repair attempts
 
 ### 14.4 Operator Intervention Points
 
@@ -1904,7 +2003,7 @@ Implications:
 
 ### 15.5 Harness Hardening Guidance
 
-Running Codex agents against repositories, issue trackers, and other inputs that can contain
+Running OpenCode agents against repositories, issue trackers, and other inputs that can contain
 sensitive data or externally-controlled content can be dangerous. A permissive deployment can lead
 to data leaks, destructive mutations, or full machine compromise if the agent is induced to execute
 harmful commands or use overly-powerful integrations.
@@ -1916,10 +2015,10 @@ arguments are fully trustworthy just because they originate inside a normal work
 
 Possible hardening measures include:
 
-- Tightening Codex approval and sandbox settings described elsewhere in this specification instead
-  of running with a maximally permissive configuration.
+- Tightening OpenCode permission policy and host isolation settings instead of running with a
+  maximally permissive configuration.
 - Adding external isolation layers such as OS/container/VM sandboxing, network restrictions, or
-  separate credentials beyond the built-in Codex policy controls.
+  separate credentials beyond built-in runner permission controls.
 - Filtering which Linear issues, projects, teams, labels, or other tracker sources are eligible for
   dispatch so untrusted or out-of-scope tasks do not automatically reach the agent.
 - Narrowing the `linear_graphql` tool so it can only read or mutate data inside the
@@ -2062,61 +2161,52 @@ function dispatch_issue(issue, state, attempt):
   return state
 ```
 
-### 16.5 Worker Attempt (Workspace + Prompt + Agent)
+### 16.5 Worker Attempt (Workspace + Issue Spec + OpenCode ACP)
 
 ```text
 function run_agent_attempt(issue, attempt, orchestrator_channel):
-  workspace = workspace_manager.create_for_issue(issue.identifier)
+  workspace = workspace_manager.create_or_reuse_worktree(issue.identifier)
   if workspace failed:
     fail_worker("workspace error")
 
   if run_hook("before_run", workspace.path) failed:
     fail_worker("before_run hook error")
 
-  session = app_server.start_session(workspace=workspace.path)
+  issue_spec = render_plain_issue_spec(workflow_template, issue, attempt)
+  if issue_spec failed:
+    run_hook_best_effort("after_run", workspace.path)
+    fail_worker("issue spec render error")
+
+  session = opencode_acp.start_or_resume_session(
+    project_root=config.opencode.project_root or workspace.path,
+    workspace=workspace.path,
+    prompt_scope=issue_spec.hash
+  )
   if session failed:
     run_hook_best_effort("after_run", workspace.path)
-    fail_worker("agent session startup error")
+    fail_worker("opencode session startup error")
 
-  max_turns = config.agent.max_turns
-  turn_number = 1
+  run_result = opencode_acp.run(
+    session=session,
+    issue_spec=issue_spec,
+    issue=issue,
+    on_event=(event) -> send(orchestrator_channel, {opencode_update, issue.id, event})
+  )
 
-  while true:
-    prompt = build_turn_prompt(workflow_template, issue, attempt, turn_number, max_turns)
-    if prompt failed:
-      app_server.stop_session(session)
-      run_hook_best_effort("after_run", workspace.path)
-      fail_worker("prompt error")
+  if run_result failed:
+    opencode_acp.stop_session(session)
+    run_hook_best_effort("after_run", workspace.path)
+    fail_worker("opencode run error")
 
-    turn_result = app_server.run_turn(
-      session=session,
-      prompt=prompt,
-      issue=issue,
-      on_message=(msg) -> send(orchestrator_channel, {codex_update, issue.id, msg})
-    )
+  if validate_handoff(run_result.handoff) failed:
+    opencode_acp.stop_session(session)
+    run_hook_best_effort("after_run", workspace.path)
+    fail_worker("invalid opencode handoff")
 
-    if turn_result failed:
-      app_server.stop_session(session)
-      run_hook_best_effort("after_run", workspace.path)
-      fail_worker("agent turn error")
+  tracker.write_handoff_idempotently(issue.id, run_result.handoff)
+  tracker.transition_state_if_policy_allows(issue.id, config.opencode.result_state)
 
-    refreshed_issue = tracker.fetch_issue_states_by_ids([issue.id])
-    if refreshed_issue failed:
-      app_server.stop_session(session)
-      run_hook_best_effort("after_run", workspace.path)
-      fail_worker("issue state refresh error")
-
-    issue = refreshed_issue[0] or issue
-
-    if issue.state is not active:
-      break
-
-    if turn_number >= max_turns:
-      break
-
-    turn_number = turn_number + 1
-
-  app_server.stop_session(session)
+  opencode_acp.stop_session(session)
   run_hook_best_effort("after_run", workspace.path)
 
   exit_normal()
@@ -2204,11 +2294,11 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - `tracker.api_key` works (including `$VAR` indirection)
 - `$VAR` resolution works for tracker API key and path values
 - `~` path expansion works
-- `codex.command` is preserved as a shell command string
+- `opencode.command` is preserved as a command path string
 - `runner.default` rejects unsupported runner names
 - `runner.routes` normalizes state routes and rejects unsupported runner names
 - Per-state concurrency override map normalizes state names and ignores invalid values
-- `opencode.protocol` accepts `cli` and `acp`
+- `opencode.protocol` accepts only `acp`
 - `opencode.command`, `args`, `project_root`, `server_url`, `agent`, `model`, `format`,
   `result_state`, `timeout_ms`, `read_timeout_ms`, `stall_timeout_ms`, and `permission_policy` are
   parsed and exposed through typed config
@@ -2251,9 +2341,10 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - `Preparing` issue with non-terminal blockers is not eligible
 - `Preparing` issue with terminal blockers is eligible
 - `Need Owner Input` without newer owner-visible input is not eligible for repeated processing
-- `In Review` remains eligible when review/acceptance is routed to the steward runner
-- State runner route selects the configured runner and falls back to `runner.default`
-- `In Progress` can route to OpenCode without Codex app-server dispatch
+- `In Review` remains eligible when Symphony owns handoff validation and accepted closure
+- State runner route selects the configured runner and falls back to `runner.default`; vNext routes
+  resolve only to `opencode`
+- `In Progress` routes to OpenCode ACP without any app-server compatibility dispatch
 - Active-state issue refresh updates running entry state
 - Non-active state stops running agent without workspace cleanup
 - Terminal state stops running agent and cleans workspace
@@ -2265,7 +2356,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Runner idle detection uses the selected runner's configured stall timeout
 - OpenCode ACP with `stall_timeout_ms <= 0` is not killed for lack of incremental events
 - OpenCode ACP nonzero idle timeout parks or retries according to runner policy without launching a
-  repeated Codex RCA loop
+  repeated non-OpenCode RCA loop
 - Slot exhaustion requeues retries with explicit error reason
 - If a snapshot API is implemented, it returns running rows, retry rows, token totals, and rate
   limits
@@ -2273,15 +2364,15 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.5 Coding-Agent Runner Clients
 
-- Launch command uses workspace cwd and invokes `bash -lc <codex.command>`
-- Session startup follows the targeted Codex app-server protocol.
-- Client identity/capability payloads are valid when the targeted Codex app-server protocol requires
+- OpenCode ACP launch uses `opencode.command` plus `opencode.args` as a stdio process
+- Session startup follows the targeted OpenCode ACP protocol.
+- Client identity/capability payloads are valid when the targeted OpenCode ACP protocol requires
   them.
 - Policy-related startup payloads use the implementation's documented approval/sandbox settings
-- Thread and turn identities exposed by the targeted protocol are extracted and used to emit
+- Session identities exposed by the targeted protocol are extracted and used to emit
   `session_started`
 - Request/response read timeout is enforced
-- Turn timeout is enforced
+- Total runner timeout is enforced
 - Transport framing required by the targeted protocol is handled correctly
 - For stdio-based transports, diagnostic stderr handling is kept separate from the protocol stream
 - Command/file-change approvals are handled according to the implementation's documented policy
@@ -2292,7 +2383,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Approval, user-input-required, usage, and rate-limit signals are interpreted according to the
   targeted protocol
 - If client-side tools are implemented, session startup advertises the supported tool specs
-  using the targeted app-server protocol
+  using the targeted OpenCode ACP protocol
 - If the `linear_graphql` client-side tool extension is implemented:
   - the tool is advertised to the session
   - valid `query` / `variables` inputs execute against configured Linear auth
@@ -2368,27 +2459,29 @@ Use the same validation profiles as Section 17:
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
 - Hook timeout config (`hooks.timeout_ms`, default `60000`)
-- Coding-agent app-server subprocess client with JSON line protocol
-- Codex launch command config (`codex.command`, default `codex app-server`)
+- OpenCode ACP subprocess client with protocol framing for the targeted OpenCode version
+- OpenCode launch command config (`opencode.command`, default `opencode`; ACP args default `["acp"]`)
 - Strict prompt rendering with `issue` and `attempt` variables
-- Exponential retry queue with continuation retries after normal exit
+- Exponential retry queue plus bounded OpenCode repair dispatch after failed evals
+- Durable SQLite persistence for retry queue, OpenCode session identifiers, handoff hashes, repair
+  counters, idempotency keys, and issue/worktree ownership so restart recovery can rebuild
+  scheduler state without process memory
 - Configurable retry backoff cap (`agent.max_retry_backoff_ms`, default 5m)
 - Reconciliation that stops runs on terminal/non-active tracker states
 - Workspace cleanup for terminal issues (startup sweep + active transition)
 - Structured logs with `issue_id`, `issue_identifier`, and `session_id`
 - Operator-visible observability (structured logs; OPTIONAL snapshot/status surface)
+- Symphony-owned tracker write APIs for comments and state transitions
+- Handoff idempotency that prevents duplicate Linear comments or duplicate state transitions
 
 ### 18.2 RECOMMENDED Extensions (Not REQUIRED for Conformance)
 
 - HTTP server extension honors CLI `--port` over `server.port`, uses a safe default bind host, and
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
-  app-server session using configured Symphony auth.
-- TODO: Persist retry queue and session metadata across process restarts.
+  OpenCode ACP session using configured Symphony auth.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
-- TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead
-  of only via agent tools.
 - TODO: Add pluggable issue tracker adapters beyond Linear.
 
 ### 18.3 Operational Validation Before Production (RECOMMENDED)
@@ -2418,9 +2511,9 @@ Extension config:
 - Each worker run is assigned to one host at a time, and that host becomes part of the run's
   effective execution identity along with the issue workspace.
 - `workspace.root` is interpreted on the remote host, not on the orchestrator host.
-- The coding-agent app-server is launched over SSH stdio instead of as a local subprocess, so the
+- The OpenCode ACP runner is launched over SSH stdio instead of as a local subprocess, so the
   orchestrator still owns the session lifecycle even though commands execute remotely.
-- Continuation turns inside one worker lifetime SHOULD stay on the same host and workspace.
+- Continuation runs inside one worker lifetime SHOULD stay on the same host and workspace.
 - A remote host SHOULD satisfy the same basic contract as a local worker environment: reachable
   shell, writable workspace root, coding-agent executable, and any required auth or repository
   prerequisites.

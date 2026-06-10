@@ -62,45 +62,46 @@ defmodule SymphonyElixir.Steward.ExecutionPacket do
       Symphony steward packet
 
       <mission>
-      Keep Codex as the architect/reviewer. OpenCode writes application code.
+      Use Codex as the only bootstrap runner for Symphony vNext development.
       Be concise, act only on the current Linear state, and stop as soon as the state contract is satisfied.
       </mission>
 
       <state_contract>
       Todo:
-      - This state is the queued work backlog for the active milestone.
+      - This state is the queued work backlog ordered by Linear milestone, priority, and blockers.
       - Do not run Codex stewardship while the issue is still in Todo.
 
       Preparing:
-      - Verify the issue is in the active milestone and is not blocked.
-      - If implementation is needed, post exactly one `symphony:opencode-task-prompt:v1` Linear comment.
-      - The OpenCode prompt must include objective, scope, allowed paths, forbidden actions, acceptance criteria, validation commands, stop conditions, and handoff requirements.
-      - Move the same issue to `In Progress`, then stop.
-      - Do not edit repo files, run implementation validation, commit, push, or open a PR.
+      - Verify the issue belongs to the expected Linear milestone/order and is not blocked.
+      - Confirm the issue spec is executable.
+      - Move the same issue to `In Progress`, then continue with Codex when coding is required.
+      - Do not create or repost an OpenCode implementation prompt.
 
       In Progress:
-      - This state belongs to OpenCode. Do not process it with Codex.
+      - Implement the scoped change in Codex.
+      - Inspect the repo/worktree state before editing.
+      - Run issue-relevant validation and record exact command outcomes.
+      - Move to `In Review` only with concrete diff and validation evidence.
 
       In Review:
-      - Inspect the OpenCode handoff, diff, and validation evidence.
+      - Inspect the diff and validation evidence directly.
       - Post one `symphony:review-decision:v1` comment.
       - Accept and close only after direct evidence; otherwise reject, request owner input, or route to RCA.
 
       RCA Required:
       - Identify root cause first.
-      - If code repair is needed, post a redesigned OpenCode prompt with a new slice_id and move the issue to `In Progress`.
-      - Do not implement the repair in Codex.
+      - Implement the systemic repair in Codex when it is in scope.
+      - Move to `In Review` only after validation evidence exists.
 
       Need Owner Input:
       - Read the latest owner-visible comment.
       - Apply the owner decision if present; otherwise leave the issue parked.
-      - Do not edit repo files.
       </state_contract>
 
       <hard_stops>
-      - Never write application code in Codex for `Todo`, `Preparing`, `In Progress`, `RCA Required`, or `Need Owner Input`.
-      - Never replace OpenCode implementation with a Codex implementation.
-      - Never continue after posting the required handoff or review decision.
+      - Never start OpenCode ACP for Symphony vNext bootstrap development.
+      - Never create `symphony:opencode-task-prompt:v1` comments for this workflow.
+      - Never change the vNext target contract from this packet; `SPEC.md` remains the Rust/OpenCode-only runtime contract.
       - Ask one concise owner question only when the packet lacks the information needed to choose the next state.
       </hard_stops>
 

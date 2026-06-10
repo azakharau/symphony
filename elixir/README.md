@@ -1,11 +1,14 @@
 # Symphony Elixir
 
-This directory contains the current Elixir/OTP implementation of Symphony, based on
-[`SPEC.md`](../SPEC.md) at the repository root.
+This directory contains the legacy Elixir/OTP prototype of Symphony. It documents prior-art runtime
+behavior and remains useful for evaluation, but it is not the Rust vNext runtime contract. The
+repository-root [`SPEC.md`](../SPEC.md) is authoritative for vNext: Rust service, root multiproject
+config, SQLite state, Symphony-owned Linear writes, and OpenCode ACP-only implementation runs.
 
 > [!WARNING]
 > Symphony Elixir is prototype software intended for evaluation only and is presented as-is.
-> We recommend implementing your own hardened version based on `SPEC.md`.
+> Do not treat its Codex app-server flow, workflow-local milestone gates, or in-memory runtime maps
+> as vNext requirements.
 
 ## Screenshot
 
@@ -90,8 +93,9 @@ Optional flags:
   live-service cutover by itself. See
   [`docs/multiproject_runtime_operator_checklist.md`](docs/multiproject_runtime_operator_checklist.md).
 
-The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
-Codex session prompt.
+The Elixir prototype `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown
+body used as the Codex session prompt. In vNext, `SPEC.md` replaces this with a plain Markdown
+OpenCode issue-spec template and OpenCode ACP runner configuration.
 
 Minimal example:
 
@@ -121,6 +125,8 @@ Title: {{ issue.title }} Body: {{ issue.description }}
 
 Notes:
 
+- The `codex` settings below are legacy Elixir prototype settings only. They are not vNext runtime
+  routes, adapters, fallbacks, steward runners, acceptance runners, or RCA runners.
 - If a value is missing, defaults are used.
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
@@ -177,9 +183,9 @@ codex:
   `/`, `/api/v1/state`, `/api/v1/projects/<project_id>/state`,
   `/api/v1/<issue_identifier>`, `/api/v1/projects/<project_id>/issues/<issue_identifier>`,
   `/api/v1/refresh`, and `/api/v1/projects/<project_id>/refresh`.
-- `stewardship.active_milestone_id` selects the only Project Milestone eligible for dispatch in a
-  project workflow. Milestone description text such as `phase_state:*` is not parsed as runtime
-  state and must not be used as a dispatch gate.
+- Linear Project Milestones, issue priority, issue status, and explicit blockers define dispatch
+  order. Workflow-local milestone pointers and milestone description text such as `phase_state:*`
+  are not dispatch gates.
 
 ### Root Projects Config
 

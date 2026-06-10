@@ -255,6 +255,7 @@ defmodule SymphonyElixir.Config.Schema do
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       read_timeout_present? = read_timeout_present?(attrs)
+      stall_timeout_present? = stall_timeout_present?(attrs)
 
       schema
       |> cast(
@@ -276,7 +277,7 @@ defmodule SymphonyElixir.Config.Schema do
         ],
         empty_values: []
       )
-      |> default_acp_read_timeout(read_timeout_present?)
+      |> default_acp_timeouts(read_timeout_present?, stall_timeout_present?)
       |> validate_required([:command, :agent, :format, :result_state])
       |> validate_inclusion(:protocol, ["cli", "acp"])
       |> validate_number(:timeout_ms, greater_than: 0)
@@ -284,20 +285,35 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
     end
 
-    defp default_acp_read_timeout(changeset, false) do
+    defp default_acp_timeouts(changeset, read_timeout_present?, stall_timeout_present?) do
       case get_field(changeset, :protocol) do
-        "acp" -> put_change(changeset, :read_timeout_ms, 120_000)
-        _protocol -> changeset
+        "acp" ->
+          changeset
+          |> maybe_default_acp_read_timeout(read_timeout_present?)
+          |> maybe_default_acp_stall_timeout(stall_timeout_present?)
+
+        _protocol ->
+          changeset
       end
     end
 
-    defp default_acp_read_timeout(changeset, _read_timeout_present?), do: changeset
+    defp maybe_default_acp_read_timeout(changeset, false), do: put_change(changeset, :read_timeout_ms, 120_000)
+    defp maybe_default_acp_read_timeout(changeset, _read_timeout_present?), do: changeset
+
+    defp maybe_default_acp_stall_timeout(changeset, false), do: put_change(changeset, :stall_timeout_ms, 0)
+    defp maybe_default_acp_stall_timeout(changeset, _stall_timeout_present?), do: changeset
 
     defp read_timeout_present?(attrs) when is_map(attrs) do
       Map.has_key?(attrs, :read_timeout_ms) or Map.has_key?(attrs, "read_timeout_ms")
     end
 
     defp read_timeout_present?(_attrs), do: false
+
+    defp stall_timeout_present?(attrs) when is_map(attrs) do
+      Map.has_key?(attrs, :stall_timeout_ms) or Map.has_key?(attrs, "stall_timeout_ms")
+    end
+
+    defp stall_timeout_present?(_attrs), do: false
   end
 
   defmodule ProcessPolicy do

@@ -37,7 +37,7 @@ runner:
     "In Review": codex
     "Need Owner Input": codex
     "RCA Required": codex
-    "In Progress": opencode
+    "In Progress": codex
 opencode:
   protocol: acp
   command: /usr/local/bin/opencode
@@ -51,15 +51,15 @@ opencode:
   result_state: "In Review"
   timeout_ms: 10800000
   read_timeout_ms: 30000
-  stall_timeout_ms: 300000
+  stall_timeout_ms: 0
   permission_policy: reject
 
 OpenCode live validation gate:
 
 - Default `mix test` is deterministic and excludes the live OpenCode gate; it must not require `/usr/local/bin/opencode`, an OpenCode web server, or live Linear.
-- Run the opt-in gate from `/home/agent/proj/symphony/elixir` with `SYMPHONY_OPENCODE_LIVE=1 OPENCODE_COMMAND=/usr/local/bin/opencode mix test.opencodelive`.
+- Run the opt-in adapter gate from `/home/agent/proj/symphony/elixir` with `SYMPHONY_OPENCODE_LIVE=1 OPENCODE_COMMAND=/usr/local/bin/opencode mix test.opencodelive`.
 - To link handoff evidence to a visible OpenCode Web session, also set `OPENCODE_SERVER_URL=http://127.0.0.1:3000`; ACP still runs as the stdio command `/usr/local/bin/opencode acp`, and the URL is recorded only as attach metadata.
-- The gate uses the memory tracker, an evidence-only no-edit OpenCode prompt, and `git status --short` before/after protection; it proves an `In Progress` issue dispatches through OpenCode and reaches the controlled `In Review` handoff state without production Linear mutation.
+- The gate uses an isolated memory tracker, explicit test-only OpenCode routing, an evidence-only no-edit prompt, and `git status --short` before/after protection. It validates the OpenCode adapter without changing the production bootstrap route, which remains Codex-only for SYM vNext work.
 - Cleanup is limited to test-owned temporary workspaces. If the gate fails, interpret the command output as local OpenCode/server/session evidence and record the exact command, result, attach URL, session id when present, and any Mnemesh evidence refs on the Linear/Mnemesh validation record.
 - `/home/agent/proj/symphony` is the canonical live gate project root. Do not use vendor aliases for live validation or service configuration.
 
@@ -80,9 +80,12 @@ codex:
     type: dangerFullAccess
 ---
 
-Symphony steward workflow for the Symphony project.
+Symphony steward workflow for the Symphony project. This file describes the current human
+stewardship process used around the Elixir prototype; it is not the Rust vNext runtime contract.
+`../SPEC.md` is authoritative for vNext and removes Codex from runtime routes, adapters, acceptance,
+RCA, and fallback execution.
 
-Codex session contract:
+Codex session contract (current human steward process only):
 
 - Symphony must start issue-scoped Codex threads from the per-issue workspace.
 - Do not resume the main project Machine Architect thread for Symphony execution packets.
@@ -99,10 +102,11 @@ Project identity:
 
 Role boundary:
 
-- Codex is the architect/reviewer: milestone stewardship, OpenCode prompt authoring, acceptance/rejection, RCA, docs/runbooks, git closure, and Linear hygiene.
-- OpenCode owns implementation of application code as the coding runner: focused validation and one consolidated handoff.
-- Codex must not implement application code for `Todo`, `Preparing`, `In Progress`, `RCA Required`, or `Need Owner Input` issues.
-- Codex may edit files only for explicit docs/runbook/config/ops/meta issues or for final accepted git closure.
+- This Elixir workflow is the temporary bootstrap surface for developing Symphony vNext only.
+- Codex owns implementation, validation, acceptance/rejection, RCA, docs/runbooks, git closure, and Linear hygiene for current Symphony vNext development tasks.
+- OpenCode is not used by this bootstrap workflow to execute, repair, or accept Symphony vNext work.
+- Codex may edit application code when the current SYM issue requires it, while preserving unrelated dirty/user changes.
+- Do not change the vNext product contract from this workflow file: `../SPEC.md` remains the target Rust/OpenCode-only runtime contract.
 - Do not choose new product milestones or seed top-level backlog work. Work only inside Linear milestones and issues already curated by the owner/CTO.
 
 Milestone rules:
@@ -115,14 +119,15 @@ Milestone rules:
 - `phase_state:*` text has no runtime effect and must not gate dispatch.
 - Do not scan, rank, promote, or synthesize new milestones.
 
-State contract:
+State contract (current bootstrap process only; vNext uses Symphony-owned Linear writes plus
+OpenCode ACP implementation/eval/repair):
 
 - `Todo`: queued work only. Symphony promotes one eligible issue to `Preparing`; Codex must not run while the issue is still `Todo`.
-- `Preparing`: Codex-owned stewardship. Verify the Linear milestone and blockers. If code is needed, post exactly one marked OpenCode prompt, move the same issue to `In Progress`, then stop. Do not edit files, run implementation validation, commit, push, or open PRs.
-- `In Progress`: OpenCode-owned. Codex must not process it directly.
-- `In Review`: Codex-owned acceptance. Inspect OpenCode handoff, diff, and validation evidence; post one marked review decision; then accept/close, reject, ask owner, or route to RCA.
-- `RCA Required`: Codex-owned RCA. Identify root cause first; if repair is needed, post a redesigned OpenCode prompt with a new `slice_id`, move to `In Progress`, then stop. Do not implement the repair.
-- `Need Owner Input`: read the latest owner-visible comment, apply the owner decision if present, otherwise keep it parked. Do not edit files.
+- `Preparing`: Codex-owned start gate. Verify the Linear milestone and blockers, confirm the issue spec is executable, move the same issue to `In Progress`, and continue through Codex when coding is required.
+- `In Progress`: Codex-owned implementation. Inspect the current repo/worktree state, implement the scoped change, run relevant validation, and move to `In Review` only with concrete evidence.
+- `In Review`: Codex-owned acceptance. Inspect the diff and validation evidence directly; post one marked review decision; then accept/close, reject, ask owner, or route to RCA.
+- `RCA Required`: Codex-owned RCA and repair. Identify root cause first, then implement the systemic repair in Codex when it is in scope.
+- `Need Owner Input`: read the latest owner-visible comment, apply the owner decision if present, otherwise keep it parked.
 - `Done`, `Canceled`, and `Duplicate` are terminal.
 
 Issue context:
@@ -144,7 +149,7 @@ No description provided.
 Continuation context:
 
 - This is retry/continuation attempt #{{ attempt }}.
-- Resume from existing Linear, repo, worktree, and runner state. Do not restart a completed implementation or repost an identical OpenCode prompt.
+- Resume from existing Linear, repo, worktree, and runner state. Do not restart completed implementation work or create duplicate execution comments.
 {% endif %}
 
 Hard process guards:
@@ -156,22 +161,14 @@ Hard process guards:
 - Do not optimize benchmark behavior for benchmark-specific issue names, paths, or fixtures.
 - Preserve existing dirty/unrelated user changes. Never reset, checkout, or clean unrelated files.
 
-OpenCode prompt contract:
+Codex execution contract (current bootstrap process only; vNext plain issue specs use the sections
+`Context`, `Change`, `Acceptance Criteria`, `Validation`, `Handoff`, and `Non-goals`):
 
-- Use direct, scoped prompts: objective, context, allowed paths, forbidden actions, acceptance criteria, validation commands, stop conditions, and handoff requirements.
-- Keep the prompt concise; include only evidence needed for implementation.
-- Post the prompt as a Linear comment using exactly this envelope:
-
-<!-- symphony:opencode-task-prompt:v1 slice_id=<stable-slice-id> -->
-```text
-<the full prompt OpenCode must receive>
-```
-
-- The fenced prompt must be self-contained, bounded to one implementation slice, and free of role-declaration preambles.
-- Start with the task objective and constraints, not `You are ...`.
-- Tell OpenCode to use writable engineer agents when useful, run/collect validation, and return one consolidated handoff.
-- Use `/home/agent/proj/symphony` as the OpenCode-visible project root so sessions appear in OpenCode WebUI.
-- After posting the marked comment, move the issue to `In Progress` and stop. Symphony passes the marked prompt to OpenCode verbatim.
+- Work from the issue workspace that Symphony creates for the SYM issue.
+- Use concise internal task framing from the Linear spec; do not create or repost OpenCode implementation prompts.
+- Do not start OpenCode ACP, rely on OpenCode session state, or treat OpenCode handoff comments as the required execution path for Symphony vNext development.
+- For code changes, inspect the current diff, implement the scoped change, run issue-relevant validation, and record exact command outcomes.
+- Preserve unrelated dirty/user changes. Never reset, checkout, or clean unrelated files.
 
 Review decision contract:
 
@@ -190,7 +187,7 @@ reason: <one concise reason>
 Validation and closure:
 
 - For Symphony code changes, run the validation commands specified by the issue. At minimum prefer targeted `mix test`, `mix format --check-formatted`, `mix specs.check`, and `git diff --check` when relevant.
-- Inspect the diff directly before accepting OpenCode work. Tests are supporting evidence, not acceptance by themselves.
-- The steward owns final git stage/commit/push after a durable acceptance record exists.
+- Inspect the diff directly before accepting work. Tests are supporting evidence, not acceptance by themselves.
+- Codex owns final git stage/commit/push when the issue requires closure and validation is sufficient.
 - Do not stop live per-project services, enable the new multiproject service, or mutate systemd cutover state unless the issue explicitly says that approval was granted.
 - If the issue asks for cutover preparation, produce templates/runbooks and validation evidence only.

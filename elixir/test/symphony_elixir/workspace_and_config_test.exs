@@ -979,7 +979,7 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([agent_question], state) == nil
   end
 
-  test "owner-input pulse ignores issue without todo project milestone" do
+  test "owner-input pulse accepts issue without runtime milestone pointer" do
     issue = %Issue{
       id: "owner-unscoped",
       identifier: "NER-30",
@@ -996,7 +996,7 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
       owner_input_pulsed: MapSet.new()
     }
 
-    assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([issue], state) == nil
+    assert Orchestrator.latest_owner_input_issue_for_pulse_for_test([issue], state) == issue
   end
 
   test "done continuation pulse ignores issue without todo project milestone" do
@@ -2044,7 +2044,7 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     assert state.active_project_milestone_id == "milestone-configured"
   end
 
-  test "milestone dispatch gate follows active pointer match and blocks nil pointer" do
+  test "milestone dispatch does not require a runtime active pointer" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_active_states: ["Todo", "Preparing", "In Progress", "Need Owner Input"],
       poll_fast_states: ["Todo", "Preparing"],
@@ -2070,8 +2070,8 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     state = %Orchestrator.State{active_project_milestone_id: "milestone-active"}
 
     assert Orchestrator.should_dispatch_issue_for_test(matching_issue, state)
-    refute Orchestrator.should_dispatch_issue_for_test(non_matching_issue, state)
-    refute Orchestrator.should_dispatch_issue_for_test(matching_issue, %Orchestrator.State{})
+    assert Orchestrator.should_dispatch_issue_for_test(non_matching_issue, state)
+    assert Orchestrator.should_dispatch_issue_for_test(matching_issue, %Orchestrator.State{})
   end
 
   test "retry of active issue hydrates missing milestone pointer from live issue" do
@@ -2290,15 +2290,15 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
 
     assert {:ok, prompt} = ExecutionPacket.prompt(packet)
     refute prompt =~ ~r/^\s*You are\b/
-    assert prompt =~ "Keep Codex as the architect/reviewer. OpenCode writes application code."
+    assert prompt =~ "Use Codex as the only bootstrap runner for Symphony vNext development."
     assert prompt =~ "Todo:"
     assert prompt =~ "Preparing:"
     assert prompt =~ "Do not run Codex stewardship while the issue is still in Todo."
-    assert prompt =~ "post exactly one `symphony:opencode-task-prompt:v1` Linear comment"
-    assert prompt =~ "Do not edit repo files, run implementation validation, commit, push, or open a PR."
+    assert prompt =~ "Do not create or repost an OpenCode implementation prompt."
+    assert prompt =~ "Implement the scoped change in Codex."
     assert prompt =~ "In Review:"
     assert prompt =~ "Post one `symphony:review-decision:v1` comment."
-    assert prompt =~ "Never replace OpenCode implementation with a Codex implementation."
+    assert prompt =~ "Never start OpenCode ACP for Symphony vNext bootstrap development."
   end
 
   test "active child work keeps milestone lock without fetching milestone phase or writing suppressions" do
@@ -2808,7 +2808,7 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     assert Config.settings!().codex.command == "codex app-server"
   end
 
-  test "opencode acp keeps idle stall watchdog when stall timeout is omitted" do
+  test "opencode acp disables idle stall watchdog when stall timeout is omitted" do
     File.write!(
       Workflow.workflow_file_path(),
       """
@@ -2826,10 +2826,32 @@ Validation results...", created_at: ~U[2026-01-05 00:00:00Z], parent_id: nil}
     config = Config.settings!()
     assert config.opencode.timeout_ms == 10_800_000
     assert config.opencode.read_timeout_ms == 120_000
+    assert config.opencode.stall_timeout_ms == 0
+  end
+
+  test "opencode acp honors explicit positive stall timeout" do
+    File.write!(
+      Workflow.workflow_file_path(),
+      """
+      ---
+      opencode:
+        protocol: acp
+        command: opencode
+        timeout_ms: 10800000
+        stall_timeout_ms: 300000
+      ---
+
+      prompt
+      """
+    )
+
+    config = Config.settings!()
+    assert config.opencode.timeout_ms == 10_800_000
+    assert config.opencode.read_timeout_ms == 120_000
     assert config.opencode.stall_timeout_ms == 300_000
   end
 
-  test "opencode acp disables idle stall watchdog only when stall timeout is explicitly zero" do
+  test "opencode acp honors explicit zero stall timeout" do
     File.write!(
       Workflow.workflow_file_path(),
       """

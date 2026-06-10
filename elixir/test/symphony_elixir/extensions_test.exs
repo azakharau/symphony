@@ -1699,7 +1699,7 @@ defmodule SymphonyElixir.ExtensionsTest do
           owner_input_count: 0,
           recent_suppression_reasons: [],
           dispatch_state: :no_eligible_work,
-          reason: "No eligible issue is available for the active milestone and worker policy."
+          reason: "No eligible issue is available for the current Linear ordering and worker policy."
         },
         rate_limits: nil,
         polling: %{checking?: false, next_poll_in_ms: 5_000, poll_interval_ms: 2_000},

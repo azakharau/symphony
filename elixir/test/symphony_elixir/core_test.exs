@@ -134,7 +134,7 @@ defmodule SymphonyElixir.CoreTest do
 
     runner = Map.get(config, "runner", %{})
     assert Map.get(runner, "default") == "codex"
-    assert get_in(runner, ["routes", "In Progress"]) == "opencode"
+    assert get_in(runner, ["routes", "In Progress"]) == "codex"
 
     opencode = Map.get(config, "opencode", %{})
     assert Map.get(opencode, "protocol") == "acp"
@@ -142,7 +142,7 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(opencode, "agent") == "build"
     assert Map.get(opencode, "server_url") == nil
     assert Map.get(opencode, "timeout_ms") == 10_800_000
-    assert Map.get(opencode, "stall_timeout_ms") == 300_000
+    assert Map.get(opencode, "stall_timeout_ms") == 0
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())
@@ -597,7 +597,7 @@ defmodule SymphonyElixir.CoreTest do
     refute Process.alive?(agent_pid)
   end
 
-  test "normal worker exit schedules active-state continuation retry" do
+  test "normal worker exit schedules cheap active-state verification retry" do
     issue_id = "issue-resume"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :ContinuationOrchestrator)
@@ -636,6 +636,55 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
     assert_due_scheduled_between(due_at_ms, before_retry_ms, after_retry_ms, 1_000)
+  end
+
+  test "codex continuation retry blocks unchanged active issue instead of redispatching" do
+    issue_id = "issue-unchanged-codex-continuation"
+    retry_token = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :CodexContinuationRetryOrchestrator)
+    issue = %Issue{id: issue_id, identifier: "MT-558", title: "Retry loop guard", state: "In Progress"}
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{
+        issue_id => %{
+          attempt: 1,
+          timer_ref: nil,
+          retry_token: retry_token,
+          due_at_ms: System.monotonic_time(:millisecond),
+          identifier: "MT-558",
+          issue: issue,
+          delay_type: :continuation,
+          runner_kind: "codex"
+        }
+      })
+    end)
+
+    send(pid, {:retry_issue, issue_id, retry_token})
+    Process.sleep(50)
+
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+    assert %{error: error, runner_kind: "codex"} = state.blocked[issue_id]
+    assert error =~ "completed normally while the issue is still active"
   end
 
   test "normal owner-input pulse exit does not schedule continuation retry" do
@@ -1162,8 +1211,8 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Title: Use rich templates for WORKFLOW.md"
     assert prompt =~ "Status: In Progress"
     assert prompt =~ "https://example.org/issues/MT-616/use-rich-templates-for-workflowmd"
-    assert prompt =~ "OpenCode owns implementation of application code"
-    assert prompt =~ "Post the prompt as a Linear comment using exactly this envelope"
+    assert prompt =~ "Codex owns implementation, validation, acceptance/rejection"
+    assert prompt =~ "Do not start OpenCode ACP"
     assert prompt =~ "Do not optimize benchmark behavior"
     assert prompt =~ "Never reset, checkout, or clean unrelated files."
     assert prompt =~ "Continuation context:"

@@ -51,6 +51,17 @@ CREATE TABLE IF NOT EXISTS opencode_sessions (
     FOREIGN KEY (project_id, issue_id) REFERENCES issues(project_id, issue_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS opencode_stage_events (
+    project_id TEXT NOT NULL,
+    issue_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    stage TEXT NOT NULL,
+    event TEXT,
+    PRIMARY KEY (project_id, issue_id, session_id, sequence),
+    FOREIGN KEY (project_id, issue_id, session_id) REFERENCES opencode_sessions(project_id, issue_id, session_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS eval_runs (
     project_id TEXT NOT NULL,
     issue_id TEXT NOT NULL,

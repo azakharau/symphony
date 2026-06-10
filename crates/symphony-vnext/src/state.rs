@@ -50,6 +50,16 @@ pub struct OpenCodeSessionRecord {
     pub silence_observed: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OpenCodeStageEventRecord {
+    pub project_id: String,
+    pub issue_id: String,
+    pub session_id: String,
+    pub sequence: u64,
+    pub stage: OpenCodeStage,
+    pub event: Option<String>,
+}
+
 impl OpenCodeSessionRecord {
     pub fn failure_marker(&self) -> Option<&str> {
         if self.lifecycle_stage == LifecycleStage::Failed {

@@ -49,6 +49,16 @@ dispatch. The persisted session read model includes stage telemetry, active agen
 todo, part, token, cost, subagent, eval-stage, worktree, lifecycle marker, last-event, and observable
 silence fields.
 
+The Rust dashboard API projection exposes deterministic JSON-compatible read models for
+`/api/dashboard`, `/api/projects/{project_id}`, and
+`/api/projects/{project_id}/issues/{issue_id}`. The aggregate projection reports project activity
+counts, parked and terminal counts, runner health, last event, capacity, and cleanup state. Project
+and issue drilldowns include Linear state, vNext lifecycle status, blockers, OpenCode session and
+worktree metadata, active agent/model, subagent count, eval results, token/cost usage, git refs,
+failure/stop reason, cleanup status, and a human-readable display status for repair loops, evals,
+silence, provider blockers, owner input, and completed cleanup. Rust vNext does not yet include a
+web dashboard server; these projections are the stable API contract for that UI.
+
 OpenCode handoff acceptance in vNext is git-closure based. Symphony accepts completion only from a
 structured OpenCode handoff with passing eval results, changed-file evidence, and git closure
 metadata including branch, commit SHA, PR URL when present, and worktree path. Eval failures stay in

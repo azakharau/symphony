@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf, thread, time::Duration};
 
 use symphony_vnext::{
-    api::RuntimeReadModel,
+    api::{RuntimeDashboardApi, RuntimeReadModel},
     cli,
     config::RootConfig,
     daemon,
@@ -14,8 +14,9 @@ use symphony_vnext::{
         OpenCodeSessionEvent, OpenCodeStopReason, PermissionPolicy,
     },
     state::{
-        CleanupStatus, FailureRecord, GitRefRecord, IssueStateRecord, LifecycleStage,
-        OpenCodeSessionRecord, OpenCodeStage, ProjectStateRecord,
+        BlockerRecord, CleanupStatus, EvalRunRecord, FailureRecord, GitRefRecord, IssueStateRecord,
+        LifecycleStage, OpenCodeSessionRecord, OpenCodeStage, OpenCodeStageEventRecord,
+        ProjectStateRecord,
     },
     storage::SqliteStore,
 };
@@ -225,6 +226,147 @@ fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
             .as_deref(),
         Some("unit")
     );
+}
+
+#[test]
+fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_yaml_str(valid_config_yaml()).expect("config");
+    let store = SqliteStore::open(&db_path).expect("open sqlite");
+    store.migrate().expect("migrate");
+    store.reconcile_projects(&config).expect("projects");
+
+    let mut repair = test_issue("symphony", "repair", "SYM-91", "In Progress");
+    repair.failure = Some(FailureRecord {
+        kind: "eval_failure".into(),
+        message: "clippy::needless_collect".into(),
+        fingerprint: Some("clippy-needless-collect".into()),
+        occurrence_count: 1,
+    });
+    repair.git_ref = Some(GitRefRecord {
+        branch: "agent-server/opencode-runner-extension".into(),
+        worktree_path: "/home/agent/.symphony/workspaces/opencode/symphony/SYM-91".into(),
+        head_sha: Some("abc123".into()),
+        pr_url: Some("https://example.test/pr/91".into()),
+    });
+    store.upsert_issue(repair).expect("repair issue");
+
+    let mut provider_blocked = test_issue("symphony", "provider", "SYM-92", "Need Owner Input");
+    provider_blocked.lifecycle_stage = LifecycleStage::Blocked;
+    provider_blocked.blocker = Some(BlockerRecord {
+        kind: "provider_blocker".into(),
+        message: "provider quota exhausted".into(),
+    });
+    store
+        .upsert_issue(provider_blocked)
+        .expect("provider issue");
+
+    let mut completed = test_issue("symphony", "done", "SYM-93", "Done");
+    completed.lifecycle_stage = LifecycleStage::Completed;
+    completed.cleanup_status = CleanupStatus::Complete;
+    store.upsert_issue(completed).expect("done issue");
+
+    let mut session = test_session(
+        "symphony",
+        "repair",
+        "oc-repair",
+        "/home/agent/.symphony/workspaces/opencode/symphony/SYM-91",
+    );
+    session.stage = OpenCodeStage::Eval;
+    session.active_agent = Some("evaluator".into());
+    session.active_model = Some("gpt-5".into());
+    session.token_count = 4096;
+    session.cost_micros = 123_456;
+    session.subagent_count = 2;
+    session.eval_stage = Some("cargo clippy".into());
+    session.lifecycle_marker = Some("repair_loop".into());
+    session.last_event = Some("eval_failed:clippy-needless-collect".into());
+    store.upsert_opencode_session(session).expect("session");
+    store
+        .upsert_opencode_stage_event(OpenCodeStageEventRecord {
+            project_id: "symphony".into(),
+            issue_id: "repair".into(),
+            session_id: "oc-repair".into(),
+            sequence: 1,
+            stage: OpenCodeStage::Running,
+            event: Some("implementation_started".into()),
+        })
+        .expect("running stage event");
+    store
+        .upsert_opencode_stage_event(OpenCodeStageEventRecord {
+            project_id: "symphony".into(),
+            issue_id: "repair".into(),
+            session_id: "oc-repair".into(),
+            sequence: 2,
+            stage: OpenCodeStage::Eval,
+            event: Some("eval_failed:clippy-needless-collect".into()),
+        })
+        .expect("eval stage event");
+    store
+        .upsert_eval_run(EvalRunRecord {
+            project_id: "symphony".into(),
+            issue_id: "repair".into(),
+            run_id: "eval-1".into(),
+            suite: "cargo clippy".into(),
+            status: "failed".into(),
+            details_json: Some(r#"{"fingerprint":"clippy-needless-collect"}"#.into()),
+        })
+        .expect("eval run");
+
+    let api = RuntimeDashboardApi::from_store(&config, &store).expect("dashboard api");
+    let aggregate_json = serde_json::to_string_pretty(&api.aggregate()).expect("aggregate json");
+    let project_json = serde_json::to_string_pretty(
+        &api.project_drilldown("symphony")
+            .expect("project endpoint")
+            .expect("project exists"),
+    )
+    .expect("project json");
+    let issue_detail = api
+        .issue_detail("symphony", "repair")
+        .expect("issue endpoint")
+        .expect("issue exists");
+    let issue_json = serde_json::to_string_pretty(issue_detail).expect("issue json");
+
+    assert_eq!(
+        aggregate_json,
+        r#"{
+  "projects": [
+    {
+      "project_id": "symphony",
+      "name": "Symphony",
+      "enabled": true,
+      "active_count": 1,
+      "parked_count": 1,
+      "terminal_count": 1,
+      "runner_health": "repair loop",
+      "last_event": "eval_failed:clippy-needless-collect",
+      "capacity": {
+        "max_sessions": 2,
+        "running_sessions": 1,
+        "available_sessions": 1
+      },
+      "cleanup_status": "clean"
+    }
+  ]
+}"#
+    );
+    assert!(
+        !aggregate_json.contains("Preparing")
+            && !aggregate_json.contains("In Review")
+            && !aggregate_json.contains("RCA Required")
+            && !aggregate_json.contains("Codex")
+    );
+    assert!(project_json.contains(r#""display_status": "provider/infra blocker""#));
+    assert!(project_json.contains(r#""history_issues""#));
+    assert!(issue_json.contains(r#""opencode_session_id": "oc-repair""#));
+    assert_eq!(
+        issue_detail.opencode_sessions[0].stage_history,
+        vec![OpenCodeStage::Running, OpenCodeStage::Eval]
+    );
+    assert!(issue_json.contains(r#""subagents_used": 2"#));
+    assert!(issue_json.contains(r#""eval_results""#));
+    assert!(issue_json.contains(r#""pr_url": "https://example.test/pr/91""#));
 }
 
 #[test]

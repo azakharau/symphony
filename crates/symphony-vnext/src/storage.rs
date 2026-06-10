@@ -7,8 +7,9 @@ use thiserror::Error;
 use crate::{
     config::RootConfig,
     state::{
-        BlockerRecord, CleanupStatus, FailureRecord, GitRefRecord, IssueStateRecord,
-        LifecycleStage, OpenCodeSessionRecord, OpenCodeStage, ProjectStateRecord, StateParseError,
+        BlockerRecord, CleanupStatus, EvalRunRecord, FailureRecord, GitRefRecord, IssueStateRecord,
+        LifecycleStage, OpenCodeSessionRecord, OpenCodeStage, OpenCodeStageEventRecord,
+        ProjectStateRecord, StateParseError,
     },
 };
 
@@ -296,6 +297,106 @@ impl SqliteStore {
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StorageError::from)
     }
+
+    pub fn upsert_opencode_stage_event(
+        &self,
+        event: OpenCodeStageEventRecord,
+    ) -> Result<(), StorageError> {
+        self.conn.execute(
+            r#"
+            INSERT INTO opencode_stage_events (
+                project_id,
+                issue_id,
+                session_id,
+                sequence,
+                stage,
+                event
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(project_id, issue_id, session_id, sequence) DO UPDATE SET
+                stage = excluded.stage,
+                event = excluded.event
+            "#,
+            params![
+                event.project_id,
+                event.issue_id,
+                event.session_id,
+                event.sequence as i64,
+                event.stage.as_str(),
+                event.event
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn opencode_stage_events_for_session(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+    ) -> Result<Vec<OpenCodeStageEventRecord>, StorageError> {
+        let mut statement = self.conn.prepare(
+            r#"
+            SELECT project_id, issue_id, session_id, sequence, stage, event
+            FROM opencode_stage_events
+            WHERE project_id = ?1 AND issue_id = ?2 AND session_id = ?3
+            ORDER BY sequence ASC
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![project_id, issue_id, session_id],
+            stage_event_from_row,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
+    pub fn upsert_eval_run(&self, eval: EvalRunRecord) -> Result<(), StorageError> {
+        self.conn.execute(
+            r#"
+            INSERT INTO eval_runs (
+                project_id,
+                issue_id,
+                run_id,
+                suite,
+                status,
+                details_json
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(project_id, issue_id, run_id) DO UPDATE SET
+                suite = excluded.suite,
+                status = excluded.status,
+                details_json = excluded.details_json
+            "#,
+            params![
+                eval.project_id,
+                eval.issue_id,
+                eval.run_id,
+                eval.suite,
+                eval.status,
+                eval.details_json
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn eval_runs_for_issue(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<Vec<EvalRunRecord>, StorageError> {
+        let mut statement = self.conn.prepare(
+            r#"
+            SELECT project_id, issue_id, run_id, suite, status, details_json
+            FROM eval_runs
+            WHERE project_id = ?1 AND issue_id = ?2
+            ORDER BY run_id ASC
+            "#,
+        )?;
+        let rows = statement.query_map(params![project_id, issue_id], eval_run_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
 }
 
 fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectStateRecord> {
@@ -355,6 +456,29 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpenCodeSession
         lifecycle_marker: row.get(17)?,
         last_event: row.get(18)?,
         silence_observed: row.get::<_, i64>(19)? != 0,
+    })
+}
+
+fn stage_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpenCodeStageEventRecord> {
+    let stage: String = row.get(4)?;
+    Ok(OpenCodeStageEventRecord {
+        project_id: row.get(0)?,
+        issue_id: row.get(1)?,
+        session_id: row.get(2)?,
+        sequence: get_u64(row, 3)?,
+        stage: parse_opencode_stage(&stage)?,
+        event: row.get(5)?,
+    })
+}
+
+fn eval_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EvalRunRecord> {
+    Ok(EvalRunRecord {
+        project_id: row.get(0)?,
+        issue_id: row.get(1)?,
+        run_id: row.get(2)?,
+        suite: row.get(3)?,
+        status: row.get(4)?,
+        details_json: row.get(5)?,
     })
 }
 

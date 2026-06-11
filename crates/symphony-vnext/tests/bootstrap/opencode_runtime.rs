@@ -79,6 +79,92 @@ async fn opencode_session_tree_metrics_count_subagent_activity_and_tokens() {
 }
 
 #[tokio::test]
+async fn opencode_session_tree_activity_exposes_subagents_todos_and_recent_events() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("opencode.db");
+    seed_opencode_session_tree(&db_path).await;
+
+    let activity = opencode::read_session_tree_activity(&db_path, "ses-root", 8)
+        .await
+        .expect("read activity")
+        .expect("activity exists");
+
+    assert_eq!(activity.root_session_id, "ses-root");
+    assert_eq!(activity.sessions.len(), 2);
+    assert_eq!(activity.subagents.len(), 1);
+    assert_eq!(activity.subagents[0].session_id, "ses-child");
+    assert_eq!(
+        activity.subagents[0].agent.as_deref(),
+        Some("rust-engineer")
+    );
+    assert_eq!(activity.todos.len(), 1);
+    assert_eq!(activity.todos[0].content, "Run eval");
+    assert_eq!(activity.timeline.len(), 2);
+    assert_eq!(activity.timeline[0].session_id, "ses-root");
+    assert_eq!(activity.timeline[0].kind, "text");
+    assert_eq!(activity.timeline[0].summary, "root transcript");
+    assert_eq!(activity.timeline[1].session_id, "ses-child");
+    assert_eq!(activity.timeline[1].kind, "tool");
+    assert_eq!(activity.timeline[1].tool.as_deref(), Some("bash"));
+    assert_eq!(activity.timeline[1].status.as_deref(), Some("running"));
+    assert_eq!(activity.running_tool_count, 1);
+}
+
+#[tokio::test]
+async fn dashboard_issue_detail_embeds_live_opencode_activity_from_sqlite() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runtime_db_path = dir.path().join("runtime.sqlite3");
+    let opencode_db_path = dir.path().join("opencode.db");
+    seed_opencode_session_tree(&opencode_db_path).await;
+    let config_toml = valid_config_toml().replacen(
+        "[[projects]]",
+        &format!(
+            "[opencode_storage]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]",
+            opencode_db_path.display(),
+            dir.path().join("archives").display()
+        ),
+        1,
+    );
+    let config = RootConfig::from_toml_str(&config_toml).expect("config");
+    let store = SqliteStore::open(&runtime_db_path)
+        .await
+        .expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let issue = test_issue("symphony", "activity", "SYM-120");
+    store.upsert_issue(issue).await.expect("issue");
+    let mut session = test_session(
+        "symphony",
+        "activity",
+        "ses-root",
+        "/home/agent/.symphony/workspaces/opencode/symphony/SYM-120",
+    );
+    session.process_id = Some(std::process::id());
+    store
+        .upsert_opencode_session(session)
+        .await
+        .expect("session");
+
+    let api = RuntimeDashboardApi::from_store(&config, &store)
+        .await
+        .expect("dashboard api");
+    let detail = api
+        .issue_detail("symphony", "activity")
+        .expect("issue detail")
+        .expect("issue exists");
+    let session = &detail.opencode_sessions[0];
+
+    assert_eq!(session.process_id, Some(std::process::id()));
+    assert_eq!(session.process_alive, Some(true));
+    let activity = session.activity.as_ref().expect("opencode activity");
+    assert_eq!(activity.subagents[0].session_id, "ses-child");
+    assert_eq!(activity.todos[0].content, "Run eval");
+    assert_eq!(activity.timeline[0].summary, "root transcript");
+    assert!(session.activity_error.is_none());
+}
+
+#[tokio::test]
 async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_issue_prompt() {
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
@@ -96,6 +182,29 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
     assert!(spec.prompt.contains("SYM-27"), "{}", spec.prompt);
     assert!(
         spec.prompt.contains("symphony-vnext-smoke"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt
+            .contains("fallback metadata, not a blanket workspace gate"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt
+            .contains("Treat the issue's Validation section as the authority"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt
+            .contains("For docs-only/no-code changes, run documentation/file-level validation"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains("do not run cargo nextest --workspace"),
         "{}",
         spec.prompt
     );
@@ -579,6 +688,51 @@ async fn opencode_silence_is_observable_without_marking_session_failed() {
     assert!(session.failure_marker().is_none());
 }
 
+#[test]
+fn unchanged_opencode_db_snapshot_preserves_control_marker() {
+    let mut session = test_session(
+        "symphony",
+        "work",
+        "ses-control-marker",
+        "/home/agent/.symphony/workspaces/opencode/symphony/SYM-67",
+    );
+    session.lifecycle_marker = Some("repair_prompted".into());
+    session.last_event = Some("opencode_db_updated:2000".into());
+    let previous_last_event = session.last_event.clone();
+    let previous_marker = session.lifecycle_marker.clone();
+    let metrics = opencode::OpenCodeSessionTreeMetrics {
+        root_session_id: session.session_id.clone(),
+        session_count: 1,
+        subagent_count: 0,
+        message_count: 3,
+        part_count: 9,
+        todo_count: 4,
+        tokens_input: 10,
+        tokens_output: 5,
+        tokens_reasoning: 0,
+        tokens_cache_read: 0,
+        tokens_cache_write: 0,
+        tokens_total: 15,
+        cost_micros: 0,
+        active_agent: Some("build".into()),
+        active_model: Some("gpt-5.5".into()),
+        last_updated_ms: Some(2000),
+    };
+
+    opencode::apply_session_tree_metrics_preserving_marker(
+        &mut session,
+        &metrics,
+        previous_last_event.as_deref(),
+        previous_marker.as_deref(),
+    );
+
+    assert_eq!(session.lifecycle_marker.as_deref(), Some("repair_prompted"));
+    assert_eq!(
+        session.last_event.as_deref(),
+        Some("opencode_db_updated:2000")
+    );
+}
+
 pub(crate) async fn seed_opencode_session_tree(path: &std::path::Path) {
     let database = libsql::Builder::new_local(path.display().to_string())
         .build()
@@ -701,9 +855,21 @@ pub(crate) async fn seed_opencode_session_tree(path: &std::path::Path) {
         .expect("insert session");
     }
 
-    for (session_id, message_id, part_id) in [
-        ("ses-root", "msg-root", "part-root"),
-        ("ses-child", "msg-child", "part-child"),
+    for (session_id, message_id, part_id, time_updated, data) in [
+        (
+            "ses-root",
+            "msg-root",
+            "part-root",
+            2001_i64,
+            serde_json::json!({"type":"text","text":"root transcript"}),
+        ),
+        (
+            "ses-child",
+            "msg-child",
+            "part-child",
+            2000_i64,
+            serde_json::json!({"type":"tool","tool":"bash","state":{"status":"running"},"title":"cargo check"}),
+        ),
     ] {
         conn.execute(
             "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, 1000, 2000, ?3)",
@@ -712,8 +878,8 @@ pub(crate) async fn seed_opencode_session_tree(path: &std::path::Path) {
         .await
         .expect("insert message");
         conn.execute(
-            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, 1000, 2000, ?4)",
-            libsql::params![part_id, message_id, session_id, serde_json::json!({"type":"text","text":"local raw transcript"}).to_string()],
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, 1000, ?4, ?5)",
+            libsql::params![part_id, message_id, session_id, time_updated, data.to_string()],
         )
         .await
         .expect("insert part");

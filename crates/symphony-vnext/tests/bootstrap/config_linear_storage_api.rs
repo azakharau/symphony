@@ -909,3 +909,144 @@ async fn dashboard_api_json_routes_aggregate_project_and_issue_paths() {
     assert!(project.body.contains(r#""active_issues""#));
     assert!(issue.body.contains(r#""identifier":"SYM-94""#));
 }
+
+#[tokio::test]
+async fn dashboard_html_routes_render_aggregate_project_issue_and_keep_json_api() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let opencode_db_path = dir.path().join("opencode.sqlite3");
+    opencode_runtime::seed_opencode_session_tree(&opencode_db_path).await;
+    let configured = valid_config_toml().replace(
+        "[[projects]]\n",
+        &format!(
+            "[opencode_storage]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]\n",
+            opencode_db_path.display(),
+            dir.path().display(),
+        ),
+    );
+    let config = RootConfig::from_toml_str(&configured).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "html-issue", "SYM-101"))
+        .await
+        .expect("issue");
+    let mut session = test_session(
+        "symphony",
+        "html-issue",
+        "ses-root",
+        "/home/agent/.symphony/workspaces/opencode/symphony/SYM-101",
+    );
+    session.process_id = Some(u32::MAX);
+    store
+        .upsert_opencode_session(session)
+        .await
+        .expect("session");
+
+    let aggregate = symphony_vnext::dashboard::runtime_dashboard_response(&config, &store, "/")
+        .await
+        .expect("aggregate html");
+    let project = symphony_vnext::dashboard::runtime_dashboard_response(
+        &config,
+        &store,
+        "/projects/symphony",
+    )
+    .await
+    .expect("project html");
+    let issue = symphony_vnext::dashboard::runtime_dashboard_response(
+        &config,
+        &store,
+        "/projects/symphony/issues/html-issue",
+    )
+    .await
+    .expect("issue html");
+    let json =
+        symphony_vnext::dashboard::runtime_dashboard_response(&config, &store, "/api/dashboard")
+            .await
+            .expect("json api");
+
+    assert_eq!(aggregate.0, 200);
+    assert_eq!(aggregate.1, "text/html; charset=utf-8");
+    assert!(aggregate.2.contains("Operational dashboard"));
+    assert!(aggregate.2.contains("/projects/symphony"));
+    assert!(project.2.contains("Active issues"));
+    assert!(project.2.contains("Recent history"));
+    assert!(issue.2.contains("process_alive"));
+    assert!(issue.2.contains("process: <strong>dead</strong>"));
+    assert!(issue.2.contains("root session"));
+    assert!(issue.2.contains("title: Child engineer"));
+    assert!(issue.2.contains("updated: 2000"));
+    assert!(issue.2.contains("time: 1000"));
+    assert_eq!(json.1, "application/json");
+    assert!(json.2.contains(r#""project_id":"symphony""#));
+}
+
+#[tokio::test]
+async fn dashboard_html_escapes_user_controlled_values() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let mut issue = test_issue("symphony", "escape", "SYM-102");
+    issue.title = "<script>alert('owned')</script>".into();
+    store.upsert_issue(issue).await.expect("issue");
+
+    let response = symphony_vnext::dashboard::runtime_dashboard_response(
+        &config,
+        &store,
+        "/projects/symphony/issues/escape",
+    )
+    .await
+    .expect("issue html");
+
+    assert_eq!(response.0, 200);
+    assert!(
+        response
+            .2
+            .contains("&lt;script&gt;alert(&#39;owned&#39;)&lt;/script&gt;")
+    );
+    assert!(!response.2.contains("<script>alert"));
+}
+
+#[tokio::test]
+async fn dashboard_html_surfaces_activity_error_fallback() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let configured = valid_config_toml().replace(
+        "[[projects]]\n",
+        "[opencode_storage]\ndatabase_path = \"/definitely/missing/opencode.db\"\narchive_root = \"/tmp/opencode-archive\"\n\n[[projects]]\n",
+    );
+    let config = RootConfig::from_toml_str(&configured).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "activity", "SYM-103"))
+        .await
+        .expect("issue");
+    store
+        .upsert_opencode_session(test_session(
+            "symphony",
+            "activity",
+            "oc-activity",
+            "/home/agent/worktree/with/a/very/long/path/that/should/wrap/or/truncate/safely",
+        ))
+        .await
+        .expect("session");
+
+    let response = symphony_vnext::dashboard::runtime_dashboard_response(
+        &config,
+        &store,
+        "/projects/symphony/issues/activity",
+    )
+    .await
+    .expect("issue html");
+
+    assert_eq!(response.0, 200);
+    assert!(response.2.contains("activity_error:"));
+    assert!(response.2.contains("No tree activity available"));
+    assert!(response.2.contains("oc-activity"));
+}

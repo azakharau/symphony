@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use tracing::{debug, info, warn};
 
+use super::terminate_current_session_process;
 use crate::{
     config::ProjectConfig,
     linear::{LinearClient, LinearIssue, LinearIssueEvidence, LinearTransition},
@@ -28,14 +29,14 @@ pub(super) async fn process_in_progress_handoff(
     opencode: &impl OpenCodeLauncher,
     issue: &LinearIssue,
     existing_issue: Option<IssueStateRecord>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let Some(session) = latest_session(store, &project.id, &issue.id).await? else {
         warn!(
             project_id = %project.id,
             issue = %issue.identifier,
             "in-progress issue has no recorded OpenCode session yet"
         );
-        return Ok(());
+        return Ok(false);
     };
     let handoff = match opencode.latest_handoff(&session).await {
         Ok(Some(handoff)) => handoff,
@@ -46,7 +47,7 @@ pub(super) async fn process_in_progress_handoff(
                 session_id = %session.session_id,
                 "OpenCode handoff not available yet"
             );
-            return Ok(());
+            return Ok(false);
         }
         Err(OpenCodeError::MalformedHandoff(message)) => {
             warn!(
@@ -73,7 +74,7 @@ pub(super) async fn process_in_progress_handoff(
                 &session,
             )
             .await?;
-            return Ok(());
+            return Ok(true);
         }
         Err(error) => return Err(error.into()),
     };
@@ -113,7 +114,7 @@ pub(super) async fn process_in_progress_handoff(
             &session,
         )
         .await?;
-        return Ok(());
+        return Ok(true);
     }
 
     match &handoff.stop_reason {
@@ -181,7 +182,7 @@ pub(super) async fn process_in_progress_handoff(
         }
     }
 
-    Ok(())
+    Ok(true)
 }
 
 async fn close_successful_handoff(
@@ -288,6 +289,7 @@ async fn close_successful_handoff(
     linear
         .transition_issue(&issue.id, LinearTransition::Done)
         .await?;
+    terminate_current_session_process(project, issue, session).await?;
     cleanup_worktree(&project.repo_path, &git.worktree_path).await?;
     info!(
         project_id = %project.id,
@@ -314,6 +316,14 @@ async fn close_successful_handoff(
         cleanup_status: CleanupStatus::Complete,
     };
     store.upsert_issue(&record).await?;
+    let mut completed_session = session.clone();
+    completed_session.process_id = None;
+    completed_session.lifecycle_stage = LifecycleStage::Completed;
+    completed_session.stage = crate::state::OpenCodeStage::Completed;
+    completed_session.lifecycle_marker = Some("handoff_accepted".into());
+    completed_session.last_event = Some("issue_closed".into());
+    completed_session.silence_observed = false;
+    store.upsert_opencode_session(&completed_session).await?;
     Ok(())
 }
 
@@ -374,6 +384,7 @@ async fn handle_eval_failure(
             "continuing OpenCode repair after eval failure"
         );
         let spec = build_acp_launch_spec(project, issue);
+        terminate_current_session_process(project, issue, session).await?;
         let started = opencode
             .continue_repair(&spec, session, failure_fingerprint, failure_fingerprint)
             .await?;
@@ -433,6 +444,7 @@ async fn request_opencode_repair(
         .unwrap_or(evidence_kind)
         .to_string();
     let spec = build_acp_launch_spec(project, issue);
+    terminate_current_session_process(project, issue, session).await?;
     let started = opencode
         .continue_repair(&spec, session, &fingerprint, &message)
         .await?;

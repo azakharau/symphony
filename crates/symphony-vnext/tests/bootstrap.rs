@@ -690,6 +690,8 @@ struct ResumeRecordingOpenCodeLauncher {
     resumed_process_id: u32,
     launches: std::sync::Mutex<Vec<String>>,
     resumes: std::sync::Mutex<Vec<(String, String)>>,
+    continuations: std::sync::Mutex<Vec<(String, String)>>,
+    repairs: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 impl ResumeRecordingOpenCodeLauncher {
@@ -698,6 +700,8 @@ impl ResumeRecordingOpenCodeLauncher {
             resumed_process_id,
             launches: std::sync::Mutex::new(Vec::new()),
             resumes: std::sync::Mutex::new(Vec::new()),
+            continuations: std::sync::Mutex::new(Vec::new()),
+            repairs: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -707,6 +711,17 @@ impl ResumeRecordingOpenCodeLauncher {
 
     fn resumes(&self) -> Vec<(String, String)> {
         self.resumes.lock().expect("resumes lock").clone()
+    }
+
+    fn continuations(&self) -> Vec<(String, String)> {
+        self.continuations
+            .lock()
+            .expect("continuations lock")
+            .clone()
+    }
+
+    fn repairs(&self) -> Vec<(String, String)> {
+        self.repairs.lock().expect("repairs lock").clone()
     }
 }
 
@@ -735,6 +750,39 @@ impl OpenCodeLauncher for ResumeRecordingOpenCodeLauncher {
             .lock()
             .expect("resumes lock")
             .push((spec.issue_identifier.clone(), session.session_id.clone()));
+        Ok(opencode::OpenCodeStartedSession {
+            session_id: session.session_id.clone(),
+            process_id: Some(self.resumed_process_id),
+        })
+    }
+
+    async fn continue_session(
+        &self,
+        spec: &opencode::OpenCodeLaunchSpec,
+        session: &OpenCodeSessionRecord,
+        _continuation_message: &str,
+    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+        self.continuations
+            .lock()
+            .expect("continuations lock")
+            .push((spec.issue_identifier.clone(), session.session_id.clone()));
+        Ok(opencode::OpenCodeStartedSession {
+            session_id: session.session_id.clone(),
+            process_id: Some(self.resumed_process_id),
+        })
+    }
+
+    async fn continue_repair(
+        &self,
+        spec: &opencode::OpenCodeLaunchSpec,
+        session: &OpenCodeSessionRecord,
+        failure_fingerprint: &str,
+        _repair_message: &str,
+    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+        self.repairs.lock().expect("repairs lock").push((
+            spec.issue_identifier.clone(),
+            failure_fingerprint.to_owned(),
+        ));
         Ok(opencode::OpenCodeStartedSession {
             session_id: session.session_id.clone(),
             process_id: Some(self.resumed_process_id),

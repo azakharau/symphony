@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 use crate::{
     config::RootConfig,
+    opencode::{OpenCodeSessionTreeActivity, read_session_tree_activity},
     state::{
         CleanupStatus, EvalRunRecord, GitRefRecord, IssueStateRecord, LifecycleStage,
         OpenCodeSessionRecord, OpenCodeStage,
@@ -120,7 +122,18 @@ impl RuntimeDashboardApi {
             let max_sessions = configured
                 .map(|project| project.concurrency.max_sessions)
                 .unwrap_or(0);
-            projects.push(project_dashboard_response(store, project, max_sessions).await?);
+            projects.push(
+                project_dashboard_response(
+                    store,
+                    project,
+                    max_sessions,
+                    config
+                        .opencode_storage
+                        .as_ref()
+                        .map(|storage| storage.database_path.clone()),
+                )
+                .await?,
+            );
         }
 
         let aggregate = AggregateDashboardResponse {
@@ -256,6 +269,8 @@ pub struct OpenCodeSessionDetail {
     pub agent: String,
     pub model: Option<String>,
     pub worktree_path: String,
+    pub process_id: Option<u32>,
+    pub process_alive: Option<bool>,
     pub lifecycle_stage: LifecycleStage,
     pub current_stage: OpenCodeStage,
     pub stage_history: Vec<OpenCodeStage>,
@@ -271,6 +286,8 @@ pub struct OpenCodeSessionDetail {
     pub lifecycle_marker: Option<String>,
     pub last_event: Option<String>,
     pub silence_observed: bool,
+    pub activity: Option<OpenCodeSessionTreeActivity>,
+    pub activity_error: Option<String>,
 }
 
 async fn issue_read_model(
@@ -290,6 +307,7 @@ async fn project_dashboard_response(
     store: &SqliteStore,
     project: ProjectReadModel,
     max_sessions: u32,
+    opencode_database_path: Option<PathBuf>,
 ) -> Result<ProjectDashboardResponse, StorageError> {
     let running_sessions = project
         .issues
@@ -305,7 +323,7 @@ async fn project_dashboard_response(
     let mut active_issues = Vec::new();
     let mut history_issues = Vec::new();
     for issue in project.issues {
-        let detail = issue_detail_response(store, issue).await?;
+        let detail = issue_detail_response(store, issue, opencode_database_path.as_ref()).await?;
         if detail.lifecycle_stage == LifecycleStage::Completed {
             history_issues.push(detail);
         } else {
@@ -328,13 +346,14 @@ async fn project_dashboard_response(
 async fn issue_detail_response(
     store: &SqliteStore,
     issue: IssueReadModel,
+    opencode_database_path: Option<&PathBuf>,
 ) -> Result<IssueDetailResponse, StorageError> {
     let eval_results = store
         .eval_runs_for_issue(&issue.issue.project_id, &issue.issue.issue_id)
         .await?;
     let mut sessions = Vec::new();
     for session in issue.opencode_sessions {
-        sessions.push(session_detail(store, session).await?);
+        sessions.push(session_detail(store, session, opencode_database_path).await?);
     }
     let last_runner_event = sessions
         .iter()
@@ -375,6 +394,7 @@ async fn issue_detail_response(
 async fn session_detail(
     store: &SqliteStore,
     session: OpenCodeSessionRecord,
+    opencode_database_path: Option<&PathBuf>,
 ) -> Result<OpenCodeSessionDetail, StorageError> {
     let stage_history = store
         .opencode_stage_events_for_session(
@@ -391,12 +411,24 @@ async fn session_detail(
     } else {
         stage_history
     };
+    let process_id = session.process_id;
+    let process_alive = process_alive(process_id).await;
+    let (activity, activity_error) = match opencode_database_path {
+        Some(path) => match read_session_tree_activity(path.clone(), &session.session_id, 40).await
+        {
+            Ok(activity) => (activity, None),
+            Err(error) => (None, Some(error.to_string())),
+        },
+        None => (None, None),
+    };
 
     Ok(OpenCodeSessionDetail {
         opencode_session_id: session.session_id,
         agent: session.agent,
         model: session.model,
         worktree_path: session.worktree_path,
+        process_id,
+        process_alive,
         lifecycle_stage: session.lifecycle_stage,
         current_stage: session.stage,
         stage_history,
@@ -412,7 +444,18 @@ async fn session_detail(
         lifecycle_marker: session.lifecycle_marker,
         last_event: session.last_event,
         silence_observed: session.silence_observed,
+        activity,
+        activity_error,
     })
+}
+
+async fn process_alive(process_id: Option<u32>) -> Option<bool> {
+    let process_id = process_id?;
+    Some(
+        tokio::fs::try_exists(format!("/proc/{process_id}"))
+            .await
+            .unwrap_or(false),
+    )
 }
 
 fn issue_display_status(

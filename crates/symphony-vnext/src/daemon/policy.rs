@@ -29,6 +29,10 @@ pub(super) fn stable_fingerprint(input: &str) -> String {
         .collect()
 }
 
+pub(super) fn recoverable_opencode_failure(failure: &FailureRecord) -> bool {
+    matches!(failure.kind.as_str(), "malformed_handoff" | "eval_failure")
+}
+
 pub(super) fn compare_issues_for_dispatch(left: &LinearIssue, right: &LinearIssue) -> Ordering {
     priority_order(left.priority)
         .cmp(&priority_order(right.priority))

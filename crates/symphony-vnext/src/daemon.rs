@@ -7,6 +7,7 @@ mod records;
 use std::path::PathBuf;
 
 use anyhow::Context;
+use tokio::time::{Duration, sleep};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -14,17 +15,20 @@ use crate::{
     linear::{EmptyLinearClient, LinearClient, LinearIssue, LinearTransition},
     opencode::{
         DeterministicOpenCodeLauncher, OpenCodeLauncher, OpenCodeStartedSession,
-        StdioOpenCodeLauncher, apply_session_tree_metrics, build_acp_launch_spec,
+        StdioOpenCodeLauncher, apply_session_tree_metrics_preserving_marker, build_acp_launch_spec,
         new_session_record, read_session_tree_metrics,
     },
-    state::{BlockerRecord, CleanupStatus, LifecycleStage, OpenCodeSessionRecord, OpenCodeStage},
+    state::{
+        BlockerRecord, CleanupStatus, FailureRecord, LifecycleStage, OpenCodeSessionRecord,
+        OpenCodeStage,
+    },
     storage::SqliteStore,
 };
 use handoff::process_in_progress_handoff;
 use http::run_continuous;
 use policy::{
     blocker_record, compare_issues_for_dispatch, has_existing_session, has_new_owner_response,
-    is_terminal_state, nonterminal_blocker,
+    is_terminal_state, nonterminal_blocker, recoverable_opencode_failure,
 };
 use records::issue_record;
 
@@ -193,6 +197,7 @@ async fn reconcile_project(
                     }
                 }
                 store.upsert_issue(&record).await?;
+                mark_issue_sessions_terminal(store, project, &issue).await?;
                 info!(
                     project_id = %project.id,
                     issue = %issue.identifier,
@@ -303,6 +308,11 @@ async fn reconcile_project(
                     store.upsert_issue(&record).await?;
                     continue;
                 }
+                if process_in_progress_handoff(project, store, linear, opencode, &issue, existing)
+                    .await?
+                {
+                    continue;
+                }
                 resume_stale_opencode_session(project, store, opencode, &issue).await?;
                 if let Some(storage) = opencode_storage
                     && let Err(error) =
@@ -316,8 +326,6 @@ async fn reconcile_project(
                     );
                 }
                 store.upsert_issue(&record).await?;
-                process_in_progress_handoff(project, store, linear, opencode, &issue, existing)
-                    .await?;
             }
             "Todo" => {
                 if has_unanswered_owner_input {
@@ -527,6 +535,26 @@ async fn mark_existing_session_queued(
     Ok(())
 }
 
+async fn mark_issue_sessions_terminal(
+    store: &SqliteStore,
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+) -> anyhow::Result<()> {
+    for mut session in store
+        .opencode_sessions_for_issue(&project.id, &issue.id)
+        .await?
+    {
+        session.process_id = None;
+        session.lifecycle_stage = LifecycleStage::Completed;
+        session.stage = OpenCodeStage::Completed;
+        session.lifecycle_marker = Some("linear_terminal_reconciled".into());
+        session.last_event = Some("linear_terminal_reconciled".into());
+        session.silence_observed = false;
+        store.upsert_opencode_session(&session).await?;
+    }
+    Ok(())
+}
+
 async fn mark_existing_session_reactivated(
     store: &SqliteStore,
     project: &ProjectConfig,
@@ -558,8 +586,21 @@ async fn resume_stale_opencode_session(
         return Ok(());
     }
     let launch_spec = build_acp_launch_spec(project, issue);
-    let started = opencode.resume(&launch_spec, &session).await?;
-    apply_resumed_process(&mut session, started);
+    let existing_issue = store.issue(&project.id, &issue.id).await?;
+    if let Some(failure) = existing_issue
+        .as_ref()
+        .and_then(|record| record.failure.as_ref())
+        .filter(|failure| recoverable_opencode_failure(failure))
+    {
+        terminate_current_session_process(project, issue, &session).await?;
+        let started =
+            continue_failed_session_repair(opencode, &launch_spec, &session, failure).await?;
+        apply_repair_process(&mut session, started, failure);
+    } else {
+        terminate_current_session_process(project, issue, &session).await?;
+        let started = continue_stale_session(opencode, &launch_spec, &session).await?;
+        apply_continued_process(&mut session, started);
+    }
     info!(
         project_id = %project.id,
         issue = %issue.identifier,
@@ -604,15 +645,111 @@ async fn opencode_process_is_alive(process_id: u32) -> bool {
         .any(|part| part.contains("opencode"))
 }
 
-fn apply_resumed_process(session: &mut OpenCodeSessionRecord, started: OpenCodeStartedSession) {
+pub(super) async fn terminate_current_session_process(
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+    session: &OpenCodeSessionRecord,
+) -> anyhow::Result<()> {
+    let Some(process_id) = session.process_id else {
+        return Ok(());
+    };
+    if !opencode_process_is_alive(process_id).await {
+        return Ok(());
+    }
+    info!(
+        project_id = %project.id,
+        issue = %issue.identifier,
+        session_id = %session.session_id,
+        process_id,
+        "terminating stale OpenCode ACP process before session continuation"
+    );
+    let status = tokio::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(process_id.to_string())
+        .status()
+        .await?;
+    if !status.success() {
+        warn!(
+            project_id = %project.id,
+            issue = %issue.identifier,
+            session_id = %session.session_id,
+            process_id,
+            status = %status,
+            "failed to terminate stale OpenCode ACP process"
+        );
+        return Ok(());
+    }
+    for _ in 0..10 {
+        if !opencode_process_is_alive(process_id).await {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    warn!(
+        project_id = %project.id,
+        issue = %issue.identifier,
+        session_id = %session.session_id,
+        process_id,
+        "stale OpenCode ACP process was still alive after SIGTERM"
+    );
+    Ok(())
+}
+
+async fn continue_stale_session(
+    opencode: &impl OpenCodeLauncher,
+    spec: &crate::opencode::OpenCodeLaunchSpec,
+    session: &OpenCodeSessionRecord,
+) -> anyhow::Result<OpenCodeStartedSession> {
+    Ok(opencode
+        .continue_session(
+            spec,
+            session,
+            "The previous ACP stdio process ended or was killed while this Linear issue was still In Progress. Inspect the current repository/session state, continue the remaining work in this same session, and write the structured Symphony handoff JSON when done.",
+        )
+        .await?)
+}
+
+fn apply_continued_process(session: &mut OpenCodeSessionRecord, started: OpenCodeStartedSession) {
     session.process_id = started.process_id;
     session.lifecycle_stage = LifecycleStage::Running;
     session.stage = OpenCodeStage::Running;
-    session.lifecycle_marker = Some("acp_resumed".into());
+    session.lifecycle_marker = Some("continuation_prompted".into());
     session.last_event = started
         .process_id
-        .map(|process_id| format!("acp_process_resumed:{process_id}"))
-        .or_else(|| Some("acp_process_resumed".into()));
+        .map(|process_id| format!("continuation_prompted:{process_id}"))
+        .or_else(|| Some("continuation_prompted".into()));
+    session.silence_observed = false;
+}
+
+async fn continue_failed_session_repair(
+    opencode: &impl OpenCodeLauncher,
+    spec: &crate::opencode::OpenCodeLaunchSpec,
+    session: &OpenCodeSessionRecord,
+    failure: &FailureRecord,
+) -> anyhow::Result<OpenCodeStartedSession> {
+    let fingerprint = failure
+        .fingerprint
+        .as_deref()
+        .unwrap_or(failure.kind.as_str());
+    Ok(opencode
+        .continue_repair(spec, session, fingerprint, &failure.message)
+        .await?)
+}
+
+fn apply_repair_process(
+    session: &mut OpenCodeSessionRecord,
+    started: OpenCodeStartedSession,
+    failure: &FailureRecord,
+) {
+    let fingerprint = failure
+        .fingerprint
+        .as_deref()
+        .unwrap_or(failure.kind.as_str());
+    session.process_id = started.process_id;
+    session.lifecycle_stage = LifecycleStage::Running;
+    session.stage = OpenCodeStage::Running;
+    session.lifecycle_marker = Some("repair_prompted".into());
+    session.last_event = Some(format!("repair_prompted:{fingerprint}"));
     session.silence_observed = false;
 }
 
@@ -641,7 +778,13 @@ async fn refresh_opencode_session_metrics(
         return Ok(());
     };
     let previous_last_event = session.last_event.clone();
-    apply_session_tree_metrics(&mut session, &metrics);
+    let previous_marker = session.lifecycle_marker.clone();
+    apply_session_tree_metrics_preserving_marker(
+        &mut session,
+        &metrics,
+        previous_last_event.as_deref(),
+        previous_marker.as_deref(),
+    );
     if session.last_event != previous_last_event {
         info!(
             project_id = %project.id,

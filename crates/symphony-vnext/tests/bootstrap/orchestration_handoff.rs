@@ -95,6 +95,19 @@ async fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_wo
             .contains(worktree.to_str().expect("worktree path utf8")),
         "accepted handoff must unregister the git worktree"
     );
+    let session = store
+        .opencode_session("symphony", "completed", "oc-80")
+        .await
+        .expect("query completed session")
+        .expect("completed session");
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Completed);
+    assert_eq!(session.stage, OpenCodeStage::Completed);
+    assert_eq!(session.process_id, None);
+    assert_eq!(
+        session.lifecycle_marker.as_deref(),
+        Some("handoff_accepted")
+    );
+    assert_eq!(session.last_event.as_deref(), Some("issue_closed"));
 
     let terminal_poll =
         RecordingLinearClient::new(vec![linear_issue("completed", "SYM-80", "Done", Some(1))]);
@@ -221,6 +234,14 @@ async fn no_code_success_handoff_can_close_without_commit_sha() {
         completed.git_ref.expect("git ref").head_sha.as_deref(),
         None
     );
+    let session = store
+        .opencode_session("symphony", "no-code", "oc-79")
+        .await
+        .expect("query no-code session")
+        .expect("no-code session");
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Completed);
+    assert_eq!(session.stage, OpenCodeStage::Completed);
+    assert_eq!(session.process_id, None);
     assert!(!worktree.exists(), "no-code success must remove worktree");
 }
 
@@ -670,10 +691,17 @@ async fn malformed_handoff_sidecar_requests_repair_without_owner_input() {
         .upsert_issue(test_issue("symphony", "malformed-json", "SYM-86"))
         .await
         .expect("running issue");
+    let mut stale_process = Command::new("bash")
+        .arg("-c")
+        .arg("exec -a opencode sleep 120")
+        .spawn()
+        .expect("spawn stale opencode-shaped process");
+    thread::sleep(Duration::from_millis(100));
+    let stale_process_id = stale_process.id();
     store
         .upsert_opencode_session({
             let mut session = test_session("symphony", "malformed-json", "oc-86", &worktree);
-            session.process_id = Some(4242);
+            session.process_id = Some(stale_process_id);
             session
         })
         .await
@@ -692,6 +720,26 @@ async fn malformed_handoff_sidecar_requests_repair_without_owner_input() {
         .await
         .expect("malformed handoff must not fail the whole poll");
 
+    let mut stale_terminated = false;
+    for _ in 0..20 {
+        if stale_process
+            .try_wait()
+            .expect("poll stale process")
+            .is_some()
+        {
+            stale_terminated = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    if !stale_terminated {
+        let _ = stale_process.kill();
+        let _ = stale_process.wait();
+    }
+    assert!(
+        stale_terminated,
+        "repair prompt must terminate the previous active ACP process before reconnecting"
+    );
     assert!(client.transitions().is_empty());
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff" && evidence.body.contains("unknown field `status`")

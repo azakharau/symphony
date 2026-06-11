@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use libsql::{Builder, Connection, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::fs;
 use tracing::info;
@@ -46,6 +46,60 @@ pub struct OpenCodeSessionTreeMetrics {
     pub active_agent: Option<String>,
     pub active_model: Option<String>,
     pub last_updated_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OpenCodeSessionTreeActivity {
+    pub root_session_id: String,
+    pub sessions: Vec<OpenCodeSessionActivity>,
+    pub subagents: Vec<OpenCodeSessionActivity>,
+    pub todos: Vec<OpenCodeTodoActivity>,
+    pub timeline: Vec<OpenCodeTimelineEvent>,
+    pub running_tool_count: u64,
+    pub pending_tool_count: u64,
+    pub last_updated_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OpenCodeSessionActivity {
+    pub session_id: String,
+    pub parent_session_id: Option<String>,
+    pub title: String,
+    pub directory: String,
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub is_subagent: bool,
+    pub tokens_input: u64,
+    pub tokens_output: u64,
+    pub tokens_reasoning: u64,
+    pub tokens_cache_read: u64,
+    pub tokens_cache_write: u64,
+    pub cost_micros: u64,
+    pub time_created_ms: u64,
+    pub time_updated_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OpenCodeTodoActivity {
+    pub session_id: String,
+    pub content: String,
+    pub status: String,
+    pub priority: String,
+    pub position: u64,
+    pub time_updated_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OpenCodeTimelineEvent {
+    pub session_id: String,
+    pub part_id: String,
+    pub time_created_ms: u64,
+    pub time_updated_ms: u64,
+    pub kind: String,
+    pub tool: Option<String>,
+    pub status: Option<String>,
+    pub title: Option<String>,
+    pub summary: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -139,6 +193,59 @@ pub async fn read_session_tree_metrics(
         part_count,
         todo_count,
     )))
+}
+
+pub async fn read_session_tree_activity(
+    opencode_database_path: impl Into<PathBuf>,
+    root_session_id: &str,
+    timeline_limit: usize,
+) -> Result<Option<OpenCodeSessionTreeActivity>, OpenCodeError> {
+    let conn = open_opencode_database(opencode_database_path.into()).await?;
+    let sessions = session_tree(&conn, root_session_id).await?;
+    if sessions.is_empty() {
+        return Ok(None);
+    }
+
+    let session_ids = sessions
+        .iter()
+        .map(|session| session.id.as_str())
+        .collect::<Vec<_>>();
+    let todos = todo_rows(&conn, &session_ids).await?;
+    let timeline = timeline_events(&conn, &session_ids, timeline_limit).await?;
+    let running_tool_count = timeline
+        .iter()
+        .filter(|event| event.status.as_deref() == Some("running"))
+        .count() as u64;
+    let pending_tool_count = timeline
+        .iter()
+        .filter(|event| event.status.as_deref() == Some("pending"))
+        .count() as u64;
+    let session_activity = sessions
+        .iter()
+        .map(session_activity_from_row)
+        .collect::<Vec<_>>();
+    let subagents = session_activity
+        .iter()
+        .filter(|session| session.is_subagent)
+        .cloned()
+        .collect::<Vec<_>>();
+    let last_updated_ms = sessions
+        .iter()
+        .map(|session| session.time_updated)
+        .chain(timeline.iter().map(|event| event.time_updated_ms))
+        .chain(todos.iter().map(|todo| todo.time_updated))
+        .max();
+
+    Ok(Some(OpenCodeSessionTreeActivity {
+        root_session_id: root_session_id.into(),
+        sessions: session_activity,
+        subagents,
+        todos: todos.into_iter().map(todo_activity_from_row).collect(),
+        timeline,
+        running_tool_count,
+        pending_tool_count,
+        last_updated_ms,
+    }))
 }
 
 pub async fn archive_and_delete_session_tree(
@@ -407,6 +514,57 @@ async fn todo_rows(conn: &Connection, session_ids: &[&str]) -> Result<Vec<TodoRo
     Ok(values)
 }
 
+async fn timeline_events(
+    conn: &Connection,
+    session_ids: &[&str],
+    timeline_limit: usize,
+) -> Result<Vec<OpenCodeTimelineEvent>, OpenCodeError> {
+    if timeline_limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let per_session_limit = timeline_limit.max(1) as i64;
+    let mut values = Vec::new();
+    for session_id in session_ids {
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, session_id, time_created, time_updated, data
+                FROM part
+                WHERE session_id = ?1
+                ORDER BY time_updated DESC, time_created DESC, id DESC
+                LIMIT ?2
+                "#,
+                params![*session_id, per_session_limit],
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            let part_id: String = row.get(0)?;
+            let session_id: String = row.get(1)?;
+            let time_created = get_u64(&row, 2)?;
+            let time_updated = get_u64(&row, 3)?;
+            let data = parse_json_cell(row.get(4)?)?;
+            values.push(timeline_event_from_part(
+                part_id,
+                session_id,
+                time_created,
+                time_updated,
+                &data,
+            ));
+        }
+    }
+    values.sort_by(|left, right| {
+        right
+            .time_updated_ms
+            .cmp(&left.time_updated_ms)
+            .then_with(|| right.time_created_ms.cmp(&left.time_created_ms))
+            .then_with(|| left.session_id.cmp(&right.session_id))
+            .then_with(|| left.part_id.cmp(&right.part_id))
+    });
+    values.truncate(timeline_limit);
+    Ok(values)
+}
+
 fn metrics_from_rows(
     root_session_id: &str,
     sessions: &[SessionRow],
@@ -458,6 +616,107 @@ fn metrics_from_rows(
         .saturating_add(metrics.tokens_cache_read)
         .saturating_add(metrics.tokens_cache_write);
     metrics
+}
+
+fn session_activity_from_row(session: &SessionRow) -> OpenCodeSessionActivity {
+    OpenCodeSessionActivity {
+        session_id: session.id.clone(),
+        parent_session_id: session.parent_id.clone(),
+        title: session.title.clone(),
+        directory: session.directory.clone(),
+        agent: session.agent.clone(),
+        model: model_id(session.model.as_deref()),
+        is_subagent: session.parent_id.is_some(),
+        tokens_input: session.tokens_input,
+        tokens_output: session.tokens_output,
+        tokens_reasoning: session.tokens_reasoning,
+        tokens_cache_read: session.tokens_cache_read,
+        tokens_cache_write: session.tokens_cache_write,
+        cost_micros: (session.cost.max(0.0) * 1_000_000.0).round() as u64,
+        time_created_ms: session.time_created,
+        time_updated_ms: session.time_updated,
+    }
+}
+
+fn todo_activity_from_row(todo: TodoRow) -> OpenCodeTodoActivity {
+    OpenCodeTodoActivity {
+        session_id: todo.session_id,
+        content: todo.content,
+        status: todo.status,
+        priority: todo.priority,
+        position: todo.position,
+        time_updated_ms: todo.time_updated,
+    }
+}
+
+fn timeline_event_from_part(
+    part_id: String,
+    session_id: String,
+    time_created_ms: u64,
+    time_updated_ms: u64,
+    data: &Value,
+) -> OpenCodeTimelineEvent {
+    let kind = json_string(data, "type").unwrap_or_else(|| "unknown".into());
+    let tool = json_string(data, "tool");
+    let status = data
+        .get("state")
+        .and_then(|state| state.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let title = json_string(data, "title").filter(|title| !title.trim().is_empty());
+    let summary = timeline_summary(data, &kind, tool.as_deref(), status.as_deref());
+
+    OpenCodeTimelineEvent {
+        session_id,
+        part_id,
+        time_created_ms,
+        time_updated_ms,
+        kind,
+        tool,
+        status,
+        title,
+        summary,
+    }
+}
+
+fn timeline_summary(data: &Value, kind: &str, tool: Option<&str>, status: Option<&str>) -> String {
+    let summary = match kind {
+        "text" | "reasoning" => json_string(data, "text"),
+        "tool" => {
+            let mut parts = Vec::new();
+            if let Some(tool) = tool {
+                parts.push(tool.to_owned());
+            }
+            if let Some(status) = status {
+                parts.push(status.to_owned());
+            }
+            if let Some(title) = json_string(data, "title")
+                && !title.trim().is_empty()
+            {
+                parts.push(title);
+            }
+            (!parts.is_empty()).then(|| parts.join(" "))
+        }
+        "patch" => Some("patch applied".into()),
+        _ => json_string(data, "title"),
+    }
+    .unwrap_or_else(|| kind.to_owned());
+    truncate_summary(&summary)
+}
+
+fn json_string(data: &Value, key: &str) -> Option<String> {
+    data.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+fn truncate_summary(input: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    let mut chars = input.trim().chars();
+    let summary = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{summary}...")
+    } else {
+        summary
+    }
 }
 
 async fn write_archive(

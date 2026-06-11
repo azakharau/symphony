@@ -18,8 +18,10 @@ use acp::{
     session_resume_params, set_session_config_option, write_acp_request,
 };
 pub use archive::{
-    OpenCodeSessionArchiveReport, OpenCodeSessionArchiveRequest, OpenCodeSessionTreeMetrics,
-    archive_and_delete_session_tree, read_session_tree_metrics,
+    OpenCodeSessionActivity, OpenCodeSessionArchiveReport, OpenCodeSessionArchiveRequest,
+    OpenCodeSessionTreeActivity, OpenCodeSessionTreeMetrics, OpenCodeTimelineEvent,
+    OpenCodeTodoActivity, archive_and_delete_session_tree, read_session_tree_activity,
+    read_session_tree_metrics,
 };
 pub use types::{
     GitClosureEvidence, OpenCodeEvalResult, OpenCodeHandoff, OpenCodeLaunchSpec,
@@ -49,6 +51,18 @@ pub trait OpenCodeLauncher: Sync {
         session: &OpenCodeSessionRecord,
         _failure_fingerprint: &str,
         _repair_message: &str,
+    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
+        Ok(OpenCodeStartedSession {
+            session_id: session.session_id.clone(),
+            process_id: session.process_id,
+        })
+    }
+
+    async fn continue_session(
+        &self,
+        _spec: &OpenCodeLaunchSpec,
+        session: &OpenCodeSessionRecord,
+        _continuation_message: &str,
     ) -> Result<OpenCodeStartedSession, OpenCodeError> {
         Ok(OpenCodeStartedSession {
             session_id: session.session_id.clone(),
@@ -432,10 +446,14 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             "Symphony repair required for existing ACP session `{}`.\n\n\
              Failure fingerprint: `{}`\n\n\
              Repair details:\n{}\n\n\
+             Validation policy:\n{}\n\n\
              Continue the same implementation session. Do not start a new task. \
              Fix the implementation or handoff, rerun the required validation, \
              and rewrite the structured Symphony handoff JSON at the configured sidecar path.",
-            session.session_id, failure_fingerprint, repair_message
+            session.session_id,
+            failure_fingerprint,
+            repair_message,
+            validation_policy_text()
         );
         write_acp_request(
             &mut stdin,
@@ -465,6 +483,149 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             .await
             {
                 warn!(error = %error, "OpenCode ACP repair prompt stream ended with error");
+            }
+            let _ = child.wait().await;
+        });
+
+        Ok(OpenCodeStartedSession {
+            session_id: session.session_id.clone(),
+            process_id,
+        })
+    }
+
+    async fn continue_session(
+        &self,
+        spec: &OpenCodeLaunchSpec,
+        session: &OpenCodeSessionRecord,
+        continuation_message: &str,
+    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
+        info!(
+            issue = %spec.issue_identifier,
+            session_id = %session.session_id,
+            cwd = %spec.cwd.display(),
+            command = %spec.command.display(),
+            "continuing OpenCode ACP session"
+        );
+        ensure_worktree(spec).await?;
+        remove_stale_handoff_sidecar(&spec.cwd).await?;
+        let mut child = Command::new(&spec.command)
+            .args(&spec.args)
+            .current_dir(&spec.cwd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let process_id = child.id();
+        let mut stdin = child.stdin.take().ok_or(OpenCodeError::MissingStdin)?;
+        let stdout = child.stdout.take().ok_or(OpenCodeError::MissingStdout)?;
+        let mut stdout = BufReader::new(stdout);
+
+        let mut next_id = 1_u64;
+        acp_request(
+            &mut stdin,
+            &mut stdout,
+            &spec.permission_policy,
+            next_id,
+            "initialize",
+            json!({
+                "protocolVersion": 1,
+                "agent": spec.agent,
+                "model": spec.model,
+            }),
+        )
+        .await?;
+        next_id += 1;
+
+        let resume_result = acp_request(
+            &mut stdin,
+            &mut stdout,
+            &spec.permission_policy,
+            next_id,
+            "session/resume",
+            session_resume_params(spec, session),
+        )
+        .await?;
+        next_id += 1;
+        let resumed_session_id =
+            extract_session_id(&resume_result).unwrap_or_else(|_| session.session_id.clone());
+        if resumed_session_id != session.session_id {
+            return Err(OpenCodeError::AcpProtocol(format!(
+                "ACP session/resume returned `{resumed_session_id}` for `{}`",
+                session.session_id
+            )));
+        }
+        set_session_config_option(
+            &mut stdin,
+            &mut stdout,
+            &spec.permission_policy,
+            next_id,
+            &session.session_id,
+            "mode",
+            Some(spec.agent.as_str()),
+        )
+        .await?;
+        next_id += 1;
+        set_session_config_option(
+            &mut stdin,
+            &mut stdout,
+            &spec.permission_policy,
+            next_id,
+            &session.session_id,
+            "model",
+            spec.model.as_deref(),
+        )
+        .await?;
+        next_id += 1;
+        set_session_config_option(
+            &mut stdin,
+            &mut stdout,
+            &spec.permission_policy,
+            next_id,
+            &session.session_id,
+            "effort",
+            spec.effort.as_deref(),
+        )
+        .await?;
+        next_id += 1;
+
+        let prompt_request_id = next_id;
+        let prompt = format!(
+            "Symphony continuation required for existing ACP session `{}`.\n\n\
+             Continue the same implementation session. Do not start a new task. \
+             Do not repeat already completed work unless validation requires it.\n\n\
+             Validation policy:\n{}\n\n{}",
+            session.session_id,
+            validation_policy_text(),
+            continuation_message
+        );
+        write_acp_request(
+            &mut stdin,
+            prompt_request_id,
+            "session/prompt",
+            json!({
+                "sessionId": session.session_id.as_str(),
+                "prompt": [
+                    {
+                        "type": "text",
+                        "text": prompt.as_str(),
+                    }
+                ],
+            }),
+        )
+        .await?;
+
+        let permission_policy = spec.permission_policy.clone();
+        tokio::spawn(async move {
+            if let Err(error) = read_acp_response(
+                &mut stdout,
+                &mut stdin,
+                &permission_policy,
+                prompt_request_id,
+                "session/prompt",
+            )
+            .await
+            {
+                warn!(error = %error, "OpenCode ACP continuation prompt stream ended with error");
             }
             let _ = child.wait().await;
         });
@@ -609,6 +770,18 @@ pub fn apply_session_tree_metrics(
         .or_else(|| Some("opencode_db_snapshot".into()));
 }
 
+pub fn apply_session_tree_metrics_preserving_marker(
+    session: &mut OpenCodeSessionRecord,
+    metrics: &OpenCodeSessionTreeMetrics,
+    previous_last_event: Option<&str>,
+    previous_marker: Option<&str>,
+) {
+    apply_session_tree_metrics(session, metrics);
+    if session.last_event.as_deref() == previous_last_event {
+        session.lifecycle_marker = previous_marker.map(ToOwned::to_owned);
+    }
+}
+
 pub fn mark_session_silence(session: &mut OpenCodeSessionRecord, reason: &str) {
     session.stage = OpenCodeStage::Silent;
     session.silence_observed = true;
@@ -625,9 +798,11 @@ fn build_issue_prompt(project: &ProjectConfig, issue: &LinearIssue) -> String {
          Project: {project_id}\n\
          Repository: {repo_path}\n\
          Isolated worktree: {worktree}\n\
-         Eval default suite: {eval_suite}\n\
+         Eval default suite: {eval_suite} (fallback metadata, not a blanket workspace gate)\n\
          Linear state: {state}\n\
          URL: {url}\n\n\
+         Validation policy:\n\
+         {validation_policy}\n\n\
          On completion, write the structured Symphony handoff JSON to:\n\
          {handoff_path}\n\n\
          The handoff file must be valid JSON matching this exact shape:\n\
@@ -660,7 +835,16 @@ fn build_issue_prompt(project: &ProjectConfig, issue: &LinearIssue) -> String {
         eval_suite = project.eval.default_suite,
         state = issue.state,
         url = issue.url.as_deref().unwrap_or("none"),
+        validation_policy = validation_policy_text(),
     )
+}
+
+fn validation_policy_text() -> &'static str {
+    "- Treat the issue's Validation section as the authority for required commands.\n\
+     - Scope validation to the changed surface and the issue's explicit acceptance criteria.\n\
+     - For docs-only/no-code changes, run documentation/file-level validation such as git diff --check and reference checks; do not run cargo nextest --workspace, full workspace tests, or release gates unless the issue explicitly requires them.\n\
+     - For Rust source changes, prefer the narrowest package/filter/profile that covers the changed behavior before escalating to workspace-level checks.\n\
+     - If a broader check is intentionally skipped, record the reason in eval_results.details and risks."
 }
 
 fn deterministic_session_id(input: &str) -> String {

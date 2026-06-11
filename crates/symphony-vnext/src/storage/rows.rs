@@ -43,18 +43,17 @@ pub(super) fn project_from_row(row: &Row) -> Result<ProjectStateRecord, StorageE
 }
 
 pub(super) fn issue_from_row(row: &Row) -> Result<IssueStateRecord, StorageError> {
-    let lifecycle_stage: String = row.get(5)?;
-    let blocker_json: Option<String> = row.get(6)?;
-    let failure_json: Option<String> = row.get(7)?;
-    let git_ref_json: Option<String> = row.get(8)?;
-    let cleanup_status: String = row.get(9)?;
+    let lifecycle_stage: String = row.get(4)?;
+    let blocker_json: Option<String> = row.get(5)?;
+    let failure_json: Option<String> = row.get(6)?;
+    let git_ref_json: Option<String> = row.get(7)?;
+    let cleanup_status: String = row.get(8)?;
 
     Ok(IssueStateRecord {
         project_id: row.get(0)?,
         issue_id: row.get(1)?,
         identifier: row.get(2)?,
         title: row.get(3)?,
-        state: row.get(4)?,
         lifecycle_stage: parse_lifecycle(&lifecycle_stage)?,
         blocker: decode_optional::<BlockerRecord>(blocker_json)?,
         failure: decode_optional::<FailureRecord>(failure_json)?,

@@ -166,7 +166,6 @@ async fn reconcile_project(
                     let record = issue_record(
                         project,
                         &issue,
-                        "Backlog",
                         LifecycleStage::Queued,
                         None,
                         CleanupStatus::Clean,
@@ -179,7 +178,6 @@ async fn reconcile_project(
                 let mut record = issue_record(
                     project,
                     &issue,
-                    state,
                     LifecycleStage::Completed,
                     None,
                     CleanupStatus::Pending,
@@ -218,7 +216,6 @@ async fn reconcile_project(
                     let record = issue_record(
                         project,
                         &issue,
-                        LinearTransition::Todo.state_name(),
                         LifecycleStage::Queued,
                         None,
                         CleanupStatus::Clean,
@@ -233,7 +230,6 @@ async fn reconcile_project(
                     let record = issue_record(
                         project,
                         &issue,
-                        "Need Owner Input",
                         LifecycleStage::Blocked,
                         Some(BlockerRecord {
                             kind: "owner_input".into(),
@@ -259,7 +255,6 @@ async fn reconcile_project(
                     let record = issue_record(
                         project,
                         &issue,
-                        LinearTransition::Todo.state_name(),
                         LifecycleStage::Queued,
                         Some(BlockerRecord {
                             kind: "project_owner_input".into(),
@@ -280,7 +275,6 @@ async fn reconcile_project(
                 let mut record = issue_record(
                     project,
                     &issue,
-                    "In Progress",
                     LifecycleStage::Running,
                     None,
                     CleanupStatus::Clean,
@@ -302,7 +296,6 @@ async fn reconcile_project(
                     let record = issue_record(
                         project,
                         &issue,
-                        LinearTransition::Todo.state_name(),
                         LifecycleStage::Queued,
                         None,
                         CleanupStatus::Clean,
@@ -336,7 +329,6 @@ async fn reconcile_project(
                     let record = issue_record(
                         project,
                         &issue,
-                        "Todo",
                         LifecycleStage::Queued,
                         Some(BlockerRecord {
                             kind: "project_owner_input".into(),
@@ -357,7 +349,6 @@ async fn reconcile_project(
                     let record = issue_record(
                         project,
                         &issue,
-                        "Todo",
                         LifecycleStage::Blocked,
                         Some(BlockerRecord {
                             kind: "missing_todo_milestone".into(),
@@ -381,7 +372,6 @@ async fn reconcile_project(
                     let record = issue_record(
                         project,
                         &issue,
-                        "Todo",
                         LifecycleStage::Queued,
                         None,
                         CleanupStatus::Clean,
@@ -391,7 +381,6 @@ async fn reconcile_project(
                     let record = issue_record(
                         project,
                         &issue,
-                        "Todo",
                         LifecycleStage::Queued,
                         None,
                         CleanupStatus::Clean,
@@ -408,7 +397,6 @@ async fn reconcile_project(
                     let record = issue_record(
                         project,
                         &issue,
-                        "Todo",
                         LifecycleStage::Blocked,
                         Some(blocker_record(blocker)),
                         CleanupStatus::Clean,
@@ -424,7 +412,6 @@ async fn reconcile_project(
                     let record = issue_record(
                         project,
                         &issue,
-                        "Todo",
                         LifecycleStage::Queued,
                         None,
                         CleanupStatus::Clean,
@@ -451,7 +438,6 @@ async fn reconcile_project(
                 let record = issue_record(
                     project,
                     &issue,
-                    &issue.state,
                     LifecycleStage::Queued,
                     None,
                     CleanupStatus::Clean,
@@ -490,7 +476,6 @@ async fn reconcile_project(
         let record = issue_record(
             project,
             issue,
-            LinearTransition::InProgress.state_name(),
             LifecycleStage::Running,
             None,
             CleanupStatus::Clean,

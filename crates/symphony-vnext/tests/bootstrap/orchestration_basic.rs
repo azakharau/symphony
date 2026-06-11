@@ -41,7 +41,7 @@ async fn orchestration_dispatches_one_eligible_todo_by_project_capacity_and_orde
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
     store
-        .upsert_issue(test_issue("symphony", "running-1", "SYM-21", "In Progress"))
+        .upsert_issue(test_issue("symphony", "running-1", "SYM-21"))
         .await
         .expect("running issue");
 
@@ -177,21 +177,11 @@ async fn orchestration_reconciles_persisted_backlog_without_counting_capacity() 
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
     store
-        .upsert_issue(test_issue(
-            "symphony",
-            "parked-plan",
-            "SYM-45",
-            "In Progress",
-        ))
+        .upsert_issue(test_issue("symphony", "parked-plan", "SYM-45"))
         .await
         .expect("persisted running backlog issue");
     store
-        .upsert_issue(test_issue(
-            "symphony",
-            "still-running",
-            "SYM-46",
-            "In Progress",
-        ))
+        .upsert_issue(test_issue("symphony", "still-running", "SYM-46"))
         .await
         .expect("persisted running issue");
 
@@ -272,7 +262,7 @@ async fn orchestration_ignores_owner_input_comments_that_predate_the_parked_reco
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
-    let mut stale = test_issue("symphony", "stale", "SYM-53", "Need Owner Input");
+    let mut stale = test_issue("symphony", "stale", "SYM-53");
     stale.lifecycle_stage = LifecycleStage::Blocked;
     stale.blocker = Some(BlockerRecord {
         kind: "owner_question".into(),
@@ -314,7 +304,7 @@ async fn orchestration_ignores_new_symphony_evidence_comments_after_parked_recor
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
-    let mut parked = test_issue("symphony", "parked", "SYM-54", "Need Owner Input");
+    let mut parked = test_issue("symphony", "parked", "SYM-54");
     parked.lifecycle_stage = LifecycleStage::Blocked;
     parked.blocker = Some(BlockerRecord {
         kind: "owner_question".into(),
@@ -386,7 +376,7 @@ async fn orchestration_reconciles_terminal_issues_and_avoids_duplicate_dispatch_
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
     store
-        .upsert_issue(test_issue("symphony", "finished", "SYM-60", "In Progress"))
+        .upsert_issue(test_issue("symphony", "finished", "SYM-60"))
         .await
         .expect("finished issue");
 
@@ -447,7 +437,7 @@ async fn orchestration_refreshes_active_opencode_session_metrics_from_persisted_
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
     store
-        .upsert_issue(test_issue("symphony", "work", "SYM-64", "In Progress"))
+        .upsert_issue(test_issue("symphony", "work", "SYM-64"))
         .await
         .expect("issue");
     store
@@ -499,7 +489,7 @@ async fn orchestration_resumes_stale_in_progress_session_without_duplicate_launc
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
     store
-        .upsert_issue(test_issue("symphony", "work", "SYM-65", "In Progress"))
+        .upsert_issue(test_issue("symphony", "work", "SYM-65"))
         .await
         .expect("issue");
     let mut session = test_session(
@@ -557,7 +547,7 @@ async fn terminal_reconciliation_marks_cleanup_complete_when_worktree_is_already
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
-    let mut closed = test_issue("symphony", "closed", "SYM-63", "Done");
+    let mut closed = test_issue("symphony", "closed", "SYM-63");
     closed.cleanup_status = CleanupStatus::Pending;
     closed.git_ref = Some(GitRefRecord {
         branch: "agent-server/opencode-runner-extension".into(),
@@ -598,7 +588,7 @@ async fn orchestration_restores_requeued_issue_with_existing_session_without_dup
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
     store
-        .upsert_issue(test_issue("symphony", "requeued", "SYM-62", "In Progress"))
+        .upsert_issue(test_issue("symphony", "requeued", "SYM-62"))
         .await
         .expect("running issue");
     store
@@ -622,7 +612,6 @@ async fn orchestration_restores_requeued_issue_with_existing_session_without_dup
         .await
         .expect("query requeued")
         .expect("requeued");
-    assert_eq!(issue.state, "In Progress");
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
     let sessions = store
         .opencode_sessions_for_issue("symphony", "requeued")
@@ -647,14 +636,14 @@ async fn orchestration_capacity_gates_requeued_issue_with_existing_session() {
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
     store
-        .upsert_issue(test_issue("symphony", "running-1", "SYM-60", "In Progress"))
+        .upsert_issue(test_issue("symphony", "running-1", "SYM-60"))
         .await
         .expect("running issue 1");
     store
-        .upsert_issue(test_issue("symphony", "running-2", "SYM-61", "In Progress"))
+        .upsert_issue(test_issue("symphony", "running-2", "SYM-61"))
         .await
         .expect("running issue 2");
-    let mut requeued = test_issue("symphony", "requeued", "SYM-65", "Todo");
+    let mut requeued = test_issue("symphony", "requeued", "SYM-65");
     requeued.lifecycle_stage = LifecycleStage::Queued;
     store.upsert_issue(requeued).await.expect("requeued issue");
     store
@@ -676,7 +665,6 @@ async fn orchestration_capacity_gates_requeued_issue_with_existing_session() {
         .await
         .expect("query requeued")
         .expect("requeued");
-    assert_eq!(issue.state, "Todo");
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Queued);
     let sessions = store
         .opencode_sessions_for_issue("symphony", "requeued")
@@ -719,6 +707,5 @@ async fn orchestration_returns_in_progress_issue_without_session_to_todo() {
         .await
         .expect("query issue")
         .expect("issue");
-    assert_eq!(issue.state, "Todo");
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Queued);
 }

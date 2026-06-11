@@ -18,7 +18,6 @@ pub struct IssueStateRecord {
     pub issue_id: String,
     pub identifier: String,
     pub title: String,
-    pub state: String,
     pub lifecycle_stage: LifecycleStage,
     pub blocker: Option<BlockerRecord>,
     pub failure: Option<FailureRecord>,

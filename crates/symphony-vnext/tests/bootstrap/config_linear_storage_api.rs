@@ -340,6 +340,145 @@ async fn sqlite_migrations_initialize_empty_runtime_store() {
 }
 
 #[tokio::test]
+async fn issue_runtime_store_does_not_persist_linear_state() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+
+    let database = libsql::Builder::new_local(db_path.display().to_string())
+        .build()
+        .await
+        .expect("open database");
+    let conn = database.connect().expect("connect");
+    let mut rows = conn
+        .query("PRAGMA table_info(issues)", ())
+        .await
+        .expect("pragma");
+    let mut columns = Vec::new();
+    while let Some(row) = rows.next().await.expect("row") {
+        columns.push(row.get::<String>(1).expect("column name"));
+    }
+
+    assert!(
+        !columns.iter().any(|column| column == "state"),
+        "Linear issue state must remain in Linear, not SQLite: {columns:?}"
+    );
+}
+
+#[tokio::test]
+async fn migration_removes_legacy_issue_state_without_losing_sessions() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let database = libsql::Builder::new_local(db_path.display().to_string())
+        .build()
+        .await
+        .expect("open database");
+    let conn = database.connect().expect("connect");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE schema_migrations (
+            id TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO schema_migrations (id) VALUES ('001_runtime_state');
+
+        CREATE TABLE projects (
+            project_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            lifecycle_stage TEXT NOT NULL,
+            cleanup_status TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO projects (project_id, name, enabled, lifecycle_stage, cleanup_status)
+        VALUES ('symphony', 'Symphony', 1, 'running', 'clean');
+
+        CREATE TABLE issues (
+            project_id TEXT NOT NULL,
+            issue_id TEXT NOT NULL,
+            identifier TEXT NOT NULL,
+            title TEXT NOT NULL,
+            state TEXT NOT NULL,
+            lifecycle_stage TEXT NOT NULL,
+            blocker_json TEXT,
+            failure_json TEXT,
+            git_ref_json TEXT,
+            cleanup_status TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (project_id, issue_id),
+            FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+        );
+        INSERT INTO issues (
+            project_id, issue_id, identifier, title, state, lifecycle_stage, cleanup_status
+        )
+        VALUES ('symphony', 'issue-1', 'SYM-1', 'Legacy issue', 'In Progress', 'running', 'clean');
+
+        CREATE TABLE opencode_sessions (
+            project_id TEXT NOT NULL,
+            issue_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            model TEXT,
+            worktree_path TEXT NOT NULL,
+            process_id INTEGER,
+            lifecycle_stage TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            active_agent TEXT,
+            active_model TEXT,
+            message_count INTEGER NOT NULL,
+            todo_count INTEGER NOT NULL,
+            part_count INTEGER NOT NULL,
+            token_count INTEGER NOT NULL,
+            cost_micros INTEGER NOT NULL,
+            subagent_count INTEGER NOT NULL,
+            eval_stage TEXT,
+            lifecycle_marker TEXT,
+            last_event TEXT,
+            silence_observed INTEGER NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (project_id, issue_id, session_id),
+            FOREIGN KEY (project_id, issue_id) REFERENCES issues(project_id, issue_id) ON DELETE CASCADE
+        );
+        INSERT INTO opencode_sessions (
+            project_id, issue_id, session_id, agent, worktree_path, lifecycle_stage, stage,
+            message_count, todo_count, part_count, token_count, cost_micros, subagent_count,
+            silence_observed
+        )
+        VALUES (
+            'symphony', 'issue-1', 'session-1', 'build', '/tmp/SYM-1', 'running', 'running',
+            1, 2, 3, 4, 5, 6, 0
+        );
+        "#,
+    )
+    .await
+    .expect("seed legacy schema");
+
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+
+    let mut columns = conn
+        .query("PRAGMA table_info(issues)", ())
+        .await
+        .expect("pragma");
+    while let Some(row) = columns.next().await.expect("row") {
+        assert_ne!(row.get::<String>(1).expect("column name"), "state");
+    }
+    let issue = store
+        .issue("symphony", "issue-1")
+        .await
+        .expect("query issue")
+        .expect("issue preserved");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    let session = store
+        .opencode_session("symphony", "issue-1", "session-1")
+        .await
+        .expect("query session")
+        .expect("session preserved");
+    assert_eq!(session.session_id, "session-1");
+}
+
+#[tokio::test]
 async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
@@ -363,7 +502,6 @@ async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
                 issue_id: "0af8ad67-37b9-412a-9869-82ca96b418e1".into(),
                 identifier: "SYM-25".into(),
                 title: "Bootstrap Rust service, project registry, and SQLite state store".into(),
-                state: "In Progress".into(),
                 lifecycle_stage: LifecycleStage::Running,
                 blocker: None,
                 failure: Some(FailureRecord {
@@ -490,7 +628,7 @@ async fn runtime_cleanup_removes_stale_completed_rows_and_keeps_active_state() {
         .await
         .expect("project");
 
-    let mut completed = test_issue("symphony", "done", "SYM-1", "Done");
+    let mut completed = test_issue("symphony", "done", "SYM-1");
     completed.lifecycle_stage = LifecycleStage::Completed;
     completed.cleanup_status = CleanupStatus::Complete;
     store
@@ -532,7 +670,7 @@ async fn runtime_cleanup_removes_stale_completed_rows_and_keeps_active_state() {
         .await
         .expect("completed eval");
 
-    let running = test_issue("symphony", "running", "SYM-2", "In Progress");
+    let running = test_issue("symphony", "running", "SYM-2");
     store.upsert_issue(running).await.expect("running issue");
     store
         .upsert_opencode_session(test_session(
@@ -544,7 +682,7 @@ async fn runtime_cleanup_removes_stale_completed_rows_and_keeps_active_state() {
         .await
         .expect("running session");
 
-    let mut blocked = test_issue("symphony", "blocked", "SYM-3", "Need Owner Input");
+    let mut blocked = test_issue("symphony", "blocked", "SYM-3");
     blocked.lifecycle_stage = LifecycleStage::Blocked;
     store.upsert_issue(blocked).await.expect("blocked issue");
 
@@ -596,7 +734,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
 
-    let mut repair = test_issue("symphony", "repair", "SYM-91", "In Progress");
+    let mut repair = test_issue("symphony", "repair", "SYM-91");
     repair.failure = Some(FailureRecord {
         kind: "eval_failure".into(),
         message: "clippy::needless_collect".into(),
@@ -611,7 +749,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
     });
     store.upsert_issue(repair).await.expect("repair issue");
 
-    let mut provider_blocked = test_issue("symphony", "provider", "SYM-92", "Need Owner Input");
+    let mut provider_blocked = test_issue("symphony", "provider", "SYM-92");
     provider_blocked.lifecycle_stage = LifecycleStage::Blocked;
     provider_blocked.blocker = Some(BlockerRecord {
         kind: "provider_blocker".into(),
@@ -623,7 +761,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
         .await
         .expect("provider issue");
 
-    let mut completed = test_issue("symphony", "done", "SYM-93", "Done");
+    let mut completed = test_issue("symphony", "done", "SYM-93");
     completed.lifecycle_stage = LifecycleStage::Completed;
     completed.cleanup_status = CleanupStatus::Complete;
     store.upsert_issue(completed).await.expect("done issue");
@@ -740,7 +878,7 @@ async fn dashboard_api_json_routes_aggregate_project_and_issue_paths() {
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
-    let issue = test_issue("symphony", "api-issue", "SYM-94", "In Progress");
+    let issue = test_issue("symphony", "api-issue", "SYM-94");
     store.upsert_issue(issue).await.expect("issue");
 
     let aggregate =

@@ -8,7 +8,6 @@ use crate::{
 pub(super) fn issue_record(
     project: &ProjectConfig,
     issue: &LinearIssue,
-    state: &str,
     lifecycle_stage: LifecycleStage,
     blocker: Option<BlockerRecord>,
     cleanup_status: CleanupStatus,
@@ -18,7 +17,6 @@ pub(super) fn issue_record(
         issue_id: issue.id.clone(),
         identifier: issue.identifier.clone(),
         title: issue.title.clone(),
-        state: state.into(),
         lifecycle_stage,
         blocker,
         failure: None,

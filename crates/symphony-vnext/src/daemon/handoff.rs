@@ -302,7 +302,6 @@ async fn close_successful_handoff(
         issue_id: issue.id.clone(),
         identifier: issue.identifier.clone(),
         title: issue.title.clone(),
-        state: LinearTransition::Done.state_name().into(),
         lifecycle_stage: LifecycleStage::Completed,
         blocker: None,
         failure: None,
@@ -381,7 +380,6 @@ async fn handle_eval_failure(
         let mut record = issue_record(
             project,
             issue,
-            "In Progress",
             LifecycleStage::Running,
             None,
             CleanupStatus::Clean,
@@ -441,7 +439,6 @@ async fn request_opencode_repair(
     let mut record = issue_record(
         project,
         issue,
-        "In Progress",
         LifecycleStage::Running,
         None,
         CleanupStatus::Clean,
@@ -565,7 +562,6 @@ pub(super) async fn park_need_owner_input(
         issue_id: issue.id.clone(),
         identifier: issue.identifier.clone(),
         title: issue.title.clone(),
-        state: LinearTransition::NeedOwnerInput.state_name().into(),
         lifecycle_stage: LifecycleStage::Blocked,
         blocker: Some(BlockerRecord {
             kind: blocker_kind.into(),

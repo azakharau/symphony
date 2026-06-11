@@ -60,6 +60,67 @@ impl SqliteStore {
         self.conn.execute_batch(RUNTIME_STATE_MIGRATION).await?;
         self.ensure_column("opencode_sessions", "process_id", "INTEGER")
             .await?;
+        self.drop_issue_linear_state_column().await?;
+        Ok(())
+    }
+
+    async fn drop_issue_linear_state_column(&self) -> Result<(), StorageError> {
+        if !self.column_exists("issues", "state").await? {
+            return Ok(());
+        }
+
+        self.conn
+            .execute_batch(
+                r#"
+                PRAGMA foreign_keys = OFF;
+
+                CREATE TABLE issues_without_linear_state (
+                    project_id TEXT NOT NULL,
+                    issue_id TEXT NOT NULL,
+                    identifier TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    lifecycle_stage TEXT NOT NULL,
+                    blocker_json TEXT,
+                    failure_json TEXT,
+                    git_ref_json TEXT,
+                    cleanup_status TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (project_id, issue_id),
+                    FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+                );
+
+                INSERT INTO issues_without_linear_state (
+                    project_id,
+                    issue_id,
+                    identifier,
+                    title,
+                    lifecycle_stage,
+                    blocker_json,
+                    failure_json,
+                    git_ref_json,
+                    cleanup_status,
+                    updated_at
+                )
+                SELECT
+                    project_id,
+                    issue_id,
+                    identifier,
+                    title,
+                    lifecycle_stage,
+                    blocker_json,
+                    failure_json,
+                    git_ref_json,
+                    cleanup_status,
+                    updated_at
+                FROM issues;
+
+                DROP TABLE issues;
+                ALTER TABLE issues_without_linear_state RENAME TO issues;
+
+                PRAGMA foreign_keys = ON;
+                "#,
+            )
+            .await?;
         Ok(())
     }
 
@@ -69,15 +130,8 @@ impl SqliteStore {
         column: &str,
         definition: &str,
     ) -> Result<(), StorageError> {
-        let mut rows = self
-            .conn
-            .query(format!("PRAGMA table_info({table})").as_str(), ())
-            .await?;
-        while let Some(row) = rows.next().await? {
-            let name: String = row.get(1)?;
-            if name == column {
-                return Ok(());
-            }
+        if self.column_exists(table, column).await? {
+            return Ok(());
         }
         self.conn
             .execute(
@@ -86,6 +140,20 @@ impl SqliteStore {
             )
             .await?;
         Ok(())
+    }
+
+    async fn column_exists(&self, table: &str, column: &str) -> Result<bool, StorageError> {
+        let mut rows = self
+            .conn
+            .query(format!("PRAGMA table_info({table})").as_str(), ())
+            .await?;
+        while let Some(row) = rows.next().await? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub async fn applied_migrations(&self) -> Result<Vec<String>, StorageError> {
@@ -185,18 +253,16 @@ impl SqliteStore {
                     issue_id,
                     identifier,
                     title,
-                    state,
                     lifecycle_stage,
                     blocker_json,
                     failure_json,
                     git_ref_json,
                     cleanup_status
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                 ON CONFLICT(project_id, issue_id) DO UPDATE SET
                     identifier = excluded.identifier,
                     title = excluded.title,
-                    state = excluded.state,
                     lifecycle_stage = excluded.lifecycle_stage,
                     blocker_json = excluded.blocker_json,
                     failure_json = excluded.failure_json,
@@ -209,7 +275,6 @@ impl SqliteStore {
                     issue.issue_id.as_str(),
                     issue.identifier.as_str(),
                     issue.title.as_str(),
-                    issue.state.as_str(),
                     issue.lifecycle_stage.as_str(),
                     blocker_json,
                     failure_json,
@@ -229,7 +294,7 @@ impl SqliteStore {
             .conn
             .query(
                 r#"
-                SELECT project_id, issue_id, identifier, title, state, lifecycle_stage,
+                SELECT project_id, issue_id, identifier, title, lifecycle_stage,
                        blocker_json, failure_json, git_ref_json, cleanup_status
                 FROM issues
                 WHERE project_id = ?1
@@ -250,7 +315,7 @@ impl SqliteStore {
             .conn
             .query(
                 r#"
-                SELECT project_id, issue_id, identifier, title, state, lifecycle_stage,
+                SELECT project_id, issue_id, identifier, title, lifecycle_stage,
                        blocker_json, failure_json, git_ref_json, cleanup_status
                 FROM issues
                 WHERE project_id = ?1 AND issue_id = ?2

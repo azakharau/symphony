@@ -173,14 +173,12 @@ fn test_issue(
     project_id: impl Into<String>,
     issue_id: impl Into<String>,
     identifier: impl Into<String>,
-    state: impl Into<String>,
 ) -> IssueStateRecord {
     IssueStateRecord {
         project_id: project_id.into(),
         issue_id: issue_id.into(),
         identifier: identifier.into(),
         title: "Test issue".into(),
-        state: state.into(),
         lifecycle_stage: LifecycleStage::Running,
         blocker: None,
         failure: None,

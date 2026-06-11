@@ -17,7 +17,6 @@ CREATE TABLE IF NOT EXISTS issues (
     issue_id TEXT NOT NULL,
     identifier TEXT NOT NULL,
     title TEXT NOT NULL,
-    state TEXT NOT NULL,
     lifecycle_stage TEXT NOT NULL,
     blocker_json TEXT,
     failure_json TEXT,

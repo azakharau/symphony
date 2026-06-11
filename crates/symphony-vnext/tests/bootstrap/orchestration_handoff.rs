@@ -40,7 +40,7 @@ async fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_wo
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
     store
-        .upsert_issue(test_issue("symphony", "completed", "SYM-80", "In Progress"))
+        .upsert_issue(test_issue("symphony", "completed", "SYM-80"))
         .await
         .expect("running issue");
     store
@@ -80,7 +80,6 @@ async fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_wo
         .await
         .expect("query completed")
         .expect("completed issue");
-    assert_eq!(completed.state, "Done");
     assert_eq!(completed.lifecycle_stage, LifecycleStage::Completed);
     assert_eq!(completed.cleanup_status, CleanupStatus::Complete);
     let git_ref = completed.git_ref.expect("git ref");
@@ -164,7 +163,7 @@ async fn no_code_success_handoff_can_close_without_commit_sha() {
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
     store
-        .upsert_issue(test_issue("symphony", "no-code", "SYM-79", "In Progress"))
+        .upsert_issue(test_issue("symphony", "no-code", "SYM-79"))
         .await
         .expect("running issue");
     store
@@ -216,7 +215,6 @@ async fn no_code_success_handoff_can_close_without_commit_sha() {
         .await
         .expect("query no-code")
         .expect("no-code issue");
-    assert_eq!(completed.state, "Done");
     assert_eq!(completed.lifecycle_stage, LifecycleStage::Completed);
     assert_eq!(completed.cleanup_status, CleanupStatus::Complete);
     assert_eq!(
@@ -243,7 +241,7 @@ async fn successful_handoff_with_worktree_outside_configured_root_is_parked_with
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
     store
-        .upsert_issue(test_issue("symphony", "completed", "SYM-80", "In Progress"))
+        .upsert_issue(test_issue("symphony", "completed", "SYM-80"))
         .await
         .expect("running issue");
     store
@@ -302,7 +300,7 @@ async fn successful_handoff_with_sibling_worktree_is_parked_without_cleanup() {
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
     store
-        .upsert_issue(test_issue("symphony", "completed", "SYM-80", "In Progress"))
+        .upsert_issue(test_issue("symphony", "completed", "SYM-80"))
         .await
         .expect("running issue");
     store
@@ -359,7 +357,7 @@ async fn successful_handoff_with_whitespace_worktree_path_is_parked_without_clea
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
     store
-        .upsert_issue(test_issue("symphony", "completed", "SYM-80", "In Progress"))
+        .upsert_issue(test_issue("symphony", "completed", "SYM-80"))
         .await
         .expect("running issue");
     store
@@ -406,7 +404,7 @@ async fn eval_failure_stays_in_opencode_repair_loop_without_linear_churn() {
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
     store
-        .upsert_issue(test_issue("symphony", "repair", "SYM-81", "In Progress"))
+        .upsert_issue(test_issue("symphony", "repair", "SYM-81"))
         .await
         .expect("running issue");
     store
@@ -436,7 +434,6 @@ async fn eval_failure_stays_in_opencode_repair_loop_without_linear_churn() {
         .await
         .expect("query repair")
         .expect("repair issue");
-    assert_eq!(issue.state, "In Progress");
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
     let failure = issue.failure.expect("failure");
     assert_eq!(failure.kind, "eval_failure");
@@ -453,7 +450,7 @@ async fn repeated_identical_eval_failure_parks_owner_input_with_typed_evidence()
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
-    let mut issue = test_issue("symphony", "repeat", "SYM-82", "In Progress");
+    let mut issue = test_issue("symphony", "repeat", "SYM-82");
     issue.failure = Some(FailureRecord {
         kind: "eval_failure".into(),
         message: "lint-loop".into(),
@@ -487,7 +484,6 @@ async fn repeated_identical_eval_failure_parks_owner_input_with_typed_evidence()
         .await
         .expect("query repeat")
         .expect("repeat issue");
-    assert_eq!(issue.state, "Need Owner Input");
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Blocked);
     assert_eq!(
         issue.blocker.expect("blocker").kind,
@@ -544,7 +540,7 @@ async fn provider_blocker_and_owner_question_park_with_owner_visible_question() 
     for (issue_id, identifier, handoff, expected_kind) in cases {
         let worktree = dir.path().join(format!("{identifier}-worktree"));
         store
-            .upsert_issue(test_issue("symphony", issue_id, identifier, "In Progress"))
+            .upsert_issue(test_issue("symphony", issue_id, identifier))
             .await
             .expect("running issue");
         store
@@ -584,7 +580,6 @@ async fn provider_blocker_and_owner_question_park_with_owner_visible_question() 
             .await
             .expect("query parked")
             .expect("parked issue");
-        assert_eq!(issue.state, "Need Owner Input");
         assert_eq!(issue.lifecycle_stage, LifecycleStage::Blocked);
         assert_eq!(issue.blocker.expect("blocker").kind, expected_kind);
     }
@@ -600,7 +595,7 @@ async fn malformed_success_handoff_stays_in_progress_and_requests_opencode_repai
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
     store
-        .upsert_issue(test_issue("symphony", "malformed", "SYM-85", "In Progress"))
+        .upsert_issue(test_issue("symphony", "malformed", "SYM-85"))
         .await
         .expect("running issue");
     store
@@ -654,7 +649,6 @@ async fn malformed_success_handoff_stays_in_progress_and_requests_opencode_repai
         .await
         .expect("query issue")
         .expect("issue");
-    assert_eq!(issue.state, "In Progress");
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
     assert!(issue.blocker.is_none());
     assert_eq!(
@@ -673,12 +667,7 @@ async fn malformed_handoff_sidecar_requests_repair_without_owner_input() {
     store.reconcile_projects(&config).await.expect("projects");
     let worktree = dir.path().join("SYM-86-worktree");
     store
-        .upsert_issue(test_issue(
-            "symphony",
-            "malformed-json",
-            "SYM-86",
-            "In Progress",
-        ))
+        .upsert_issue(test_issue("symphony", "malformed-json", "SYM-86"))
         .await
         .expect("running issue");
     store
@@ -712,7 +701,6 @@ async fn malformed_handoff_sidecar_requests_repair_without_owner_input() {
         .await
         .expect("query malformed")
         .expect("malformed issue");
-    assert_eq!(issue.state, "In Progress");
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
     assert!(issue.blocker.is_none());
     let failure = issue.failure.expect("failure");

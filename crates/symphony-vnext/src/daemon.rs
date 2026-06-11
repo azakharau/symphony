@@ -71,6 +71,20 @@ pub struct OrchestrationReport {
     pub terminal_reconciled: Vec<String>,
 }
 
+#[derive(Debug)]
+enum DispatchCandidate {
+    New(LinearIssue),
+    ExistingSession(LinearIssue),
+}
+
+impl DispatchCandidate {
+    fn issue(&self) -> &LinearIssue {
+        match self {
+            Self::New(issue) | Self::ExistingSession(issue) => issue,
+        }
+    }
+}
+
 pub async fn run_once_with_linear_client(
     config: &RootConfig,
     store: &SqliteStore,
@@ -115,6 +129,9 @@ async fn reconcile_project(
     let mut eligible = Vec::new();
     let mut issues = linear.fetch_candidate_issues(project).await?;
     issues.sort_by(compare_issues_for_dispatch);
+    let has_unanswered_owner_input = issues
+        .iter()
+        .any(|issue| issue.state == "Need Owner Input" && !issue.has_new_owner_answer);
     let active_todo_milestone = active_todo_milestone(&issues);
     let todo_milestone_count = todo_milestone_count(&issues);
     debug!(
@@ -124,6 +141,12 @@ async fn reconcile_project(
         issues = issues.len(),
         "fetched Linear candidate issues"
     );
+    if has_unanswered_owner_input {
+        info!(
+            project_id = %project.id,
+            "unanswered Need Owner Input blocks project dispatch"
+        );
+    }
     if todo_milestone_count > 1 {
         info!(
             project_id = %project.id,
@@ -224,6 +247,30 @@ async fn reconcile_project(
                 }
             }
             "In Progress" => {
+                if has_unanswered_owner_input {
+                    info!(
+                        project_id = %project.id,
+                        issue = %issue.identifier,
+                        "pausing in-progress issue because project has unanswered Need Owner Input"
+                    );
+                    linear
+                        .transition_issue(&issue.id, LinearTransition::Todo)
+                        .await?;
+                    let record = issue_record(
+                        project,
+                        &issue,
+                        LinearTransition::Todo.state_name(),
+                        LifecycleStage::Queued,
+                        Some(BlockerRecord {
+                            kind: "project_owner_input".into(),
+                            message: "project has an unanswered Need Owner Input issue".into(),
+                            observed_at: issue.updated_at.clone(),
+                        }),
+                        CleanupStatus::Clean,
+                    );
+                    store.upsert_issue(&record).await?;
+                    continue;
+                }
                 debug!(
                     project_id = %project.id,
                     issue = %issue.identifier,
@@ -280,6 +327,27 @@ async fn reconcile_project(
                     .await?;
             }
             "Todo" => {
+                if has_unanswered_owner_input {
+                    debug!(
+                        project_id = %project.id,
+                        issue = %issue.identifier,
+                        "Todo issue queued because project has unanswered Need Owner Input"
+                    );
+                    let record = issue_record(
+                        project,
+                        &issue,
+                        "Todo",
+                        LifecycleStage::Queued,
+                        Some(BlockerRecord {
+                            kind: "project_owner_input".into(),
+                            message: "project has an unanswered Need Owner Input issue".into(),
+                            observed_at: issue.updated_at.clone(),
+                        }),
+                        CleanupStatus::Clean,
+                    );
+                    store.upsert_issue(&record).await?;
+                    continue;
+                }
                 let Some(issue_milestone) = issue.project_milestone.as_ref() else {
                     info!(
                         project_id = %project.id,
@@ -351,27 +419,26 @@ async fn reconcile_project(
                     info!(
                         project_id = %project.id,
                         issue = %issue.identifier,
-                        "existing OpenCode session found; resuming issue without new session"
+                        "existing OpenCode session found; queued for capacity-gated resume"
                     );
-                    linear
-                        .transition_issue(&issue.id, LinearTransition::InProgress)
-                        .await?;
                     let record = issue_record(
                         project,
                         &issue,
-                        "In Progress",
-                        LifecycleStage::Running,
+                        "Todo",
+                        LifecycleStage::Queued,
                         None,
                         CleanupStatus::Clean,
                     );
                     store.upsert_issue(&record).await?;
+                    mark_existing_session_queued(store, project, &issue).await?;
+                    eligible.push(DispatchCandidate::ExistingSession(issue));
                 } else {
                     debug!(
                         project_id = %project.id,
                         issue = %issue.identifier,
                         "Todo issue is eligible for dispatch"
                     );
-                    eligible.push(issue);
+                    eligible.push(DispatchCandidate::New(issue));
                 }
             }
             _ => {
@@ -409,7 +476,8 @@ async fn reconcile_project(
         "project dispatch capacity evaluated"
     );
 
-    for issue in eligible.into_iter().take(capacity) {
+    for candidate in eligible.into_iter().take(capacity) {
+        let issue = candidate.issue();
         info!(
             project_id = %project.id,
             issue = %issue.identifier,
@@ -418,29 +486,77 @@ async fn reconcile_project(
         linear
             .transition_issue(&issue.id, LinearTransition::InProgress)
             .await?;
-        let launch_spec = build_acp_launch_spec(project, &issue);
-        let started = opencode.launch(&launch_spec).await?;
+        let launch_spec = build_acp_launch_spec(project, issue);
         let record = issue_record(
             project,
-            &issue,
+            issue,
             LinearTransition::InProgress.state_name(),
             LifecycleStage::Running,
             None,
             CleanupStatus::Clean,
         );
         store.upsert_issue(&record).await?;
-        let session = new_session_record(project, &issue, started, &launch_spec);
-        info!(
-            project_id = %project.id,
-            issue = %issue.identifier,
-            session_id = %session.session_id,
-            worktree_path = %session.worktree_path,
-            "OpenCode session recorded"
-        );
-        store.upsert_opencode_session(&session).await?;
-        report.dispatched.push(issue.identifier);
+        match candidate {
+            DispatchCandidate::New(issue) => {
+                let started = opencode.launch(&launch_spec).await?;
+                let session = new_session_record(project, &issue, started, &launch_spec);
+                info!(
+                    project_id = %project.id,
+                    issue = %issue.identifier,
+                    session_id = %session.session_id,
+                    worktree_path = %session.worktree_path,
+                    "OpenCode session recorded"
+                );
+                store.upsert_opencode_session(&session).await?;
+                report.dispatched.push(issue.identifier);
+            }
+            DispatchCandidate::ExistingSession(issue) => {
+                mark_existing_session_reactivated(store, project, &issue).await?;
+                info!(
+                    project_id = %project.id,
+                    issue = %issue.identifier,
+                    "existing OpenCode session reactivated without duplicate launch"
+                );
+            }
+        }
     }
 
+    Ok(())
+}
+
+async fn mark_existing_session_queued(
+    store: &SqliteStore,
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+) -> anyhow::Result<()> {
+    let Some(mut session) = latest_session_for_issue(store, &project.id, &issue.id).await? else {
+        return Ok(());
+    };
+    session.process_id = None;
+    session.lifecycle_stage = LifecycleStage::Queued;
+    session.stage = OpenCodeStage::Silent;
+    session.lifecycle_marker = Some("waiting_for_capacity".into());
+    session.last_event = Some("existing_session_waiting_for_capacity".into());
+    session.silence_observed = false;
+    store.upsert_opencode_session(&session).await?;
+    Ok(())
+}
+
+async fn mark_existing_session_reactivated(
+    store: &SqliteStore,
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+) -> anyhow::Result<()> {
+    let Some(mut session) = latest_session_for_issue(store, &project.id, &issue.id).await? else {
+        return Ok(());
+    };
+    session.process_id = None;
+    session.lifecycle_stage = LifecycleStage::Running;
+    session.stage = OpenCodeStage::Running;
+    session.lifecycle_marker = Some("existing_session_reactivated".into());
+    session.last_event = Some("existing_session_reactivated".into());
+    session.silence_observed = false;
+    store.upsert_opencode_session(&session).await?;
     Ok(())
 }
 

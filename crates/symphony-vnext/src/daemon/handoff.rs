@@ -6,7 +6,8 @@ use crate::{
     config::ProjectConfig,
     linear::{LinearClient, LinearIssue, LinearIssueEvidence, LinearTransition},
     opencode::{
-        OpenCodeError, OpenCodeHandoff, OpenCodeLauncher, OpenCodeStopReason, worktree_path_allowed,
+        OpenCodeError, OpenCodeHandoff, OpenCodeLauncher, OpenCodeStopReason,
+        build_acp_launch_spec, worktree_path_allowed,
     },
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, GitRefRecord, IssueStateRecord, LifecycleStage,
@@ -55,20 +56,21 @@ pub(super) async fn process_in_progress_handoff(
                 message,
                 "OpenCode handoff sidecar failed validation"
             );
-            park_need_owner_input(
+            request_opencode_repair(
                 project,
                 store,
+                opencode,
                 linear,
                 issue,
-                Some(&session),
                 "malformed_handoff",
                 message.clone(),
-                Some(FailureRecord {
+                FailureRecord {
                     kind: "malformed_handoff".into(),
                     message,
                     fingerprint: Some("malformed_handoff_sidecar".into()),
                     occurrence_count: 1,
-                }),
+                },
+                &session,
             )
             .await?;
             return Ok(());
@@ -91,23 +93,24 @@ pub(super) async fn process_in_progress_handoff(
             handoff_session_id = %handoff.session_id,
             "malformed OpenCode handoff session mismatch"
         );
-        park_need_owner_input(
+        request_opencode_repair(
             project,
             store,
+            opencode,
             linear,
             issue,
-            Some(&session),
             "malformed_handoff",
             format!(
                 "handoff session `{}` did not match active session `{}`",
                 handoff.session_id, session.session_id
             ),
-            Some(FailureRecord {
+            FailureRecord {
                 kind: "malformed_handoff".into(),
                 message: "session id mismatch".into(),
                 fingerprint: Some("session_id_mismatch".into()),
                 occurrence_count: 1,
-            }),
+            },
+            &session,
         )
         .await?;
         return Ok(());
@@ -115,7 +118,8 @@ pub(super) async fn process_in_progress_handoff(
 
     match &handoff.stop_reason {
         OpenCodeStopReason::Success => {
-            close_successful_handoff(project, store, linear, issue, &session, &handoff).await?;
+            close_successful_handoff(project, store, opencode, linear, issue, &session, &handoff)
+                .await?;
         }
         OpenCodeStopReason::EvalFailed {
             failure_fingerprint,
@@ -183,6 +187,7 @@ pub(super) async fn process_in_progress_handoff(
 async fn close_successful_handoff(
     project: &ProjectConfig,
     store: &SqliteStore,
+    opencode: &impl OpenCodeLauncher,
     linear: &impl LinearClient,
     issue: &LinearIssue,
     session: &crate::state::OpenCodeSessionRecord,
@@ -196,20 +201,21 @@ async fn close_successful_handoff(
             message,
             "successful OpenCode handoff failed validation"
         );
-        park_need_owner_input(
+        request_opencode_repair(
             project,
             store,
+            opencode,
             linear,
             issue,
-            Some(session),
             "malformed_handoff",
             message.clone(),
-            Some(FailureRecord {
+            FailureRecord {
                 kind: "malformed_handoff".into(),
                 message,
                 fingerprint: Some("incomplete_success_handoff".into()),
                 occurrence_count: 1,
-            }),
+            },
+            session,
         )
         .await?;
         return Ok(());
@@ -222,20 +228,21 @@ async fn close_successful_handoff(
             session_id = %session.session_id,
             "successful OpenCode handoff missing git evidence"
         );
-        park_need_owner_input(
+        request_opencode_repair(
             project,
             store,
+            opencode,
             linear,
             issue,
-            Some(session),
             "malformed_handoff",
             "successful handoff did not include git closure evidence".into(),
-            Some(FailureRecord {
+            FailureRecord {
                 kind: "malformed_handoff".into(),
                 message: "missing git closure evidence".into(),
                 fingerprint: Some("missing_git_closure".into()),
                 occurrence_count: 1,
-            }),
+            },
+            session,
         )
         .await?;
         return Ok(());
@@ -248,20 +255,21 @@ async fn close_successful_handoff(
             message,
             "successful OpenCode handoff has unsafe worktree evidence"
         );
-        park_need_owner_input(
+        request_opencode_repair(
             project,
             store,
+            opencode,
             linear,
             issue,
-            Some(session),
             "malformed_handoff",
             message.clone(),
-            Some(FailureRecord {
+            FailureRecord {
                 kind: "malformed_handoff".into(),
                 message,
                 fingerprint: Some("unsafe_worktree_path".into()),
                 occurrence_count: 1,
-            }),
+            },
+            session,
         )
         .await?;
         return Ok(());
@@ -366,8 +374,9 @@ async fn handle_eval_failure(
             max_identical,
             "continuing OpenCode repair after eval failure"
         );
-        opencode
-            .continue_repair(session, failure_fingerprint)
+        let spec = build_acp_launch_spec(project, issue);
+        let started = opencode
+            .continue_repair(&spec, session, failure_fingerprint, failure_fingerprint)
             .await?;
         let mut record = issue_record(
             project,
@@ -384,7 +393,70 @@ async fn handle_eval_failure(
             occurrence_count,
         });
         store.upsert_issue(&record).await?;
+        let mut repair_session = session.clone();
+        repair_session.process_id = started.process_id;
+        repair_session.lifecycle_stage = LifecycleStage::Running;
+        repair_session.stage = crate::state::OpenCodeStage::Running;
+        repair_session.lifecycle_marker = Some("repair_prompted".into());
+        repair_session.last_event = Some(format!("repair_prompted:{failure_fingerprint}"));
+        repair_session.silence_observed = false;
+        store.upsert_opencode_session(&repair_session).await?;
     }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "repair request needs project, adapters, issue, session, and failure evidence"
+)]
+async fn request_opencode_repair(
+    project: &ProjectConfig,
+    store: &SqliteStore,
+    opencode: &impl OpenCodeLauncher,
+    linear: &impl LinearClient,
+    issue: &LinearIssue,
+    evidence_kind: &str,
+    message: String,
+    failure: FailureRecord,
+    session: &crate::state::OpenCodeSessionRecord,
+) -> anyhow::Result<()> {
+    linear
+        .record_issue_evidence(
+            &issue.id,
+            LinearIssueEvidence {
+                kind: evidence_kind.into(),
+                body: message.clone(),
+            },
+        )
+        .await?;
+    let fingerprint = failure
+        .fingerprint
+        .as_deref()
+        .unwrap_or(evidence_kind)
+        .to_string();
+    let spec = build_acp_launch_spec(project, issue);
+    let started = opencode
+        .continue_repair(&spec, session, &fingerprint, &message)
+        .await?;
+    let mut record = issue_record(
+        project,
+        issue,
+        "In Progress",
+        LifecycleStage::Running,
+        None,
+        CleanupStatus::Clean,
+    );
+    record.failure = Some(failure);
+    store.upsert_issue(&record).await?;
+
+    let mut repair_session = session.clone();
+    repair_session.process_id = started.process_id;
+    repair_session.lifecycle_stage = LifecycleStage::Running;
+    repair_session.stage = crate::state::OpenCodeStage::Running;
+    repair_session.lifecycle_marker = Some("repair_prompted".into());
+    repair_session.last_event = Some(format!("repair_prompted:{fingerprint}"));
+    repair_session.silence_observed = false;
+    store.upsert_opencode_session(&repair_session).await?;
     Ok(())
 }
 
@@ -475,12 +547,13 @@ pub(super) async fn park_need_owner_input(
     message: String,
     failure: Option<FailureRecord>,
 ) -> anyhow::Result<()> {
+    let owner_visible_body = owner_visible_parking_body(blocker_kind, &message);
     linear
         .record_issue_evidence(
             &issue.id,
             LinearIssueEvidence {
                 kind: blocker_kind.into(),
-                body: message.clone(),
+                body: owner_visible_body,
             },
         )
         .await?;
@@ -514,4 +587,14 @@ pub(super) async fn park_need_owner_input(
         store.upsert_opencode_session(&parked_session).await?;
     }
     Ok(())
+}
+
+fn owner_visible_parking_body(blocker_kind: &str, message: &str) -> String {
+    if blocker_kind == "owner_question" {
+        return message.to_string();
+    }
+
+    format!(
+        "{message}\n\nOwner input needed: decide whether to keep this issue parked, change provider/runtime configuration, or move it back to Todo for another implementation attempt."
+    )
 }

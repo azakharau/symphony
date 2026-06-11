@@ -747,13 +747,19 @@ impl OpenCodeLauncher for ResumeRecordingOpenCodeLauncher {
 #[derive(Debug)]
 struct MalformedHandoffOpenCodeLauncher {
     message: String,
+    repairs: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 impl MalformedHandoffOpenCodeLauncher {
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            repairs: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    fn repairs(&self) -> Vec<(String, String)> {
+        self.repairs.lock().expect("repairs lock").clone()
     }
 }
 
@@ -773,6 +779,23 @@ impl OpenCodeLauncher for MalformedHandoffOpenCodeLauncher {
         Err(opencode::OpenCodeError::MalformedHandoff(
             self.message.clone(),
         ))
+    }
+
+    async fn continue_repair(
+        &self,
+        _spec: &opencode::OpenCodeLaunchSpec,
+        session: &OpenCodeSessionRecord,
+        failure_fingerprint: &str,
+        _repair_message: &str,
+    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+        self.repairs
+            .lock()
+            .expect("repairs lock")
+            .push((session.session_id.clone(), failure_fingerprint.to_string()));
+        Ok(opencode::OpenCodeStartedSession {
+            session_id: session.session_id.clone(),
+            process_id: session.process_id,
+        })
     }
 }
 
@@ -800,14 +823,19 @@ impl OpenCodeLauncher for ScriptedOpenCodeLauncher {
 
     async fn continue_repair(
         &self,
+        _spec: &opencode::OpenCodeLaunchSpec,
         session: &OpenCodeSessionRecord,
         failure_fingerprint: &str,
-    ) -> Result<(), opencode::OpenCodeError> {
+        _repair_message: &str,
+    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
         self.repairs
             .lock()
             .expect("repairs lock")
             .push((session.session_id.clone(), failure_fingerprint.to_string()));
-        Ok(())
+        Ok(opencode::OpenCodeStartedSession {
+            session_id: session.session_id.clone(),
+            process_id: session.process_id,
+        })
     }
 }
 

@@ -221,7 +221,7 @@ async fn orchestration_reconciles_persisted_backlog_without_counting_capacity() 
 }
 
 #[tokio::test]
-async fn orchestration_keeps_owner_input_parked_until_answer_or_manual_todo() {
+async fn orchestration_keeps_owner_input_parked_and_blocks_manual_todo_dispatch() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
@@ -239,13 +239,10 @@ async fn orchestration_keeps_owner_input_parked_until_answer_or_manual_todo() {
         .await
         .expect("orchestrate once");
 
-    assert_eq!(report.dispatched, vec!["SYM-52"]);
+    assert!(report.dispatched.is_empty());
     assert_eq!(
         client.transitions(),
-        vec![
-            ("answered".into(), LinearTransition::Todo),
-            ("manual".into(), LinearTransition::InProgress),
-        ]
+        vec![("answered".into(), LinearTransition::Todo)]
     );
     assert_eq!(
         store
@@ -255,6 +252,15 @@ async fn orchestration_keeps_owner_input_parked_until_answer_or_manual_todo() {
             .expect("parked")
             .lifecycle_stage,
         LifecycleStage::Blocked
+    );
+    assert_eq!(
+        store
+            .issue("symphony", "manual")
+            .await
+            .expect("query manual")
+            .expect("manual")
+            .lifecycle_stage,
+        LifecycleStage::Queued
     );
 }
 
@@ -618,13 +624,70 @@ async fn orchestration_restores_requeued_issue_with_existing_session_without_dup
         .expect("requeued");
     assert_eq!(issue.state, "In Progress");
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    let sessions = store
+        .opencode_sessions_for_issue("symphony", "requeued")
+        .await
+        .expect("sessions");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Running);
     assert_eq!(
-        store
-            .opencode_sessions_for_issue("symphony", "requeued")
-            .await
-            .expect("sessions")
-            .len(),
-        1
+        sessions[0].lifecycle_marker.as_deref(),
+        Some("existing_session_reactivated")
+    );
+}
+
+#[tokio::test]
+async fn orchestration_capacity_gates_requeued_issue_with_existing_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let worktree = dir.path().join("SYM-65-worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "running-1", "SYM-60", "In Progress"))
+        .await
+        .expect("running issue 1");
+    store
+        .upsert_issue(test_issue("symphony", "running-2", "SYM-61", "In Progress"))
+        .await
+        .expect("running issue 2");
+    let mut requeued = test_issue("symphony", "requeued", "SYM-65", "Todo");
+    requeued.lifecycle_stage = LifecycleStage::Queued;
+    store.upsert_issue(requeued).await.expect("requeued issue");
+    store
+        .upsert_opencode_session(test_session("symphony", "requeued", "oc-65", &worktree))
+        .await
+        .expect("running session");
+
+    let client =
+        RecordingLinearClient::new(vec![linear_issue("requeued", "SYM-65", "Todo", Some(1))]);
+
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("poll");
+
+    assert!(report.dispatched.is_empty());
+    assert!(client.transitions().is_empty());
+    let issue = store
+        .issue("symphony", "requeued")
+        .await
+        .expect("query requeued")
+        .expect("requeued");
+    assert_eq!(issue.state, "Todo");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Queued);
+    let sessions = store
+        .opencode_sessions_for_issue("symphony", "requeued")
+        .await
+        .expect("sessions");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Queued);
+    assert_eq!(sessions[0].process_id, None);
+    assert_eq!(
+        sessions[0].lifecycle_marker.as_deref(),
+        Some("waiting_for_capacity")
     );
 }
 

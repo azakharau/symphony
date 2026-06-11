@@ -45,10 +45,15 @@ pub trait OpenCodeLauncher: Sync {
 
     async fn continue_repair(
         &self,
-        _session: &OpenCodeSessionRecord,
+        _spec: &OpenCodeLaunchSpec,
+        session: &OpenCodeSessionRecord,
         _failure_fingerprint: &str,
-    ) -> Result<(), OpenCodeError> {
-        Ok(())
+        _repair_message: &str,
+    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
+        Ok(OpenCodeStartedSession {
+            session_id: session.session_id.clone(),
+            process_id: session.process_id,
+        })
     }
 
     async fn resume(
@@ -315,6 +320,151 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         tokio::spawn(async move {
             if let Err(error) = drain_acp_stream(stdout, stdin, permission_policy).await {
                 warn!(error = %error, "OpenCode ACP resumed stream ended with error");
+            }
+            let _ = child.wait().await;
+        });
+
+        Ok(OpenCodeStartedSession {
+            session_id: session.session_id.clone(),
+            process_id,
+        })
+    }
+
+    async fn continue_repair(
+        &self,
+        spec: &OpenCodeLaunchSpec,
+        session: &OpenCodeSessionRecord,
+        failure_fingerprint: &str,
+        repair_message: &str,
+    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
+        info!(
+            issue = %spec.issue_identifier,
+            session_id = %session.session_id,
+            cwd = %spec.cwd.display(),
+            command = %spec.command.display(),
+            failure_fingerprint,
+            "continuing OpenCode ACP repair"
+        );
+        ensure_worktree(spec).await?;
+        remove_stale_handoff_sidecar(&spec.cwd).await?;
+        let mut child = Command::new(&spec.command)
+            .args(&spec.args)
+            .current_dir(&spec.cwd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let process_id = child.id();
+        let mut stdin = child.stdin.take().ok_or(OpenCodeError::MissingStdin)?;
+        let stdout = child.stdout.take().ok_or(OpenCodeError::MissingStdout)?;
+        let mut stdout = BufReader::new(stdout);
+
+        let mut next_id = 1_u64;
+        acp_request(
+            &mut stdin,
+            &mut stdout,
+            &spec.permission_policy,
+            next_id,
+            "initialize",
+            json!({
+                "protocolVersion": 1,
+                "agent": spec.agent,
+                "model": spec.model,
+            }),
+        )
+        .await?;
+        next_id += 1;
+
+        let resume_result = acp_request(
+            &mut stdin,
+            &mut stdout,
+            &spec.permission_policy,
+            next_id,
+            "session/resume",
+            session_resume_params(spec, session),
+        )
+        .await?;
+        next_id += 1;
+        let resumed_session_id =
+            extract_session_id(&resume_result).unwrap_or_else(|_| session.session_id.clone());
+        if resumed_session_id != session.session_id {
+            return Err(OpenCodeError::AcpProtocol(format!(
+                "ACP session/resume returned `{resumed_session_id}` for `{}`",
+                session.session_id
+            )));
+        }
+        set_session_config_option(
+            &mut stdin,
+            &mut stdout,
+            &spec.permission_policy,
+            next_id,
+            &session.session_id,
+            "mode",
+            Some(spec.agent.as_str()),
+        )
+        .await?;
+        next_id += 1;
+        set_session_config_option(
+            &mut stdin,
+            &mut stdout,
+            &spec.permission_policy,
+            next_id,
+            &session.session_id,
+            "model",
+            spec.model.as_deref(),
+        )
+        .await?;
+        next_id += 1;
+        set_session_config_option(
+            &mut stdin,
+            &mut stdout,
+            &spec.permission_policy,
+            next_id,
+            &session.session_id,
+            "effort",
+            spec.effort.as_deref(),
+        )
+        .await?;
+        next_id += 1;
+
+        let prompt_request_id = next_id;
+        let prompt = format!(
+            "Symphony repair required for existing ACP session `{}`.\n\n\
+             Failure fingerprint: `{}`\n\n\
+             Repair details:\n{}\n\n\
+             Continue the same implementation session. Do not start a new task. \
+             Fix the implementation or handoff, rerun the required validation, \
+             and rewrite the structured Symphony handoff JSON at the configured sidecar path.",
+            session.session_id, failure_fingerprint, repair_message
+        );
+        write_acp_request(
+            &mut stdin,
+            prompt_request_id,
+            "session/prompt",
+            json!({
+                "sessionId": session.session_id.as_str(),
+                "prompt": [
+                    {
+                        "type": "text",
+                        "text": prompt.as_str(),
+                    }
+                ],
+            }),
+        )
+        .await?;
+
+        let permission_policy = spec.permission_policy.clone();
+        tokio::spawn(async move {
+            if let Err(error) = read_acp_response(
+                &mut stdout,
+                &mut stdin,
+                &permission_policy,
+                prompt_request_id,
+                "session/prompt",
+            )
+            .await
+            {
+                warn!(error = %error, "OpenCode ACP repair prompt stream ended with error");
             }
             let _ = child.wait().await;
         });

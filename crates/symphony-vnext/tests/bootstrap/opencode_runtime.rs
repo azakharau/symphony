@@ -209,6 +209,23 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         spec.prompt
     );
     assert!(
+        spec.prompt.contains("Commit policy for successful handoff"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt
+            .contains("If the task changes code, docs, config, tests, or any other git-tracked state, commit those changes before writing a success handoff"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt
+            .contains("Do not report success with changed_files unless git.head_sha is the commit that contains those changes"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
         spec.prompt
             .contains("Implement the OpenCode ACP lifecycle runner"),
         "{}",

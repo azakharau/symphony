@@ -447,13 +447,15 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
              Failure fingerprint: `{}`\n\n\
              Repair details:\n{}\n\n\
              Validation policy:\n{}\n\n\
+             Commit policy for successful handoff:\n{}\n\n\
              Continue the same implementation session. Do not start a new task. \
              Fix the implementation or handoff, rerun the required validation, \
              and rewrite the structured Symphony handoff JSON at the configured sidecar path.",
             session.session_id,
             failure_fingerprint,
             repair_message,
-            validation_policy_text()
+            validation_policy_text(),
+            commit_policy_text()
         );
         write_acp_request(
             &mut stdin,
@@ -593,9 +595,11 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             "Symphony continuation required for existing ACP session `{}`.\n\n\
              Continue the same implementation session. Do not start a new task. \
              Do not repeat already completed work unless validation requires it.\n\n\
-             Validation policy:\n{}\n\n{}",
+             Validation policy:\n{}\n\n\
+             Commit policy for successful handoff:\n{}\n\n{}",
             session.session_id,
             validation_policy_text(),
+            commit_policy_text(),
             continuation_message
         );
         write_acp_request(
@@ -803,6 +807,8 @@ fn build_issue_prompt(project: &ProjectConfig, issue: &LinearIssue) -> String {
          URL: {url}\n\n\
          Validation policy:\n\
          {validation_policy}\n\n\
+         Commit policy for successful handoff:\n\
+         {commit_policy}\n\n\
          On completion, write the structured Symphony handoff JSON to:\n\
          {handoff_path}\n\n\
          The handoff file must be valid JSON matching this exact shape:\n\
@@ -836,6 +842,7 @@ fn build_issue_prompt(project: &ProjectConfig, issue: &LinearIssue) -> String {
         state = issue.state,
         url = issue.url.as_deref().unwrap_or("none"),
         validation_policy = validation_policy_text(),
+        commit_policy = commit_policy_text(),
     )
 }
 
@@ -845,6 +852,13 @@ fn validation_policy_text() -> &'static str {
      - For docs-only/no-code changes, run documentation/file-level validation such as git diff --check and reference checks; do not run cargo nextest --workspace, full workspace tests, or release gates unless the issue explicitly requires them.\n\
      - For Rust source changes, prefer the narrowest package/filter/profile that covers the changed behavior before escalating to workspace-level checks.\n\
      - If a broader check is intentionally skipped, record the reason in eval_results.details and risks."
+}
+
+fn commit_policy_text() -> &'static str {
+    "- If the task changes code, docs, config, tests, or any other git-tracked state, commit those changes before writing a success handoff.\n\
+     - Do not report success with changed_files unless git.head_sha is the commit that contains those changes.\n\
+     - If there are truly no git changes, leave changed_files empty, set git to null, and explain the no-change outcome in eval_results.details.\n\
+     - A successful handoff with changed_files but no matching commit is invalid and must be repaired before Symphony can move the issue to Done."
 }
 
 fn deterministic_session_id(input: &str) -> String {

@@ -617,6 +617,78 @@ async fn orchestration_reissues_repair_prompt_for_stale_failed_session_instead_o
 }
 
 #[tokio::test]
+async fn orchestration_continues_requeued_owner_input_session_during_dispatch() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let mut issue = test_issue("symphony", "answered", "SYM-67");
+    issue.lifecycle_stage = LifecycleStage::Blocked;
+    issue.blocker = Some(BlockerRecord {
+        kind: "provider_blocker".into(),
+        message: "workspace-not-found".into(),
+        observed_at: Some("2026-06-11T15:14:00Z".into()),
+    });
+    issue.failure = Some(FailureRecord {
+        kind: "provider_blocker".into(),
+        message: "workspace-not-found".into(),
+        fingerprint: Some("workspace-not-found".into()),
+        occurrence_count: 1,
+    });
+    store.upsert_issue(issue).await.expect("issue");
+    let mut session = test_session(
+        "symphony",
+        "answered",
+        "ses-owner-input",
+        "/home/agent/.symphony/workspaces/opencode/symphony/SYM-67",
+    );
+    session.process_id = None;
+    session.lifecycle_stage = LifecycleStage::Blocked;
+    session.stage = OpenCodeStage::Failed;
+    session.lifecycle_marker = Some("parked".into());
+    session.last_event = Some("parked:provider_blocker".into());
+    store
+        .upsert_opencode_session(session)
+        .await
+        .expect("session");
+    let client =
+        RecordingLinearClient::new(vec![linear_issue("answered", "SYM-67", "Todo", Some(1))]);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert!(
+        opencode.launches().is_empty(),
+        "answered owner-input retry must not launch a duplicate fresh session"
+    );
+    assert_eq!(
+        opencode.continuations(),
+        vec![("SYM-67".to_string(), "ses-owner-input".to_string())]
+    );
+    assert_eq!(
+        client.transitions(),
+        vec![("answered".into(), LinearTransition::InProgress)]
+    );
+    let resumed = store
+        .opencode_session("symphony", "answered", "ses-owner-input")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(resumed.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(resumed.stage, OpenCodeStage::Running);
+    assert_eq!(resumed.process_id, Some(4242));
+    assert_eq!(
+        resumed.lifecycle_marker.as_deref(),
+        Some("continuation_prompted")
+    );
+}
+
+#[tokio::test]
 async fn terminal_reconciliation_marks_cleanup_complete_when_worktree_is_already_absent() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
@@ -717,7 +789,7 @@ async fn orchestration_restores_requeued_issue_with_existing_session_without_dup
     assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Running);
     assert_eq!(
         sessions[0].lifecycle_marker.as_deref(),
-        Some("existing_session_reactivated")
+        Some("continuation_prompted")
     );
 }
 

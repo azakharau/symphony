@@ -505,10 +505,11 @@ async fn reconcile_project(
             }
             DispatchCandidate::ExistingSession(issue) => {
                 mark_existing_session_reactivated(store, project, &issue).await?;
+                resume_stale_opencode_session(project, store, opencode, &issue).await?;
                 info!(
                     project_id = %project.id,
                     issue = %issue.identifier,
-                    "existing OpenCode session reactivated without duplicate launch"
+                    "existing OpenCode session continued without duplicate launch"
                 );
             }
         }

@@ -1,5 +1,79 @@
 use super::*;
 
+#[derive(Debug)]
+struct DoneRequiresStoppedProcessLinearClient {
+    issue: LinearIssue,
+    process_id: u32,
+    transitions: std::sync::Mutex<Vec<(String, LinearTransition)>>,
+    evidence: std::sync::Mutex<Vec<(String, LinearIssueEvidence)>>,
+}
+
+impl DoneRequiresStoppedProcessLinearClient {
+    fn new(issue: LinearIssue, process_id: u32) -> Self {
+        Self {
+            issue,
+            process_id,
+            transitions: std::sync::Mutex::new(Vec::new()),
+            evidence: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn transitions(&self) -> Vec<(String, LinearTransition)> {
+        self.transitions.lock().expect("transitions lock").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl LinearClient for DoneRequiresStoppedProcessLinearClient {
+    async fn fetch_candidate_issues(
+        &self,
+        _project: &symphony::config::ProjectConfig,
+    ) -> Result<Vec<LinearIssue>, LinearClientError> {
+        Ok(vec![self.issue.clone()])
+    }
+
+    async fn transition_issue(
+        &self,
+        issue_id: &str,
+        transition: LinearTransition,
+    ) -> Result<(), LinearClientError> {
+        if transition == LinearTransition::Done && test_process_is_alive(self.process_id) {
+            return Err(LinearClientError::Message(
+                "Done transition happened before OpenCode process termination".into(),
+            ));
+        }
+        self.transitions
+            .lock()
+            .expect("transitions lock")
+            .push((issue_id.to_string(), transition));
+        Ok(())
+    }
+
+    async fn record_issue_evidence(
+        &self,
+        issue_id: &str,
+        evidence: LinearIssueEvidence,
+    ) -> Result<(), LinearClientError> {
+        self.evidence
+            .lock()
+            .expect("evidence lock")
+            .push((issue_id.to_string(), evidence));
+        Ok(())
+    }
+}
+
+fn test_process_is_alive(process_id: u32) -> bool {
+    let path = format!("/proc/{process_id}/cmdline");
+    fs::read(path)
+        .map(|cmdline| {
+            cmdline
+                .split(|byte| *byte == 0)
+                .filter_map(|part| std::str::from_utf8(part).ok())
+                .any(|part| part.contains("opencode"))
+        })
+        .unwrap_or(false)
+}
+
 #[tokio::test]
 async fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_worktree() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -166,6 +240,118 @@ async fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_wo
             worktree.to_str().expect("worktree path utf8"),
             "agent-server/opencode-runner-extension",
         ],
+    );
+}
+
+#[tokio::test]
+async fn passing_handoff_stops_process_before_done_and_removes_worktree_immediately_after() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let repo = dir.path().join("repo");
+    let origin = dir.path().join("origin.git");
+    fs::create_dir_all(&origin).expect("origin dir");
+    run_git(&origin, ["init", "--bare"]);
+    fs::create_dir_all(&repo).expect("repo dir");
+    run_git(&repo, ["init"]);
+    run_git(&repo, ["config", "user.email", "symphony@example.test"]);
+    run_git(&repo, ["config", "user.name", "Symphony Test"]);
+    run_git(
+        &repo,
+        [
+            "remote",
+            "add",
+            "origin",
+            origin.to_str().expect("origin utf8"),
+        ],
+    );
+    fs::write(repo.join("README.md"), "base checkout").expect("readme");
+    run_git(&repo, ["add", "README.md"]);
+    run_git(&repo, ["commit", "-m", "base"]);
+    run_git(&repo, ["branch", "agent-server/opencode-runner-extension"]);
+    run_git(
+        &repo,
+        ["push", "origin", "agent-server/opencode-runner-extension"],
+    );
+
+    let worktree_root = dir.path().join("allowed-worktrees");
+    let worktree = worktree_root.join("SYM-90");
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "--detach",
+            worktree.to_str().expect("worktree path utf8"),
+            "agent-server/opencode-runner-extension",
+        ],
+    );
+    fs::write(worktree.join("artifact.txt"), "implementation").expect("artifact");
+    run_git(&worktree, ["add", "artifact.txt"]);
+    run_git(&worktree, ["commit", "-m", "SYM-90 implementation"]);
+    let head_sha = git_output(&worktree, ["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    let issue_branch = "symphony/SYM-90";
+    let issue_refspec = format!("HEAD:refs/heads/{issue_branch}");
+    run_git(&worktree, ["push", "origin", &issue_refspec]);
+
+    let mut child = Command::new("bash")
+        .args(["-c", "exec -a opencode sleep 60"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn fake opencode process");
+    let process_id = child.id();
+
+    let config_toml = valid_config_toml()
+        .replace(
+            "repo_path = \"/home/agent/proj/symphony\"",
+            &format!("repo_path = \"{}\"", repo.display()),
+        )
+        .replace(
+            "/home/agent/.symphony/workspaces/opencode/symphony",
+            &worktree_root.display().to_string(),
+        );
+    let config = RootConfig::from_toml_str(&config_toml).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "close-order", "SYM-90"))
+        .await
+        .expect("running issue");
+    let mut session = test_session("symphony", "close-order", "oc-90", &worktree);
+    session.process_id = Some(process_id);
+    store
+        .upsert_opencode_session(session)
+        .await
+        .expect("running session");
+
+    let client = DoneRequiresStoppedProcessLinearClient::new(
+        linear_issue("close-order", "SYM-90", "In Progress", Some(1)),
+        process_id,
+    );
+    let opencode = ScriptedOpenCodeLauncher::new(Some(success_handoff(
+        "oc-90",
+        &worktree,
+        issue_branch,
+        &head_sha,
+    )));
+
+    let result = daemon::run_once_with_clients(&config, &store, &client, &opencode).await;
+    if test_process_is_alive(process_id) {
+        child.kill().expect("kill fake opencode process");
+    }
+    let _ = child.wait();
+
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+        client.transitions(),
+        vec![("close-order".into(), LinearTransition::Done)]
+    );
+    assert!(
+        !worktree.exists(),
+        "Done must be followed by worktree removal"
     );
 }
 

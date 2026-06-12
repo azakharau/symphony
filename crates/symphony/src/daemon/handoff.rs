@@ -324,10 +324,10 @@ async fn close_successful_handoff(
             },
         )
         .await?;
+    terminate_current_session_process(project, issue, session).await?;
     linear
         .transition_issue(&issue.id, LinearTransition::Done)
         .await?;
-    terminate_current_session_process(project, issue, session).await?;
     cleanup_worktree(&project.repo_path, &git.worktree_path).await?;
     info!(
         project_id = %project.id,

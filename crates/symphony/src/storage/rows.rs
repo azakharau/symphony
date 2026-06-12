@@ -7,7 +7,7 @@ use crate::{
     state::{
         BlockerRecord, CleanupStatus, EvalRunRecord, FailureRecord, GitRefRecord, IssueStateRecord,
         LifecycleStage, OpenCodeSessionRecord, OpenCodeStage, OpenCodeStageEventRecord,
-        ProjectStateRecord,
+        ProjectRuntimeLivenessRecord, ProjectStateRecord, RuntimeLivenessStatus,
     },
     storage::StorageError,
 };
@@ -59,6 +59,20 @@ pub(super) fn issue_from_row(row: &Row) -> Result<IssueStateRecord, StorageError
         failure: decode_optional::<FailureRecord>(failure_json)?,
         git_ref: decode_optional::<GitRefRecord>(git_ref_json)?,
         cleanup_status: parse_cleanup(&cleanup_status)?,
+    })
+}
+
+pub(super) fn liveness_from_row(row: &Row) -> Result<ProjectRuntimeLivenessRecord, StorageError> {
+    let status: String = row.get(1)?;
+    Ok(ProjectRuntimeLivenessRecord {
+        project_id: row.get(0)?,
+        status: parse_liveness_status(&status)?,
+        reason: row.get(2)?,
+        last_poll_at: row.get(3)?,
+        last_successful_candidate_scan_at: row.get(4)?,
+        max_sessions: get_u64(row, 5)? as u32,
+        running_sessions: get_u64(row, 6)? as u32,
+        available_sessions: get_u64(row, 7)? as u32,
     })
 }
 
@@ -143,6 +157,10 @@ fn parse_cleanup(input: &str) -> Result<CleanupStatus, StorageError> {
 
 fn parse_opencode_stage(input: &str) -> Result<OpenCodeStage, StorageError> {
     OpenCodeStage::from_str(input).map_err(StorageError::State)
+}
+
+fn parse_liveness_status(input: &str) -> Result<RuntimeLivenessStatus, StorageError> {
+    RuntimeLivenessStatus::from_str(input).map_err(StorageError::State)
 }
 
 fn get_u64(row: &Row, index: i32) -> Result<u64, StorageError> {

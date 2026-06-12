@@ -12,6 +12,19 @@ CREATE TABLE IF NOT EXISTS projects (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS project_runtime_liveness (
+    project_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    last_poll_at TEXT,
+    last_successful_candidate_scan_at TEXT,
+    max_sessions INTEGER NOT NULL,
+    running_sessions INTEGER NOT NULL,
+    available_sessions INTEGER NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS issues (
     project_id TEXT NOT NULL,
     issue_id TEXT NOT NULL,

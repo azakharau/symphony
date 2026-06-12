@@ -32,6 +32,175 @@ async fn daemon_once_entrypoint_validates_config_migrates_and_reconciles_project
     assert_eq!(project.cleanup_status, CleanupStatus::Clean);
 }
 
+#[test]
+fn systemd_user_unit_declares_restart_and_default_target_autostart() {
+    let unit = include_str!("../../../../deploy/systemd/openai-symphony-symphony.service");
+
+    assert!(unit.starts_with("[Unit]\n"));
+    assert_eq!(unit.matches("[Unit]").count(), 1);
+    assert!(unit.contains("\n[Service]\n"));
+    assert!(unit.contains("\nRestart=on-failure\n"));
+    assert!(unit.contains("\nRestartSec=10\n"));
+    assert!(unit.contains("\n[Install]\n"));
+    assert!(unit.contains("\nWantedBy=default.target\n"));
+}
+
+#[tokio::test]
+async fn dashboard_shows_inactive_runtime_before_daemon_poll() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let api = RuntimeDashboardApi::from_store(&config, &store)
+        .await
+        .expect("dashboard api");
+    let project = api
+        .project_drilldown("symphony")
+        .expect("project endpoint")
+        .expect("project exists");
+
+    assert_eq!(
+        project.liveness.status,
+        RuntimeLivenessStatus::InactiveRuntime
+    );
+    assert!(project.liveness.last_poll_at.is_none());
+    assert!(project.liveness.reason.contains("has not reported"));
+}
+
+#[tokio::test]
+async fn orchestration_records_no_eligible_liveness_without_launching_opencode() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let client = RecordingLinearClient::new(Vec::new());
+    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+
+    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert!(report.dispatched.is_empty());
+    assert!(opencode.launches().is_empty());
+    let liveness = store
+        .project_liveness("symphony")
+        .await
+        .expect("query liveness")
+        .expect("liveness row");
+    assert_eq!(liveness.status, RuntimeLivenessStatus::NoEligibleIssues);
+    assert_eq!(liveness.available_sessions, 2);
+    assert!(liveness.last_poll_at.is_some());
+    assert!(liveness.last_successful_candidate_scan_at.is_some());
+}
+
+#[tokio::test]
+async fn orchestration_records_blocked_issues_liveness_when_candidates_are_blocked() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let blocked =
+        linear_issue("blocked", "SYM-40", "Todo", Some(1)).blocked_by(vec![LinearBlocker {
+            id: Some("blocker-1".into()),
+            identifier: Some("SYM-39".into()),
+            state: Some("In Progress".into()),
+        }]);
+    let client = RecordingLinearClient::new(vec![blocked]);
+
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
+
+    assert!(report.dispatched.is_empty());
+    assert_eq!(report.blocked, vec!["SYM-40"]);
+    let liveness = store
+        .project_liveness("symphony")
+        .await
+        .expect("query liveness")
+        .expect("liveness row");
+    assert_eq!(liveness.status, RuntimeLivenessStatus::BlockedIssues);
+    assert!(liveness.reason.contains("blocked or parked"));
+}
+
+#[tokio::test]
+async fn orchestration_records_healthy_capacity_liveness_before_dispatch() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "running-1", "SYM-21"))
+        .await
+        .expect("running issue");
+    let client =
+        RecordingLinearClient::new(vec![linear_issue("eligible", "SYM-22", "Todo", Some(1))]);
+
+    daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
+
+    let liveness = store
+        .project_liveness("symphony")
+        .await
+        .expect("query liveness")
+        .expect("liveness row");
+    assert_eq!(
+        liveness.status,
+        RuntimeLivenessStatus::HealthyCapacityAvailable
+    );
+    assert_eq!(liveness.running_sessions, 1);
+    assert_eq!(liveness.available_sessions, 1);
+}
+
+#[tokio::test]
+async fn orchestration_records_runner_process_dead_liveness_for_stale_running_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "work", "SYM-65"))
+        .await
+        .expect("issue");
+    let mut session = test_session(
+        "symphony",
+        "work",
+        "ses-existing",
+        "/home/agent/.symphony/workspaces/opencode/symphony/SYM-65",
+    );
+    session.process_id = Some(u32::MAX);
+    store
+        .upsert_opencode_session(session)
+        .await
+        .expect("session");
+    let client =
+        RecordingLinearClient::new(vec![linear_issue("work", "SYM-65", "In Progress", Some(1))]);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    let liveness = store
+        .project_liveness("symphony")
+        .await
+        .expect("query liveness")
+        .expect("liveness row");
+    assert_eq!(liveness.status, RuntimeLivenessStatus::RunnerProcessDead);
+    assert!(liveness.reason.contains("no live runner process"));
+}
+
 #[tokio::test]
 async fn orchestration_dispatches_one_eligible_todo_by_project_capacity_and_order() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -845,6 +1014,14 @@ async fn orchestration_capacity_gates_requeued_issue_with_existing_session() {
         sessions[0].lifecycle_marker.as_deref(),
         Some("waiting_for_capacity")
     );
+    let liveness = store
+        .project_liveness("symphony")
+        .await
+        .expect("query liveness")
+        .expect("liveness row");
+    assert_eq!(liveness.status, RuntimeLivenessStatus::CapacityFull);
+    assert_eq!(liveness.running_sessions, 2);
+    assert_eq!(liveness.available_sessions, 0);
 }
 
 #[tokio::test]

@@ -6,7 +6,7 @@ use crate::{
     opencode::{OpenCodeSessionTreeActivity, read_session_tree_activity},
     state::{
         CleanupStatus, EvalRunRecord, GitRefRecord, IssueStateRecord, LifecycleStage,
-        OpenCodeSessionRecord, OpenCodeStage,
+        OpenCodeSessionRecord, OpenCodeStage, ProjectRuntimeLivenessRecord, RuntimeLivenessStatus,
     },
     storage::{SqliteStore, StorageError},
 };
@@ -73,12 +73,14 @@ impl RuntimeReadModel {
                 issue_models.push(issue_read_model(store, issue).await?);
             }
 
+            let liveness = store.project_liveness(&project.project_id).await?;
             projects.push(ProjectReadModel {
                 project_id: project.project_id,
                 name: project.name,
                 enabled: project.enabled,
                 lifecycle_stage: project.lifecycle_stage,
                 cleanup_status: project.cleanup_status,
+                liveness,
                 issues: issue_models,
             });
         }
@@ -94,6 +96,7 @@ pub struct ProjectReadModel {
     pub enabled: bool,
     pub lifecycle_stage: crate::state::LifecycleStage,
     pub cleanup_status: crate::state::CleanupStatus,
+    pub liveness: Option<ProjectRuntimeLivenessRecord>,
     pub issues: Vec<IssueReadModel>,
 }
 
@@ -198,6 +201,7 @@ pub struct ProjectDashboardCard {
     pub runner_health: String,
     pub last_event: String,
     pub capacity: ProjectCapacity,
+    pub liveness: ProjectRuntimeLivenessResponse,
     pub cleanup_status: CleanupStatus,
 }
 
@@ -209,6 +213,15 @@ pub struct ProjectCapacity {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectRuntimeLivenessResponse {
+    pub status: RuntimeLivenessStatus,
+    pub reason: String,
+    pub last_poll_at: Option<String>,
+    pub last_successful_candidate_scan_at: Option<String>,
+    pub capacity: ProjectCapacity,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectDashboardResponse {
     pub project_id: String,
     pub name: String,
@@ -216,6 +229,7 @@ pub struct ProjectDashboardResponse {
     pub lifecycle_stage: LifecycleStage,
     pub cleanup_status: CleanupStatus,
     pub capacity: ProjectCapacity,
+    pub liveness: ProjectRuntimeLivenessResponse,
     pub active_issues: Vec<IssueDetailResponse>,
     pub history_issues: Vec<IssueDetailResponse>,
 }
@@ -240,6 +254,7 @@ impl ProjectDashboardResponse {
             runner_health: project_runner_health(self),
             last_event: project_last_event(self),
             capacity: self.capacity.clone(),
+            liveness: self.liveness.clone(),
             cleanup_status: self.cleanup_status,
         }
     }
@@ -309,16 +324,8 @@ async fn project_dashboard_response(
     max_sessions: u32,
     opencode_database_path: Option<PathBuf>,
 ) -> Result<ProjectDashboardResponse, StorageError> {
-    let running_sessions = project
-        .issues
-        .iter()
-        .filter(|issue| issue.issue.lifecycle_stage == LifecycleStage::Running)
-        .count() as u32;
-    let capacity = ProjectCapacity {
-        max_sessions,
-        running_sessions,
-        available_sessions: max_sessions.saturating_sub(running_sessions),
-    };
+    let capacity = project_capacity(&project, max_sessions);
+    let liveness = project_liveness_response(&project, &capacity);
 
     let mut active_issues = Vec::new();
     let mut history_issues = Vec::new();
@@ -338,9 +345,53 @@ async fn project_dashboard_response(
         lifecycle_stage: project.lifecycle_stage,
         cleanup_status: project.cleanup_status,
         capacity,
+        liveness,
         active_issues,
         history_issues,
     })
+}
+
+fn project_capacity(project: &ProjectReadModel, max_sessions: u32) -> ProjectCapacity {
+    let running_sessions = project
+        .issues
+        .iter()
+        .filter(|issue| issue.issue.lifecycle_stage == LifecycleStage::Running)
+        .count() as u32;
+    ProjectCapacity {
+        max_sessions,
+        running_sessions,
+        available_sessions: max_sessions.saturating_sub(running_sessions),
+    }
+}
+
+fn project_liveness_response(
+    project: &ProjectReadModel,
+    fallback_capacity: &ProjectCapacity,
+) -> ProjectRuntimeLivenessResponse {
+    match &project.liveness {
+        Some(liveness) => ProjectRuntimeLivenessResponse {
+            status: liveness.status,
+            reason: liveness.reason.clone(),
+            last_poll_at: liveness.last_poll_at.clone(),
+            last_successful_candidate_scan_at: liveness.last_successful_candidate_scan_at.clone(),
+            capacity: ProjectCapacity {
+                max_sessions: liveness.max_sessions,
+                running_sessions: liveness.running_sessions,
+                available_sessions: liveness.available_sessions,
+            },
+        },
+        None => ProjectRuntimeLivenessResponse {
+            status: RuntimeLivenessStatus::InactiveRuntime,
+            reason: if project.enabled {
+                "runtime has not reported a poll for this enabled project".into()
+            } else {
+                "project disabled".into()
+            },
+            last_poll_at: None,
+            last_successful_candidate_scan_at: None,
+            capacity: fallback_capacity.clone(),
+        },
+    }
 }
 
 async fn issue_detail_response(

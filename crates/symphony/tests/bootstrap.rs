@@ -24,7 +24,7 @@ use symphony::{
     state::{
         BlockerRecord, CleanupStatus, EvalRunRecord, FailureRecord, GitRefRecord, IssueStateRecord,
         LifecycleStage, OpenCodeSessionRecord, OpenCodeStage, OpenCodeStageEventRecord,
-        ProjectStateRecord,
+        ProjectStateRecord, RuntimeLivenessStatus,
     },
     storage::SqliteStore,
 };

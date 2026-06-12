@@ -853,6 +853,17 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
         "running_sessions": 1,
         "available_sessions": 1
       },
+      "liveness": {
+        "status": "inactive_runtime",
+        "reason": "runtime has not reported a poll for this enabled project",
+        "last_poll_at": null,
+        "last_successful_candidate_scan_at": null,
+        "capacity": {
+          "max_sessions": 2,
+          "running_sessions": 1,
+          "available_sessions": 1
+        }
+      },
       "cleanup_status": "clean"
     }
   ]

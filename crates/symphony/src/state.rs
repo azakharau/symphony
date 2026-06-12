@@ -13,6 +13,64 @@ pub struct ProjectStateRecord {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectRuntimeLivenessRecord {
+    pub project_id: String,
+    pub status: RuntimeLivenessStatus,
+    pub reason: String,
+    pub last_poll_at: Option<String>,
+    pub last_successful_candidate_scan_at: Option<String>,
+    pub max_sessions: u32,
+    pub running_sessions: u32,
+    pub available_sessions: u32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeLivenessStatus {
+    InactiveRuntime,
+    NoEligibleIssues,
+    BlockedIssues,
+    CapacityFull,
+    HealthyCapacityAvailable,
+    RunnerProcessDead,
+}
+
+impl RuntimeLivenessStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InactiveRuntime => "inactive_runtime",
+            Self::NoEligibleIssues => "no_eligible_issues",
+            Self::BlockedIssues => "blocked_issues",
+            Self::CapacityFull => "capacity_full",
+            Self::HealthyCapacityAvailable => "healthy_capacity_available",
+            Self::RunnerProcessDead => "runner_process_dead",
+        }
+    }
+}
+
+impl fmt::Display for RuntimeLivenessStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for RuntimeLivenessStatus {
+    type Err = StateParseError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input {
+            "inactive_runtime" => Ok(Self::InactiveRuntime),
+            "no_eligible_issues" => Ok(Self::NoEligibleIssues),
+            "blocked_issues" => Ok(Self::BlockedIssues),
+            "capacity_full" => Ok(Self::CapacityFull),
+            "healthy_capacity_available" => Ok(Self::HealthyCapacityAvailable),
+            "runner_process_dead" => Ok(Self::RunnerProcessDead),
+            other => Err(StateParseError::RuntimeLivenessStatus(other.into())),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct IssueStateRecord {
     pub project_id: String,
     pub issue_id: String,
@@ -253,4 +311,6 @@ pub enum StateParseError {
     OpenCodeStage(String),
     #[error("unknown cleanup status `{0}`")]
     CleanupStatus(String),
+    #[error("unknown runtime liveness status `{0}`")]
+    RuntimeLivenessStatus(String),
 }

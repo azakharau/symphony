@@ -9,12 +9,13 @@ use crate::{
     config::RootConfig,
     state::{
         CleanupStatus, EvalRunRecord, IssueStateRecord, LifecycleStage, OpenCodeSessionRecord,
-        OpenCodeStageEventRecord, ProjectStateRecord, StateParseError,
+        OpenCodeStageEventRecord, ProjectRuntimeLivenessRecord, ProjectStateRecord,
+        RuntimeLivenessStatus, StateParseError,
     },
 };
 use rows::{
-    collect_rows, encode_optional, eval_run_from_row, issue_from_row, optional_row,
-    project_from_row, session_from_row, stage_event_from_row,
+    collect_rows, encode_optional, eval_run_from_row, issue_from_row, liveness_from_row,
+    optional_row, project_from_row, session_from_row, stage_event_from_row,
 };
 
 const RUNTIME_STATE_MIGRATION: &str = include_str!("../migrations/001_runtime_state.sql");
@@ -234,6 +235,129 @@ impl SqliteStore {
             )
             .await?;
         optional_row(&mut rows, project_from_row).await
+    }
+
+    pub async fn upsert_project_liveness<L>(&self, liveness: L) -> Result<(), StorageError>
+    where
+        L: Borrow<ProjectRuntimeLivenessRecord> + Send + Sync,
+    {
+        let liveness = liveness.borrow();
+        self.conn
+            .execute(
+                r#"
+                INSERT INTO project_runtime_liveness (
+                    project_id,
+                    status,
+                    reason,
+                    last_poll_at,
+                    last_successful_candidate_scan_at,
+                    max_sessions,
+                    running_sessions,
+                    available_sessions
+                )
+                VALUES (?1, ?2, ?3, COALESCE(?4, CURRENT_TIMESTAMP), ?5, ?6, ?7, ?8)
+                ON CONFLICT(project_id) DO UPDATE SET
+                    status = excluded.status,
+                    reason = excluded.reason,
+                    last_poll_at = excluded.last_poll_at,
+                    last_successful_candidate_scan_at = excluded.last_successful_candidate_scan_at,
+                    max_sessions = excluded.max_sessions,
+                    running_sessions = excluded.running_sessions,
+                    available_sessions = excluded.available_sessions,
+                    updated_at = CURRENT_TIMESTAMP
+                "#,
+                params![
+                    liveness.project_id.as_str(),
+                    liveness.status.as_str(),
+                    liveness.reason.as_str(),
+                    liveness.last_poll_at.as_deref(),
+                    liveness.last_successful_candidate_scan_at.as_deref(),
+                    liveness.max_sessions as i64,
+                    liveness.running_sessions as i64,
+                    liveness.available_sessions as i64,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn project_liveness(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<ProjectRuntimeLivenessRecord>, StorageError> {
+        let mut rows = self
+            .conn
+            .query(
+                r#"
+                SELECT project_id, status, reason, last_poll_at, last_successful_candidate_scan_at,
+                       max_sessions, running_sessions, available_sessions
+                FROM project_runtime_liveness
+                WHERE project_id = ?1
+                "#,
+                params![project_id],
+            )
+            .await?;
+        optional_row(&mut rows, liveness_from_row).await
+    }
+
+    pub async fn mark_project_liveness_poll(
+        &self,
+        project_id: &str,
+        status: RuntimeLivenessStatus,
+        reason: &str,
+        max_sessions: u32,
+        running_sessions: u32,
+        successful_candidate_scan: bool,
+    ) -> Result<(), StorageError> {
+        let available_sessions = max_sessions.saturating_sub(running_sessions);
+        self.conn
+            .execute(
+                r#"
+                INSERT INTO project_runtime_liveness (
+                    project_id,
+                    status,
+                    reason,
+                    last_poll_at,
+                    last_successful_candidate_scan_at,
+                    max_sessions,
+                    running_sessions,
+                    available_sessions
+                )
+                VALUES (
+                    ?1,
+                    ?2,
+                    ?3,
+                    CURRENT_TIMESTAMP,
+                    CASE WHEN ?7 THEN CURRENT_TIMESTAMP ELSE NULL END,
+                    ?4,
+                    ?5,
+                    ?6
+                )
+                ON CONFLICT(project_id) DO UPDATE SET
+                    status = excluded.status,
+                    reason = excluded.reason,
+                    last_poll_at = excluded.last_poll_at,
+                    last_successful_candidate_scan_at = CASE
+                        WHEN ?7 THEN excluded.last_successful_candidate_scan_at
+                        ELSE project_runtime_liveness.last_successful_candidate_scan_at
+                    END,
+                    max_sessions = excluded.max_sessions,
+                    running_sessions = excluded.running_sessions,
+                    available_sessions = excluded.available_sessions,
+                    updated_at = CURRENT_TIMESTAMP
+                "#,
+                params![
+                    project_id,
+                    status.as_str(),
+                    reason,
+                    max_sessions as i64,
+                    running_sessions as i64,
+                    available_sessions as i64,
+                    successful_candidate_scan,
+                ],
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn upsert_issue<I>(&self, issue: I) -> Result<(), StorageError>

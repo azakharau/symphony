@@ -2,6 +2,7 @@ mod cleanup;
 mod git_closure;
 mod handoff;
 mod http;
+mod liveness;
 mod policy;
 mod records;
 
@@ -27,6 +28,7 @@ use crate::{
 };
 use handoff::process_in_progress_handoff;
 use http::run_continuous;
+use liveness::project_liveness_projection;
 use policy::{
     blocker_record, compare_issues_for_dispatch, has_existing_session, has_new_owner_response,
     is_terminal_state, nonterminal_blocker, recoverable_opencode_failure,
@@ -463,11 +465,37 @@ async fn reconcile_project(
         .filter(|issue| issue.lifecycle_stage == LifecycleStage::Running)
         .count() as u32;
     let capacity = project.concurrency.max_sessions.saturating_sub(running) as usize;
+    let blocked_count = store
+        .issues_for_project(&project.id)
+        .await?
+        .into_iter()
+        .filter(|issue| issue.lifecycle_stage == LifecycleStage::Blocked)
+        .count();
+    let (liveness, liveness_reason) = project_liveness_projection(
+        store,
+        project,
+        running,
+        eligible.len(),
+        blocked_count,
+        capacity,
+    )
+    .await?;
+    store
+        .mark_project_liveness_poll(
+            &project.id,
+            liveness,
+            &liveness_reason,
+            project.concurrency.max_sessions,
+            running,
+            true,
+        )
+        .await?;
     info!(
         project_id = %project.id,
         running,
         capacity,
         eligible = eligible.len(),
+        liveness = %liveness,
         "project dispatch capacity evaluated"
     );
 

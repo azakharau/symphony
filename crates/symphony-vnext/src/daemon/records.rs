@@ -38,12 +38,14 @@ pub(super) fn issue_record(
 pub(super) fn git_closure_evidence_body(
     handoff: &OpenCodeHandoff,
     git: &crate::opencode::GitClosureEvidence,
+    integrated_base: Option<&str>,
 ) -> String {
     format!(
-        "session_id: {}\nbranch: {}\nhead_sha: {}\npr_url: {}\nchanged_files: {}\nevals: {}\nrisks: {}",
+        "session_id: {}\nbranch: {}\nhead_sha: {}\nintegrated_base: {}\npr_url: {}\nchanged_files: {}\nevals: {}\nrisks: {}",
         handoff.session_id,
         git.branch,
         git.head_sha.as_deref().unwrap_or(""),
+        integrated_base.unwrap_or("none"),
         git.pr_url.as_deref().unwrap_or("none"),
         handoff.changed_files.join(", "),
         handoff

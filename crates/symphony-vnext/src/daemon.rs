@@ -1,4 +1,5 @@
 mod cleanup;
+mod git_closure;
 mod handoff;
 mod http;
 mod policy;

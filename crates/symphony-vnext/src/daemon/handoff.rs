@@ -18,6 +18,7 @@ use crate::{
 
 use super::{
     cleanup::cleanup_worktree,
+    git_closure::{GitClosureResult, verify_and_integrate_git_closure},
     policy::{matching_failure_count, stable_fingerprint},
     records::{git_closure_evidence_body, issue_record},
 };
@@ -276,7 +277,44 @@ async fn close_successful_handoff(
         return Ok(());
     }
 
-    let evidence_body = git_closure_evidence_body(handoff, git);
+    let integration =
+        match verify_and_integrate_git_closure(project, git, &handoff.changed_files).await {
+            Ok(integration) => integration,
+            Err(error) => {
+                let message = error.to_string();
+                warn!(
+                    project_id = %project.id,
+                    issue = %issue.identifier,
+                    session_id = %session.session_id,
+                    message,
+                    "successful OpenCode handoff failed git closure verification"
+                );
+                request_opencode_repair(
+                    project,
+                    store,
+                    opencode,
+                    linear,
+                    issue,
+                    "malformed_handoff",
+                    message.clone(),
+                    FailureRecord {
+                        kind: "malformed_handoff".into(),
+                        message,
+                        fingerprint: Some("git_closure_unverified".into()),
+                        occurrence_count: 1,
+                    },
+                    session,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+
+    let integrated_base = match &integration {
+        GitClosureResult::NoGitChanges => None,
+        GitClosureResult::Integrated { base_branch } => Some(base_branch.as_str()),
+    };
+    let evidence_body = git_closure_evidence_body(handoff, git, integrated_base);
     linear
         .record_issue_evidence(
             &issue.id,

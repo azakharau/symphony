@@ -31,6 +31,8 @@ use symphony::{
 
 #[path = "bootstrap/config_linear_storage_api.rs"]
 mod config_linear_storage_api;
+#[path = "bootstrap/dashboard_reason_codes.rs"]
+mod dashboard_reason_codes;
 #[path = "bootstrap/opencode_runtime.rs"]
 mod opencode_runtime;
 #[path = "bootstrap/orchestration_basic.rs"]

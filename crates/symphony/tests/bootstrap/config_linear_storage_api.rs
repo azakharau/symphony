@@ -875,6 +875,8 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
       "liveness": {
         "status": "inactive_runtime",
         "reason": "runtime has not reported a poll for this enabled project",
+        "primary_reason_code": "active_opencode_session",
+        "primary_reason_detail": "an OpenCode session is actively executing",
         "last_poll_at": null,
         "last_successful_candidate_scan_at": null,
         "capacity": {

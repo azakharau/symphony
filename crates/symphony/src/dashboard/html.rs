@@ -41,8 +41,9 @@ pub(super) fn render_aggregate(aggregate: &AggregateDashboardResponse) -> String
             escape(&project.last_event),
         ));
         body.push_str(&format!(
-            "<p class=\"muted\">{}</p>",
-            escape(&project.liveness.reason)
+            "<p class=\"muted\"><code>{}</code> — {}</p>",
+            escape(&project.liveness.primary_reason_code),
+            escape(&project.liveness.primary_reason_detail)
         ));
         if !project.enabled {
             body.push_str("<p class=\"warning\">Project disabled</p>");
@@ -60,14 +61,15 @@ pub(super) fn render_project(project: &ProjectDashboardResponse) -> String {
     let mut body = String::new();
     body.push_str(&page_header(&format!("{} · Symphony", project.name)));
     body.push_str(&format!(
-        "<main class=\"page\"><nav><a href=\"/\">Aggregate</a></nav><section class=\"console-head\"><h1>{}</h1><p>{} · liveness {} · cleanup {} · capacity {}/{}</p><p>{}</p></section>",
+        "<main class=\"page\"><nav><a href=\"/\">Aggregate</a></nav><section class=\"console-head\"><h1>{}</h1><p>{} · liveness {} · cleanup {} · capacity {}/{}</p><p><code>{}</code> — {}</p></section>",
         escape(&project.name),
         lifecycle_label(project.lifecycle_stage),
         escape(project.liveness.status.as_str()),
         cleanup_label(project.cleanup_status),
         project.capacity.running_sessions,
         project.capacity.max_sessions,
-        escape(&project.liveness.reason),
+        escape(&project.liveness.primary_reason_code),
+        escape(&project.liveness.primary_reason_detail),
     ));
     issue_table(&mut body, "Active issues", &project.active_issues, true);
     issue_table(&mut body, "Recent history", &project.history_issues, false);

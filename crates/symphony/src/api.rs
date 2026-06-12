@@ -216,6 +216,8 @@ pub struct ProjectCapacity {
 pub struct ProjectRuntimeLivenessResponse {
     pub status: RuntimeLivenessStatus,
     pub reason: String,
+    pub primary_reason_code: String,
+    pub primary_reason_detail: String,
     pub last_poll_at: Option<String>,
     pub last_successful_candidate_scan_at: Option<String>,
     pub capacity: ProjectCapacity,
@@ -325,7 +327,7 @@ async fn project_dashboard_response(
     opencode_database_path: Option<PathBuf>,
 ) -> Result<ProjectDashboardResponse, StorageError> {
     let capacity = project_capacity(&project, max_sessions);
-    let liveness = project_liveness_response(&project, &capacity);
+    let mut liveness = project_liveness_response(&project, &capacity);
 
     let mut active_issues = Vec::new();
     let mut history_issues = Vec::new();
@@ -337,6 +339,16 @@ async fn project_dashboard_response(
             active_issues.push(detail);
         }
     }
+
+    let (primary_reason_code, primary_reason_detail) = primary_execution_reason(
+        project.enabled,
+        project.cleanup_status,
+        &active_issues,
+        &history_issues,
+        &liveness,
+    );
+    liveness.primary_reason_code = primary_reason_code.into();
+    liveness.primary_reason_detail = primary_reason_detail;
 
     Ok(ProjectDashboardResponse {
         project_id: project.project_id,
@@ -372,6 +384,8 @@ fn project_liveness_response(
         Some(liveness) => ProjectRuntimeLivenessResponse {
             status: liveness.status,
             reason: liveness.reason.clone(),
+            primary_reason_code: liveness.status.as_str().into(),
+            primary_reason_detail: liveness.reason.clone(),
             last_poll_at: liveness.last_poll_at.clone(),
             last_successful_candidate_scan_at: liveness.last_successful_candidate_scan_at.clone(),
             capacity: ProjectCapacity {
@@ -380,18 +394,148 @@ fn project_liveness_response(
                 available_sessions: liveness.available_sessions,
             },
         },
-        None => ProjectRuntimeLivenessResponse {
-            status: RuntimeLivenessStatus::InactiveRuntime,
-            reason: if project.enabled {
-                "runtime has not reported a poll for this enabled project".into()
+        None => {
+            let reason = if project.enabled {
+                "runtime has not reported a poll for this enabled project"
             } else {
-                "project disabled".into()
-            },
-            last_poll_at: None,
-            last_successful_candidate_scan_at: None,
-            capacity: fallback_capacity.clone(),
-        },
+                "project disabled"
+            };
+            ProjectRuntimeLivenessResponse {
+                status: RuntimeLivenessStatus::InactiveRuntime,
+                reason: reason.into(),
+                primary_reason_code: RuntimeLivenessStatus::InactiveRuntime.as_str().into(),
+                primary_reason_detail: reason.into(),
+                last_poll_at: None,
+                last_successful_candidate_scan_at: None,
+                capacity: fallback_capacity.clone(),
+            }
+        }
     }
+}
+
+fn primary_execution_reason(
+    project_enabled: bool,
+    project_cleanup_status: CleanupStatus,
+    active_issues: &[IssueDetailResponse],
+    history_issues: &[IssueDetailResponse],
+    liveness: &ProjectRuntimeLivenessResponse,
+) -> (&'static str, String) {
+    if !project_enabled {
+        return (
+            "disabled_project",
+            "project is disabled in the Symphony configuration".into(),
+        );
+    }
+    if matches!(
+        project_cleanup_status,
+        CleanupStatus::Pending | CleanupStatus::InProgress
+    ) {
+        return (
+            "cleanup_pending",
+            format!("project cleanup is {project_cleanup_status}"),
+        );
+    }
+    if liveness.status == RuntimeLivenessStatus::RunnerProcessDead
+        || active_issues.iter().any(issue_has_dead_runner)
+    {
+        return (
+            "runner_dead",
+            "a running OpenCode session has no live runner process".into(),
+        );
+    }
+    if active_issues.iter().any(issue_waits_for_handoff) {
+        return (
+            "waiting_for_handoff",
+            "an active OpenCode session is waiting in handoff".into(),
+        );
+    }
+    if active_issues.iter().any(issue_has_active_opencode_session) {
+        return (
+            "active_opencode_session",
+            "an OpenCode session is actively executing".into(),
+        );
+    }
+    if liveness.capacity.available_sessions == 0 {
+        return ("capacity_full", "project dispatch capacity is full".into());
+    }
+    if active_issues.iter().any(issue_has_owner_input_blocker) {
+        return (
+            "owner_input_parked",
+            "an issue is parked for owner input".into(),
+        );
+    }
+    if active_issues.iter().any(issue_has_linear_blocker) {
+        return (
+            "linear_blockers",
+            "an issue is blocked by Linear dependencies".into(),
+        );
+    }
+    if history_issues.iter().any(|issue| {
+        matches!(
+            issue.cleanup_status,
+            CleanupStatus::Pending | CleanupStatus::InProgress
+        )
+    }) {
+        return (
+            "cleanup_pending",
+            "completed issue cleanup is pending".into(),
+        );
+    }
+    match liveness.status {
+        RuntimeLivenessStatus::InactiveRuntime => ("inactive_runtime", liveness.reason.clone()),
+        RuntimeLivenessStatus::NoEligibleIssues => ("no_eligible_issues", liveness.reason.clone()),
+        RuntimeLivenessStatus::BlockedIssues => ("linear_blockers", liveness.reason.clone()),
+        RuntimeLivenessStatus::CapacityFull => ("capacity_full", liveness.reason.clone()),
+        RuntimeLivenessStatus::HealthyCapacityAvailable => {
+            ("healthy_capacity_available", liveness.reason.clone())
+        }
+        RuntimeLivenessStatus::RunnerProcessDead => ("runner_dead", liveness.reason.clone()),
+    }
+}
+
+fn issue_has_dead_runner(issue: &IssueDetailResponse) -> bool {
+    issue.lifecycle_stage == LifecycleStage::Running
+        && issue
+            .opencode_sessions
+            .iter()
+            .any(|session| session.process_alive == Some(false))
+}
+
+fn issue_waits_for_handoff(issue: &IssueDetailResponse) -> bool {
+    issue.lifecycle_stage == LifecycleStage::Running
+        && issue
+            .opencode_sessions
+            .iter()
+            .any(|session| session.current_stage == OpenCodeStage::Handoff)
+}
+
+fn issue_has_active_opencode_session(issue: &IssueDetailResponse) -> bool {
+    issue.lifecycle_stage == LifecycleStage::Running
+        && issue.opencode_sessions.iter().any(|session| {
+            matches!(
+                session.current_stage,
+                OpenCodeStage::Starting
+                    | OpenCodeStage::Running
+                    | OpenCodeStage::Eval
+                    | OpenCodeStage::Review
+                    | OpenCodeStage::Silent
+            )
+        })
+}
+
+fn issue_has_owner_input_blocker(issue: &IssueDetailResponse) -> bool {
+    issue.lifecycle_stage == LifecycleStage::Blocked
+        && issue.blocker.as_ref().is_some_and(|blocker| {
+            matches!(blocker.kind.as_str(), "owner_input" | "owner_question")
+        })
+}
+
+fn issue_has_linear_blocker(issue: &IssueDetailResponse) -> bool {
+    issue.lifecycle_stage == LifecycleStage::Blocked
+        && issue
+            .blocker
+            .as_ref()
+            .is_some_and(|blocker| blocker.kind == "linear_blocker")
 }
 
 async fn issue_detail_response(

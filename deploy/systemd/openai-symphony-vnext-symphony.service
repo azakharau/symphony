@@ -1,21 +1,18 @@
 [Unit]
-Description=Symphony vNext Rust runtime
+Description=Symphony vNext Rust runtime for Symphony
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=agent
-Group=agent
 Environment=HOME=/home/agent
 Environment=PATH=/home/agent/.cargo/bin:/home/agent/.bun/bin:/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin
-WorkingDirectory=/home/agent/proj/symphony
 Environment=RUST_LOG=info
 EnvironmentFile=/home/agent/.symphony/env/linear.env
-StateDirectory=symphony-vnext
-ExecStart=/home/agent/proj/symphony/target/release/symphony-vnext daemon --config /home/agent/proj/symphony/config/symphony.projects.yml --database /var/lib/symphony-vnext/runtime.sqlite3
+WorkingDirectory=/home/agent/proj/symphony
+ExecStart=/home/agent/.cargo/bin/symphony-vnext daemon --config /home/agent/.symphony/vnext/symphony/projects.toml --database /home/agent/.symphony/vnext/symphony/runtime.sqlite3
 Restart=on-failure
 RestartSec=10
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

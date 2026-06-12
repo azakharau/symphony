@@ -2,21 +2,22 @@
 
 ## Service
 
-Systemd template: `deploy/systemd/symphony-vnext.service`
+Systemd user-service template: `deploy/systemd/openai-symphony-vnext-symphony.service`
 
 Install/update:
 
 ```bash
 cargo build --release -p symphony-vnext
-install -Dm0644 deploy/systemd/symphony-vnext.service /etc/systemd/system/symphony-vnext.service
-systemctl daemon-reload
-systemctl restart symphony-vnext.service
-systemctl status symphony-vnext.service
+install -Dm0755 target/release/symphony-vnext /home/agent/.cargo/bin/symphony-vnext
+install -Dm0644 config/symphony.projects.toml /home/agent/.symphony/vnext/symphony/projects.toml
+install -Dm0644 deploy/systemd/openai-symphony-vnext-symphony.service /home/agent/.config/systemd/user/openai-symphony-vnext-symphony.service
+systemctl --user daemon-reload
+systemctl --user restart openai-symphony-vnext-symphony.service
+systemctl --user status openai-symphony-vnext-symphony.service
 ```
 
-The template points at `config/symphony.projects.yml` and
-`/var/lib/symphony-vnext/runtime.sqlite3`. Systemd creates the data directory through
-`StateDirectory=symphony-vnext`. The service reads `LINEAR_API_KEY` from
+The user service points at `/home/agent/.symphony/vnext/symphony/projects.toml` and
+`/home/agent/.symphony/vnext/symphony/runtime.sqlite3`. The service reads `LINEAR_API_KEY` from
 `/home/agent/.symphony/env/linear.env`; do not copy the key into workflow files or checked-in
 configuration.
 
@@ -25,9 +26,9 @@ configuration.
 Local non-live checks:
 
 ```bash
-cargo run -p symphony-vnext -- validate-config --config config/symphony.projects.yml
-cargo run -p symphony-vnext -- init-store --database /tmp/symphony-vnext-smoke.sqlite3
-cargo run -p symphony-vnext -- daemon --config config/symphony.projects.yml --database /tmp/symphony-vnext-smoke.sqlite3 --once
+/home/agent/.cargo/bin/symphony-vnext validate-config --config config/symphony.projects.toml
+/home/agent/.cargo/bin/symphony-vnext init-store --database /tmp/symphony-vnext-smoke.sqlite3
+/home/agent/.cargo/bin/symphony-vnext daemon --config config/symphony.projects.toml --database /tmp/symphony-vnext-smoke.sqlite3 --once
 ```
 
 OpenCode ACP contract smoke without sending an implementation prompt:
@@ -41,8 +42,8 @@ Live checks:
 
 ```bash
 /usr/local/bin/opencode acp
-curl -fsS http://127.0.0.1:4110/api/dashboard
-curl -fsS http://127.0.0.1:4110/api/projects/symphony
+curl -fsS http://127.0.0.1:4115/api/dashboard
+curl -fsS http://127.0.0.1:4115/api/projects/symphony
 ```
 
 ## Rollback
@@ -50,9 +51,9 @@ curl -fsS http://127.0.0.1:4110/api/projects/symphony
 Rollback is Rust-service-only:
 
 ```bash
-systemctl stop symphony-vnext.service
-cp /var/lib/symphony-vnext/runtime.sqlite3 /var/lib/symphony-vnext/runtime.sqlite3.rollback
-systemctl start symphony-vnext.service
+systemctl --user stop openai-symphony-vnext-symphony.service
+cp /home/agent/.symphony/vnext/symphony/runtime.sqlite3 /home/agent/.symphony/vnext/symphony/runtime.sqlite3.rollback
+systemctl --user start openai-symphony-vnext-symphony.service
 ```
 
 Do not restart or restore the removed Elixir runtime. If the Rust service cannot run, leave active

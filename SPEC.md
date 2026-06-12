@@ -135,11 +135,11 @@ Live cutover verification:
 ```bash
 cargo build --release -p symphony-vnext
 cargo run -p symphony-vnext -- validate-config --config config/symphony.projects.toml
-cargo run -p symphony-vnext -- daemon --config config/symphony.projects.toml --database /var/lib/symphony-vnext/runtime.sqlite3
+cargo run -p symphony-vnext -- daemon --config config/symphony.projects.toml --database /home/agent/.symphony/vnext/symphony/runtime.sqlite3
 /usr/local/bin/opencode acp
-systemctl status symphony-vnext.service
-curl -fsS http://127.0.0.1:4110/api/dashboard
-curl -fsS http://127.0.0.1:4110/api/projects/symphony
+systemctl --user status openai-symphony-vnext-symphony.service
+curl -fsS http://127.0.0.1:4115/api/dashboard
+curl -fsS http://127.0.0.1:4115/api/projects/symphony
 ```
 
 The live commands require host service access, Linear credentials, OpenCode availability, and the

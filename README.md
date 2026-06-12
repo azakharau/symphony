@@ -33,13 +33,13 @@ them as executable runtime aliases.
 Use the checked-in sample as the active service shape:
 
 ```bash
-cargo run -p symphony-vnext -- validate-config --config config/symphony.projects.yml
-cargo run -p symphony-vnext -- init-store --database /var/lib/symphony-vnext/runtime.sqlite3
-cargo run -p symphony-vnext -- daemon --config config/symphony.projects.yml --database /var/lib/symphony-vnext/runtime.sqlite3
+cargo run -p symphony-vnext -- validate-config --config config/symphony.projects.toml
+cargo run -p symphony-vnext -- init-store --database /home/agent/.symphony/vnext/symphony/runtime.sqlite3
+cargo run -p symphony-vnext -- daemon --config config/symphony.projects.toml --database /home/agent/.symphony/vnext/symphony/runtime.sqlite3
 ```
 
 Continuous service mode uses the systemd unit template in
-`deploy/systemd/symphony-vnext.service` after the operator approves the host cutover. Use `--once`
+`deploy/systemd/openai-symphony-vnext-symphony.service` after the operator approves the host cutover. Use `--once`
 only for non-live bootstrap validation. Continuous mode requires `LINEAR_API_KEY` so the daemon can
 poll and mutate Linear through the Rust adapter. The service reads that key from the existing
 file-backed Symphony environment at `/home/agent/.symphony/env/linear.env`; do not duplicate the key
@@ -62,9 +62,9 @@ SYMPHONY_VNEXT_LIVE_OPENCODE_ACP=1 cargo test -p symphony-vnext --test bootstrap
   installed_opencode_acp_supports_ndjson_config_options_without_prompting -- --nocapture
 cargo build --release -p symphony-vnext
 /usr/local/bin/opencode acp
-systemctl status symphony-vnext.service
-curl -fsS http://127.0.0.1:4110/api/dashboard
-curl -fsS http://127.0.0.1:4110/api/projects/symphony
+systemctl --user status openai-symphony-vnext-symphony.service
+curl -fsS http://127.0.0.1:4115/api/dashboard
+curl -fsS http://127.0.0.1:4115/api/projects/symphony
 ```
 
 ## Runtime Contract

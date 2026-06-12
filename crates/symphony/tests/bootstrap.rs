@@ -51,6 +51,9 @@ enabled = true
 workflow_path = "/home/agent/proj/symphony/WORKFLOW.md"
 repo_path = "/home/agent/proj/symphony"
 
+[projects.mnemesh]
+workspace_root = "/home/agent/proj/symphony"
+
 [projects.branch]
 base = "agent-server/opencode-runner-extension"
 worktree_root = "/home/agent/.symphony/workspaces/opencode/symphony"
@@ -88,6 +91,9 @@ enabled = true
 workflow_path = "/home/agent/proj/alpha/WORKFLOW.md"
 repo_path = "/home/agent/proj/alpha"
 
+[projects.mnemesh]
+workspace_root = "/home/agent/proj/alpha"
+
 [projects.branch]
 base = "main"
 worktree_root = "/home/agent/.symphony/workspaces/opencode/alpha"
@@ -116,6 +122,9 @@ name = "Symphony"
 enabled = true
 workflow_path = "/home/agent/proj/symphony/WORKFLOW.md"
 repo_path = "/home/agent/proj/symphony"
+
+[projects.mnemesh]
+workspace_root = "/home/agent/proj/symphony"
 
 [projects.branch]
 base = "agent-server/opencode-runner-extension"

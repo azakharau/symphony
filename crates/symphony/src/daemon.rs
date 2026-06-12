@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     config::{OpenCodeStorageConfig, ProjectConfig, RootConfig},
-    linear::{EmptyLinearClient, LinearClient, LinearIssue, LinearTransition},
+    linear::{EmptyLinearClient, LinearClient, LinearIssue, LinearIssueEvidence, LinearTransition},
     opencode::{
         DeterministicOpenCodeLauncher, OpenCodeLauncher, OpenCodeStartedSession,
         StdioOpenCodeLauncher, apply_session_tree_metrics_preserving_marker, build_acp_launch_spec,
@@ -501,6 +501,17 @@ async fn reconcile_project(
 
     for candidate in eligible.into_iter().take(capacity) {
         let issue = candidate.issue();
+        if let Some(reason) = missing_mnemesh_workspace_reason(project) {
+            warn!(
+                project_id = %project.id,
+                issue = %issue.identifier,
+                reason = %reason,
+                "parking issue because Mnemesh workspace is not configured"
+            );
+            park_missing_mnemesh_workspace(project, store, linear, issue, reason).await?;
+            report.parked_owner_input.push(issue.identifier.clone());
+            continue;
+        }
         info!(
             project_id = %project.id,
             issue = %issue.identifier,
@@ -544,6 +555,61 @@ async fn reconcile_project(
         }
     }
 
+    Ok(())
+}
+
+fn missing_mnemesh_workspace_reason(project: &ProjectConfig) -> Option<String> {
+    let Some(mnemesh) = project.mnemesh.as_ref() else {
+        return Some("mnemesh workspace_root is not configured".into());
+    };
+    let workspace_root = mnemesh.workspace_root.as_path();
+    if workspace_root.as_os_str().is_empty() {
+        return Some("mnemesh workspace_root is empty".into());
+    }
+    if !workspace_root.is_absolute() {
+        return Some(format!(
+            "mnemesh workspace_root is not absolute: {}",
+            workspace_root.display()
+        ));
+    }
+    None
+}
+
+async fn park_missing_mnemesh_workspace(
+    project: &ProjectConfig,
+    store: &SqliteStore,
+    linear: &impl LinearClient,
+    issue: &LinearIssue,
+    reason: String,
+) -> anyhow::Result<()> {
+    let body = format!(
+        "mnemesh_workspace_missing: {reason}\n\nConfigure `[projects.mnemesh].workspace_root` with the canonical project root Mnemesh workspace, for example `{}`. The OpenCode runner will not start until the global project workspace is passed explicitly.",
+        project.repo_path.display()
+    );
+    linear
+        .record_issue_evidence(
+            &issue.id,
+            LinearIssueEvidence {
+                kind: "provider_blocker".into(),
+                body,
+            },
+        )
+        .await?;
+    linear
+        .transition_issue(&issue.id, LinearTransition::NeedOwnerInput)
+        .await?;
+    let record = issue_record(
+        project,
+        issue,
+        LifecycleStage::Blocked,
+        Some(BlockerRecord {
+            kind: "mnemesh_workspace_missing".into(),
+            message: reason,
+            observed_at: issue.updated_at.clone(),
+        }),
+        CleanupStatus::Clean,
+    );
+    store.upsert_issue(&record).await?;
     Ok(())
 }
 

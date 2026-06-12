@@ -674,6 +674,10 @@ pub fn build_acp_launch_spec(project: &ProjectConfig, issue: &LinearIssue) -> Op
         worktree_root: Some(project.branch.worktree_root.clone()),
         issue_identifier: issue.identifier.clone(),
         repo_path: Some(project.repo_path.clone()),
+        mnemesh_workspace_root: project
+            .mnemesh
+            .as_ref()
+            .map(|mnemesh| mnemesh.workspace_root.clone()),
         base_ref: Some(project.branch.base.clone()),
         agent: project.opencode.agent.clone(),
         model: project.opencode.model.clone(),
@@ -802,9 +806,12 @@ fn build_issue_prompt(project: &ProjectConfig, issue: &LinearIssue) -> String {
          Project: {project_id}\n\
          Repository: {repo_path}\n\
          Isolated worktree: {worktree}\n\
+         Mnemesh workspace root: {mnemesh_workspace_root}\n\
          Eval default suite: {eval_suite} (fallback metadata, not a blanket workspace gate)\n\
          Linear state: {state}\n\
          URL: {url}\n\n\
+         Mnemesh evidence policy:\n\
+         {mnemesh_policy}\n\n\
          Validation policy:\n\
          {validation_policy}\n\n\
          Commit policy for successful handoff:\n\
@@ -836,14 +843,27 @@ fn build_issue_prompt(project: &ProjectConfig, issue: &LinearIssue) -> String {
             .worktree_root
             .join(&issue.identifier)
             .display(),
+        mnemesh_workspace_root = project
+            .mnemesh
+            .as_ref()
+            .map(|mnemesh| mnemesh.workspace_root.display().to_string())
+            .unwrap_or_else(|| "missing".to_owned()),
         handoff_path =
             handoff_sidecar_path(project.branch.worktree_root.join(&issue.identifier)).display(),
         eval_suite = project.eval.default_suite,
         state = issue.state,
         url = issue.url.as_deref().unwrap_or("none"),
+        mnemesh_policy = mnemesh_policy_text(),
         validation_policy = validation_policy_text(),
         commit_policy = commit_policy_text(),
     )
+}
+
+fn mnemesh_policy_text() -> &'static str {
+    "- Use the listed Mnemesh workspace root as the durable project evidence workspace for all Mnemesh MCP calls, observations, claims, evidence, verification, and handoff records.\n\
+     - The Mnemesh workspace belongs to the canonical project root, not the isolated issue worktree.\n\
+     - Do not create or register a separate Mnemesh workspace for the isolated worktree.\n\
+     - If that global workspace is missing or unavailable, stop with provider_blocker and explain the workspace failure; do not continue with degraded local evidence."
 }
 
 fn validation_policy_text() -> &'static str {

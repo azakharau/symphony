@@ -70,6 +70,9 @@ impl RootConfig {
                     project.id
                 )));
             }
+            if let Some(mnemesh) = &project.mnemesh {
+                mnemesh.validate(&project.id)?;
+            }
             if project.concurrency.max_sessions == 0 {
                 return Err(ConfigError::Validation(format!(
                     "project `{}` concurrency.max_sessions must be greater than zero",
@@ -172,11 +175,34 @@ pub struct ProjectConfig {
     pub enabled: bool,
     pub workflow_path: PathBuf,
     pub repo_path: PathBuf,
+    pub mnemesh: Option<MnemeshProjectConfig>,
     pub branch: BranchPolicy,
     pub linear: LinearProjectConfig,
     pub opencode: OpenCodeRuntimeConfig,
     pub eval: EvalDefaults,
     pub concurrency: ConcurrencyConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MnemeshProjectConfig {
+    pub workspace_root: PathBuf,
+}
+
+impl MnemeshProjectConfig {
+    fn validate(&self, project_id: &str) -> Result<(), ConfigError> {
+        if self.workspace_root.as_os_str().is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "project `{project_id}` mnemesh.workspace_root must not be empty"
+            )));
+        }
+        if !self.workspace_root.is_absolute() {
+            return Err(ConfigError::Validation(format!(
+                "project `{project_id}` mnemesh.workspace_root must be absolute"
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

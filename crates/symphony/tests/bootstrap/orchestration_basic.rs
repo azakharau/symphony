@@ -248,6 +248,60 @@ async fn orchestration_dispatches_one_eligible_todo_by_project_capacity_and_orde
 }
 
 #[tokio::test]
+async fn orchestration_parks_todo_issue_when_mnemesh_workspace_root_is_missing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config_toml = valid_config_toml().replace(
+        "\n[projects.mnemesh]\nworkspace_root = \"/home/agent/proj/symphony\"\n",
+        "\n",
+    );
+    let config = RootConfig::from_toml_str(&config_toml).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "missing-workspace",
+        "SYM-250",
+        "Todo",
+        Some(1),
+    )]);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+
+    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert!(report.dispatched.is_empty());
+    assert_eq!(report.parked_owner_input, vec!["SYM-250"]);
+    assert!(opencode.launches().is_empty());
+    assert_eq!(
+        client.transitions(),
+        vec![("missing-workspace".into(), LinearTransition::NeedOwnerInput)]
+    );
+    let evidence = client.evidence();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].0, "missing-workspace");
+    assert_eq!(evidence[0].1.kind, "provider_blocker");
+    assert!(evidence[0].1.body.contains("mnemesh_workspace_missing"));
+    assert!(
+        evidence[0]
+            .1
+            .body
+            .contains("mnemesh workspace_root is not configured")
+    );
+    let parked = store
+        .issue("symphony", "missing-workspace")
+        .await
+        .expect("query parked")
+        .expect("parked issue");
+    assert_eq!(parked.lifecycle_stage, LifecycleStage::Blocked);
+    assert_eq!(
+        parked.blocker.expect("blocker").kind,
+        "mnemesh_workspace_missing"
+    );
+}
+
+#[tokio::test]
 async fn orchestration_never_dispatches_nonterminal_blockers_or_backlog() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

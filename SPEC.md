@@ -43,6 +43,19 @@ Purpose: Define the active Symphony runtime that orchestrates project work throu
   messages, parts, todos, token counters, cost, active agent/model, and subagent count from that
   persisted tree, so missing incremental ACP stream events do not produce false silence.
 
+## Mnemesh Evidence Workspace Contract
+
+- Each enabled project must provide `[projects.mnemesh].workspace_root` in the root TOML config.
+- The workspace root is the canonical project root, for example `/home/agent/proj/mnemesh`, not the
+  isolated per-issue OpenCode worktree.
+- Symphony passes that global workspace root into every OpenCode task prompt. OpenCode must use it
+  for Mnemesh MCP calls, observations, claims, evidence, verification, and handoff records.
+- Symphony must not start an OpenCode runner when the Mnemesh workspace root is missing from project
+  config. It parks the issue in `Need Owner Input` with `provider_blocker` evidence instead.
+- OpenCode must not create or register a separate Mnemesh workspace for an issue worktree. If the
+  global project workspace is unavailable, OpenCode stops with a provider blocker rather than
+  continuing with local degraded evidence.
+
 ## Issue Lifecycle
 
 Symphony uses this executable lifecycle:
@@ -82,6 +95,7 @@ The root config contains one or more projects with:
 
 - Linear team/project identity.
 - Repository path and branch/worktree policy.
+- Mnemesh project evidence workspace root.
 - OpenCode command, args, agent, model, optional effort, and permission policy.
 - Eval defaults.
 - Per-project concurrency.

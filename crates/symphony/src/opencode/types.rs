@@ -31,6 +31,7 @@ pub struct OpenCodeLaunchSpec {
     pub worktree_root: Option<PathBuf>,
     pub issue_identifier: String,
     pub repo_path: Option<PathBuf>,
+    pub mnemesh_workspace_root: Option<PathBuf>,
     pub base_ref: Option<String>,
     pub agent: String,
     pub model: Option<String>,

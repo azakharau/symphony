@@ -179,7 +179,24 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         spec.cwd,
         PathBuf::from("/home/agent/.symphony/workspaces/opencode/symphony/SYM-27")
     );
+    assert_eq!(
+        spec.mnemesh_workspace_root,
+        Some(PathBuf::from("/home/agent/proj/symphony"))
+    );
     assert!(spec.prompt.contains("SYM-27"), "{}", spec.prompt);
+    assert!(
+        spec.prompt
+            .contains("Mnemesh workspace root: /home/agent/proj/symphony"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "Do not create or register a separate Mnemesh workspace for the isolated worktree"
+        ),
+        "{}",
+        spec.prompt
+    );
     assert!(spec.prompt.contains("symphony-smoke"), "{}", spec.prompt);
     assert!(
         spec.prompt
@@ -242,6 +259,7 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
         worktree_root: None,
         issue_identifier: "SYM-200".into(),
         repo_path: None,
+        mnemesh_workspace_root: Some(worktree.clone()),
         base_ref: None,
         agent: "build".into(),
         model: Some("openai/gpt-5.5".into()),
@@ -340,6 +358,7 @@ async fn stdio_launcher_removes_stale_handoff_before_prompting_new_session() {
         worktree_root: Some(worktree_root),
         issue_identifier: "SYM-201".into(),
         repo_path: None,
+        mnemesh_workspace_root: Some(dir.path().to_path_buf()),
         base_ref: None,
         agent: "build".into(),
         model: Some("openai/gpt-5.5".into()),
@@ -385,6 +404,7 @@ async fn stdio_launcher_resumes_existing_session_without_replaying_prompt() {
         worktree_root: None,
         issue_identifier: "SYM-202".into(),
         repo_path: None,
+        mnemesh_workspace_root: Some(dir.path().to_path_buf()),
         base_ref: None,
         agent: "build".into(),
         model: Some("openai/gpt-5.5".into()),
@@ -553,6 +573,7 @@ async fn stdio_launcher_creates_git_worktree_from_project_repo_and_base_ref() {
         worktree_root: Some(dir.path().join("worktrees")),
         issue_identifier: "SYM-200".into(),
         repo_path: Some(repo.clone()),
+        mnemesh_workspace_root: Some(repo.clone()),
         base_ref: Some("agent-server/opencode-runner-extension".into()),
         agent: "build".into(),
         model: Some("openai/gpt-5.5".into()),
@@ -596,6 +617,7 @@ async fn stdio_launcher_rejects_issue_identifier_path_separators_before_worktree
         worktree_root: Some(root.clone()),
         issue_identifier: "SYM/200".into(),
         repo_path: Some(dir.path().join("repo")),
+        mnemesh_workspace_root: Some(dir.path().join("repo")),
         base_ref: Some("main".into()),
         agent: "build".into(),
         model: Some("openai/gpt-5.5".into()),

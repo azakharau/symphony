@@ -11,6 +11,14 @@ async fn multiproject_toml_config_loads_deterministically_and_validates_required
     let project = first.project("symphony").expect("project lookup");
     assert_eq!(project.linear.team_key, "SYM");
     assert_eq!(
+        project
+            .mnemesh
+            .as_ref()
+            .expect("mnemesh config")
+            .workspace_root,
+        PathBuf::from("/home/agent/proj/symphony")
+    );
+    assert_eq!(
         project.opencode.command,
         PathBuf::from("/usr/local/bin/opencode")
     );
@@ -25,6 +33,17 @@ async fn multiproject_toml_config_loads_deterministically_and_validates_required
         valid_config_toml().replace("repo_path = \"/home/agent/proj/symphony\"\n", "");
     let err = RootConfig::from_toml_str(&missing_required).expect_err("repo_path is required");
     assert!(err.to_string().contains("repo_path"), "{err}");
+}
+
+#[tokio::test]
+async fn mnemesh_workspace_config_validates_global_project_workspace_root() {
+    let invalid = valid_config_toml().replace(
+        "workspace_root = \"/home/agent/proj/symphony\"",
+        "workspace_root = \"relative/project\"",
+    );
+    let err = RootConfig::from_toml_str(&invalid).expect_err("relative workspace root rejected");
+
+    assert!(err.to_string().contains("mnemesh.workspace_root"), "{err}");
 }
 
 #[tokio::test]

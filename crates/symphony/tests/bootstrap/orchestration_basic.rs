@@ -939,10 +939,11 @@ async fn terminal_reconciliation_marks_cleanup_complete_when_worktree_is_already
     let client =
         RecordingLinearClient::new(vec![linear_issue("closed", "SYM-63", "Done", Some(1))]);
 
-    daemon::run_once_with_linear_client(&config, &store, &client)
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
         .await
         .expect("terminal reconciliation");
 
+    assert_eq!(report.terminal_reconciled, vec!["SYM-63"]);
     let closed = store
         .issue("symphony", "closed")
         .await
@@ -966,6 +967,126 @@ async fn terminal_reconciliation_marks_cleanup_complete_when_worktree_is_already
         session.lifecycle_marker.as_deref(),
         Some("linear_terminal_reconciled")
     );
+}
+
+#[tokio::test]
+async fn terminal_reconciliation_skips_unchanged_issue_and_session_rows() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let missing_worktree = dir.path().join("already-removed").join("SYM-68");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let mut closed = test_issue("symphony", "closed-quiet", "SYM-68");
+    closed.lifecycle_stage = LifecycleStage::Completed;
+    closed.cleanup_status = CleanupStatus::Complete;
+    closed.git_ref = Some(GitRefRecord {
+        branch: "agent-server/opencode-runner-extension".into(),
+        worktree_path: missing_worktree.display().to_string(),
+        head_sha: None,
+        pr_url: None,
+    });
+    store.upsert_issue(closed).await.expect("closed issue");
+    let mut terminal_session = test_session("symphony", "closed-quiet", "oc-68", &missing_worktree);
+    terminal_session.process_id = None;
+    terminal_session.lifecycle_stage = LifecycleStage::Completed;
+    terminal_session.stage = OpenCodeStage::Completed;
+    terminal_session.lifecycle_marker = Some("linear_terminal_reconciled".into());
+    terminal_session.last_event = Some("linear_terminal_reconciled".into());
+    terminal_session.silence_observed = false;
+    store
+        .upsert_opencode_session(terminal_session)
+        .await
+        .expect("terminal session");
+    set_issue_and_session_updated_at(&db_path, "closed-quiet", "oc-68", "2000-01-01 00:00:00")
+        .await;
+
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "closed-quiet",
+        "SYM-68",
+        "Done",
+        Some(1),
+    )]);
+
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("quiet terminal reconciliation");
+
+    assert!(
+        report.terminal_reconciled.is_empty(),
+        "unchanged terminal issue should not emit per-poll reconciliation events"
+    );
+    let (issue_updated_at, session_updated_at) =
+        issue_and_session_updated_at(&db_path, "closed-quiet", "oc-68").await;
+    assert_eq!(issue_updated_at, "2000-01-01 00:00:00");
+    assert_eq!(session_updated_at, "2000-01-01 00:00:00");
+}
+
+async fn set_issue_and_session_updated_at(
+    db_path: &Path,
+    issue_id: &str,
+    session_id: &str,
+    updated_at: &str,
+) {
+    let database = libsql::Builder::new_local(db_path.display().to_string())
+        .build()
+        .await
+        .expect("open database");
+    let conn = database.connect().expect("connect");
+    conn.execute(
+        "UPDATE issues SET updated_at = ?1 WHERE project_id = 'symphony' AND issue_id = ?2",
+        libsql::params![updated_at, issue_id],
+    )
+    .await
+    .expect("set issue updated_at");
+    conn.execute(
+        "UPDATE opencode_sessions SET updated_at = ?1 WHERE project_id = 'symphony' AND issue_id = ?2 AND session_id = ?3",
+        libsql::params![updated_at, issue_id, session_id],
+    )
+    .await
+    .expect("set session updated_at");
+}
+
+async fn issue_and_session_updated_at(
+    db_path: &Path,
+    issue_id: &str,
+    session_id: &str,
+) -> (String, String) {
+    let database = libsql::Builder::new_local(db_path.display().to_string())
+        .build()
+        .await
+        .expect("open database");
+    let conn = database.connect().expect("connect");
+    let mut issue_rows = conn
+        .query(
+            "SELECT updated_at FROM issues WHERE project_id = 'symphony' AND issue_id = ?1",
+            libsql::params![issue_id],
+        )
+        .await
+        .expect("query issue updated_at");
+    let issue_updated_at = issue_rows
+        .next()
+        .await
+        .expect("issue row")
+        .expect("issue exists")
+        .get::<String>(0)
+        .expect("issue updated_at");
+    let mut session_rows = conn
+        .query(
+            "SELECT updated_at FROM opencode_sessions WHERE project_id = 'symphony' AND issue_id = ?1 AND session_id = ?2",
+            libsql::params![issue_id, session_id],
+        )
+        .await
+        .expect("query session updated_at");
+    let session_updated_at = session_rows
+        .next()
+        .await
+        .expect("session row")
+        .expect("session exists")
+        .get::<String>(0)
+        .expect("session updated_at");
+    (issue_updated_at, session_updated_at)
 }
 
 #[tokio::test]

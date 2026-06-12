@@ -189,8 +189,8 @@ async fn reconcile_project(
                     None,
                     CleanupStatus::Pending,
                 );
-                if let Some(existing) = existing {
-                    record.git_ref = existing.git_ref;
+                if let Some(existing) = &existing {
+                    record.git_ref.clone_from(&existing.git_ref);
                     if existing.cleanup_status == CleanupStatus::Complete {
                         record.cleanup_status = CleanupStatus::Complete;
                     } else if let Some(git_ref) = &record.git_ref
@@ -199,16 +199,21 @@ async fn reconcile_project(
                         record.cleanup_status = CleanupStatus::Complete;
                     }
                 }
-                store.upsert_issue(&record).await?;
-                mark_issue_sessions_terminal(store, project, &issue).await?;
-                info!(
-                    project_id = %project.id,
-                    issue = %issue.identifier,
-                    state,
-                    cleanup = ?record.cleanup_status,
-                    "terminal issue reconciled"
-                );
-                report.terminal_reconciled.push(issue.identifier);
+                let issue_changed = existing.as_ref() != Some(&record);
+                if issue_changed {
+                    store.upsert_issue(&record).await?;
+                }
+                let sessions_changed = mark_issue_sessions_terminal(store, project, &issue).await?;
+                if issue_changed || sessions_changed {
+                    info!(
+                        project_id = %project.id,
+                        issue = %issue.identifier,
+                        state,
+                        cleanup = ?record.cleanup_status,
+                        "terminal issue reconciled"
+                    );
+                    report.terminal_reconciled.push(issue.identifier);
+                }
             }
             "Need Owner Input" => {
                 let existing = store.issue(&project.id, &issue.id).await?;
@@ -635,11 +640,21 @@ async fn mark_issue_sessions_terminal(
     store: &SqliteStore,
     project: &ProjectConfig,
     issue: &LinearIssue,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
+    let mut changed = false;
     for mut session in store
         .opencode_sessions_for_issue(&project.id, &issue.id)
         .await?
     {
+        if session.process_id.is_none()
+            && session.lifecycle_stage == LifecycleStage::Completed
+            && session.stage == OpenCodeStage::Completed
+            && session.lifecycle_marker.as_deref() == Some("linear_terminal_reconciled")
+            && session.last_event.as_deref() == Some("linear_terminal_reconciled")
+            && !session.silence_observed
+        {
+            continue;
+        }
         session.process_id = None;
         session.lifecycle_stage = LifecycleStage::Completed;
         session.stage = OpenCodeStage::Completed;
@@ -647,8 +662,9 @@ async fn mark_issue_sessions_terminal(
         session.last_event = Some("linear_terminal_reconciled".into());
         session.silence_observed = false;
         store.upsert_opencode_session(&session).await?;
+        changed = true;
     }
-    Ok(())
+    Ok(changed)
 }
 
 async fn mark_existing_session_reactivated(

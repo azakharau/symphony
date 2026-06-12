@@ -100,7 +100,7 @@ async fn ensure_issue_branch_pushed(
     }
 
     let remote_ref = format!("refs/remotes/origin/{branch}");
-    let fetch_refspec = format!("refs/heads/{branch}:{remote_ref}");
+    let fetch_refspec = format!("+refs/heads/{branch}:{remote_ref}");
     git_status(repo_path, &["fetch", "origin", &fetch_refspec]).await?;
     let remote_head = git_output(repo_path, &["rev-parse", &remote_ref]).await?;
     if same_sha(remote_head.trim(), head_sha) {
@@ -123,7 +123,7 @@ async fn integrate_base_branch(
     }
 
     let remote_base = format!("refs/remotes/origin/{base_branch}");
-    let fetch_refspec = format!("refs/heads/{base_branch}:{remote_base}");
+    let fetch_refspec = format!("+refs/heads/{base_branch}:{remote_base}");
     git_status(repo_path, &["fetch", "origin", &fetch_refspec]).await?;
     git_status(
         repo_path,

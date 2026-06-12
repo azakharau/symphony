@@ -565,6 +565,7 @@ fn linear_issue_node_json(
         "labels": { "nodes": [] },
         "comments": { "nodes": [] },
         "relations": { "nodes": [] },
+        "inverseRelations": { "nodes": [] },
         "createdAt": "2026-06-10T00:00:00Z",
         "updatedAt": "2026-06-10T00:00:00Z"
     })

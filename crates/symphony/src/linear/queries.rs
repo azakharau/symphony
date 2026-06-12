@@ -41,6 +41,16 @@ query CandidateIssues($teamKey: String!, $projectId: ID!, $states: [String!], $a
           }
         }
       }
+      inverseRelations {
+        nodes {
+          type
+          issue {
+            id
+            identifier
+            state { name }
+          }
+        }
+      }
       createdAt
       updatedAt
     }

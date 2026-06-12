@@ -32,6 +32,8 @@ pub(super) struct LinearIssueNode {
     project_milestone: Option<LinearMilestoneNode>,
     labels: LinearLabelConnection,
     relations: LinearRelationConnection,
+    #[serde(default, rename = "inverseRelations")]
+    inverse_relations: LinearInverseRelationConnection,
     comments: LinearCommentConnection,
     #[serde(rename = "createdAt")]
     created_at: Option<String>,
@@ -43,6 +45,29 @@ impl LinearIssueNode {
     pub(super) fn into_issue(self) -> LinearIssue {
         let owner_answer_created_at = latest_owner_answer_comment(&self.comments.nodes)
             .and_then(|comment| comment.created_at.clone());
+        let mut blocked_by: Vec<_> = self
+            .relations
+            .nodes
+            .into_iter()
+            .filter(|relation| relation.relation_type == "blocked_by")
+            .map(|relation| LinearBlocker {
+                id: Some(relation.related_issue.id),
+                identifier: Some(relation.related_issue.identifier),
+                state: Some(relation.related_issue.state.name),
+            })
+            .collect();
+        blocked_by.extend(
+            self.inverse_relations
+                .nodes
+                .into_iter()
+                .filter(|relation| relation.relation_type == "blocks")
+                .map(|relation| LinearBlocker {
+                    id: Some(relation.issue.id),
+                    identifier: Some(relation.issue.identifier),
+                    state: Some(relation.issue.state.name),
+                }),
+        );
+
         LinearIssue {
             id: self.id,
             identifier: self.identifier,
@@ -61,17 +86,7 @@ impl LinearIssueNode {
                 .into_iter()
                 .map(|label| label.name)
                 .collect(),
-            blocked_by: self
-                .relations
-                .nodes
-                .into_iter()
-                .filter(|relation| relation.relation_type == "blocked_by")
-                .map(|relation| LinearBlocker {
-                    id: Some(relation.related_issue.id),
-                    identifier: Some(relation.related_issue.identifier),
-                    state: Some(relation.related_issue.state.name),
-                })
-                .collect(),
+            blocked_by,
             has_new_owner_answer: owner_answer_created_at.is_some(),
             owner_answer_created_at,
             created_at: self.created_at,
@@ -116,7 +131,7 @@ struct LinearLabelNode {
     name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct LinearRelationConnection {
     nodes: Vec<LinearRelationNode>,
 }
@@ -127,6 +142,18 @@ struct LinearRelationNode {
     relation_type: String,
     #[serde(rename = "relatedIssue")]
     related_issue: RelatedIssueNode,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct LinearInverseRelationConnection {
+    nodes: Vec<LinearInverseRelationNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearInverseRelationNode {
+    #[serde(rename = "type")]
+    relation_type: String,
+    issue: RelatedIssueNode,
 }
 
 #[derive(Debug, Deserialize)]

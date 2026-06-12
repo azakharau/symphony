@@ -137,6 +137,18 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
                                     }
                                 ]
                             },
+                            "inverseRelations": {
+                                "nodes": [
+                                    {
+                                        "type": "blocks",
+                                        "issue": {
+                                            "id": "inverse-blocker-1",
+                                            "identifier": "SYM-98",
+                                            "state": { "name": "In Progress" }
+                                        }
+                                    }
+                                ]
+                            },
                             "createdAt": "2026-06-10T00:00:00Z",
                             "updatedAt": "2026-06-10T00:01:00Z"
                         },
@@ -174,6 +186,7 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
                                 ]
                             },
                             "relations": { "nodes": [] },
+                            "inverseRelations": { "nodes": [] },
                             "createdAt": "2026-06-10T00:00:00Z",
                             "updatedAt": "2026-06-10T00:03:00Z"
                         }
@@ -236,6 +249,10 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
     assert_eq!(
         issues[0].blocked_by[0].identifier.as_deref(),
         Some("SYM-99")
+    );
+    assert_eq!(
+        issues[0].blocked_by[1].identifier.as_deref(),
+        Some("SYM-98")
     );
     assert!(!issues[0].has_new_owner_answer);
     assert_eq!(issues[1].identifier, "SYM-101");

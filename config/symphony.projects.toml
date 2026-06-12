@@ -35,7 +35,7 @@ effort = "high"
 permission_policy = "reject"
 
 [projects.eval]
-default_suite = "symphony-vnext-validation"
+default_suite = "symphony-validation"
 max_identical_failure_fingerprints = 2
 
 [projects.concurrency]

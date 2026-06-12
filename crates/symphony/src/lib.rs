@@ -1,4 +1,4 @@
-//! Rust-first Symphony vNext runtime foundation.
+//! Rust-first Symphony runtime foundation.
 
 pub mod api;
 pub mod cli;

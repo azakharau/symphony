@@ -180,11 +180,7 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         PathBuf::from("/home/agent/.symphony/workspaces/opencode/symphony/SYM-27")
     );
     assert!(spec.prompt.contains("SYM-27"), "{}", spec.prompt);
-    assert!(
-        spec.prompt.contains("symphony-vnext-smoke"),
-        "{}",
-        spec.prompt
-    );
+    assert!(spec.prompt.contains("symphony-smoke"), "{}", spec.prompt);
     assert!(
         spec.prompt
             .contains("fallback metadata, not a blanket workspace gate"),
@@ -436,12 +432,8 @@ async fn stdio_launcher_resumes_existing_session_without_replaying_prompt() {
 
 #[tokio::test]
 async fn installed_opencode_acp_supports_ndjson_config_options_without_prompting() {
-    if std::env::var("SYMPHONY_VNEXT_LIVE_OPENCODE_ACP")
-        .ok()
-        .as_deref()
-        != Some("1")
-    {
-        eprintln!("set SYMPHONY_VNEXT_LIVE_OPENCODE_ACP=1 to run installed OpenCode ACP smoke");
+    if std::env::var("SYMPHONY_LIVE_OPENCODE_ACP").ok().as_deref() != Some("1") {
+        eprintln!("set SYMPHONY_LIVE_OPENCODE_ACP=1 to run installed OpenCode ACP smoke");
         return;
     }
 
@@ -465,7 +457,7 @@ async fn installed_opencode_acp_supports_ndjson_config_options_without_prompting
         "initialize",
         serde_json::json!({
             "protocolVersion": 1,
-            "clientInfo": {"name": "symphony-vnext-test", "version": "0"},
+            "clientInfo": {"name": "symphony-test", "version": "0"},
             "capabilities": {}
         }),
     );
@@ -479,7 +471,7 @@ async fn installed_opencode_acp_supports_ndjson_config_options_without_prompting
         serde_json::json!({
             "cwd": dir.path(),
             "mcpServers": [],
-            "title": "Symphony vNext ACP contract smoke"
+            "title": "Symphony ACP contract smoke"
         }),
     );
     let session_id = created["sessionId"]

@@ -1,17 +1,17 @@
 # Symphony
 
-Symphony turns project work into isolated implementation runs. The active vNext runtime is the Rust
-`symphony-vnext` service, which schedules Linear issues and runs OpenCode ACP in per-issue
+Symphony turns project work into isolated implementation runs. The active Symphony runtime is the Rust
+`symphony` service, which schedules Linear issues and runs OpenCode ACP in per-issue
 worktrees.
 
 [![Symphony demo video preview](.github/media/symphony-demo-poster.jpg)](https://player.vimeo.com/video/1186371009?h=5626e4b899)
 
 > [!WARNING]
-> Symphony vNext is an engineering preview for trusted operator environments.
+> Symphony is an engineering preview for trusted operator environments.
 
 ## Active Runtime
 
-Rust vNext is the only active service implementation in this repository. The old Elixir runtime and
+Symphony is the only active service implementation in this repository. The old Elixir runtime and
 Codex runner integration have been removed from active code, CI, and operator docs.
 
 The Rust workspace contains:
@@ -25,7 +25,7 @@ The Rust workspace contains:
   reconciliation, eval repair loops, and git-closure handoffs.
 - Dashboard/API read models for aggregate, project, and issue drilldown views.
 
-Rust vNext parks legacy steward states (`Preparing`, `In Review`, `RCA Required`) instead of treating
+Symphony parks legacy steward states (`Preparing`, `In Review`, `RCA Required`) instead of treating
 them as executable runtime aliases.
 
 ## Configuration
@@ -33,17 +33,18 @@ them as executable runtime aliases.
 Use the checked-in sample as the active service shape:
 
 ```bash
-cargo run -p symphony-vnext -- validate-config --config config/symphony.projects.toml
-cargo run -p symphony-vnext -- init-store --database /home/agent/.symphony/vnext/symphony/runtime.sqlite3
-cargo run -p symphony-vnext -- daemon --config config/symphony.projects.toml --database /home/agent/.symphony/vnext/symphony/runtime.sqlite3
+cargo run -p symphony -- validate-config --config config/symphony.projects.toml
+cargo run -p symphony -- init-store --database /home/agent/.symphony/symphony/runtime.sqlite3
+cargo run -p symphony -- daemon --config config/symphony.projects.toml --database /home/agent/.symphony/symphony/runtime.sqlite3
 ```
 
 Continuous service mode uses the systemd unit template in
-`deploy/systemd/openai-symphony-vnext-symphony.service` after the operator approves the host cutover. Use `--once`
-only for non-live bootstrap validation. Continuous mode requires `LINEAR_API_KEY` so the daemon can
-poll and mutate Linear through the Rust adapter. The service reads that key from the existing
-file-backed Symphony environment at `/home/agent/.symphony/env/linear.env`; do not duplicate the key
-in project workflow files.
+`deploy/systemd/openai-symphony-symphony.service` after the operator approves a safe host restart
+window. Do not restart currently running user services during documentation or config-only updates.
+Use `--once` only for non-live bootstrap validation. Continuous mode requires `LINEAR_API_KEY` so the
+daemon can poll and mutate Linear through the Rust adapter. The service reads that key from the
+existing file-backed Symphony environment at `/home/agent/.symphony/env/linear.env`; do not duplicate
+the key in project workflow files.
 
 ## Validation
 
@@ -58,18 +59,18 @@ cargo test
 Live cutover validation requires host credentials and operator control:
 
 ```bash
-SYMPHONY_VNEXT_LIVE_OPENCODE_ACP=1 cargo test -p symphony-vnext --test bootstrap \
+SYMPHONY_LIVE_OPENCODE_ACP=1 cargo test -p symphony --test bootstrap \
   installed_opencode_acp_supports_ndjson_config_options_without_prompting -- --nocapture
-cargo build --release -p symphony-vnext
+cargo build --release -p symphony
 /usr/local/bin/opencode acp
-systemctl --user status openai-symphony-vnext-symphony.service
+systemctl --user status openai-symphony-symphony.service
 curl -fsS http://127.0.0.1:4115/api/dashboard
 curl -fsS http://127.0.0.1:4115/api/projects/symphony
 ```
 
 ## Runtime Contract
 
-See [SPEC.md](SPEC.md) for the Rust/OpenCode-only vNext service contract.
+See [SPEC.md](SPEC.md) for the Rust/OpenCode-only Symphony service contract.
 
 ## License
 

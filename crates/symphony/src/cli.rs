@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 use crate::{config::RootConfig, daemon, storage::SqliteStore};
 
 #[derive(Debug, Parser)]
-#[command(name = "symphony-vnext", about = "Rust-first Symphony vNext runtime")]
+#[command(name = "symphony", about = "Rust-first Symphony runtime")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

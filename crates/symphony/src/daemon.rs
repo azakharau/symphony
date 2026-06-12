@@ -50,7 +50,7 @@ pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
         database_path = %options.database_path.display(),
         projects = config.projects().len(),
         once = options.once,
-        "symphony vNext daemon starting"
+        "Symphony daemon starting"
     );
     let store = SqliteStore::open(&options.database_path)
         .await

@@ -1,5 +1,5 @@
 [Unit]
-Description=Symphony vNext Rust runtime for Symphony
+Description=Symphony Rust runtime for Symphony
 After=network-online.target
 Wants=network-online.target
 
@@ -10,7 +10,7 @@ Environment=PATH=/home/agent/.cargo/bin:/home/agent/.bun/bin:/home/agent/.local/
 Environment=RUST_LOG=info
 EnvironmentFile=/home/agent/.symphony/env/linear.env
 WorkingDirectory=/home/agent/proj/symphony
-ExecStart=/home/agent/.cargo/bin/symphony-vnext daemon --config /home/agent/.symphony/vnext/symphony/projects.toml --database /home/agent/.symphony/vnext/symphony/runtime.sqlite3
+ExecStart=/home/agent/.cargo/bin/symphony daemon --config /home/agent/.symphony/symphony/projects.toml --database /home/agent/.symphony/symphony/runtime.sqlite3
 Restart=on-failure
 RestartSec=10
 

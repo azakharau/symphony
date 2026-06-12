@@ -1,12 +1,12 @@
-# Symphony vNext Workflow
+# Symphony Workflow
 
-This file is the project-local policy target referenced by the Rust vNext multiproject config.
+This file is the project-local policy target referenced by the Symphony multiproject config.
 
 ## Active Runtime
 
-- Runtime: Rust `symphony-vnext`.
+- Runtime: Rust `symphony`.
 - Implementation runner: OpenCode ACP only.
-- Active milestone: `05. Rust vNext: OpenCode-only multiproject Symphony`.
+- Active milestone: `05. Symphony: OpenCode-only multiproject Symphony`.
 - Active milestone id: `7a04f8cf-dece-48b9-a2ec-0356ed639943`.
 
 ## State Policy

@@ -333,7 +333,7 @@ async fn no_code_success_handoff_can_close_without_commit_sha() {
         ],
         subagents: Vec::new(),
         eval_results: vec![OpenCodeEvalResult {
-            suite: "symphony-vnext-smoke".into(),
+            suite: "symphony-smoke".into(),
             passed: true,
             failure_fingerprint: None,
             details: Some("no-code smoke passed".into()),
@@ -778,7 +778,7 @@ async fn malformed_success_handoff_stays_in_progress_and_requests_opencode_repai
             failure_fingerprint: None,
             details: None,
         }],
-        changed_files: vec!["crates/symphony-vnext/src/opencode.rs".into()],
+        changed_files: vec!["crates/symphony/src/opencode.rs".into()],
         git: None,
         risks: Vec::new(),
         stop_reason: OpenCodeStopReason::Success,

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/symphony-vnext"]
+members = ["crates/symphony"]
 
 [workspace.package]
 edition = "2024"

@@ -96,7 +96,7 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
                                 "id": "milestone-from-linear",
                                 "name": "Milestone From Linear"
                             },
-                            "labels": { "nodes": [{ "name": "vnext" }] },
+                            "labels": { "nodes": [{ "name": "symphony" }] },
                             "comments": {
                                 "nodes": [
                                     {
@@ -213,7 +213,7 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
             .map(|milestone| milestone.id.as_str()),
         Some("milestone-from-linear")
     );
-    assert_eq!(issues[0].labels, vec!["vnext"]);
+    assert_eq!(issues[0].labels, vec!["symphony"]);
     assert_eq!(
         issues[0].blocked_by[0].identifier.as_deref(),
         Some("SYM-99")
@@ -881,15 +881,14 @@ async fn dashboard_api_json_routes_aggregate_project_and_issue_paths() {
     let issue = test_issue("symphony", "api-issue", "SYM-94");
     store.upsert_issue(issue).await.expect("issue");
 
-    let aggregate =
-        symphony_vnext::api::runtime_api_json_response(&config, &store, "/api/dashboard")
-            .await
-            .expect("aggregate response");
+    let aggregate = symphony::api::runtime_api_json_response(&config, &store, "/api/dashboard")
+        .await
+        .expect("aggregate response");
     let project =
-        symphony_vnext::api::runtime_api_json_response(&config, &store, "/api/projects/symphony")
+        symphony::api::runtime_api_json_response(&config, &store, "/api/projects/symphony")
             .await
             .expect("project response");
-    let issue = symphony_vnext::api::runtime_api_json_response(
+    let issue = symphony::api::runtime_api_json_response(
         &config,
         &store,
         "/api/projects/symphony/issues/api-issue",
@@ -897,7 +896,7 @@ async fn dashboard_api_json_routes_aggregate_project_and_issue_paths() {
     .await
     .expect("issue response");
     let missing =
-        symphony_vnext::api::runtime_api_json_response(&config, &store, "/api/projects/missing")
+        symphony::api::runtime_api_json_response(&config, &store, "/api/projects/missing")
             .await
             .expect("missing response");
 
@@ -944,27 +943,23 @@ async fn dashboard_html_routes_render_aggregate_project_issue_and_keep_json_api(
         .await
         .expect("session");
 
-    let aggregate = symphony_vnext::dashboard::runtime_dashboard_response(&config, &store, "/")
+    let aggregate = symphony::dashboard::runtime_dashboard_response(&config, &store, "/")
         .await
         .expect("aggregate html");
-    let project = symphony_vnext::dashboard::runtime_dashboard_response(
-        &config,
-        &store,
-        "/projects/symphony",
-    )
-    .await
-    .expect("project html");
-    let issue = symphony_vnext::dashboard::runtime_dashboard_response(
+    let project =
+        symphony::dashboard::runtime_dashboard_response(&config, &store, "/projects/symphony")
+            .await
+            .expect("project html");
+    let issue = symphony::dashboard::runtime_dashboard_response(
         &config,
         &store,
         "/projects/symphony/issues/html-issue",
     )
     .await
     .expect("issue html");
-    let json =
-        symphony_vnext::dashboard::runtime_dashboard_response(&config, &store, "/api/dashboard")
-            .await
-            .expect("json api");
+    let json = symphony::dashboard::runtime_dashboard_response(&config, &store, "/api/dashboard")
+        .await
+        .expect("json api");
 
     assert_eq!(aggregate.0, 200);
     assert_eq!(aggregate.1, "text/html; charset=utf-8");
@@ -994,7 +989,7 @@ async fn dashboard_html_escapes_user_controlled_values() {
     issue.title = "<script>alert('owned')</script>".into();
     store.upsert_issue(issue).await.expect("issue");
 
-    let response = symphony_vnext::dashboard::runtime_dashboard_response(
+    let response = symphony::dashboard::runtime_dashboard_response(
         &config,
         &store,
         "/projects/symphony/issues/escape",
@@ -1037,7 +1032,7 @@ async fn dashboard_html_surfaces_activity_error_fallback() {
         .await
         .expect("session");
 
-    let response = symphony_vnext::dashboard::runtime_dashboard_response(
+    let response = symphony::dashboard::runtime_dashboard_response(
         &config,
         &store,
         "/projects/symphony/issues/activity",

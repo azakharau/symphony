@@ -2,7 +2,7 @@ use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::Subscribe
 
 pub fn init() {
     let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("symphony_vnext=info"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("symphony=info"));
 
     #[cfg(target_os = "linux")]
     {
@@ -13,12 +13,12 @@ pub fn init() {
                     .with(layer)
                     .try_init()
                 {
-                    eprintln!("symphony-vnext telemetry init skipped: {error}");
+                    eprintln!("symphony telemetry init skipped: {error}");
                 }
                 return;
             }
             Err(error) => {
-                eprintln!("symphony-vnext telemetry journald init failed: {error}");
+                eprintln!("symphony telemetry journald init failed: {error}");
             }
         }
     }
@@ -32,6 +32,6 @@ pub fn init() {
         .with(fmt_layer)
         .try_init()
     {
-        eprintln!("symphony-vnext telemetry init skipped: {error}");
+        eprintln!("symphony telemetry init skipped: {error}");
     }
 }

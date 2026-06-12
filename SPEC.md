@@ -1,13 +1,13 @@
-# Symphony vNext Service Specification
+# Symphony Service Specification
 
-Status: Rust/OpenCode-only vNext contract
+Status: Rust/OpenCode-only Symphony contract
 
 Purpose: Define the active Symphony runtime that orchestrates project work through the Rust
-`symphony-vnext` binary and OpenCode ACP sessions.
+`symphony` binary and OpenCode ACP sessions.
 
 ## Runtime Contract
 
-- The active service implementation is the Rust crate at `crates/symphony-vnext`.
+- The active service implementation is the Rust crate at `crates/symphony`.
 - OpenCode ACP is the only implementation runner. The runtime launches `/usr/local/bin/opencode acp`
   from an isolated per-issue worktree.
 - Codex runner integration is not an active runtime path.
@@ -45,7 +45,7 @@ Purpose: Define the active Symphony runtime that orchestrates project work throu
 
 ## Issue Lifecycle
 
-Rust vNext uses this executable lifecycle:
+Symphony uses this executable lifecycle:
 
 - `Backlog`: planning inventory only. Existing runtime rows may be reconciled, but backlog issues are
   not dispatched.
@@ -58,7 +58,7 @@ Rust vNext uses this executable lifecycle:
 - Terminal states: `Done`, `Canceled`, `Cancelled`, `Closed`, and `Duplicate`.
 
 Legacy steward states such as `Preparing`, `In Review`, and `RCA Required` are not executable runtime
-states in vNext. If the Rust runtime sees them in the active queue, it parks the issue in
+states in Symphony. If the Rust runtime sees them in the active queue, it parks the issue in
 `Need Owner Input` with typed evidence instead of preserving hidden compatibility aliases.
 
 ## OpenCode Handoff
@@ -109,7 +109,7 @@ The Rust runtime exposes stable read-model builders for:
 - `/api/projects/{project_id}/issues/{issue_id}`
 
 These projections report project activity, parked and terminal counts, runner health, capacity,
-cleanup state, Linear state, vNext lifecycle state, blocker/failure details, OpenCode session
+cleanup state, Linear state, Symphony lifecycle state, blocker/failure details, OpenCode session
 metadata, eval results, git refs, worktree paths, token/cost counters, subagent count/activity, and
 display status.
 
@@ -126,18 +126,18 @@ cargo test
 Host-dependent live OpenCode smoke:
 
 ```bash
-SYMPHONY_VNEXT_LIVE_OPENCODE_ACP=1 cargo test -p symphony-vnext --test bootstrap \
+SYMPHONY_LIVE_OPENCODE_ACP=1 cargo test -p symphony --test bootstrap \
   installed_opencode_acp_supports_ndjson_config_options_without_prompting -- --nocapture
 ```
 
 Live cutover verification:
 
 ```bash
-cargo build --release -p symphony-vnext
-cargo run -p symphony-vnext -- validate-config --config config/symphony.projects.toml
-cargo run -p symphony-vnext -- daemon --config config/symphony.projects.toml --database /home/agent/.symphony/vnext/symphony/runtime.sqlite3
+cargo build --release -p symphony
+cargo run -p symphony -- validate-config --config config/symphony.projects.toml
+cargo run -p symphony -- daemon --config config/symphony.projects.toml --database /home/agent/.symphony/symphony/runtime.sqlite3
 /usr/local/bin/opencode acp
-systemctl --user status openai-symphony-vnext-symphony.service
+systemctl --user status openai-symphony-symphony.service
 curl -fsS http://127.0.0.1:4115/api/dashboard
 curl -fsS http://127.0.0.1:4115/api/projects/symphony
 ```

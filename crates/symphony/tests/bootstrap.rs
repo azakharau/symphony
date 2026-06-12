@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use symphony_vnext::{
+use symphony::{
     api::{RuntimeDashboardApi, RuntimeReadModel},
     cli,
     config::RootConfig,
@@ -68,7 +68,7 @@ effort = "high"
 permission_policy = "reject"
 
 [projects.eval]
-default_suite = "symphony-vnext-smoke"
+default_suite = "symphony-smoke"
 
 [projects.concurrency]
 max_sessions = 2
@@ -134,7 +134,7 @@ effort = "high"
 permission_policy = "reject"
 
 [projects.eval]
-default_suite = "symphony-vnext-smoke"
+default_suite = "symphony-smoke"
 
 [projects.concurrency]
 max_sessions = 2
@@ -157,7 +157,7 @@ fn linear_issue(
         branch_name: None,
         url: None,
         labels: Vec::new(),
-        project_milestone: Some(symphony_vnext::linear::LinearMilestone {
+        project_milestone: Some(symphony::linear::LinearMilestone {
             id: "test-milestone-id".into(),
             name: "Test Milestone".into(),
         }),
@@ -211,7 +211,7 @@ fn test_session(
         token_count: 100,
         cost_micros: 10,
         subagent_count: 1,
-        eval_stage: Some("symphony-vnext-smoke".into()),
+        eval_stage: Some("symphony-smoke".into()),
         lifecycle_marker: Some("implementation".into()),
         last_event: Some("working".into()),
         silence_observed: false,
@@ -239,7 +239,7 @@ fn success_handoff(
             failure_fingerprint: None,
             details: Some("ok".into()),
         }],
-        changed_files: vec!["crates/symphony-vnext/src/opencode.rs".into()],
+        changed_files: vec!["crates/symphony/src/opencode.rs".into()],
         git: Some(GitClosureEvidence {
             branch: branch.into(),
             head_sha: Some(head_sha.into()),
@@ -262,7 +262,7 @@ fn eval_failed_handoff(session_id: &str, fingerprint: &str) -> OpenCodeHandoff {
             failure_fingerprint: Some(fingerprint.into()),
             details: Some("clippy failed".into()),
         }],
-        changed_files: vec!["crates/symphony-vnext/src/daemon.rs".into()],
+        changed_files: vec!["crates/symphony/src/daemon.rs".into()],
         git: None,
         risks: vec!["repair pending".into()],
         stop_reason: OpenCodeStopReason::EvalFailed {
@@ -588,7 +588,7 @@ impl RecordingLinearClient {
 impl LinearClient for RecordingLinearClient {
     async fn fetch_candidate_issues(
         &self,
-        _project: &symphony_vnext::config::ProjectConfig,
+        _project: &symphony::config::ProjectConfig,
     ) -> Result<Vec<LinearIssue>, LinearClientError> {
         Ok(self.issues.clone())
     }
@@ -644,7 +644,7 @@ impl ProjectAwareLinearClient {
 impl LinearClient for ProjectAwareLinearClient {
     async fn fetch_candidate_issues(
         &self,
-        project: &symphony_vnext::config::ProjectConfig,
+        project: &symphony::config::ProjectConfig,
     ) -> Result<Vec<LinearIssue>, LinearClientError> {
         Ok(self
             .issues_by_project

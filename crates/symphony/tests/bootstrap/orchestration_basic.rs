@@ -8,7 +8,7 @@ async fn daemon_once_entrypoint_validates_config_migrates_and_reconciles_project
     fs::write(&config_path, valid_config_toml()).expect("write config");
 
     cli::run_with_args([
-        "symphony-vnext",
+        "symphony",
         "daemon",
         "--config",
         config_path.to_str().expect("utf8 config path"),
@@ -141,7 +141,7 @@ async fn orchestration_leaves_todo_queued_when_todo_spans_multiple_milestones() 
 
     let first = linear_issue("first", "SYM-42", "Todo", Some(1));
     let mut second = linear_issue("second", "SYM-43", "Todo", Some(2));
-    second.project_milestone = Some(symphony_vnext::linear::LinearMilestone {
+    second.project_milestone = Some(symphony::linear::LinearMilestone {
         id: "different-milestone-id".into(),
         name: "Different Milestone".into(),
     });

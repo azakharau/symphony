@@ -45,8 +45,10 @@ Important boundary:
   progress back to Linear.
 - OpenCode ACP is the only code-execution integration. Codex is not a runtime route, fallback,
   compatibility adapter, steward runner, acceptance runner, or RCA runner in vNext.
-- A successful run ends when Symphony validates an OpenCode handoff and writes the configured Linear
-  handoff state, not necessarily tracker terminal state `Done`.
+- A successful implementation run may move a Linear issue to `Done` only after Symphony validates
+  the OpenCode handoff, verifies git closure, integrates the per-issue worktree commit into the
+  configured canonical branch, pushes that canonical branch, and removes the local per-issue
+  worktree. A handoff alone is not a terminal closure.
 
 ## 2. Goals and Non-Goals
 
@@ -54,7 +56,8 @@ Important boundary:
 
 - Poll the issue tracker on a fixed cadence and dispatch work with bounded concurrency.
 - Maintain a single authoritative orchestrator state for dispatch, retries, and reconciliation.
-- Create deterministic per-issue workspaces and preserve them across runs.
+- Create deterministic per-issue workspaces, preserve them only while work is active or parked, and
+  remove them after verified terminal closure.
 - Stop active runs when issue state changes make them ineligible.
 - Recover from transient failures with exponential backoff.
 - Load runtime behavior from root `symphony.yml` plus repository-owned `WORKFLOW.md` contracts.
@@ -350,7 +353,9 @@ Required fields:
 - `subagents_used` (list of subagent name/objective/outcome entries, empty when none)
 - `eval_results` (list of evaluator/check identifiers and pass/fail outcomes)
 - `changed_files` (list of `file:start-end` anchors with purpose)
-- `commit` (object with `sha`, `branch`, and `pr_url`; fields may be null when no commit/PR exists)
+- `commit` (object with `sha`, `branch`, `pr_url`, `worktree_path`, `pushed`, and
+  `integrated_base`; `sha` may be null only when `changed_files` is empty and the handoff proves no
+  git-tracked state changed)
 - `validation` (list of command/cwd/outcome/evidence objects)
 - `risks_unresolved_assumptions` (list of strings)
 - `stop_reason` (string)
@@ -1392,14 +1397,20 @@ Behavior:
 5. Forward runner events to orchestrator.
 6. Persist runner session identity.
 7. Validate the final OpenCode handoff before any Linear write or state transition.
-8. On successful validated handoff, write the handoff to Linear and move to the configured result
-   state when policy requires a state transition.
-9. On any error, fail the worker attempt, dispatch bounded OpenCode repair, or park the issue
+8. For a successful implementation handoff that changes git-tracked state, verify that the handoff
+   commit exists, is the worktree `HEAD`, the worktree is clean except Symphony metadata, the commit
+   is pushed on the issue branch, and the commit can fast-forward the configured canonical branch.
+9. Integrate the verified commit into the configured canonical branch, push that branch, and verify
+   the remote canonical branch now points at the integrated commit.
+10. Write the handoff/git-closure evidence to Linear, move to `Done`, terminate the runner process,
+   and remove the local per-issue worktree.
+11. On any error, fail the worker attempt, dispatch bounded OpenCode repair, or park the issue
    according to the selected runner's documented error mapping.
 
 Note:
 
-- Workspaces are intentionally preserved after successful runs.
+- Workspaces are intentionally preserved only for active, parked, or failed runs. Verified terminal
+  closure removes the per-issue worktree and prunes git worktree metadata.
 - `OpenCode Session Attached` is not a completion handoff and MUST NOT be used as an owner-input
   request.
 
@@ -1412,12 +1423,16 @@ A successful OpenCode implementation MUST return an operator-visible handoff wit
 - subagents used
 - eval results and validation commands/results
 - changed files with line anchors
-- commit SHA, branch, and PR URL if any
+- commit SHA, issue branch, worktree path, push evidence, integrated canonical branch, and PR URL
+  when one exists
 - risks and unresolved assumptions
 - stop reason
 
-Symphony validates this handoff before writing to Linear. Duplicate handoff hashes MUST NOT create
-duplicate comments or duplicate state transitions.
+Symphony validates this handoff before writing to Linear. For code, documentation, config, tests, or
+any other git-tracked state change, `Done` is invalid unless the commit has been pushed, integrated
+into the configured canonical branch, the canonical branch has been pushed, and the local issue
+worktree has been removed. Duplicate handoff hashes MUST NOT create duplicate comments or duplicate
+state transitions.
 
 ## 11. Issue Tracker Integration Contract (Linear-Compatible)
 
@@ -1494,8 +1509,10 @@ decisions, repair prompts, and state transitions to Linear.
 
 - Ticket mutations are performed through Symphony's tracker adapter under orchestrator policy.
 - OpenCode does not need raw Linear credentials to complete implementation work.
-- Workflow-specific success often means "reached the configured handoff state" (for example
-  `In Review`) rather than tracker terminal state `Done`.
+- Workflow-specific success may mean "reached a review state", but tracker terminal state `Done`
+  always means git closure is complete: pushed issue commit, integrated and pushed canonical branch,
+  and removed local issue worktree. A code-changing issue MUST NOT be moved to `Done` from a handoff
+  that lacks this evidence.
 - If the `linear_graphql` client-side tool extension is implemented, scope it to the active project
   and treat it as an optional OpenCode tool, not as the authority for Symphony-owned state changes.
 - State/comment writes MUST be idempotent using persisted handoff hashes and transition keys.
@@ -2457,6 +2474,8 @@ Use the same validation profiles as Section 17:
 - Polling orchestrator with single-authority mutable state
 - Issue tracker client with candidate fetch + state refresh + terminal fetch
 - Workspace manager with sanitized per-issue workspaces
+- Git closure gate that verifies pushed issue commits, fast-forward canonical integration,
+  canonical branch push, and per-issue worktree removal before `Done`
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
 - Hook timeout config (`hooks.timeout_ms`, default `60000`)
 - OpenCode ACP subprocess client with protocol framing for the targeted OpenCode version
@@ -2468,7 +2487,8 @@ Use the same validation profiles as Section 17:
   scheduler state without process memory
 - Configurable retry backoff cap (`agent.max_retry_backoff_ms`, default 5m)
 - Reconciliation that stops runs on terminal/non-active tracker states
-- Workspace cleanup for terminal issues (startup sweep + active transition)
+- Workspace cleanup for verified terminal issues (startup sweep + active transition); successful
+  code-changing closure must remove the local per-issue worktree before Linear `Done`
 - Structured logs with `issue_id`, `issue_identifier`, and `session_id`
 - Operator-visible observability (structured logs; OPTIONAL snapshot/status surface)
 - Symphony-owned tracker write APIs for comments and state transitions

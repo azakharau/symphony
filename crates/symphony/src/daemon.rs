@@ -31,7 +31,7 @@ use http::run_continuous;
 use liveness::project_liveness_projection;
 use policy::{
     blocker_record, compare_issues_for_dispatch, has_existing_session, has_new_owner_response,
-    is_terminal_state, nonterminal_blocker, recoverable_opencode_failure,
+    is_terminal_state, recoverable_opencode_failure, unaccepted_blocker,
 };
 use records::issue_record;
 
@@ -279,6 +279,29 @@ async fn reconcile_project(
                     store.upsert_issue(&record).await?;
                     continue;
                 }
+                if let Some(blocker) = unaccepted_blocker(&issue.blocked_by) {
+                    info!(
+                        project_id = %project.id,
+                        issue = %issue.identifier,
+                        blocker_id = blocker.id.as_deref().unwrap_or("unknown"),
+                        blocker_state = blocker.state.as_deref().unwrap_or("unknown"),
+                        "pausing in-progress issue because Linear blocker is not accepted"
+                    );
+                    linear
+                        .transition_issue(&issue.id, LinearTransition::Todo)
+                        .await?;
+                    let record = issue_record(
+                        project,
+                        &issue,
+                        LifecycleStage::Blocked,
+                        Some(blocker_record(blocker)),
+                        CleanupStatus::Clean,
+                    );
+                    store.upsert_issue(&record).await?;
+                    mark_existing_session_blocked(store, project, &issue).await?;
+                    report.blocked.push(issue.identifier);
+                    continue;
+                }
                 debug!(
                     project_id = %project.id,
                     issue = %issue.identifier,
@@ -402,7 +425,7 @@ async fn reconcile_project(
                         CleanupStatus::Clean,
                     );
                     store.upsert_issue(&record).await?;
-                } else if let Some(blocker) = nonterminal_blocker(&issue.blocked_by) {
+                } else if let Some(blocker) = unaccepted_blocker(&issue.blocked_by) {
                     info!(
                         project_id = %project.id,
                         issue = %issue.identifier,
@@ -631,6 +654,25 @@ async fn mark_existing_session_queued(
     session.stage = OpenCodeStage::Silent;
     session.lifecycle_marker = Some("waiting_for_capacity".into());
     session.last_event = Some("existing_session_waiting_for_capacity".into());
+    session.silence_observed = false;
+    store.upsert_opencode_session(&session).await?;
+    Ok(())
+}
+
+async fn mark_existing_session_blocked(
+    store: &SqliteStore,
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+) -> anyhow::Result<()> {
+    let Some(mut session) = latest_session_for_issue(store, &project.id, &issue.id).await? else {
+        return Ok(());
+    };
+    terminate_current_session_process(project, issue, &session).await?;
+    session.process_id = None;
+    session.lifecycle_stage = LifecycleStage::Queued;
+    session.stage = OpenCodeStage::Silent;
+    session.lifecycle_marker = Some("waiting_for_blocker".into());
+    session.last_event = Some("existing_session_waiting_for_blocker".into());
     session.silence_observed = false;
     store.upsert_opencode_session(&session).await?;
     Ok(())

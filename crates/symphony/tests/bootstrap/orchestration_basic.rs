@@ -1090,6 +1090,42 @@ async fn issue_and_session_updated_at(
 }
 
 #[tokio::test]
+async fn orchestration_treats_canceled_blocker_as_not_accepted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let blocked =
+        linear_issue("blocked", "SYM-42", "Todo", Some(1)).blocked_by(vec![LinearBlocker {
+            id: Some("blocker-1".into()),
+            identifier: Some("SYM-41".into()),
+            state: Some("Canceled".into()),
+        }]);
+    let client = RecordingLinearClient::new(vec![blocked]);
+
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
+
+    assert!(report.dispatched.is_empty());
+    assert!(client.transitions().is_empty());
+    assert_eq!(report.blocked, vec!["SYM-42"]);
+    let blocked_row = store
+        .issue("symphony", "blocked")
+        .await
+        .expect("query blocked")
+        .expect("blocked row");
+    assert_eq!(blocked_row.lifecycle_stage, LifecycleStage::Blocked);
+    assert_eq!(
+        blocked_row.blocker.expect("blocker").message,
+        "SYM-41 is Canceled"
+    );
+}
+
+#[tokio::test]
 async fn orchestration_restores_requeued_issue_with_existing_session_without_duplicate_launch() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
@@ -1134,6 +1170,74 @@ async fn orchestration_restores_requeued_issue_with_existing_session_without_dup
     assert_eq!(
         sessions[0].lifecycle_marker.as_deref(),
         Some("continuation_prompted")
+    );
+}
+
+#[tokio::test]
+async fn orchestration_blocks_in_progress_issue_when_linear_blocker_is_not_done() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let worktree = dir.path().join("SYM-116-worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let mut running = test_issue("symphony", "blocked-running", "SYM-116");
+    running.lifecycle_stage = LifecycleStage::Running;
+    store.upsert_issue(running).await.expect("running issue");
+    let mut session = test_session("symphony", "blocked-running", "oc-116", &worktree);
+    session.process_id = None;
+    session.lifecycle_stage = LifecycleStage::Running;
+    session.stage = OpenCodeStage::Running;
+    store
+        .upsert_opencode_session(session)
+        .await
+        .expect("session");
+
+    let blocked =
+        linear_issue("blocked-running", "SYM-116", "In Progress", Some(1)).blocked_by(vec![
+            LinearBlocker {
+                id: Some("blocker-115".into()),
+                identifier: Some("MNE-115".into()),
+                state: Some("In Progress".into()),
+            },
+        ]);
+    let client = RecordingLinearClient::new(vec![blocked]);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+
+    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert!(report.dispatched.is_empty());
+    assert_eq!(report.blocked, vec!["SYM-116"]);
+    assert_eq!(
+        client.transitions(),
+        vec![("blocked-running".into(), LinearTransition::Todo)]
+    );
+    assert!(opencode.continuations().is_empty());
+    assert!(opencode.resumes().is_empty());
+    let issue = store
+        .issue("symphony", "blocked-running")
+        .await
+        .expect("query blocked")
+        .expect("blocked row");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Blocked);
+    assert_eq!(
+        issue.blocker.expect("blocker").message,
+        "MNE-115 is In Progress"
+    );
+    let sessions = store
+        .opencode_sessions_for_issue("symphony", "blocked-running")
+        .await
+        .expect("sessions");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Queued);
+    assert_eq!(sessions[0].process_id, None);
+    assert_eq!(
+        sessions[0].lifecycle_marker.as_deref(),
+        Some("waiting_for_blocker")
     );
 }
 

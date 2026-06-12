@@ -48,10 +48,17 @@ pub(super) fn is_terminal_state(state: &str) -> bool {
     matches!(state, "Done" | "Canceled")
 }
 
-pub(super) fn nonterminal_blocker(blockers: &[LinearBlocker]) -> Option<&LinearBlocker> {
-    blockers
-        .iter()
-        .find(|blocker| !blocker.state.as_deref().is_some_and(is_terminal_state))
+fn is_accepted_blocker_state(state: &str) -> bool {
+    matches!(state, "Done" | "completed" | "Completed")
+}
+
+pub(super) fn unaccepted_blocker(blockers: &[LinearBlocker]) -> Option<&LinearBlocker> {
+    blockers.iter().find(|blocker| {
+        !blocker
+            .state
+            .as_deref()
+            .is_some_and(is_accepted_blocker_state)
+    })
 }
 
 pub(super) fn blocker_record(blocker: &LinearBlocker) -> BlockerRecord {

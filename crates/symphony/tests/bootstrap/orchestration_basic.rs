@@ -392,6 +392,47 @@ async fn orchestration_leaves_todo_queued_when_todo_spans_multiple_milestones() 
 }
 
 #[tokio::test]
+async fn orchestration_dispatches_unblocked_todo_when_future_milestone_todo_is_blocked() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let current = linear_issue("current", "MNE-105", "Todo", Some(1));
+    let mut future =
+        linear_issue("future", "MNE-118", "Todo", Some(2)).blocked_by(vec![LinearBlocker {
+            id: Some("future-blocker".into()),
+            identifier: Some("MNE-130".into()),
+            state: Some("Backlog".into()),
+        }]);
+    future.project_milestone = Some(symphony::linear::LinearMilestone {
+        id: "future-milestone-id".into(),
+        name: "Future Milestone".into(),
+    });
+    let client = RecordingLinearClient::new(vec![current, future]);
+
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
+
+    assert_eq!(report.dispatched, vec!["MNE-105"]);
+    assert_eq!(report.blocked, vec!["MNE-118"]);
+    assert_eq!(
+        client.transitions(),
+        vec![("current".into(), LinearTransition::InProgress)]
+    );
+    let blocked = store
+        .issue("symphony", "future")
+        .await
+        .expect("query future")
+        .expect("future issue");
+    assert_eq!(blocked.lifecycle_stage, LifecycleStage::Blocked);
+    assert_eq!(blocked.blocker.expect("blocker").kind, "linear_blocker");
+}
+
+#[tokio::test]
 async fn orchestration_reconciles_persisted_backlog_without_counting_capacity() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

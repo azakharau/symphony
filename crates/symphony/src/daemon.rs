@@ -139,12 +139,12 @@ async fn reconcile_project(
     let has_unanswered_owner_input = issues
         .iter()
         .any(|issue| issue.state == "Need Owner Input" && !issue.has_new_owner_answer);
-    let active_todo_milestone = active_todo_milestone(&issues);
-    let todo_milestone_count = todo_milestone_count(&issues);
+    let active_runnable_todo_milestone = active_runnable_todo_milestone(&issues);
+    let runnable_todo_milestone_count = runnable_todo_milestone_count(&issues);
     debug!(
         project_id = %project.id,
-        active_todo_milestone = active_todo_milestone.as_deref().unwrap_or("none"),
-        todo_milestone_count,
+        active_runnable_todo_milestone = active_runnable_todo_milestone.as_deref().unwrap_or("none"),
+        runnable_todo_milestone_count,
         issues = issues.len(),
         "fetched Linear candidate issues"
     );
@@ -154,11 +154,11 @@ async fn reconcile_project(
             "unanswered Need Owner Input blocks project dispatch"
         );
     }
-    if todo_milestone_count > 1 {
+    if runnable_todo_milestone_count > 1 {
         info!(
             project_id = %project.id,
-            todo_milestone_count,
-            "Todo queue spans multiple Linear milestones; dispatch is suppressed until Todo contains one active milestone"
+            runnable_todo_milestone_count,
+            "Runnable Todo queue spans multiple Linear milestones; dispatch is suppressed until unblocked Todo contains one active milestone"
         );
     }
     for issue in issues {
@@ -400,32 +400,7 @@ async fn reconcile_project(
                     report.blocked.push(issue.identifier);
                     continue;
                 };
-                if active_todo_milestone.as_deref() != Some(issue_milestone.id.as_str()) {
-                    debug!(
-                        project_id = %project.id,
-                        issue = %issue.identifier,
-                        issue_milestone = %issue_milestone.id,
-                        active_todo_milestone = active_todo_milestone.as_deref().unwrap_or("none"),
-                        "Todo issue is outside the active Todo milestone; leaving queued"
-                    );
-                    let record = issue_record(
-                        project,
-                        &issue,
-                        LifecycleStage::Queued,
-                        None,
-                        CleanupStatus::Clean,
-                    );
-                    store.upsert_issue(&record).await?;
-                } else if todo_milestone_count > 1 {
-                    let record = issue_record(
-                        project,
-                        &issue,
-                        LifecycleStage::Queued,
-                        None,
-                        CleanupStatus::Clean,
-                    );
-                    store.upsert_issue(&record).await?;
-                } else if let Some(blocker) = unaccepted_blocker(&issue.blocked_by) {
+                if let Some(blocker) = unaccepted_blocker(&issue.blocked_by) {
                     info!(
                         project_id = %project.id,
                         issue = %issue.identifier,
@@ -442,6 +417,33 @@ async fn reconcile_project(
                     );
                     store.upsert_issue(&record).await?;
                     report.blocked.push(issue.identifier);
+                } else if runnable_todo_milestone_count > 1 {
+                    let record = issue_record(
+                        project,
+                        &issue,
+                        LifecycleStage::Queued,
+                        None,
+                        CleanupStatus::Clean,
+                    );
+                    store.upsert_issue(&record).await?;
+                } else if active_runnable_todo_milestone.as_deref()
+                    != Some(issue_milestone.id.as_str())
+                {
+                    debug!(
+                        project_id = %project.id,
+                        issue = %issue.identifier,
+                        issue_milestone = %issue_milestone.id,
+                        active_runnable_todo_milestone = active_runnable_todo_milestone.as_deref().unwrap_or("none"),
+                        "Todo issue is outside the active runnable Todo milestone; leaving queued"
+                    );
+                    let record = issue_record(
+                        project,
+                        &issue,
+                        LifecycleStage::Queued,
+                        None,
+                        CleanupStatus::Clean,
+                    );
+                    store.upsert_issue(&record).await?;
                 } else if has_existing_session(store, &project.id, &issue.id).await? {
                     info!(
                         project_id = %project.id,
@@ -960,10 +962,10 @@ async fn refresh_opencode_session_metrics(
     Ok(())
 }
 
-fn active_todo_milestone(issues: &[LinearIssue]) -> Option<String> {
+fn active_runnable_todo_milestone(issues: &[LinearIssue]) -> Option<String> {
     issues
         .iter()
-        .filter(|issue| issue.state == "Todo")
+        .filter(|issue| issue.state == "Todo" && unaccepted_blocker(&issue.blocked_by).is_none())
         .find_map(|issue| {
             issue
                 .project_milestone
@@ -972,9 +974,12 @@ fn active_todo_milestone(issues: &[LinearIssue]) -> Option<String> {
         })
 }
 
-fn todo_milestone_count(issues: &[LinearIssue]) -> usize {
+fn runnable_todo_milestone_count(issues: &[LinearIssue]) -> usize {
     let mut milestones = Vec::<&str>::new();
-    for issue in issues.iter().filter(|issue| issue.state == "Todo") {
+    for issue in issues
+        .iter()
+        .filter(|issue| issue.state == "Todo" && unaccepted_blocker(&issue.blocked_by).is_none())
+    {
         let Some(milestone) = issue.project_milestone.as_ref() else {
             continue;
         };

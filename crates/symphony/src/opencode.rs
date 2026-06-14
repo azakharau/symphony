@@ -811,7 +811,7 @@ fn commit_policy_text() -> &'static str {
      - Use git.branch exactly as shown in the handoff schema; never write `HEAD` as git.branch.\n\
      - If commit or push fails, do not write a success handoff; stop with a provider_blocker or eval_failed handoff that includes the command failure details.\n\
      - Write or rewrite the handoff sidecar only after validation, commit, and push are complete so git.head_sha reflects the final durable revision.\n\
-     - If there are truly no git changes, leave changed_files empty, set git to null, and explain the no-change outcome in eval_results.details.\n\
+     - If there are truly no git changes, leave changed_files empty, keep git.branch and git.worktree_path populated, set git.head_sha to null, and explain the no-change outcome in eval_results.details.\n\
      - A successful handoff with changed_files but no matching pushed commit is invalid and must be repaired before Symphony can move the issue to Done."
 }
 

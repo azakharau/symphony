@@ -260,6 +260,13 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         spec.prompt
     );
     assert!(
+        spec.prompt.contains(
+            "If there are truly no git changes, leave changed_files empty, keep git.branch and git.worktree_path populated, set git.head_sha to null"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
         spec.prompt
             .contains("Implement the OpenCode ACP lifecycle runner"),
         "{}",

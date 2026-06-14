@@ -591,7 +591,10 @@ async fn successful_handoff_with_unpushed_issue_commit_does_not_close_or_cleanup
         .await
         .expect("orchestrate once");
 
-    assert!(client.transitions().is_empty());
+    assert_eq!(
+        client.transitions(),
+        vec![("unpushed".into(), LinearTransition::Todo)]
+    );
     assert!(
         worktree.exists(),
         "unverified git closure must keep worktree"
@@ -755,7 +758,10 @@ async fn successful_handoff_with_worktree_outside_configured_root_is_parked_with
         .await
         .expect("orchestrate once");
 
-    assert!(client.transitions().is_empty());
+    assert_eq!(
+        client.transitions(),
+        vec![("completed".into(), LinearTransition::Todo)]
+    );
     assert!(outside.exists(), "outside path must not be removed");
     assert!(
         client
@@ -764,10 +770,13 @@ async fn successful_handoff_with_worktree_outside_configured_root_is_parked_with
             .any(|(_, evidence)| evidence.kind == "malformed_handoff"
                 && evidence.body.contains("outside configured worktree root"))
     );
-    assert_eq!(
-        opencode.repairs(),
-        vec![("oc-80".into(), "unsafe_worktree_path".into())]
-    );
+    assert!(opencode.repairs().is_empty());
+    let issue = store
+        .issue("symphony", "completed")
+        .await
+        .expect("query failed")
+        .expect("failed issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
 }
 
 #[tokio::test]
@@ -814,7 +823,10 @@ async fn successful_handoff_with_sibling_worktree_is_parked_without_cleanup() {
         .await
         .expect("orchestrate once");
 
-    assert!(client.transitions().is_empty());
+    assert_eq!(
+        client.transitions(),
+        vec![("completed".into(), LinearTransition::Todo)]
+    );
     assert!(active.exists(), "active worktree must not be removed");
     assert!(sibling.exists(), "sibling worktree must not be removed");
     assert!(client.evidence().iter().any(|(_, evidence)| {
@@ -823,10 +835,13 @@ async fn successful_handoff_with_sibling_worktree_is_parked_without_cleanup() {
                 .body
                 .contains("does not match active session worktree")
     }));
-    assert_eq!(
-        opencode.repairs(),
-        vec![("oc-80".into(), "unsafe_worktree_path".into())]
-    );
+    assert!(opencode.repairs().is_empty());
+    let issue = store
+        .issue("symphony", "completed")
+        .await
+        .expect("query failed")
+        .expect("failed issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
 }
 
 #[tokio::test]
@@ -871,16 +886,22 @@ async fn successful_handoff_with_whitespace_worktree_path_is_parked_without_clea
         .await
         .expect("orchestrate once");
 
-    assert!(client.transitions().is_empty());
+    assert_eq!(
+        client.transitions(),
+        vec![("completed".into(), LinearTransition::Todo)]
+    );
     assert!(active.exists(), "active worktree must not be removed");
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff"
             && evidence.body.contains("leading or trailing whitespace")
     }));
-    assert_eq!(
-        opencode.repairs(),
-        vec![("oc-80".into(), "unsafe_worktree_path".into())]
-    );
+    assert!(opencode.repairs().is_empty());
+    let issue = store
+        .issue("symphony", "completed")
+        .await
+        .expect("query failed")
+        .expect("failed issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
 }
 
 #[tokio::test]
@@ -1075,7 +1096,7 @@ async fn provider_blocker_and_owner_question_park_with_owner_visible_question() 
 }
 
 #[tokio::test]
-async fn malformed_success_handoff_stays_in_progress_and_requests_opencode_repair() {
+async fn malformed_success_handoff_fails_fast_without_opencode_repair_or_owner_input() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let worktree = dir.path().join("SYM-85-worktree");
@@ -1122,32 +1143,44 @@ async fn malformed_success_handoff_stays_in_progress_and_requests_opencode_repai
         .await
         .expect("orchestrate once");
 
-    assert!(client.transitions().is_empty());
+    assert_eq!(
+        client.transitions(),
+        vec![("malformed".into(), LinearTransition::Todo)]
+    );
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff"
             && evidence
                 .body
                 .contains("successful handoff did not include git closure evidence")
     }));
-    assert_eq!(
-        opencode.repairs(),
-        vec![("oc-malformed".into(), "incomplete_success_handoff".into())]
-    );
+    assert!(opencode.repairs().is_empty());
     let issue = store
         .issue("symphony", "malformed")
         .await
         .expect("query issue")
         .expect("issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
     assert!(issue.blocker.is_none());
     assert_eq!(
         issue.failure.expect("failure").fingerprint.as_deref(),
         Some("incomplete_success_handoff")
     );
+    let session = store
+        .opencode_session("symphony", "malformed", "oc-malformed")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(session.stage, OpenCodeStage::Failed);
+    assert_eq!(session.process_id, None);
+    assert_eq!(
+        session.lifecycle_marker.as_deref(),
+        Some("failed:malformed_handoff")
+    );
 }
 
 #[tokio::test]
-async fn malformed_handoff_sidecar_requests_repair_without_owner_input() {
+async fn malformed_handoff_sidecar_fails_fast_kills_process_tree_and_does_not_repair() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
@@ -1206,9 +1239,12 @@ async fn malformed_handoff_sidecar_requests_repair_without_owner_input() {
     }
     assert!(
         stale_terminated,
-        "repair prompt must terminate the previous active ACP process before reconnecting"
+        "malformed handoff must terminate the previous active ACP process"
     );
-    assert!(client.transitions().is_empty());
+    assert_eq!(
+        client.transitions(),
+        vec![("malformed-json".into(), LinearTransition::Todo)]
+    );
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff" && evidence.body.contains("unknown field `status`")
     }));
@@ -1217,7 +1253,7 @@ async fn malformed_handoff_sidecar_requests_repair_without_owner_input() {
         .await
         .expect("query malformed")
         .expect("malformed issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
     assert!(issue.blocker.is_none());
     let failure = issue.failure.expect("failure");
     assert_eq!(failure.kind, "malformed_handoff");
@@ -1226,21 +1262,88 @@ async fn malformed_handoff_sidecar_requests_repair_without_owner_input() {
         Some("malformed_handoff_sidecar")
     );
     assert!(failure.message.contains("unknown field `status`"));
-    assert_eq!(
-        opencode.repairs(),
-        vec![("oc-86".into(), "malformed_handoff_sidecar".into())]
-    );
+    assert!(opencode.repairs().is_empty());
     let session = store
         .opencode_session("symphony", "malformed-json", "oc-86")
         .await
         .expect("query session")
         .expect("session");
-    assert_eq!(session.stage, OpenCodeStage::Running);
-    assert_eq!(session.lifecycle_marker.as_deref(), Some("repair_prompted"));
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(session.stage, OpenCodeStage::Failed);
+    assert_eq!(session.process_id, None);
+    assert_eq!(
+        session.lifecycle_marker.as_deref(),
+        Some("failed:malformed_handoff")
+    );
     assert_eq!(
         session.last_event.as_deref(),
-        Some("repair_prompted:malformed_handoff_sidecar")
+        Some("failed:malformed_handoff_sidecar")
     );
+}
+
+#[tokio::test]
+async fn dead_in_progress_session_without_handoff_sidecar_fails_fast_instead_of_reusing_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let worktree = dir.path().join("SYM-87-worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    store
+        .upsert_issue(test_issue("symphony", "missing-sidecar", "SYM-87"))
+        .await
+        .expect("running issue");
+    store
+        .upsert_opencode_session({
+            let mut session = test_session("symphony", "missing-sidecar", "oc-87", &worktree);
+            session.process_id = None;
+            session
+        })
+        .await
+        .expect("running session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "missing-sidecar",
+        "SYM-87",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(None);
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("missing-sidecar".into(), LinearTransition::Todo)]
+    );
+    assert!(client.evidence().iter().any(|(_, evidence)| {
+        evidence.kind == "malformed_handoff"
+            && evidence
+                .body
+                .contains(".symphony/opencode-handoff.json was not produced")
+    }));
+    assert!(opencode.repairs().is_empty());
+    let issue = store
+        .issue("symphony", "missing-sidecar")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(
+        issue.failure.expect("failure").fingerprint.as_deref(),
+        Some("missing_handoff_sidecar")
+    );
+    let session = store
+        .opencode_session("symphony", "missing-sidecar", "oc-87")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(session.stage, OpenCodeStage::Failed);
+    assert_eq!(session.process_id, None);
 }
 
 #[tokio::test]

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use tracing::{debug, info, warn};
 
-use super::terminate_current_session_process;
+use super::{process_elapsed_seconds, session_has_live_process, terminate_current_session_process};
 use crate::{
     config::ProjectConfig,
     linear::{LinearClient, LinearIssue, LinearIssueEvidence, LinearTransition},
@@ -42,13 +42,42 @@ pub(super) async fn process_in_progress_handoff(
     let handoff = match opencode.latest_handoff(&session).await {
         Ok(Some(handoff)) => handoff,
         Ok(None) => {
-            debug!(
+            if session_has_live_process(&session).await {
+                debug!(
+                    project_id = %project.id,
+                    issue = %issue.identifier,
+                    session_id = %session.session_id,
+                    "OpenCode handoff not available yet"
+                );
+                return Ok(false);
+            }
+
+            let message = ".symphony/opencode-handoff.json was not produced before the OpenCode ACP process ended".to_string();
+            warn!(
                 project_id = %project.id,
                 issue = %issue.identifier,
                 session_id = %session.session_id,
-                "OpenCode handoff not available yet"
+                process_id = session.process_id,
+                message,
+                "OpenCode session ended without handoff sidecar"
             );
-            return Ok(false);
+            fail_runtime_defect(
+                project,
+                store,
+                linear,
+                issue,
+                "malformed_handoff",
+                message.clone(),
+                FailureRecord {
+                    kind: "malformed_handoff".into(),
+                    message,
+                    fingerprint: Some("missing_handoff_sidecar".into()),
+                    occurrence_count: 1,
+                },
+                &session,
+            )
+            .await?;
+            return Ok(true);
         }
         Err(OpenCodeError::MalformedHandoff(message)) => {
             warn!(
@@ -58,10 +87,9 @@ pub(super) async fn process_in_progress_handoff(
                 message,
                 "OpenCode handoff sidecar failed validation"
             );
-            request_opencode_repair(
+            fail_runtime_defect(
                 project,
                 store,
-                opencode,
                 linear,
                 issue,
                 "malformed_handoff",
@@ -189,7 +217,7 @@ pub(super) async fn process_in_progress_handoff(
 async fn close_successful_handoff(
     project: &ProjectConfig,
     store: &SqliteStore,
-    opencode: &impl OpenCodeLauncher,
+    _opencode: &impl OpenCodeLauncher,
     linear: &impl LinearClient,
     issue: &LinearIssue,
     session: &crate::state::OpenCodeSessionRecord,
@@ -203,10 +231,9 @@ async fn close_successful_handoff(
             message,
             "successful OpenCode handoff failed validation"
         );
-        request_opencode_repair(
+        fail_runtime_defect(
             project,
             store,
-            opencode,
             linear,
             issue,
             "malformed_handoff",
@@ -230,10 +257,9 @@ async fn close_successful_handoff(
             session_id = %session.session_id,
             "successful OpenCode handoff missing git evidence"
         );
-        request_opencode_repair(
+        fail_runtime_defect(
             project,
             store,
-            opencode,
             linear,
             issue,
             "malformed_handoff",
@@ -257,10 +283,9 @@ async fn close_successful_handoff(
             message,
             "successful OpenCode handoff has unsafe worktree evidence"
         );
-        request_opencode_repair(
+        fail_runtime_defect(
             project,
             store,
-            opencode,
             linear,
             issue,
             "malformed_handoff",
@@ -289,10 +314,9 @@ async fn close_successful_handoff(
                     message,
                     "successful OpenCode handoff failed git closure verification"
                 );
-                request_opencode_repair(
+                fail_runtime_defect(
                     project,
                     store,
-                    opencode,
                     linear,
                     issue,
                     "malformed_handoff",
@@ -505,6 +529,83 @@ async fn request_opencode_repair(
     repair_session.silence_observed = false;
     store.upsert_opencode_session(&repair_session).await?;
     Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "runtime defect closure needs project, adapters, issue, failure evidence, and active session"
+)]
+async fn fail_runtime_defect(
+    project: &ProjectConfig,
+    store: &SqliteStore,
+    linear: &impl LinearClient,
+    issue: &LinearIssue,
+    evidence_kind: &str,
+    message: String,
+    failure: FailureRecord,
+    session: &crate::state::OpenCodeSessionRecord,
+) -> anyhow::Result<()> {
+    let elapsed_seconds = match session.process_id {
+        Some(process_id) => process_elapsed_seconds(process_id).await,
+        None => None,
+    };
+    linear
+        .record_issue_evidence(
+            &issue.id,
+            LinearIssueEvidence {
+                kind: evidence_kind.into(),
+                body: runtime_defect_evidence_body(&message, session, elapsed_seconds),
+            },
+        )
+        .await?;
+    terminate_current_session_process(project, issue, session).await?;
+    linear
+        .transition_issue(&issue.id, LinearTransition::Todo)
+        .await?;
+
+    let mut record = issue_record(
+        project,
+        issue,
+        LifecycleStage::Failed,
+        None,
+        CleanupStatus::Clean,
+    );
+    record.failure = Some(failure.clone());
+    store.upsert_issue(&record).await?;
+
+    let mut failed_session = session.clone();
+    failed_session.process_id = None;
+    failed_session.lifecycle_stage = LifecycleStage::Failed;
+    failed_session.stage = crate::state::OpenCodeStage::Failed;
+    failed_session.lifecycle_marker = Some(format!("failed:{}", failure.kind));
+    failed_session.last_event = Some(format!(
+        "failed:{}",
+        failure
+            .fingerprint
+            .as_deref()
+            .unwrap_or(failure.kind.as_str())
+    ));
+    failed_session.silence_observed = false;
+    store.upsert_opencode_session(&failed_session).await?;
+    Ok(())
+}
+
+fn runtime_defect_evidence_body(
+    message: &str,
+    session: &crate::state::OpenCodeSessionRecord,
+    elapsed_seconds: Option<u64>,
+) -> String {
+    format!(
+        "Symphony runtime defect: {message}\n\nsession_id: {session_id}\nprocess_id: {process_id}\nelapsed_seconds: {elapsed_seconds}\n\nThe issue was moved back to Todo and the OpenCode session row was marked failed. This is not owner input; fix the runner/tooling defect before retrying.",
+        session_id = session.session_id,
+        process_id = session
+            .process_id
+            .map(|process_id| process_id.to_string())
+            .unwrap_or_else(|| "none".into()),
+        elapsed_seconds = elapsed_seconds
+            .map(|seconds| seconds.to_string())
+            .unwrap_or_else(|| "unknown".into()),
+    )
 }
 
 async fn latest_session(

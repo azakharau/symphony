@@ -337,6 +337,8 @@ async fn reconcile_project(
                         CleanupStatus::Clean,
                     );
                     store.upsert_issue(&record).await?;
+                    mark_existing_session_waiting_for_project_owner_input(store, project, &issue)
+                        .await?;
                     continue;
                 }
                 if process_in_progress_handoff(project, store, linear, opencode, &issue, existing)
@@ -377,6 +379,8 @@ async fn reconcile_project(
                         CleanupStatus::Clean,
                     );
                     store.upsert_issue(&record).await?;
+                    mark_existing_session_waiting_for_project_owner_input(store, project, &issue)
+                        .await?;
                     continue;
                 }
                 let Some(issue_milestone) = issue.project_milestone.as_ref() else {
@@ -417,6 +421,37 @@ async fn reconcile_project(
                     );
                     store.upsert_issue(&record).await?;
                     report.blocked.push(issue.identifier);
+                } else if let Some(failure) =
+                    unresolved_runtime_defect(store, project, &issue).await?
+                {
+                    info!(
+                        project_id = %project.id,
+                        issue = %issue.identifier,
+                        failure_kind = %failure.kind,
+                        failure_fingerprint = failure.fingerprint.as_deref().unwrap_or(&failure.message),
+                        "Todo issue suppressed by unresolved runtime defect"
+                    );
+                    let mut record = issue_record(
+                        project,
+                        &issue,
+                        LifecycleStage::Failed,
+                        Some(BlockerRecord {
+                            kind: "runtime_defect".into(),
+                            message: format!(
+                                "unresolved runtime defect: {}",
+                                failure.fingerprint.as_deref().unwrap_or(&failure.message)
+                            ),
+                            observed_at: issue.updated_at.clone(),
+                        }),
+                        CleanupStatus::Clean,
+                    );
+                    record.failure = Some(failure);
+                    store.upsert_issue(&record).await?;
+                    mark_existing_session_failed_for_unresolved_runtime_defect(
+                        store, project, &issue,
+                    )
+                    .await?;
+                    report.blocked.push(issue.identifier);
                 } else if runnable_todo_milestone_count > 1 {
                     let record = issue_record(
                         project,
@@ -444,7 +479,7 @@ async fn reconcile_project(
                         CleanupStatus::Clean,
                     );
                     store.upsert_issue(&record).await?;
-                } else if has_existing_session(store, &project.id, &issue.id).await? {
+                } else if has_reusable_existing_session(store, &project.id, &issue.id).await? {
                     info!(
                         project_id = %project.id,
                         issue = %issue.identifier,
@@ -661,6 +696,29 @@ async fn mark_existing_session_queued(
     Ok(())
 }
 
+async fn unresolved_runtime_defect(
+    store: &SqliteStore,
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+) -> anyhow::Result<Option<FailureRecord>> {
+    let Some(record) = store.issue(&project.id, &issue.id).await? else {
+        return Ok(None);
+    };
+    let Some(failure) = record.failure else {
+        return Ok(None);
+    };
+    if recoverable_opencode_failure(&failure) {
+        return Ok(None);
+    }
+    if !matches!(
+        failure.kind.as_str(),
+        "malformed_handoff" | "runtime_defect"
+    ) {
+        return Ok(None);
+    }
+    Ok(Some(failure))
+}
+
 async fn mark_existing_session_blocked(
     store: &SqliteStore,
     project: &ProjectConfig,
@@ -675,6 +733,48 @@ async fn mark_existing_session_blocked(
     session.stage = OpenCodeStage::Silent;
     session.lifecycle_marker = Some("waiting_for_blocker".into());
     session.last_event = Some("existing_session_waiting_for_blocker".into());
+    session.silence_observed = false;
+    store.upsert_opencode_session(&session).await?;
+    Ok(())
+}
+
+async fn mark_existing_session_waiting_for_project_owner_input(
+    store: &SqliteStore,
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+) -> anyhow::Result<()> {
+    let Some(mut session) = latest_session_for_issue(store, &project.id, &issue.id).await? else {
+        return Ok(());
+    };
+    terminate_current_session_process(project, issue, &session).await?;
+    session.process_id = None;
+    session.lifecycle_stage = LifecycleStage::Queued;
+    session.stage = OpenCodeStage::Silent;
+    session.lifecycle_marker = Some("waiting_for_project_owner_input".into());
+    session.last_event = Some("existing_session_waiting_for_project_owner_input".into());
+    session.silence_observed = false;
+    store.upsert_opencode_session(&session).await?;
+    Ok(())
+}
+
+async fn mark_existing_session_failed_for_unresolved_runtime_defect(
+    store: &SqliteStore,
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+) -> anyhow::Result<()> {
+    let Some(mut session) = latest_session_for_issue(store, &project.id, &issue.id).await? else {
+        return Ok(());
+    };
+    terminate_current_session_process(project, issue, &session).await?;
+    session.process_id = None;
+    session.lifecycle_stage = LifecycleStage::Failed;
+    session.stage = OpenCodeStage::Failed;
+    session
+        .lifecycle_marker
+        .get_or_insert_with(|| "failed:unresolved_runtime_defect".into());
+    session
+        .last_event
+        .get_or_insert_with(|| "failed:unresolved_runtime_defect".into());
     session.silence_observed = false;
     store.upsert_opencode_session(&session).await?;
     Ok(())
@@ -780,6 +880,20 @@ async fn latest_session_for_issue(
     Ok(sessions.into_iter().next_back())
 }
 
+async fn has_reusable_existing_session(
+    store: &SqliteStore,
+    project_id: &str,
+    issue_id: &str,
+) -> anyhow::Result<bool> {
+    let Some(session) = latest_session_for_issue(store, project_id, issue_id).await? else {
+        return Ok(false);
+    };
+    Ok(!matches!(
+        session.lifecycle_stage,
+        LifecycleStage::Failed | LifecycleStage::Completed
+    ))
+}
+
 async fn session_requires_resume(session: &OpenCodeSessionRecord) -> bool {
     if session.lifecycle_stage != LifecycleStage::Running {
         return false;
@@ -788,6 +902,13 @@ async fn session_requires_resume(session: &OpenCodeSessionRecord) -> bool {
         return true;
     };
     !opencode_process_is_alive(process_id).await
+}
+
+pub(super) async fn session_has_live_process(session: &OpenCodeSessionRecord) -> bool {
+    let Some(process_id) = session.process_id else {
+        return false;
+    };
+    opencode_process_is_alive(process_id).await
 }
 
 async fn opencode_process_is_alive(process_id: u32) -> bool {
@@ -799,6 +920,21 @@ async fn opencode_process_is_alive(process_id: u32) -> bool {
         .split(|byte| *byte == 0)
         .filter_map(|part| std::str::from_utf8(part).ok())
         .any(|part| part.contains("opencode"))
+}
+
+pub(super) async fn process_elapsed_seconds(process_id: u32) -> Option<u64> {
+    let output = tokio::process::Command::new("ps")
+        .args(["-o", "etimes=", "-p", &process_id.to_string()])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .ok()
 }
 
 pub(super) async fn terminate_current_session_process(
@@ -819,24 +955,19 @@ pub(super) async fn terminate_current_session_process(
         process_id,
         "terminating stale OpenCode ACP process before session continuation"
     );
-    let status = tokio::process::Command::new("kill")
-        .arg("-TERM")
-        .arg(process_id.to_string())
-        .status()
-        .await?;
-    if !status.success() {
-        warn!(
-            project_id = %project.id,
-            issue = %issue.identifier,
-            session_id = %session.session_id,
-            process_id,
-            status = %status,
-            "failed to terminate stale OpenCode ACP process"
-        );
-        return Ok(());
+    let mut targets = descendant_process_ids(process_id).await?;
+    targets.reverse();
+    targets.push(process_id);
+    terminate_processes(&targets, "-TERM").await?;
+    for _ in 0..20 {
+        if !process_exists(process_id).await {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(100)).await;
     }
+    terminate_processes(&targets, "-KILL").await?;
     for _ in 0..10 {
-        if !opencode_process_is_alive(process_id).await {
+        if !process_exists(process_id).await {
             return Ok(());
         }
         sleep(Duration::from_millis(100)).await;
@@ -849,6 +980,72 @@ pub(super) async fn terminate_current_session_process(
         "stale OpenCode ACP process was still alive after SIGTERM"
     );
     Ok(())
+}
+
+async fn terminate_processes(process_ids: &[u32], signal: &str) -> anyhow::Result<()> {
+    for process_id in process_ids {
+        if !process_exists(*process_id).await {
+            continue;
+        }
+        let status = tokio::process::Command::new("kill")
+            .arg(signal)
+            .arg(process_id.to_string())
+            .status()
+            .await?;
+        if !status.success() && process_exists(*process_id).await {
+            warn!(
+                process_id,
+                signal,
+                status = %status,
+                "failed to signal OpenCode process tree member"
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn process_exists(process_id: u32) -> bool {
+    tokio::fs::try_exists(format!("/proc/{process_id}"))
+        .await
+        .unwrap_or(false)
+}
+
+async fn descendant_process_ids(root_process_id: u32) -> anyhow::Result<Vec<u32>> {
+    let mut children = std::collections::BTreeMap::<u32, Vec<u32>>::new();
+    let mut entries = tokio::fs::read_dir("/proc").await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let file_name = entry.file_name();
+        let Some(pid) = file_name.to_str().and_then(|name| name.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(parent_pid) = read_parent_process_id(pid).await else {
+            continue;
+        };
+        children.entry(parent_pid).or_default().push(pid);
+    }
+
+    let mut descendants = Vec::new();
+    let mut stack = children.remove(&root_process_id).unwrap_or_default();
+    while let Some(pid) = stack.pop() {
+        if let Some(grandchildren) = children.remove(&pid) {
+            stack.extend(grandchildren);
+        }
+        descendants.push(pid);
+    }
+    Ok(descendants)
+}
+
+async fn read_parent_process_id(process_id: u32) -> anyhow::Result<u32> {
+    let stat = tokio::fs::read_to_string(format!("/proc/{process_id}/stat")).await?;
+    let Some(after_command) = stat.rsplit_once(") ") else {
+        anyhow::bail!("invalid proc stat for pid {process_id}");
+    };
+    let mut fields = after_command.1.split_whitespace();
+    let _state = fields.next();
+    let Some(parent_pid) = fields.next() else {
+        anyhow::bail!("missing parent pid for pid {process_id}");
+    };
+    Ok(parent_pid.parse::<u32>()?)
 }
 
 async fn continue_stale_session(

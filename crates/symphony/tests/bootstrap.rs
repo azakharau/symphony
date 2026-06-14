@@ -403,6 +403,41 @@ for line in sys.stdin:
     script_path
 }
 
+fn write_failing_acp_setup_script(dir: &Path, child_pid_path: &Path) -> PathBuf {
+    let script_path = dir.join("fake-opencode-acp-setup-fail.py");
+    let child_pid_literal =
+        serde_json::to_string(&child_pid_path.display().to_string()).expect("json path");
+    fs::write(
+        &script_path,
+        format!(
+            r#"#!/usr/bin/env python3
+import json
+import pathlib
+import subprocess
+import sys
+import time
+
+child = subprocess.Popen(["sleep", "60"])
+pathlib.Path({child_pid_literal}).write_text(str(child.pid))
+sys.stderr.write("setup stderr must be drained\n" * 2000)
+sys.stderr.flush()
+
+line = sys.stdin.readline()
+message = json.loads(line)
+print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "error": {{"code": -32000, "message": "setup failed before session attachment"}}}}), flush=True)
+time.sleep(60)
+"#
+        ),
+    )
+    .expect("fake setup failure script");
+    let mut permissions = fs::metadata(&script_path)
+        .expect("script metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script_path, permissions).expect("script executable");
+    script_path
+}
+
 fn write_fake_acp_script_without_handoff(dir: &Path, transcript_path: &Path) -> PathBuf {
     let script_path = dir.join("fake-opencode-acp-no-handoff.py");
     let transcript_literal =
@@ -721,6 +756,32 @@ impl OpenCodeLauncher for FailingLaunchOpenCodeLauncher {
         Err(opencode::OpenCodeError::InvalidWorktree(
             self.message.clone(),
         ))
+    }
+}
+
+#[derive(Debug)]
+struct SetupFailingOpenCodeLauncher;
+
+#[async_trait::async_trait]
+impl OpenCodeLauncher for SetupFailingOpenCodeLauncher {
+    async fn launch(
+        &self,
+        spec: &opencode::OpenCodeLaunchSpec,
+    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+        Err(opencode::OpenCodeError::AcpSetupFailed {
+            issue_identifier: spec.issue_identifier.clone(),
+            process_id: Some(4242),
+            session_id: None,
+            reason: "setup failed before session attachment".into(),
+            termination: Box::new(opencode::ProcessTreeTerminationEvidence {
+                root_process_id: 4242,
+                descendant_process_ids: vec![4243],
+                term_signal_sent: true,
+                kill_signal_sent: false,
+                still_alive: false,
+                reason: "setup failed before session attachment".into(),
+            }),
+        })
     }
 }
 

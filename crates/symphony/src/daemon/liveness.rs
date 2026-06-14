@@ -14,11 +14,20 @@ pub(super) async fn project_liveness_projection(
     blocked: usize,
     capacity: usize,
 ) -> anyhow::Result<(RuntimeLivenessStatus, String)> {
-    if project_has_dead_runner(store, &project.id).await? {
-        return Ok((
-            RuntimeLivenessStatus::RunnerProcessDead,
-            "at least one running OpenCode session has no live runner process".into(),
-        ));
+    if let Some(status) = project_runner_problem(store, &project.id).await? {
+        let reason = match status {
+            RuntimeLivenessStatus::RunnerSetupFailed => {
+                "at least one OpenCode session failed ACP setup before session attachment"
+            }
+            RuntimeLivenessStatus::RunnerStaleKilled => {
+                "at least one stale OpenCode process tree was terminated before continuation"
+            }
+            RuntimeLivenessStatus::RunnerProcessDead => {
+                "at least one running OpenCode session has no live runner process"
+            }
+            _ => "OpenCode runner is not healthy",
+        };
+        return Ok((status, reason.into()));
     }
     if running >= project.concurrency.max_sessions {
         return Ok((
@@ -44,11 +53,11 @@ pub(super) async fn project_liveness_projection(
     ))
 }
 
-async fn project_has_dead_runner(store: &SqliteStore, project_id: &str) -> anyhow::Result<bool> {
+async fn project_runner_problem(
+    store: &SqliteStore,
+    project_id: &str,
+) -> anyhow::Result<Option<RuntimeLivenessStatus>> {
     for issue in store.issues_for_project(project_id).await? {
-        if issue.lifecycle_stage != LifecycleStage::Running {
-            continue;
-        }
         let mut sessions = store
             .opencode_sessions_for_issue(project_id, &issue.issue_id)
             .await?;
@@ -56,9 +65,26 @@ async fn project_has_dead_runner(store: &SqliteStore, project_id: &str) -> anyho
         let Some(session) = sessions.into_iter().next_back() else {
             continue;
         };
+        if session
+            .lifecycle_marker
+            .as_deref()
+            .is_some_and(|marker| marker.starts_with("setup_failed:"))
+        {
+            return Ok(Some(RuntimeLivenessStatus::RunnerSetupFailed));
+        }
+        if session
+            .last_event
+            .as_deref()
+            .is_some_and(|event| event.starts_with("stale_killed:"))
+        {
+            return Ok(Some(RuntimeLivenessStatus::RunnerStaleKilled));
+        }
+        if issue.lifecycle_stage != LifecycleStage::Running {
+            continue;
+        }
         if session_requires_resume(&session).await {
-            return Ok(true);
+            return Ok(Some(RuntimeLivenessStatus::RunnerProcessDead));
         }
     }
-    Ok(false)
+    Ok(None)
 }

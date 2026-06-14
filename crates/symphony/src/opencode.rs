@@ -1,11 +1,16 @@
 mod acp;
 mod archive;
+mod lifecycle;
 mod types;
 mod worktree;
 
 use serde_json::json;
 use thiserror::Error;
-use tokio::{io::BufReader, process::Command};
+use tokio::{
+    io::BufReader,
+    process::{Child, ChildStdin, ChildStdout},
+    task::JoinHandle,
+};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -23,6 +28,9 @@ pub use archive::{
     OpenCodeTodoActivity, archive_and_delete_session_tree, read_session_tree_activity,
     read_session_tree_metrics,
 };
+use lifecycle::AcpChildLifecycle;
+pub use lifecycle::ProcessTreeTerminationEvidence;
+pub(crate) use lifecycle::terminate_process_tree;
 pub use types::{
     GitClosureEvidence, OpenCodeEvalResult, OpenCodeHandoff, OpenCodeLaunchSpec,
     OpenCodeRuntimeConfig, OpenCodeSessionEvent, OpenCodeStartedSession, OpenCodeStopReason,
@@ -101,6 +109,145 @@ impl OpenCodeLauncher for DeterministicOpenCodeLauncher {
 #[derive(Debug, Default)]
 pub struct StdioOpenCodeLauncher;
 
+async fn initialize_acp_child(
+    child: &mut AcpChildLifecycle,
+    spec: &OpenCodeLaunchSpec,
+    request_id: u64,
+) -> Result<(), OpenCodeError> {
+    let (stdin, stdout) = child.io();
+    acp_request(
+        stdin,
+        stdout,
+        &spec.permission_policy,
+        request_id,
+        "initialize",
+        json!({
+            "protocolVersion": 1,
+            "agent": spec.agent,
+            "model": spec.model,
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn configure_acp_session(
+    child: &mut AcpChildLifecycle,
+    spec: &OpenCodeLaunchSpec,
+    session_id: &str,
+    next_id: &mut u64,
+) -> Result<(), OpenCodeError> {
+    let (stdin, stdout) = child.io();
+    set_session_config_option(
+        stdin,
+        stdout,
+        &spec.permission_policy,
+        *next_id,
+        session_id,
+        "mode",
+        Some(spec.agent.as_str()),
+    )
+    .await?;
+    *next_id += 1;
+    let (stdin, stdout) = child.io();
+    set_session_config_option(
+        stdin,
+        stdout,
+        &spec.permission_policy,
+        *next_id,
+        session_id,
+        "model",
+        spec.model.as_deref(),
+    )
+    .await?;
+    *next_id += 1;
+    let (stdin, stdout) = child.io();
+    set_session_config_option(
+        stdin,
+        stdout,
+        &spec.permission_policy,
+        *next_id,
+        session_id,
+        "effort",
+        spec.effort.as_deref(),
+    )
+    .await?;
+    *next_id += 1;
+    Ok(())
+}
+
+async fn resume_acp_session(
+    child: &mut AcpChildLifecycle,
+    spec: &OpenCodeLaunchSpec,
+    session: &OpenCodeSessionRecord,
+    request_id: u64,
+) -> Result<(), OpenCodeError> {
+    let (stdin, stdout) = child.io();
+    let resume_result = acp_request(
+        stdin,
+        stdout,
+        &spec.permission_policy,
+        request_id,
+        "session/resume",
+        session_resume_params(spec, session),
+    )
+    .await?;
+    let resumed_session_id =
+        extract_session_id(&resume_result).unwrap_or_else(|_| session.session_id.clone());
+    if resumed_session_id != session.session_id {
+        return Err(OpenCodeError::AcpProtocol(format!(
+            "ACP session/resume returned `{resumed_session_id}` for `{}`",
+            session.session_id
+        )));
+    }
+    Ok(())
+}
+
+fn spawn_prompt_reader(
+    permission_policy: &PermissionPolicy,
+    prompt_request_id: u64,
+    warning: &'static str,
+    mut child: Child,
+    mut stdin: ChildStdin,
+    mut stdout: BufReader<ChildStdout>,
+    stderr_drain: JoinHandle<()>,
+) {
+    let permission_policy = permission_policy.clone();
+    tokio::spawn(async move {
+        if let Err(error) = read_acp_response(
+            &mut stdout,
+            &mut stdin,
+            &permission_policy,
+            prompt_request_id,
+            "session/prompt",
+        )
+        .await
+        {
+            warn!(error = %error, message = warning, "OpenCode ACP prompt stream ended with error");
+        }
+        let _ = child.wait().await;
+        stderr_drain.abort();
+    });
+}
+
+fn spawn_stream_drain(
+    permission_policy: &PermissionPolicy,
+    warning: &'static str,
+    mut child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    stderr_drain: JoinHandle<()>,
+) {
+    let permission_policy = permission_policy.clone();
+    tokio::spawn(async move {
+        if let Err(error) = drain_acp_stream(stdout, stdin, permission_policy).await {
+            warn!(error = %error, message = warning, "OpenCode ACP stream drain ended with error");
+        }
+        let _ = child.wait().await;
+        stderr_drain.abort();
+    });
+}
+
 #[async_trait::async_trait]
 impl OpenCodeLauncher for StdioOpenCodeLauncher {
     async fn launch(
@@ -117,91 +264,51 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         );
         ensure_worktree(spec).await?;
         remove_stale_handoff_sidecar(&spec.cwd).await?;
-        let mut child = Command::new(&spec.command)
-            .args(&spec.args)
-            .current_dir(&spec.cwd)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
-        let process_id = child.id();
-        let mut stdin = child.stdin.take().ok_or(OpenCodeError::MissingStdin)?;
-        let stdout = child.stdout.take().ok_or(OpenCodeError::MissingStdout)?;
-        let mut stdout = BufReader::new(stdout);
+        let mut child = AcpChildLifecycle::spawn(spec).await?;
+        let process_id = child.process_id();
 
         let mut next_id = 1_u64;
-        acp_request(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            "initialize",
-            json!({
-                "protocolVersion": 1,
-                "agent": spec.agent,
-                "model": spec.model,
-            }),
-        )
-        .await?;
-        next_id += 1;
+        let setup = async {
+            initialize_acp_child(&mut child, spec, next_id).await?;
+            next_id += 1;
 
-        let session_result = acp_request(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            "session/new",
-            session_new_params(spec),
-        )
-        .await?;
-        next_id += 1;
-        let session_id = extract_session_id(&session_result)?;
-        info!(
-            issue = %spec.issue_identifier,
-            session_id = %session_id,
-            cwd = %spec.cwd.display(),
-            "OpenCode ACP session created"
-        );
-        set_session_config_option(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            &session_id,
-            "mode",
-            Some(spec.agent.as_str()),
-        )
-        .await?;
-        next_id += 1;
-        set_session_config_option(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            &session_id,
-            "model",
-            spec.model.as_deref(),
-        )
-        .await?;
-        next_id += 1;
-        set_session_config_option(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            &session_id,
-            "effort",
-            spec.effort.as_deref(),
-        )
-        .await?;
-        next_id += 1;
+            let (stdin, stdout) = child.io();
+            let session_result = acp_request(
+                stdin,
+                stdout,
+                &spec.permission_policy,
+                next_id,
+                "session/new",
+                session_new_params(spec),
+            )
+            .await?;
+            next_id += 1;
+            let session_id = extract_session_id(&session_result)?;
+            info!(
+                issue = %spec.issue_identifier,
+                session_id = %session_id,
+                cwd = %spec.cwd.display(),
+                "OpenCode ACP session created"
+            );
+            configure_acp_session(&mut child, spec, &session_id, &mut next_id).await?;
+            Ok::<String, OpenCodeError>(session_id)
+        }
+        .await;
+        let session_id = match setup {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                return Err(child
+                    .setup_failed(&spec.issue_identifier, None, error.to_string())
+                    .await);
+            }
+        };
         let prompt_request_id = next_id;
         let prompt = format!(
             "OpenCode ACP session id: {session_id}\n\n{task_prompt}",
             task_prompt = spec.prompt.as_str()
         );
         write_acp_request(
-            &mut stdin,
+            child.stdin(),
             prompt_request_id,
             "session/prompt",
             json!({
@@ -215,22 +322,16 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             }),
         )
         .await?;
-        let permission_policy = spec.permission_policy.clone();
-
-        tokio::spawn(async move {
-            if let Err(error) = read_acp_response(
-                &mut stdout,
-                &mut stdin,
-                &permission_policy,
-                prompt_request_id,
-                "session/prompt",
-            )
-            .await
-            {
-                warn!(error = %error, "OpenCode ACP prompt stream ended with error");
-            }
-            let _ = child.wait().await;
-        });
+        let (process, stdin, stdout, stderr_drain) = child.into_parts();
+        spawn_prompt_reader(
+            &spec.permission_policy,
+            prompt_request_id,
+            "OpenCode ACP prompt stream ended with error",
+            process,
+            stdin,
+            stdout,
+            stderr_drain,
+        );
 
         Ok(OpenCodeStartedSession {
             session_id,
@@ -251,92 +352,37 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             "resuming OpenCode ACP session"
         );
         ensure_worktree(spec).await?;
-        let mut child = Command::new(&spec.command)
-            .args(&spec.args)
-            .current_dir(&spec.cwd)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
-        let process_id = child.id();
-        let mut stdin = child.stdin.take().ok_or(OpenCodeError::MissingStdin)?;
-        let stdout = child.stdout.take().ok_or(OpenCodeError::MissingStdout)?;
-        let mut stdout = BufReader::new(stdout);
+        let mut child = AcpChildLifecycle::spawn(spec).await?;
+        let process_id = child.process_id();
 
         let mut next_id = 1_u64;
-        acp_request(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            "initialize",
-            json!({
-                "protocolVersion": 1,
-                "agent": spec.agent,
-                "model": spec.model,
-            }),
-        )
-        .await?;
-        next_id += 1;
-
-        let resume_result = acp_request(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            "session/resume",
-            session_resume_params(spec, session),
-        )
-        .await?;
-        next_id += 1;
-        let resumed_session_id =
-            extract_session_id(&resume_result).unwrap_or_else(|_| session.session_id.clone());
-        if resumed_session_id != session.session_id {
-            return Err(OpenCodeError::AcpProtocol(format!(
-                "ACP session/resume returned `{resumed_session_id}` for `{}`",
-                session.session_id
-            )));
+        let setup = async {
+            initialize_acp_child(&mut child, spec, next_id).await?;
+            next_id += 1;
+            resume_acp_session(&mut child, spec, session, next_id).await?;
+            next_id += 1;
+            configure_acp_session(&mut child, spec, &session.session_id, &mut next_id).await?;
+            Ok::<(), OpenCodeError>(())
         }
-        set_session_config_option(
-            &mut stdin,
-            &mut stdout,
+        .await;
+        if let Err(error) = setup {
+            return Err(child
+                .setup_failed(
+                    &spec.issue_identifier,
+                    Some(session.session_id.clone()),
+                    error.to_string(),
+                )
+                .await);
+        }
+        let (process, stdin, stdout, stderr_drain) = child.into_parts();
+        spawn_stream_drain(
             &spec.permission_policy,
-            next_id,
-            &session.session_id,
-            "mode",
-            Some(spec.agent.as_str()),
-        )
-        .await?;
-        next_id += 1;
-        set_session_config_option(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            &session.session_id,
-            "model",
-            spec.model.as_deref(),
-        )
-        .await?;
-        next_id += 1;
-        set_session_config_option(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            &session.session_id,
-            "effort",
-            spec.effort.as_deref(),
-        )
-        .await?;
-
-        let permission_policy = spec.permission_policy.clone();
-        tokio::spawn(async move {
-            if let Err(error) = drain_acp_stream(stdout, stdin, permission_policy).await {
-                warn!(error = %error, "OpenCode ACP resumed stream ended with error");
-            }
-            let _ = child.wait().await;
-        });
+            "OpenCode ACP resumed stream ended with error",
+            process,
+            stdin,
+            stdout,
+            stderr_drain,
+        );
 
         Ok(OpenCodeStartedSession {
             session_id: session.session_id.clone(),
@@ -361,85 +407,28 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         );
         ensure_worktree(spec).await?;
         remove_stale_handoff_sidecar(&spec.cwd).await?;
-        let mut child = Command::new(&spec.command)
-            .args(&spec.args)
-            .current_dir(&spec.cwd)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
-        let process_id = child.id();
-        let mut stdin = child.stdin.take().ok_or(OpenCodeError::MissingStdin)?;
-        let stdout = child.stdout.take().ok_or(OpenCodeError::MissingStdout)?;
-        let mut stdout = BufReader::new(stdout);
+        let mut child = AcpChildLifecycle::spawn(spec).await?;
+        let process_id = child.process_id();
 
         let mut next_id = 1_u64;
-        acp_request(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            "initialize",
-            json!({
-                "protocolVersion": 1,
-                "agent": spec.agent,
-                "model": spec.model,
-            }),
-        )
-        .await?;
-        next_id += 1;
-
-        let resume_result = acp_request(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            "session/resume",
-            session_resume_params(spec, session),
-        )
-        .await?;
-        next_id += 1;
-        let resumed_session_id =
-            extract_session_id(&resume_result).unwrap_or_else(|_| session.session_id.clone());
-        if resumed_session_id != session.session_id {
-            return Err(OpenCodeError::AcpProtocol(format!(
-                "ACP session/resume returned `{resumed_session_id}` for `{}`",
-                session.session_id
-            )));
+        let setup = async {
+            initialize_acp_child(&mut child, spec, next_id).await?;
+            next_id += 1;
+            resume_acp_session(&mut child, spec, session, next_id).await?;
+            next_id += 1;
+            configure_acp_session(&mut child, spec, &session.session_id, &mut next_id).await?;
+            Ok::<(), OpenCodeError>(())
         }
-        set_session_config_option(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            &session.session_id,
-            "mode",
-            Some(spec.agent.as_str()),
-        )
-        .await?;
-        next_id += 1;
-        set_session_config_option(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            &session.session_id,
-            "model",
-            spec.model.as_deref(),
-        )
-        .await?;
-        next_id += 1;
-        set_session_config_option(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            &session.session_id,
-            "effort",
-            spec.effort.as_deref(),
-        )
-        .await?;
-        next_id += 1;
+        .await;
+        if let Err(error) = setup {
+            return Err(child
+                .setup_failed(
+                    &spec.issue_identifier,
+                    Some(session.session_id.clone()),
+                    error.to_string(),
+                )
+                .await);
+        }
 
         let prompt_request_id = next_id;
         let prompt = format!(
@@ -458,7 +447,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             commit_policy_text()
         );
         write_acp_request(
-            &mut stdin,
+            child.stdin(),
             prompt_request_id,
             "session/prompt",
             json!({
@@ -472,22 +461,16 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             }),
         )
         .await?;
-
-        let permission_policy = spec.permission_policy.clone();
-        tokio::spawn(async move {
-            if let Err(error) = read_acp_response(
-                &mut stdout,
-                &mut stdin,
-                &permission_policy,
-                prompt_request_id,
-                "session/prompt",
-            )
-            .await
-            {
-                warn!(error = %error, "OpenCode ACP repair prompt stream ended with error");
-            }
-            let _ = child.wait().await;
-        });
+        let (process, stdin, stdout, stderr_drain) = child.into_parts();
+        spawn_prompt_reader(
+            &spec.permission_policy,
+            prompt_request_id,
+            "OpenCode ACP repair prompt stream ended with error",
+            process,
+            stdin,
+            stdout,
+            stderr_drain,
+        );
 
         Ok(OpenCodeStartedSession {
             session_id: session.session_id.clone(),
@@ -510,85 +493,28 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         );
         ensure_worktree(spec).await?;
         remove_stale_handoff_sidecar(&spec.cwd).await?;
-        let mut child = Command::new(&spec.command)
-            .args(&spec.args)
-            .current_dir(&spec.cwd)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
-        let process_id = child.id();
-        let mut stdin = child.stdin.take().ok_or(OpenCodeError::MissingStdin)?;
-        let stdout = child.stdout.take().ok_or(OpenCodeError::MissingStdout)?;
-        let mut stdout = BufReader::new(stdout);
+        let mut child = AcpChildLifecycle::spawn(spec).await?;
+        let process_id = child.process_id();
 
         let mut next_id = 1_u64;
-        acp_request(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            "initialize",
-            json!({
-                "protocolVersion": 1,
-                "agent": spec.agent,
-                "model": spec.model,
-            }),
-        )
-        .await?;
-        next_id += 1;
-
-        let resume_result = acp_request(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            "session/resume",
-            session_resume_params(spec, session),
-        )
-        .await?;
-        next_id += 1;
-        let resumed_session_id =
-            extract_session_id(&resume_result).unwrap_or_else(|_| session.session_id.clone());
-        if resumed_session_id != session.session_id {
-            return Err(OpenCodeError::AcpProtocol(format!(
-                "ACP session/resume returned `{resumed_session_id}` for `{}`",
-                session.session_id
-            )));
+        let setup = async {
+            initialize_acp_child(&mut child, spec, next_id).await?;
+            next_id += 1;
+            resume_acp_session(&mut child, spec, session, next_id).await?;
+            next_id += 1;
+            configure_acp_session(&mut child, spec, &session.session_id, &mut next_id).await?;
+            Ok::<(), OpenCodeError>(())
         }
-        set_session_config_option(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            &session.session_id,
-            "mode",
-            Some(spec.agent.as_str()),
-        )
-        .await?;
-        next_id += 1;
-        set_session_config_option(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            &session.session_id,
-            "model",
-            spec.model.as_deref(),
-        )
-        .await?;
-        next_id += 1;
-        set_session_config_option(
-            &mut stdin,
-            &mut stdout,
-            &spec.permission_policy,
-            next_id,
-            &session.session_id,
-            "effort",
-            spec.effort.as_deref(),
-        )
-        .await?;
-        next_id += 1;
+        .await;
+        if let Err(error) = setup {
+            return Err(child
+                .setup_failed(
+                    &spec.issue_identifier,
+                    Some(session.session_id.clone()),
+                    error.to_string(),
+                )
+                .await);
+        }
 
         let prompt_request_id = next_id;
         let prompt = format!(
@@ -603,7 +529,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             continuation_message
         );
         write_acp_request(
-            &mut stdin,
+            child.stdin(),
             prompt_request_id,
             "session/prompt",
             json!({
@@ -617,22 +543,16 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             }),
         )
         .await?;
-
-        let permission_policy = spec.permission_policy.clone();
-        tokio::spawn(async move {
-            if let Err(error) = read_acp_response(
-                &mut stdout,
-                &mut stdin,
-                &permission_policy,
-                prompt_request_id,
-                "session/prompt",
-            )
-            .await
-            {
-                warn!(error = %error, "OpenCode ACP continuation prompt stream ended with error");
-            }
-            let _ = child.wait().await;
-        });
+        let (process, stdin, stdout, stderr_drain) = child.into_parts();
+        spawn_prompt_reader(
+            &spec.permission_policy,
+            prompt_request_id,
+            "OpenCode ACP continuation prompt stream ended with error",
+            process,
+            stdin,
+            stdout,
+            stderr_drain,
+        );
 
         Ok(OpenCodeStartedSession {
             session_id: session.session_id.clone(),
@@ -905,8 +825,22 @@ pub enum OpenCodeError {
     MissingStdin,
     #[error("opencode child stdout was not piped")]
     MissingStdout,
+    #[error("opencode child stderr was not piped")]
+    MissingStderr,
     #[error("opencode ACP protocol error: {0}")]
     AcpProtocol(String),
+    #[error(
+        "opencode ACP setup failed for {issue_identifier} pid={process_id:?} session={session_id:?}: {reason}; termination={termination:?}"
+    )]
+    AcpSetupFailed {
+        issue_identifier: String,
+        process_id: Option<u32>,
+        session_id: Option<String>,
+        reason: String,
+        termination: Box<ProcessTreeTerminationEvidence>,
+    },
+    #[error("opencode process tree error: {0}")]
+    ProcessTree(String),
     #[error("invalid opencode worktree: {0}")]
     InvalidWorktree(String),
     #[error("git command failed: {command}: {stderr}")]

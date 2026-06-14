@@ -490,6 +490,12 @@ fn primary_execution_reason(
             ("healthy_capacity_available", liveness.reason.clone())
         }
         RuntimeLivenessStatus::RunnerProcessDead => ("runner_dead", liveness.reason.clone()),
+        RuntimeLivenessStatus::RunnerSetupFailed => {
+            ("runner_setup_failed", liveness.reason.clone())
+        }
+        RuntimeLivenessStatus::RunnerStaleKilled => {
+            ("runner_stale_killed", liveness.reason.clone())
+        }
     }
 }
 

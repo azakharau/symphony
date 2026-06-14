@@ -1598,6 +1598,130 @@ async fn orchestration_records_launch_failure_without_aborting_poll_or_owner_inp
 }
 
 #[tokio::test]
+async fn orchestration_persists_setup_failure_session_for_liveness_projection() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "setup-fails",
+        "SYM-210",
+        "Todo",
+        Some(1),
+    )]);
+
+    daemon::run_once_with_clients(&config, &store, &client, &SetupFailingOpenCodeLauncher)
+        .await
+        .expect("setup failure must not abort poll");
+
+    let sessions = store
+        .opencode_sessions_for_issue("symphony", "setup-fails")
+        .await
+        .expect("sessions");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(sessions[0].stage, OpenCodeStage::Failed);
+    assert_eq!(sessions[0].process_id, Some(4242));
+    assert_eq!(
+        sessions[0].lifecycle_marker.as_deref(),
+        Some("setup_failed:setup failed before session attachment")
+    );
+    assert!(
+        sessions[0]
+            .last_event
+            .as_deref()
+            .expect("last event")
+            .starts_with("setup_failed:4242:")
+    );
+
+    let no_candidates = RecordingLinearClient::new(Vec::new());
+    daemon::run_once_with_linear_client(&config, &store, &no_candidates)
+        .await
+        .expect("second liveness poll");
+    let liveness = store
+        .project_liveness("symphony")
+        .await
+        .expect("query liveness")
+        .expect("liveness row");
+    assert_eq!(liveness.status, RuntimeLivenessStatus::RunnerSetupFailed);
+}
+
+#[tokio::test]
+async fn orchestration_persists_stale_killed_session_event_through_continuation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "stale-live", "SYM-211"))
+        .await
+        .expect("issue");
+    let opencode_sleep = dir.path().join("opencode-sleep");
+    std::os::unix::fs::symlink("/bin/sleep", &opencode_sleep).expect("opencode sleep symlink");
+    let mut stale_process = Command::new(&opencode_sleep)
+        .arg("120")
+        .spawn()
+        .expect("spawn stale opencode-shaped process");
+    thread::sleep(Duration::from_millis(100));
+    let mut session = test_session(
+        "symphony",
+        "stale-live",
+        "ses-stale-live",
+        "/home/agent/.symphony/workspaces/opencode/symphony/SYM-211",
+    );
+    session.process_id = Some(stale_process.id());
+    store
+        .upsert_opencode_session(session)
+        .await
+        .expect("session");
+    let client =
+        RecordingLinearClient::new(vec![linear_issue("stale-live", "SYM-211", "Todo", Some(1))]);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(5151);
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate stale continuation");
+
+    let resumed = store
+        .opencode_session("symphony", "stale-live", "ses-stale-live")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(resumed.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(resumed.stage, OpenCodeStage::Running);
+    assert_eq!(
+        resumed.lifecycle_marker.as_deref(),
+        Some("continuation_prompted")
+    );
+    assert!(
+        resumed
+            .last_event
+            .as_deref()
+            .expect("last event")
+            .starts_with(&format!("stale_killed:{}:", stale_process.id())),
+        "last_event={:?}",
+        resumed.last_event
+    );
+
+    let no_candidates = RecordingLinearClient::new(Vec::new());
+    daemon::run_once_with_linear_client(&config, &store, &no_candidates)
+        .await
+        .expect("second liveness poll");
+    let liveness = store
+        .project_liveness("symphony")
+        .await
+        .expect("query liveness")
+        .expect("liveness row");
+    assert_eq!(liveness.status, RuntimeLivenessStatus::RunnerStaleKilled);
+    let _ = stale_process.kill();
+    let _ = stale_process.wait();
+}
+
+#[tokio::test]
 async fn orchestration_ignores_historical_failed_session_for_in_progress_reconciliation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

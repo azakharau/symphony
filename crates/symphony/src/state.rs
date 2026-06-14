@@ -33,6 +33,8 @@ pub enum RuntimeLivenessStatus {
     CapacityFull,
     HealthyCapacityAvailable,
     RunnerProcessDead,
+    RunnerSetupFailed,
+    RunnerStaleKilled,
 }
 
 impl RuntimeLivenessStatus {
@@ -44,6 +46,8 @@ impl RuntimeLivenessStatus {
             Self::CapacityFull => "capacity_full",
             Self::HealthyCapacityAvailable => "healthy_capacity_available",
             Self::RunnerProcessDead => "runner_process_dead",
+            Self::RunnerSetupFailed => "runner_setup_failed",
+            Self::RunnerStaleKilled => "runner_stale_killed",
         }
     }
 }
@@ -65,6 +69,8 @@ impl FromStr for RuntimeLivenessStatus {
             "capacity_full" => Ok(Self::CapacityFull),
             "healthy_capacity_available" => Ok(Self::HealthyCapacityAvailable),
             "runner_process_dead" => Ok(Self::RunnerProcessDead),
+            "runner_setup_failed" => Ok(Self::RunnerSetupFailed),
+            "runner_stale_killed" => Ok(Self::RunnerStaleKilled),
             other => Err(StateParseError::RuntimeLivenessStatus(other.into())),
         }
     }

@@ -338,6 +338,62 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
 }
 
 #[tokio::test]
+async fn stdio_launcher_kills_process_tree_when_setup_fails_before_session_attachment() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let child_pid_path = dir.path().join("child.pid");
+    let script_path = write_failing_acp_setup_script(dir.path(), &child_pid_path);
+    let worktree = dir.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let spec = opencode::OpenCodeLaunchSpec {
+        command: script_path,
+        args: Vec::new(),
+        cwd: worktree.clone(),
+        worktree_root: None,
+        issue_identifier: "SYM-209".into(),
+        branch_name: "feature/sym-209".into(),
+        repo_path: None,
+        mnemesh_workspace_root: Some(worktree),
+        base_ref: None,
+        agent: "build".into(),
+        model: Some("openai/gpt-5.5".into()),
+        effort: Some("high".into()),
+        prompt: "Full Linear issue spec with eval defaults".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+
+    let error = opencode::StdioOpenCodeLauncher
+        .launch(&spec)
+        .await
+        .expect_err("setup failure must be returned");
+
+    let child_pid = fs::read_to_string(&child_pid_path)
+        .expect("child pid")
+        .trim()
+        .parse::<u32>()
+        .expect("child pid number");
+    match error {
+        opencode::OpenCodeError::AcpSetupFailed {
+            issue_identifier,
+            process_id,
+            session_id,
+            reason,
+            termination,
+        } => {
+            assert_eq!(issue_identifier, "SYM-209");
+            assert!(process_id.is_some());
+            assert_eq!(session_id, None);
+            assert!(reason.contains("setup failed before session attachment"));
+            assert_eq!(termination.root_process_id, process_id.expect("root pid"));
+            assert!(termination.descendant_process_ids.contains(&child_pid));
+            assert!(termination.term_signal_sent);
+            assert!(!termination.still_alive);
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    assert!(!Path::new(&format!("/proc/{child_pid}")).exists());
+}
+
+#[tokio::test]
 async fn handoff_sidecar_accepts_eval_result_evidence_ref() {
     let dir = tempfile::tempdir().expect("tempdir");
     let worktree = dir.path().join("worktree");

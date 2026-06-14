@@ -9,7 +9,6 @@ mod records;
 use std::{error::Error as StdError, path::PathBuf};
 
 use anyhow::Context;
-use tokio::time::{Duration, sleep};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -17,8 +16,9 @@ use crate::{
     linear::{EmptyLinearClient, LinearClient, LinearIssue, LinearIssueEvidence, LinearTransition},
     opencode::{
         DeterministicOpenCodeLauncher, OpenCodeLauncher, OpenCodeStartedSession,
-        StdioOpenCodeLauncher, apply_session_tree_metrics_preserving_marker, build_acp_launch_spec,
-        new_session_record, read_session_tree_metrics,
+        ProcessTreeTerminationEvidence, StdioOpenCodeLauncher,
+        apply_session_tree_metrics_preserving_marker, build_acp_launch_spec, new_session_record,
+        read_session_tree_metrics, terminate_process_tree,
     },
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, LifecycleStage, OpenCodeSessionRecord,
@@ -748,7 +748,67 @@ async fn handle_launch_failure(
     );
     record.failure = Some(failure);
     store.upsert_issue(&record).await?;
+    if let Some(session) = setup_failure_session(project, issue, launch_spec, &error) {
+        store.upsert_opencode_session(&session).await?;
+    }
     Ok(())
+}
+
+fn setup_failure_session(
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+    launch_spec: &crate::opencode::OpenCodeLaunchSpec,
+    error: &crate::opencode::OpenCodeError,
+) -> Option<OpenCodeSessionRecord> {
+    let crate::opencode::OpenCodeError::AcpSetupFailed {
+        process_id,
+        session_id,
+        reason,
+        termination,
+        ..
+    } = error
+    else {
+        return None;
+    };
+    let session_id = session_id
+        .clone()
+        .unwrap_or_else(|| format!("setup-failed:{}", issue.identifier));
+    Some(OpenCodeSessionRecord {
+        project_id: project.id.clone(),
+        issue_id: issue.id.clone(),
+        session_id,
+        agent: project.opencode.agent.clone(),
+        model: project.opencode.model.clone(),
+        worktree_path: launch_spec.cwd.display().to_string(),
+        process_id: *process_id,
+        lifecycle_stage: LifecycleStage::Failed,
+        stage: OpenCodeStage::Failed,
+        active_agent: Some(project.opencode.agent.clone()),
+        active_model: project.opencode.model.clone(),
+        message_count: 0,
+        todo_count: 0,
+        part_count: 0,
+        token_count: 0,
+        cost_micros: 0,
+        subagent_count: 0,
+        eval_stage: Some(project.eval.default_suite.clone()),
+        lifecycle_marker: Some(format!("setup_failed:{reason}")),
+        last_event: Some(setup_failure_last_event(*process_id, termination)),
+        silence_observed: false,
+    })
+}
+
+fn setup_failure_last_event(
+    process_id: Option<u32>,
+    termination: &ProcessTreeTerminationEvidence,
+) -> String {
+    let process = process_id
+        .map(|pid| pid.to_string())
+        .unwrap_or_else(|| "no_pid".into());
+    format!(
+        "setup_failed:{process}:term={}:kill={}:alive={}",
+        termination.term_signal_sent, termination.kill_signal_sent, termination.still_alive
+    )
 }
 
 fn launch_failure_evidence_body(
@@ -807,11 +867,18 @@ async fn mark_existing_session_queued(
     let Some(mut session) = latest_session_for_issue(store, &project.id, &issue.id).await? else {
         return Ok(());
     };
+    terminate_current_session_process(project, issue, &mut session).await?;
     session.process_id = None;
     session.lifecycle_stage = LifecycleStage::Queued;
     session.stage = OpenCodeStage::Silent;
     session.lifecycle_marker = Some("waiting_for_capacity".into());
-    session.last_event = Some("existing_session_waiting_for_capacity".into());
+    if !session
+        .last_event
+        .as_deref()
+        .is_some_and(|event| event.starts_with("stale_killed:"))
+    {
+        session.last_event = Some("existing_session_waiting_for_capacity".into());
+    }
     session.silence_observed = false;
     store.upsert_opencode_session(&session).await?;
     Ok(())
@@ -848,7 +915,7 @@ async fn mark_existing_session_blocked(
     let Some(mut session) = latest_session_for_issue(store, &project.id, &issue.id).await? else {
         return Ok(());
     };
-    terminate_current_session_process(project, issue, &session).await?;
+    terminate_current_session_process(project, issue, &mut session).await?;
     session.process_id = None;
     session.lifecycle_stage = LifecycleStage::Queued;
     session.stage = OpenCodeStage::Silent;
@@ -867,7 +934,7 @@ async fn mark_existing_session_waiting_for_project_owner_input(
     let Some(mut session) = latest_session_for_issue(store, &project.id, &issue.id).await? else {
         return Ok(());
     };
-    terminate_current_session_process(project, issue, &session).await?;
+    terminate_current_session_process(project, issue, &mut session).await?;
     session.process_id = None;
     session.lifecycle_stage = LifecycleStage::Queued;
     session.stage = OpenCodeStage::Silent;
@@ -886,7 +953,7 @@ async fn mark_existing_session_failed_for_unresolved_runtime_defect(
     let Some(mut session) = latest_session_for_issue(store, &project.id, &issue.id).await? else {
         return Ok(());
     };
-    terminate_current_session_process(project, issue, &session).await?;
+    terminate_current_session_process(project, issue, &mut session).await?;
     session.process_id = None;
     session.lifecycle_stage = LifecycleStage::Failed;
     session.stage = OpenCodeStage::Failed;
@@ -940,11 +1007,18 @@ async fn mark_existing_session_reactivated(
     let Some(mut session) = latest_session_for_issue(store, &project.id, &issue.id).await? else {
         return Ok(());
     };
+    terminate_current_session_process(project, issue, &mut session).await?;
     session.process_id = None;
     session.lifecycle_stage = LifecycleStage::Running;
     session.stage = OpenCodeStage::Running;
     session.lifecycle_marker = Some("existing_session_reactivated".into());
-    session.last_event = Some("existing_session_reactivated".into());
+    if !session
+        .last_event
+        .as_deref()
+        .is_some_and(|event| event.starts_with("stale_killed:"))
+    {
+        session.last_event = Some("existing_session_reactivated".into());
+    }
     session.silence_observed = false;
     store.upsert_opencode_session(&session).await?;
     Ok(())
@@ -970,12 +1044,12 @@ async fn resume_stale_opencode_session(
         .and_then(|record| record.failure.as_ref())
         .filter(|failure| recoverable_opencode_failure(failure))
     {
-        terminate_current_session_process(project, issue, &session).await?;
+        terminate_current_session_process(project, issue, &mut session).await?;
         let started =
             continue_failed_session_repair(opencode, &launch_spec, &session, failure).await?;
         apply_repair_process(&mut session, started, failure);
     } else {
-        terminate_current_session_process(project, issue, &session).await?;
+        terminate_current_session_process(project, issue, &mut session).await?;
         let started = continue_stale_session(opencode, &launch_spec, &session).await?;
         apply_continued_process(&mut session, started);
     }
@@ -1099,7 +1173,7 @@ pub(super) async fn process_elapsed_seconds(process_id: u32) -> Option<u64> {
 pub(super) async fn terminate_current_session_process(
     project: &ProjectConfig,
     issue: &LinearIssue,
-    session: &OpenCodeSessionRecord,
+    session: &mut OpenCodeSessionRecord,
 ) -> anyhow::Result<()> {
     let Some(process_id) = session.process_id else {
         return Ok(());
@@ -1114,97 +1188,34 @@ pub(super) async fn terminate_current_session_process(
         process_id,
         "terminating stale OpenCode ACP process before session continuation"
     );
-    let mut targets = descendant_process_ids(process_id).await?;
-    targets.reverse();
-    targets.push(process_id);
-    terminate_processes(&targets, "-TERM").await?;
-    for _ in 0..20 {
-        if !process_exists(process_id).await {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-    terminate_processes(&targets, "-KILL").await?;
-    for _ in 0..10 {
-        if !process_exists(process_id).await {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-    warn!(
+    let evidence =
+        terminate_process_tree(process_id, "stale_opencode_session_continuation").await?;
+    info!(
         project_id = %project.id,
         issue = %issue.identifier,
         session_id = %session.session_id,
-        process_id,
-        "stale OpenCode ACP process was still alive after SIGTERM"
+        process_id = evidence.root_process_id,
+        descendant_process_ids = ?evidence.descendant_process_ids,
+        term_signal_sent = evidence.term_signal_sent,
+        kill_signal_sent = evidence.kill_signal_sent,
+        still_alive = evidence.still_alive,
+        reason = %evidence.reason,
+        "stale OpenCode ACP process tree termination evidence"
     );
+    if evidence.still_alive {
+        warn!(
+            project_id = %project.id,
+            issue = %issue.identifier,
+            session_id = %session.session_id,
+            process_id,
+            "stale OpenCode ACP process tree was still alive after termination attempts"
+        );
+    }
+    session.last_event = Some(format!(
+        "stale_killed:{process_id}:term={}:kill={}:alive={}",
+        evidence.term_signal_sent, evidence.kill_signal_sent, evidence.still_alive
+    ));
     Ok(())
-}
-
-async fn terminate_processes(process_ids: &[u32], signal: &str) -> anyhow::Result<()> {
-    for process_id in process_ids {
-        if !process_exists(*process_id).await {
-            continue;
-        }
-        let status = tokio::process::Command::new("kill")
-            .arg(signal)
-            .arg(process_id.to_string())
-            .status()
-            .await?;
-        if !status.success() && process_exists(*process_id).await {
-            warn!(
-                process_id,
-                signal,
-                status = %status,
-                "failed to signal OpenCode process tree member"
-            );
-        }
-    }
-    Ok(())
-}
-
-async fn process_exists(process_id: u32) -> bool {
-    tokio::fs::try_exists(format!("/proc/{process_id}"))
-        .await
-        .unwrap_or(false)
-}
-
-async fn descendant_process_ids(root_process_id: u32) -> anyhow::Result<Vec<u32>> {
-    let mut children = std::collections::BTreeMap::<u32, Vec<u32>>::new();
-    let mut entries = tokio::fs::read_dir("/proc").await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let file_name = entry.file_name();
-        let Some(pid) = file_name.to_str().and_then(|name| name.parse::<u32>().ok()) else {
-            continue;
-        };
-        let Ok(parent_pid) = read_parent_process_id(pid).await else {
-            continue;
-        };
-        children.entry(parent_pid).or_default().push(pid);
-    }
-
-    let mut descendants = Vec::new();
-    let mut stack = children.remove(&root_process_id).unwrap_or_default();
-    while let Some(pid) = stack.pop() {
-        if let Some(grandchildren) = children.remove(&pid) {
-            stack.extend(grandchildren);
-        }
-        descendants.push(pid);
-    }
-    Ok(descendants)
-}
-
-async fn read_parent_process_id(process_id: u32) -> anyhow::Result<u32> {
-    let stat = tokio::fs::read_to_string(format!("/proc/{process_id}/stat")).await?;
-    let Some(after_command) = stat.rsplit_once(") ") else {
-        anyhow::bail!("invalid proc stat for pid {process_id}");
-    };
-    let mut fields = after_command.1.split_whitespace();
-    let _state = fields.next();
-    let Some(parent_pid) = fields.next() else {
-        anyhow::bail!("missing parent pid for pid {process_id}");
-    };
-    Ok(parent_pid.parse::<u32>()?)
 }
 
 async fn continue_stale_session(
@@ -1226,10 +1237,16 @@ fn apply_continued_process(session: &mut OpenCodeSessionRecord, started: OpenCod
     session.lifecycle_stage = LifecycleStage::Running;
     session.stage = OpenCodeStage::Running;
     session.lifecycle_marker = Some("continuation_prompted".into());
-    session.last_event = started
-        .process_id
-        .map(|process_id| format!("continuation_prompted:{process_id}"))
-        .or_else(|| Some("continuation_prompted".into()));
+    if !session
+        .last_event
+        .as_deref()
+        .is_some_and(|event| event.starts_with("stale_killed:"))
+    {
+        session.last_event = started
+            .process_id
+            .map(|process_id| format!("continuation_prompted:{process_id}"))
+            .or_else(|| Some("continuation_prompted".into()));
+    }
     session.silence_observed = false;
 }
 

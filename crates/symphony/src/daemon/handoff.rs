@@ -350,7 +350,8 @@ async fn close_successful_handoff(
             },
         )
         .await?;
-    terminate_current_session_process(project, issue, session).await?;
+    let mut terminating_session = session.clone();
+    terminate_current_session_process(project, issue, &mut terminating_session).await?;
     linear
         .transition_issue(&issue.id, LinearTransition::Done)
         .await?;
@@ -448,7 +449,8 @@ async fn handle_eval_failure(
             "continuing OpenCode repair after eval failure"
         );
         let spec = build_acp_launch_spec(project, issue);
-        terminate_current_session_process(project, issue, session).await?;
+        let mut terminating_session = session.clone();
+        terminate_current_session_process(project, issue, &mut terminating_session).await?;
         let started = opencode
             .continue_repair(&spec, session, failure_fingerprint, failure_fingerprint)
             .await?;
@@ -508,7 +510,8 @@ async fn request_opencode_repair(
         .unwrap_or(evidence_kind)
         .to_string();
     let spec = build_acp_launch_spec(project, issue);
-    terminate_current_session_process(project, issue, session).await?;
+    let mut terminating_session = session.clone();
+    terminate_current_session_process(project, issue, &mut terminating_session).await?;
     let started = opencode
         .continue_repair(&spec, session, &fingerprint, &message)
         .await?;
@@ -560,7 +563,8 @@ async fn fail_runtime_defect(
             },
         )
         .await?;
-    terminate_current_session_process(project, issue, session).await?;
+    let mut terminating_session = session.clone();
+    terminate_current_session_process(project, issue, &mut terminating_session).await?;
     linear
         .transition_issue(&issue.id, LinearTransition::Todo)
         .await?;

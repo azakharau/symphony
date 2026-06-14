@@ -228,13 +228,34 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
     );
     assert!(
         spec.prompt
-            .contains("If the task changes code, docs, config, tests, or any other git-tracked state, commit those changes before writing a success handoff"),
+            .contains("If the task changes code, docs, config, tests, or any other git-tracked state, commit and push those changes before writing a success handoff"),
         "{}",
         spec.prompt
     );
     assert!(
         spec.prompt
-            .contains("Do not report success with changed_files unless git.head_sha is the commit that contains those changes"),
+            .contains("Do not report success with changed_files unless git.head_sha is the pushed commit that contains those changes and is reachable from origin/git.branch"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "If commit or push fails, do not write a success handoff; stop with a provider_blocker or eval_failed handoff"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "After validation, commit, and push are complete, write the structured Symphony handoff JSON"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "Write or rewrite the handoff sidecar only after validation, commit, and push are complete"
+        ),
         "{}",
         spec.prompt
     );

@@ -747,7 +747,7 @@ fn build_issue_prompt(project: &ProjectConfig, issue: &LinearIssue, branch_name:
          {validation_policy}\n\n\
          Commit policy for successful handoff:\n\
          {commit_policy}\n\n\
-         On completion, write the structured Symphony handoff JSON to:\n\
+         After validation, commit, and push are complete, write the structured Symphony handoff JSON to:\n\
          {handoff_path}\n\n\
          The handoff file must be valid JSON matching this exact shape:\n\
          {{\n\
@@ -806,11 +806,13 @@ fn validation_policy_text() -> &'static str {
 }
 
 fn commit_policy_text() -> &'static str {
-    "- If the task changes code, docs, config, tests, or any other git-tracked state, commit those changes before writing a success handoff.\n\
-     - Do not report success with changed_files unless git.head_sha is the commit that contains those changes.\n\
+    "- If the task changes code, docs, config, tests, or any other git-tracked state, commit and push those changes before writing a success handoff.\n\
+     - Do not report success with changed_files unless git.head_sha is the pushed commit that contains those changes and is reachable from origin/git.branch.\n\
      - Use git.branch exactly as shown in the handoff schema; never write `HEAD` as git.branch.\n\
+     - If commit or push fails, do not write a success handoff; stop with a provider_blocker or eval_failed handoff that includes the command failure details.\n\
+     - Write or rewrite the handoff sidecar only after validation, commit, and push are complete so git.head_sha reflects the final durable revision.\n\
      - If there are truly no git changes, leave changed_files empty, set git to null, and explain the no-change outcome in eval_results.details.\n\
-     - A successful handoff with changed_files but no matching commit is invalid and must be repaired before Symphony can move the issue to Done."
+     - A successful handoff with changed_files but no matching pushed commit is invalid and must be repaired before Symphony can move the issue to Done."
 }
 
 fn deterministic_session_id(input: &str) -> String {

@@ -1,5 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use tokio::process::Command;
 use tracing::{debug, info, warn};
 
 use super::{process_elapsed_seconds, session_has_live_process, terminate_current_session_process};
@@ -572,12 +573,18 @@ async fn fail_runtime_defect(
         Some(process_id) => process_elapsed_seconds(process_id).await,
         None => None,
     };
+    let git_snapshot = RuntimeDefectGitSnapshot::capture(session).await;
     linear
         .record_issue_evidence(
             &issue.id,
             LinearIssueEvidence {
                 kind: evidence_kind.into(),
-                body: runtime_defect_evidence_body(&message, session, elapsed_seconds),
+                body: runtime_defect_evidence_body(
+                    &message,
+                    session,
+                    elapsed_seconds,
+                    git_snapshot.as_ref(),
+                ),
             },
         )
         .await?;
@@ -595,19 +602,25 @@ async fn fail_runtime_defect(
         CleanupStatus::Clean,
     );
     record.failure = Some(failure.clone());
+    record.git_ref = git_snapshot
+        .as_ref()
+        .and_then(RuntimeDefectGitSnapshot::git_ref);
     store.upsert_issue(&record).await?;
 
     let mut failed_session = session.clone();
-    failed_session.process_id = None;
     failed_session.lifecycle_stage = LifecycleStage::Failed;
     failed_session.stage = crate::state::OpenCodeStage::Failed;
     failed_session.lifecycle_marker = Some(format!("failed:{}", failure.kind));
-    failed_session.last_event = Some(format!(
+    let failure_event = format!(
         "failed:{}",
         failure
             .fingerprint
             .as_deref()
             .unwrap_or(failure.kind.as_str())
+    );
+    failed_session.last_event = Some(git_snapshot.as_ref().map_or_else(
+        || failure_event.clone(),
+        |snapshot| snapshot.failure_event(&failure_event),
     ));
     failed_session.silence_observed = false;
     store.upsert_opencode_session(&failed_session).await?;
@@ -618,9 +631,14 @@ fn runtime_defect_evidence_body(
     message: &str,
     session: &crate::state::OpenCodeSessionRecord,
     elapsed_seconds: Option<u64>,
+    git_snapshot: Option<&RuntimeDefectGitSnapshot>,
 ) -> String {
+    let git_snapshot = git_snapshot
+        .map(RuntimeDefectGitSnapshot::evidence_body)
+        .unwrap_or_else(|| "git_snapshot: unavailable".into());
+
     format!(
-        "Symphony runtime defect: {message}\n\nsession_id: {session_id}\nprocess_id: {process_id}\nelapsed_seconds: {elapsed_seconds}\n\nThe issue was moved back to Todo and the OpenCode session row was marked failed. This is not owner input; fix the runner/tooling defect before retrying.",
+        "Symphony runtime defect: {message}\n\nsession_id: {session_id}\nprocess_id: {process_id}\nelapsed_seconds: {elapsed_seconds}\n\n{git_snapshot}\n\nThe issue was moved back to Todo and the OpenCode session row was marked failed. This is not owner input; fix the runner/tooling defect before retrying.",
         session_id = session.session_id,
         process_id = session
             .process_id
@@ -630,6 +648,133 @@ fn runtime_defect_evidence_body(
             .map(|seconds| seconds.to_string())
             .unwrap_or_else(|| "unknown".into()),
     )
+}
+
+#[derive(Debug)]
+struct RuntimeDefectGitSnapshot {
+    worktree_path: String,
+    branch: Option<String>,
+    head_sha: Option<String>,
+    status_short: Option<String>,
+    head_changed_files: Option<String>,
+    upstream: Option<String>,
+    unpushed_commits: Option<u64>,
+}
+
+impl RuntimeDefectGitSnapshot {
+    async fn capture(session: &crate::state::OpenCodeSessionRecord) -> Option<Self> {
+        let worktree_path = session.worktree_path.trim();
+        if worktree_path.is_empty() {
+            return None;
+        }
+
+        let path = Path::new(worktree_path);
+        if !tokio::fs::try_exists(path).await.ok()? {
+            return None;
+        }
+
+        let is_worktree = git_output(path, ["rev-parse", "--is-inside-work-tree"])
+            .await
+            .is_some_and(|output| output == "true");
+        if !is_worktree {
+            return None;
+        }
+
+        let upstream = git_output(
+            path,
+            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        )
+        .await;
+        let unpushed_commits = if upstream.is_some() {
+            git_output(path, ["rev-list", "--count", "@{u}..HEAD"])
+                .await
+                .and_then(|output| output.parse::<u64>().ok())
+        } else {
+            None
+        };
+
+        Some(Self {
+            worktree_path: worktree_path.into(),
+            branch: git_output(path, ["branch", "--show-current"]).await,
+            head_sha: git_output(path, ["rev-parse", "HEAD"]).await,
+            status_short: git_output(path, ["status", "--short", "--branch"]).await,
+            head_changed_files: git_output(
+                path,
+                ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+            )
+            .await,
+            upstream,
+            unpushed_commits,
+        })
+    }
+
+    fn git_ref(&self) -> Option<GitRefRecord> {
+        let branch = self.branch.as_deref()?.trim();
+        if branch.is_empty() {
+            return None;
+        }
+
+        Some(GitRefRecord {
+            branch: branch.into(),
+            worktree_path: self.worktree_path.clone(),
+            head_sha: self.head_sha.clone(),
+            pr_url: None,
+        })
+    }
+
+    fn evidence_body(&self) -> String {
+        let mut body = format!(
+            "git_snapshot:\nworktree_path: {worktree_path}\nbranch: {branch}\nhead_sha: {head_sha}\nupstream: {upstream}\nunpushed_commits: {unpushed_commits}",
+            worktree_path = self.worktree_path,
+            branch = self.branch.as_deref().unwrap_or("unknown"),
+            head_sha = self.head_sha.as_deref().unwrap_or("unknown"),
+            upstream = self.upstream.as_deref().unwrap_or("none"),
+            unpushed_commits = self
+                .unpushed_commits
+                .map(|count| count.to_string())
+                .unwrap_or_else(|| "unknown".into()),
+        );
+
+        if let Some(status) = &self.status_short {
+            body.push_str("\nstatus_short:\n");
+            body.push_str(status);
+        }
+        if let Some(files) = &self.head_changed_files {
+            body.push_str("\nhead_changed_files:\n");
+            body.push_str(files);
+        }
+
+        body
+    }
+
+    fn failure_event(&self, default_event: &str) -> String {
+        let Some(head_sha) = self.head_sha.as_deref() else {
+            return default_event.into();
+        };
+        let short_sha = head_sha.get(..12).unwrap_or(head_sha);
+        format!("{default_event}:git_head:{short_sha}")
+    }
+}
+
+async fn git_output<const N: usize>(worktree_path: &Path, args: [&str; N]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .args(args)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let output = String::from_utf8(output.stdout).ok()?;
+    let output = output.trim().to_string();
+    if output.is_empty() {
+        None
+    } else {
+        Some(output)
+    }
 }
 
 async fn latest_session(

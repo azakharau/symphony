@@ -1272,7 +1272,7 @@ async fn malformed_handoff_sidecar_fails_fast_kills_process_tree_and_does_not_re
         .expect("session");
     assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
     assert_eq!(session.stage, OpenCodeStage::Failed);
-    assert_eq!(session.process_id, None);
+    assert_eq!(session.process_id, Some(stale_process_id));
     assert_eq!(
         session.lifecycle_marker.as_deref(),
         Some("failed:malformed_handoff")
@@ -1346,6 +1346,134 @@ async fn dead_in_progress_session_without_handoff_sidecar_fails_fast_instead_of_
     assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
     assert_eq!(session.stage, OpenCodeStage::Failed);
     assert_eq!(session.process_id, None);
+}
+
+#[tokio::test]
+async fn missing_handoff_after_local_commit_records_worktree_git_snapshot_and_process_ref() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let worktree = dir.path().join("SYM-88-worktree");
+    fs::create_dir_all(worktree.join("docs/architecture/context-bundles")).expect("docs dir");
+    run_git(&worktree, ["init"]);
+    run_git(&worktree, ["config", "user.email", "symphony@example.test"]);
+    run_git(&worktree, ["config", "user.name", "Symphony Test"]);
+    run_git(
+        &worktree,
+        [
+            "checkout",
+            "-b",
+            "feature/mne-161-p0-current-wcb-code-boundary-and-assumption-audit",
+        ],
+    );
+    fs::write(worktree.join("README.md"), "base").expect("base readme");
+    run_git(&worktree, ["add", "README.md"]);
+    run_git(&worktree, ["commit", "-m", "base"]);
+    fs::write(
+        worktree.join("docs/architecture/context-bundles/wcb-boundary-audit.md"),
+        "# WCB Boundary Audit\n\nCaptured evidence.\n",
+    )
+    .expect("audit artifact");
+    run_git(
+        &worktree,
+        [
+            "add",
+            "docs/architecture/context-bundles/wcb-boundary-audit.md",
+        ],
+    );
+    run_git(
+        &worktree,
+        ["commit", "-m", "docs: add context bundle boundary audit"],
+    );
+    let head_sha = git_output(&worktree, ["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+
+    store
+        .upsert_issue(test_issue("symphony", "missing-sidecar-commit", "SYM-88"))
+        .await
+        .expect("running issue");
+    store
+        .upsert_opencode_session({
+            let mut session =
+                test_session("symphony", "missing-sidecar-commit", "oc-88", &worktree);
+            session.process_id = Some(u32::MAX);
+            session
+        })
+        .await
+        .expect("running session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "missing-sidecar-commit",
+        "SYM-88",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(None);
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("missing-sidecar-commit".into(), LinearTransition::Todo)]
+    );
+    let evidence = client
+        .evidence()
+        .into_iter()
+        .find(|(_, evidence)| evidence.kind == "malformed_handoff")
+        .map(|(_, evidence)| evidence.body)
+        .expect("runtime defect evidence");
+    assert!(evidence.contains(".symphony/opencode-handoff.json was not produced"));
+    assert!(evidence.contains("git_snapshot:"));
+    assert!(evidence.contains("process_id: 4294967295"));
+    assert!(evidence.contains("docs/architecture/context-bundles/wcb-boundary-audit.md"));
+    assert!(evidence.contains(&head_sha));
+    assert!(evidence.contains("upstream: none"));
+
+    let issue = store
+        .issue("symphony", "missing-sidecar-commit")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    let git_ref = issue.git_ref.expect("git ref");
+    assert_eq!(
+        git_ref.branch,
+        "feature/mne-161-p0-current-wcb-code-boundary-and-assumption-audit"
+    );
+    assert_eq!(git_ref.head_sha.as_deref(), Some(head_sha.as_str()));
+    assert_eq!(git_ref.worktree_path, worktree.display().to_string());
+    assert_eq!(
+        issue.failure.expect("failure").fingerprint.as_deref(),
+        Some("missing_handoff_sidecar")
+    );
+
+    let session = store
+        .opencode_session("symphony", "missing-sidecar-commit", "oc-88")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(session.stage, OpenCodeStage::Failed);
+    assert_eq!(session.process_id, Some(u32::MAX));
+    assert_eq!(
+        session.lifecycle_marker.as_deref(),
+        Some("failed:malformed_handoff")
+    );
+    assert_eq!(
+        session.last_event.as_deref(),
+        Some(
+            format!(
+                "failed:missing_handoff_sidecar:git_head:{}",
+                &head_sha[..12]
+            )
+            .as_str()
+        )
+    );
 }
 
 #[tokio::test]

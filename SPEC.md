@@ -81,12 +81,15 @@ OpenCode completion is accepted only from structured git-closure evidence:
 - Matching session id.
 - Passing eval results.
 - Changed-file evidence.
-- Git metadata with branch, commit SHA, and worktree path.
+- Git metadata with branch, pushed commit SHA, and worktree path.
 - Optional PR URL.
 - Risk summary.
 
-Successful handoffs move the issue to `Done`, persist git closure metadata, and remove the completed
-per-issue worktree. Eval failures stay in the OpenCode repair loop until they pass or hit the
+Successful handoffs move the issue to `Done` only after Symphony verifies that the issue worktree
+commit is pushed and integrated into the configured base branch. Linear comments alone are not
+closure evidence for any task that changes tracked repository state, including documentation or audit
+artifacts. After verified closure, Symphony persists git metadata and removes the completed per-issue
+worktree immediately. Eval failures stay in the OpenCode repair loop until they pass or hit the
 configured repeated-fingerprint policy.
 
 ## Multiproject Runtime

@@ -30,6 +30,7 @@ pub struct OpenCodeLaunchSpec {
     pub cwd: PathBuf,
     pub worktree_root: Option<PathBuf>,
     pub issue_identifier: String,
+    pub branch_name: String,
     pub repo_path: Option<PathBuf>,
     pub mnemesh_workspace_root: Option<PathBuf>,
     pub base_ref: Option<String>,
@@ -82,6 +83,8 @@ pub struct OpenCodeEvalResult {
     pub passed: bool,
     pub failure_fingerprint: Option<String>,
     pub details: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_ref: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

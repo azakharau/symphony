@@ -249,6 +249,7 @@ fn success_handoff(
             passed: true,
             failure_fingerprint: None,
             details: Some("ok".into()),
+            evidence_ref: None,
         }],
         changed_files: vec!["crates/symphony/src/opencode.rs".into()],
         git: Some(GitClosureEvidence {
@@ -272,6 +273,7 @@ fn eval_failed_handoff(session_id: &str, fingerprint: &str) -> OpenCodeHandoff {
             passed: false,
             failure_fingerprint: Some(fingerprint.into()),
             details: Some("clippy failed".into()),
+            evidence_ref: None,
         }],
         changed_files: vec!["crates/symphony/src/daemon.rs".into()],
         git: None,

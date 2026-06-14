@@ -40,7 +40,8 @@ pub(super) async fn ensure_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), Ope
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_path)
-        .args(["worktree", "add", "--detach"])
+        .args(["worktree", "add", "-B"])
+        .arg(&spec.branch_name)
         .arg(&spec.cwd)
         .arg(base_ref)
         .output()
@@ -52,14 +53,16 @@ pub(super) async fn ensure_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), Ope
             repo_path = %repo_path.display(),
             cwd = %spec.cwd.display(),
             base_ref,
+            branch_name = %spec.branch_name,
             "OpenCode worktree created"
         );
         Ok(())
     } else {
         Err(OpenCodeError::GitCommand {
             command: format!(
-                "git -C {} worktree add --detach {} {}",
+                "git -C {} worktree add -B {} {} {}",
                 repo_path.display(),
+                spec.branch_name,
                 spec.cwd.display(),
                 base_ref
             ),
@@ -78,6 +81,12 @@ fn validate_launch_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), OpenCodeErr
         return Err(OpenCodeError::InvalidWorktree(format!(
             "issue identifier `{}` is not a safe worktree path component",
             spec.issue_identifier
+        )));
+    }
+    if !safe_branch_name(&spec.branch_name) {
+        return Err(OpenCodeError::InvalidWorktree(format!(
+            "branch `{}` is not safe for an OpenCode issue worktree",
+            spec.branch_name
         )));
     }
 
@@ -100,6 +109,18 @@ fn safe_worktree_name(identifier: &str) -> bool {
         && identifier
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+fn safe_branch_name(branch: &str) -> bool {
+    !branch.is_empty()
+        && branch != "HEAD"
+        && !branch.starts_with('/')
+        && !branch.ends_with('/')
+        && !branch.contains("..")
+        && !branch.contains("//")
+        && branch.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '/')
+        })
 }
 
 pub(super) fn handoff_sidecar_path(path: impl AsRef<Path>) -> PathBuf {

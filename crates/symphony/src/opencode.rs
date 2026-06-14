@@ -667,12 +667,14 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
 }
 
 pub fn build_acp_launch_spec(project: &ProjectConfig, issue: &LinearIssue) -> OpenCodeLaunchSpec {
+    let branch_name = issue_branch_name(issue);
     OpenCodeLaunchSpec {
         command: project.opencode.command.clone(),
         args: project.opencode.args.clone(),
         cwd: project.branch.worktree_root.join(&issue.identifier),
         worktree_root: Some(project.branch.worktree_root.clone()),
         issue_identifier: issue.identifier.clone(),
+        branch_name: branch_name.clone(),
         repo_path: Some(project.repo_path.clone()),
         mnemesh_workspace_root: project
             .mnemesh
@@ -682,9 +684,18 @@ pub fn build_acp_launch_spec(project: &ProjectConfig, issue: &LinearIssue) -> Op
         agent: project.opencode.agent.clone(),
         model: project.opencode.model.clone(),
         effort: project.opencode.effort.clone(),
-        prompt: build_issue_prompt(project, issue),
+        prompt: build_issue_prompt(project, issue, &branch_name),
         permission_policy: project.opencode.permission_policy.clone(),
     }
+}
+
+fn issue_branch_name(issue: &LinearIssue) -> String {
+    issue
+        .branch_name
+        .as_deref()
+        .filter(|branch| !branch.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("feature/{}", issue.identifier.to_ascii_lowercase()))
 }
 
 pub fn new_session_record(
@@ -796,7 +807,7 @@ pub fn mark_session_silence(session: &mut OpenCodeSessionRecord, reason: &str) {
     session.last_event = Some(format!("silence:{reason}"));
 }
 
-fn build_issue_prompt(project: &ProjectConfig, issue: &LinearIssue) -> String {
+fn build_issue_prompt(project: &ProjectConfig, issue: &LinearIssue, branch_name: &str) -> String {
     let description = issue
         .description
         .as_deref()
@@ -823,9 +834,9 @@ fn build_issue_prompt(project: &ProjectConfig, issue: &LinearIssue) -> String {
            \"session_id\": \"{session_id}\",\n\
            \"lifecycle_stages\": [\"starting\", \"running\", \"eval\", \"handoff\", \"completed\"],\n\
            \"subagents\": [\"agent-name:session-id\"],\n\
-           \"eval_results\": [{{\"suite\": \"suite-name\", \"passed\": true, \"failure_fingerprint\": null, \"details\": \"command outcomes\"}}],\n\
+           \"eval_results\": [{{\"suite\": \"suite-name\", \"passed\": true, \"failure_fingerprint\": null, \"details\": \"command outcomes\", \"evidence_ref\": null}}],\n\
            \"changed_files\": [\"path:start-end\"],\n\
-           \"git\": {{\"branch\": \"branch-name\", \"head_sha\": \"commit-sha\", \"pr_url\": null, \"worktree_path\": \"{worktree}\"}},\n\
+           \"git\": {{\"branch\": \"{branch_name}\", \"head_sha\": \"commit-sha\", \"pr_url\": null, \"worktree_path\": \"{worktree}\"}},\n\
            \"risks\": [\"remaining risk or omitted validation\"],\n\
            \"stop_reason\": {{\"type\": \"success\"}}\n\
          }}\n\
@@ -877,6 +888,7 @@ fn validation_policy_text() -> &'static str {
 fn commit_policy_text() -> &'static str {
     "- If the task changes code, docs, config, tests, or any other git-tracked state, commit those changes before writing a success handoff.\n\
      - Do not report success with changed_files unless git.head_sha is the commit that contains those changes.\n\
+     - Use git.branch exactly as shown in the handoff schema; never write `HEAD` as git.branch.\n\
      - If there are truly no git changes, leave changed_files empty, set git to null, and explain the no-change outcome in eval_results.details.\n\
      - A successful handoff with changed_files but no matching commit is invalid and must be repaired before Symphony can move the issue to Done."
 }

@@ -674,6 +674,7 @@ async fn no_code_success_handoff_can_close_without_commit_sha() {
             passed: true,
             failure_fingerprint: None,
             details: Some("no-code smoke passed".into()),
+            evidence_ref: None,
         }],
         changed_files: Vec::new(),
         git: Some(GitClosureEvidence {
@@ -1132,6 +1133,7 @@ async fn malformed_success_handoff_fails_fast_without_opencode_repair_or_owner_i
             passed: true,
             failure_fingerprint: None,
             details: None,
+            evidence_ref: None,
         }],
         changed_files: vec!["crates/symphony/src/opencode.rs".into()],
         git: None,

@@ -258,6 +258,7 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
         cwd: worktree.clone(),
         worktree_root: None,
         issue_identifier: "SYM-200".into(),
+        branch_name: "feature/sym-200".into(),
         repo_path: None,
         mnemesh_workspace_root: Some(worktree.clone()),
         base_ref: None,
@@ -337,6 +338,41 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
 }
 
 #[tokio::test]
+async fn handoff_sidecar_accepts_eval_result_evidence_ref() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let worktree = dir.path().join("worktree");
+    let sidecar_dir = worktree.join(".symphony");
+    fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
+    fs::write(
+        sidecar_dir.join("opencode-handoff.json"),
+        r#"{
+  "session_id": "ses-evidence-ref",
+  "lifecycle_stages": ["running", "eval", "handoff", "completed"],
+  "subagents": ["rust-engineer:ses-child"],
+  "eval_results": [{"suite": "cargo test", "passed": true, "failure_fingerprint": null, "details": "ok", "evidence_ref": "mnemesh:evidence:abc123"}],
+  "changed_files": ["crates/symphony/src/opencode/types.rs:80-87"],
+  "git": {"branch": "feature/sym-37", "head_sha": "abc123", "pr_url": null, "worktree_path": "/tmp/worktree"},
+  "risks": [],
+  "stop_reason": {"type": "success"}
+}"#,
+    )
+    .expect("handoff fixture");
+    let launcher = opencode::StdioOpenCodeLauncher;
+    let session = test_session("symphony", "issue-evidence", "ses-evidence-ref", &worktree);
+
+    let handoff = launcher
+        .latest_handoff(&session)
+        .await
+        .expect("handoff parse")
+        .expect("handoff present");
+
+    assert_eq!(
+        handoff.eval_results[0].evidence_ref.as_deref(),
+        Some("mnemesh:evidence:abc123")
+    );
+}
+
+#[tokio::test]
 async fn stdio_launcher_removes_stale_handoff_before_prompting_new_session() {
     let dir = tempfile::tempdir().expect("tempdir");
     let transcript_path = dir.path().join("acp-transcript.jsonl");
@@ -357,6 +393,7 @@ async fn stdio_launcher_removes_stale_handoff_before_prompting_new_session() {
         cwd: worktree,
         worktree_root: Some(worktree_root),
         issue_identifier: "SYM-201".into(),
+        branch_name: "feature/sym-201".into(),
         repo_path: None,
         mnemesh_workspace_root: Some(dir.path().to_path_buf()),
         base_ref: None,
@@ -403,6 +440,7 @@ async fn stdio_launcher_resumes_existing_session_without_replaying_prompt() {
         cwd: worktree.clone(),
         worktree_root: None,
         issue_identifier: "SYM-202".into(),
+        branch_name: "feature/sym-202".into(),
         repo_path: None,
         mnemesh_workspace_root: Some(dir.path().to_path_buf()),
         base_ref: None,
@@ -572,6 +610,7 @@ async fn stdio_launcher_creates_git_worktree_from_project_repo_and_base_ref() {
         cwd: worktree.clone(),
         worktree_root: Some(dir.path().join("worktrees")),
         issue_identifier: "SYM-200".into(),
+        branch_name: "feature/sym-200".into(),
         repo_path: Some(repo.clone()),
         mnemesh_workspace_root: Some(repo.clone()),
         base_ref: Some("agent-server/opencode-runner-extension".into()),
@@ -593,6 +632,10 @@ async fn stdio_launcher_creates_git_worktree_from_project_repo_and_base_ref() {
             assert_eq!(
                 git_output(&worktree, ["rev-parse", "--is-inside-work-tree"]).trim(),
                 "true"
+            );
+            assert_eq!(
+                git_output(&worktree, ["branch", "--show-current"]).trim(),
+                "feature/sym-200"
             );
             return;
         }
@@ -616,6 +659,7 @@ async fn stdio_launcher_rejects_issue_identifier_path_separators_before_worktree
         cwd: nested.clone(),
         worktree_root: Some(root.clone()),
         issue_identifier: "SYM/200".into(),
+        branch_name: "feature/sym-200".into(),
         repo_path: Some(dir.path().join("repo")),
         mnemesh_workspace_root: Some(dir.path().join("repo")),
         base_ref: Some("main".into()),

@@ -59,19 +59,19 @@ fn project_or_issue_response(
         .collect::<Vec<_>>();
 
     match parts.as_slice() {
-        [project_id] => match api.project_drilldown(project_id)? {
-            Some(project) => Ok(html_response(200, html::render_project(project))),
-            None => Ok(html_response(404, html::render_not_found(path))),
-        },
-        [project_id, "issues", issue_id] => match api.issue_detail(project_id, issue_id)? {
-            Some(issue) => Ok(html_response(200, html::render_issue(issue))),
-            None => Ok(html_response(404, html::render_not_found(path))),
-        },
+        [project_id] => api.project_drilldown(project_id)?.map_or_else(
+            || Ok(html_response(404, html::render_not_found(path))),
+            |project| Ok(html_response(200, html::render_project(project))),
+        ),
+        [project_id, "issues", issue_id] => api.issue_detail(project_id, issue_id)?.map_or_else(
+            || Ok(html_response(404, html::render_not_found(path))),
+            |issue| Ok(html_response(200, html::render_issue(issue))),
+        ),
         _ => Ok(html_response(404, html::render_not_found(path))),
     }
 }
 
-fn html_response(status: u16, body: String) -> DashboardHtmlResponse {
+const fn html_response(status: u16, body: String) -> DashboardHtmlResponse {
     DashboardHtmlResponse { status, body }
 }
 

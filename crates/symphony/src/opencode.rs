@@ -1,6 +1,8 @@
 mod acp;
 mod archive;
 mod lifecycle;
+mod prompt;
+mod session_metrics;
 mod types;
 mod worktree;
 
@@ -31,6 +33,11 @@ pub use archive::{
 use lifecycle::AcpChildLifecycle;
 pub use lifecycle::ProcessTreeTerminationEvidence;
 pub(crate) use lifecycle::terminate_process_tree;
+use prompt::{build_issue_prompt, commit_policy_text, validation_policy_text};
+pub use session_metrics::{
+    apply_session_tree_metrics, apply_session_tree_metrics_preserving_marker, ingest_session_event,
+    mark_session_silence,
+};
 pub use types::{
     GitClosureEvidence, OpenCodeEvalResult, OpenCodeHandoff, OpenCodeLaunchSpec,
     OpenCodeProcessStarted, OpenCodeRuntimeConfig, OpenCodeSessionCreated, OpenCodeSessionEvent,
@@ -701,172 +708,6 @@ pub fn new_session_record(
         last_event: Some("acp_process_started".into()),
         silence_observed: false,
     }
-}
-
-pub fn ingest_session_event(session: &mut OpenCodeSessionRecord, event: OpenCodeSessionEvent) {
-    if let Some(stage) = event.stage {
-        session.stage = stage;
-    }
-    if let Some(agent) = event.active_agent {
-        session.active_agent = Some(agent);
-    }
-    if let Some(model) = event.active_model {
-        session.active_model = Some(model);
-    }
-    if let Some(eval_stage) = event.eval_stage {
-        session.eval_stage = Some(eval_stage);
-    }
-    if let Some(marker) = event.lifecycle_marker {
-        session.lifecycle_marker = Some(marker);
-    }
-    if let Some(last_event) = event.last_event {
-        session.last_event = Some(last_event);
-    }
-
-    session.message_count = session.message_count.saturating_add(event.message_delta);
-    session.todo_count = session.todo_count.saturating_add(event.todo_delta);
-    session.part_count = session.part_count.saturating_add(event.part_delta);
-    session.token_count = session.token_count.saturating_add(event.token_delta);
-    session.cost_micros = session.cost_micros.saturating_add(event.cost_micros_delta);
-    session.subagent_count = session.subagent_count.saturating_add(event.subagent_delta);
-}
-
-pub fn apply_session_tree_metrics(
-    session: &mut OpenCodeSessionRecord,
-    metrics: &OpenCodeSessionTreeMetrics,
-) {
-    if metrics.message_count > 0 || metrics.part_count > 0 || metrics.todo_count > 0 {
-        session.stage = match session.stage {
-            OpenCodeStage::Starting | OpenCodeStage::Silent => OpenCodeStage::Running,
-            stage => stage,
-        };
-        session.silence_observed = false;
-    }
-    session.active_agent = metrics
-        .active_agent
-        .clone()
-        .or(session.active_agent.clone());
-    session.active_model = metrics
-        .active_model
-        .clone()
-        .or(session.active_model.clone());
-    session.message_count = metrics.message_count;
-    session.todo_count = metrics.todo_count;
-    session.part_count = metrics.part_count;
-    session.token_count = metrics.tokens_total;
-    session.cost_micros = metrics.cost_micros;
-    session.subagent_count = metrics.subagent_count;
-    session.lifecycle_marker = Some("opencode_db_activity".into());
-    session.last_event = metrics
-        .last_updated_ms
-        .map(|updated| format!("opencode_db_updated:{updated}"))
-        .or_else(|| Some("opencode_db_snapshot".into()));
-}
-
-pub fn apply_session_tree_metrics_preserving_marker(
-    session: &mut OpenCodeSessionRecord,
-    metrics: &OpenCodeSessionTreeMetrics,
-    previous_last_event: Option<&str>,
-    previous_marker: Option<&str>,
-) {
-    apply_session_tree_metrics(session, metrics);
-    if session.last_event.as_deref() == previous_last_event {
-        session.lifecycle_marker = previous_marker.map(ToOwned::to_owned);
-    }
-}
-
-pub fn mark_session_silence(session: &mut OpenCodeSessionRecord, reason: &str) {
-    session.stage = OpenCodeStage::Silent;
-    session.silence_observed = true;
-    session.last_event = Some(format!("silence:{reason}"));
-}
-
-fn build_issue_prompt(project: &ProjectConfig, issue: &LinearIssue, branch_name: &str) -> String {
-    let description = issue
-        .description
-        .as_deref()
-        .unwrap_or("No description provided.");
-    format!(
-        "Run OpenCode ACP for {identifier}: {title}\n\n\
-         Project: {project_id}\n\
-         Repository: {repo_path}\n\
-         Isolated worktree: {worktree}\n\
-         Mnemesh workspace root: {mnemesh_workspace_root}\n\
-         Eval default suite: {eval_suite} (fallback metadata, not a blanket workspace gate)\n\
-         Linear state: {state}\n\
-         URL: {url}\n\n\
-         Mnemesh evidence policy:\n\
-         {mnemesh_policy}\n\n\
-         Validation policy:\n\
-         {validation_policy}\n\n\
-         Commit policy for successful handoff:\n\
-         {commit_policy}\n\n\
-         After validation, commit, and push are complete, write the structured Symphony handoff JSON to:\n\
-         {handoff_path}\n\n\
-         The handoff file must be valid JSON matching this exact shape:\n\
-         {{\n\
-           \"session_id\": \"{session_id}\",\n\
-           \"lifecycle_stages\": [\"starting\", \"running\", \"eval\", \"handoff\", \"completed\"],\n\
-           \"subagents\": [\"agent-name:session-id\"],\n\
-           \"eval_results\": [{{\"suite\": \"suite-name\", \"passed\": true, \"failure_fingerprint\": null, \"details\": \"command outcomes\", \"evidence_ref\": null}}],\n\
-           \"changed_files\": [\"path:start-end\"],\n\
-           \"git\": {{\"branch\": \"{branch_name}\", \"head_sha\": \"commit-sha\", \"pr_url\": null, \"worktree_path\": \"{worktree}\"}},\n\
-           \"risks\": [\"remaining risk or omitted validation\"],\n\
-           \"stop_reason\": {{\"type\": \"success\"}}\n\
-         }}\n\
-         For eval failures use \"stop_reason\": {{\"type\":\"eval_failed\",\"failure_fingerprint\":\"stable-id\"}}.\n\
-         For provider or owner blockers use \"provider_blocker\" or \"owner_question\" with \"message\"/\"question\".\n\
-         Do not use status, subagents_used, object-shaped eval_results, or string stop_reason values.\n\n\
-         Full issue spec:\n{description}\n",
-        identifier = issue.identifier,
-        session_id = "the ACP session id",
-        title = issue.title,
-        project_id = project.id,
-        repo_path = project.repo_path.display(),
-        worktree = project
-            .branch
-            .worktree_root
-            .join(&issue.identifier)
-            .display(),
-        mnemesh_workspace_root = project
-            .mnemesh
-            .as_ref()
-            .map(|mnemesh| mnemesh.workspace_root.display().to_string())
-            .unwrap_or_else(|| "missing".to_owned()),
-        handoff_path =
-            handoff_sidecar_path(project.branch.worktree_root.join(&issue.identifier)).display(),
-        eval_suite = project.eval.default_suite,
-        state = issue.state,
-        url = issue.url.as_deref().unwrap_or("none"),
-        mnemesh_policy = mnemesh_policy_text(),
-        validation_policy = validation_policy_text(),
-        commit_policy = commit_policy_text(),
-    )
-}
-
-fn mnemesh_policy_text() -> &'static str {
-    "- Use the listed Mnemesh workspace root as the durable project evidence workspace for all Mnemesh MCP calls, observations, claims, evidence, verification, and handoff records.\n\
-     - The Mnemesh workspace belongs to the canonical project root, not the isolated issue worktree.\n\
-     - Do not create or register a separate Mnemesh workspace for the isolated worktree.\n\
-     - If that global workspace is missing or unavailable, stop with provider_blocker and explain the workspace failure; do not continue with degraded local evidence."
-}
-
-fn validation_policy_text() -> &'static str {
-    "- Treat the issue's Validation section as the authority for required commands.\n\
-     - Scope validation to the changed surface and the issue's explicit acceptance criteria.\n\
-     - For docs-only/no-code changes, run documentation/file-level validation such as git diff --check and reference checks; do not run cargo nextest --workspace, full workspace tests, or release gates unless the issue explicitly requires them.\n\
-     - For Rust source changes, prefer the narrowest package/filter/profile that covers the changed behavior before escalating to workspace-level checks.\n\
-     - If a broader check is intentionally skipped, record the reason in eval_results.details and risks."
-}
-
-fn commit_policy_text() -> &'static str {
-    "- If the task changes code, docs, config, tests, or any other git-tracked state, commit and push those changes before writing a success handoff.\n\
-     - Do not report success with changed_files unless git.head_sha is the pushed commit that contains those changes and is reachable from origin/git.branch.\n\
-     - Use git.branch exactly as shown in the handoff schema; never write `HEAD` as git.branch.\n\
-     - If commit or push fails, do not write a success handoff; stop with a provider_blocker or eval_failed handoff that includes the command failure details.\n\
-     - Write or rewrite the handoff sidecar only after validation, commit, and push are complete so git.head_sha reflects the final durable revision.\n\
-     - If there are truly no git changes, leave changed_files empty, keep git.branch and git.worktree_path populated, set git.head_sha to null, and explain the no-change outcome in eval_results.details.\n\
-     - A successful handoff with changed_files but no matching pushed commit is invalid and must be repaired before Symphony can move the issue to Done."
 }
 
 fn deterministic_session_id(input: &str) -> String {

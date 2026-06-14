@@ -756,7 +756,7 @@ async fn write_archive(
 
 async fn write_json<T>(path: PathBuf, value: &T) -> Result<(), OpenCodeError>
 where
-    T: Serialize + ?Sized,
+    T: Serialize + Sync + ?Sized,
 {
     let body = serde_json::to_vec_pretty(value)?;
     fs::write(path, body).await?;

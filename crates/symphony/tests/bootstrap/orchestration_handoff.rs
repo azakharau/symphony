@@ -9,7 +9,7 @@ struct DoneRequiresStoppedProcessLinearClient {
 }
 
 impl DoneRequiresStoppedProcessLinearClient {
-    fn new(issue: LinearIssue, process_id: u32) -> Self {
+    const fn new(issue: LinearIssue, process_id: u32) -> Self {
         Self {
             issue,
             process_id,

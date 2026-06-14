@@ -969,7 +969,7 @@ fn unchanged_opencode_db_snapshot_preserves_control_marker() {
     );
 }
 
-pub(crate) async fn seed_opencode_session_tree(path: &std::path::Path) {
+pub(super) async fn seed_opencode_session_tree(path: &std::path::Path) {
     let database = libsql::Builder::new_local(path.display().to_string())
         .build()
         .await

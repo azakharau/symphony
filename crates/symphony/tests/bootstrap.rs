@@ -40,7 +40,7 @@ mod orchestration_basic;
 #[path = "bootstrap/orchestration_handoff.rs"]
 mod orchestration_handoff;
 
-fn valid_config_toml() -> &'static str {
+const fn valid_config_toml() -> &'static str {
     r#"
 [server]
 host = "127.0.0.1"
@@ -80,7 +80,7 @@ max_sessions = 2
 "#
 }
 
-fn two_project_config_toml() -> &'static str {
+const fn two_project_config_toml() -> &'static str {
     r#"
 [server]
 host = "127.0.0.1"
@@ -655,7 +655,7 @@ struct RecordingLinearClient {
 }
 
 impl RecordingLinearClient {
-    fn new(issues: Vec<LinearIssue>) -> Self {
+    const fn new(issues: Vec<LinearIssue>) -> Self {
         Self {
             issues,
             transitions: std::sync::Mutex::new(Vec::new()),
@@ -761,7 +761,7 @@ struct ScriptedOpenCodeLauncher {
 }
 
 impl ScriptedOpenCodeLauncher {
-    fn new(handoff: Option<OpenCodeHandoff>) -> Self {
+    const fn new(handoff: Option<OpenCodeHandoff>) -> Self {
         Self {
             handoff,
             repairs: std::sync::Mutex::new(Vec::new()),
@@ -834,7 +834,7 @@ struct ResumeRecordingOpenCodeLauncher {
 }
 
 impl ResumeRecordingOpenCodeLauncher {
-    fn new(resumed_process_id: u32) -> Self {
+    const fn new(resumed_process_id: u32) -> Self {
         Self {
             resumed_process_id,
             launches: std::sync::Mutex::new(Vec::new()),

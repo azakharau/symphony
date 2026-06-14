@@ -988,3 +988,120 @@ async fn opencode_row_count(path: &std::path::Path, table: &str) -> u64 {
     let count: i64 = row.get(0).expect("count value");
     count as u64
 }
+
+#[tokio::test]
+async fn stdio_launcher_repairs_clean_existing_worktree_on_wrong_branch() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    run_git(&repo, ["init"]);
+    run_git(&repo, ["config", "user.email", "symphony@example.test"]);
+    run_git(&repo, ["config", "user.name", "Symphony Test"]);
+    fs::write(repo.join("README.md"), "base checkout").expect("readme");
+    run_git(&repo, ["add", "README.md"]);
+    run_git(&repo, ["commit", "-m", "base"]);
+    run_git(&repo, ["branch", "agent-server/opencode-runner-extension"]);
+    run_git(&repo, ["branch", "stale-branch"]);
+
+    let root = dir.path().join("worktrees");
+    let worktree = root.join("SYM-204");
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "-B",
+            "stale-branch",
+            worktree.to_str().expect("worktree utf8"),
+            "agent-server/opencode-runner-extension",
+        ],
+    );
+    let transcript_path = dir.path().join("acp-transcript.jsonl");
+    let script_path = write_fake_acp_script(dir.path(), &transcript_path);
+    let spec = opencode::OpenCodeLaunchSpec {
+        command: script_path,
+        args: Vec::new(),
+        cwd: worktree.clone(),
+        worktree_root: Some(root),
+        issue_identifier: "SYM-204".into(),
+        branch_name: "feature/sym-204".into(),
+        repo_path: Some(repo),
+        mnemesh_workspace_root: Some(dir.path().join("repo")),
+        base_ref: Some("agent-server/opencode-runner-extension".into()),
+        agent: "build".into(),
+        model: Some("openai/gpt-5.5".into()),
+        effort: Some("high".into()),
+        prompt: "Full Linear issue spec with eval defaults".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+
+    opencode::StdioOpenCodeLauncher
+        .launch(&spec)
+        .await
+        .expect("clean stale worktree can be repaired");
+
+    assert_eq!(
+        git_output(&worktree, ["branch", "--show-current"]).trim(),
+        "feature/sym-204"
+    );
+}
+
+#[tokio::test]
+async fn stdio_launcher_rejects_dirty_existing_worktree_on_wrong_branch() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    run_git(&repo, ["init"]);
+    run_git(&repo, ["config", "user.email", "symphony@example.test"]);
+    run_git(&repo, ["config", "user.name", "Symphony Test"]);
+    fs::write(repo.join("README.md"), "base checkout").expect("readme");
+    run_git(&repo, ["add", "README.md"]);
+    run_git(&repo, ["commit", "-m", "base"]);
+    run_git(&repo, ["branch", "agent-server/opencode-runner-extension"]);
+    run_git(&repo, ["branch", "stale-branch"]);
+
+    let root = dir.path().join("worktrees");
+    let worktree = root.join("SYM-205");
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "-B",
+            "stale-branch",
+            worktree.to_str().expect("worktree utf8"),
+            "agent-server/opencode-runner-extension",
+        ],
+    );
+    fs::write(worktree.join("dirty.txt"), "local work").expect("dirty file");
+    let spec = opencode::OpenCodeLaunchSpec {
+        command: PathBuf::from("/bin/false"),
+        args: Vec::new(),
+        cwd: worktree.clone(),
+        worktree_root: Some(root),
+        issue_identifier: "SYM-205".into(),
+        branch_name: "feature/sym-205".into(),
+        repo_path: Some(repo),
+        mnemesh_workspace_root: Some(dir.path().join("repo")),
+        base_ref: Some("agent-server/opencode-runner-extension".into()),
+        agent: "build".into(),
+        model: Some("openai/gpt-5.5".into()),
+        effort: Some("high".into()),
+        prompt: "Full Linear issue spec with eval defaults".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+
+    let error = opencode::StdioOpenCodeLauncher
+        .launch(&spec)
+        .await
+        .expect_err("dirty stale worktree must be rejected");
+
+    assert!(
+        matches!(error, opencode::OpenCodeError::InvalidWorktree(ref message) if message.contains("dirty or untracked files prevent safe repair") && message.contains("stale-branch")),
+        "{error:?}"
+    );
+    assert_eq!(
+        git_output(&worktree, ["branch", "--show-current"]).trim(),
+        "stale-branch"
+    );
+}

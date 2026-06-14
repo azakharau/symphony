@@ -6,7 +6,7 @@ mod liveness;
 mod policy;
 mod records;
 
-use std::path::PathBuf;
+use std::{error::Error as StdError, path::PathBuf};
 
 use anyhow::Context;
 use tokio::time::{Duration, sleep};
@@ -30,8 +30,8 @@ use handoff::process_in_progress_handoff;
 use http::run_continuous;
 use liveness::project_liveness_projection;
 use policy::{
-    blocker_record, compare_issues_for_dispatch, has_existing_session, has_new_owner_response,
-    is_terminal_state, recoverable_opencode_failure, unaccepted_blocker,
+    blocker_record, compare_issues_for_dispatch, has_new_owner_response, is_terminal_state,
+    recoverable_opencode_failure, unaccepted_blocker,
 };
 use records::issue_record;
 
@@ -277,6 +277,7 @@ async fn reconcile_project(
                         CleanupStatus::Clean,
                     );
                     store.upsert_issue(&record).await?;
+                    mark_historical_sessions_ignored(store, project, &issue).await?;
                     continue;
                 }
                 if let Some(blocker) = unaccepted_blocker(&issue.blocked_by) {
@@ -320,11 +321,15 @@ async fn reconcile_project(
                     record.git_ref = existing.git_ref.clone().or(record.git_ref);
                     record.cleanup_status = existing.cleanup_status;
                 }
-                if !has_existing_session(store, &project.id, &issue.id).await? {
+                if latest_running_session_for_issue(store, &project.id, &issue.id)
+                    .await?
+                    .is_none()
+                {
                     info!(
                         project_id = %project.id,
                         issue = %issue.identifier,
-                        "In Progress issue has no recorded OpenCode session; returning to Todo"
+                        reason = "missing_active_session",
+                        "In Progress issue has no active OpenCode session; returning to Todo"
                     );
                     linear
                         .transition_issue(&issue.id, LinearTransition::Todo)
@@ -336,9 +341,17 @@ async fn reconcile_project(
                         None,
                         CleanupStatus::Clean,
                     );
+                    let mut record = record;
+                    record.failure = Some(FailureRecord {
+                        kind: "runtime_defect".into(),
+                        message:
+                            "In Progress issue has no active running or resumable OpenCode session"
+                                .into(),
+                        fingerprint: Some("missing_active_session".into()),
+                        occurrence_count: 1,
+                    });
                     store.upsert_issue(&record).await?;
-                    mark_existing_session_waiting_for_project_owner_input(store, project, &issue)
-                        .await?;
+                    mark_historical_sessions_ignored(store, project, &issue).await?;
                     continue;
                 }
                 if process_in_progress_handoff(project, store, linear, opencode, &issue, existing)
@@ -595,22 +608,29 @@ async fn reconcile_project(
         );
         store.upsert_issue(&record).await?;
         match candidate {
-            DispatchCandidate::New(issue) => {
-                let started = opencode.launch(&launch_spec).await?;
-                let session = new_session_record(project, &issue, started, &launch_spec);
-                info!(
-                    project_id = %project.id,
-                    issue = %issue.identifier,
-                    session_id = %session.session_id,
-                    worktree_path = %session.worktree_path,
-                    "OpenCode session recorded"
-                );
-                store.upsert_opencode_session(&session).await?;
-                report.dispatched.push(issue.identifier);
-            }
+            DispatchCandidate::New(issue) => match opencode.launch(&launch_spec).await {
+                Ok(started) => {
+                    let session = new_session_record(project, &issue, started, &launch_spec);
+                    info!(
+                        project_id = %project.id,
+                        issue = %issue.identifier,
+                        session_id = %session.session_id,
+                        worktree_path = %session.worktree_path,
+                        "OpenCode session recorded"
+                    );
+                    store.upsert_opencode_session(&session).await?;
+                    report.dispatched.push(issue.identifier);
+                }
+                Err(error) => {
+                    handle_launch_failure(project, store, linear, &issue, &launch_spec, error)
+                        .await?;
+                }
+            },
             DispatchCandidate::ExistingSession(issue) => {
                 mark_existing_session_reactivated(store, project, &issue).await?;
-                resume_stale_opencode_session(project, store, opencode, &issue).await?;
+                resume_stale_opencode_session(project, store, opencode, &issue)
+                    .await
+                    .context("continue existing OpenCode session")?;
                 info!(
                     project_id = %project.id,
                     issue = %issue.identifier,
@@ -675,6 +695,107 @@ async fn park_missing_mnemesh_workspace(
         CleanupStatus::Clean,
     );
     store.upsert_issue(&record).await?;
+    Ok(())
+}
+
+async fn handle_launch_failure(
+    project: &ProjectConfig,
+    store: &SqliteStore,
+    linear: &impl LinearClient,
+    issue: &LinearIssue,
+    launch_spec: &crate::opencode::OpenCodeLaunchSpec,
+    error: crate::opencode::OpenCodeError,
+) -> anyhow::Result<()> {
+    let failure_reason = error_chain(&error);
+    warn!(
+        project_id = %project.id,
+        issue_id = %issue.id,
+        issue = %issue.identifier,
+        worktree_path = %launch_spec.cwd.display(),
+        expected_branch = %launch_spec.branch_name,
+        failure_reason = %failure_reason,
+        "OpenCode launch failed after Linear transition"
+    );
+    linear
+        .record_issue_evidence(
+            &issue.id,
+            LinearIssueEvidence {
+                kind: "runtime_defect".into(),
+                body: launch_failure_evidence_body(issue, launch_spec, &failure_reason),
+            },
+        )
+        .await?;
+    linear
+        .transition_issue(&issue.id, LinearTransition::Todo)
+        .await?;
+
+    let failure = FailureRecord {
+        kind: "runtime_defect".into(),
+        message: failure_reason,
+        fingerprint: Some("launch_failed".into()),
+        occurrence_count: 1,
+    };
+    let mut record = issue_record(
+        project,
+        issue,
+        LifecycleStage::Failed,
+        Some(BlockerRecord {
+            kind: "runtime_defect".into(),
+            message: "OpenCode launch failed after Linear transition".into(),
+            observed_at: issue.updated_at.clone(),
+        }),
+        CleanupStatus::Clean,
+    );
+    record.failure = Some(failure);
+    store.upsert_issue(&record).await?;
+    Ok(())
+}
+
+fn launch_failure_evidence_body(
+    issue: &LinearIssue,
+    launch_spec: &crate::opencode::OpenCodeLaunchSpec,
+    failure_reason: &str,
+) -> String {
+    format!(
+        "runtime_defect: launch_failed\nissue_id: {}\nissue_identifier: {}\nattempted_worktree_path: {}\nexpected_branch: {}\nelapsed_seconds: unknown\nfailure_reason: {}",
+        issue.id,
+        issue.identifier,
+        launch_spec.cwd.display(),
+        launch_spec.branch_name,
+        failure_reason
+    )
+}
+
+fn error_chain(error: &(dyn StdError + 'static)) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(error) = source {
+        parts.push(error.to_string());
+        source = error.source();
+    }
+    parts.join(": ")
+}
+
+async fn mark_historical_sessions_ignored(
+    store: &SqliteStore,
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+) -> anyhow::Result<()> {
+    for mut session in store
+        .opencode_sessions_for_issue(&project.id, &issue.id)
+        .await?
+    {
+        if matches!(
+            session.lifecycle_stage,
+            LifecycleStage::Failed | LifecycleStage::Completed
+        ) || matches!(
+            session.stage,
+            OpenCodeStage::Failed | OpenCodeStage::Completed
+        ) {
+            session.last_event = Some("stale_failed_session_ignored".into());
+            store.upsert_opencode_session(&session).await?;
+        }
+    }
     Ok(())
 }
 
@@ -835,7 +956,8 @@ async fn resume_stale_opencode_session(
     opencode: &impl OpenCodeLauncher,
     issue: &LinearIssue,
 ) -> anyhow::Result<()> {
-    let Some(mut session) = latest_session_for_issue(store, &project.id, &issue.id).await? else {
+    let Some(mut session) = latest_active_session_for_issue(store, &project.id, &issue.id).await?
+    else {
         return Ok(());
     };
     if !session_requires_resume(&session).await {
@@ -880,18 +1002,55 @@ async fn latest_session_for_issue(
     Ok(sessions.into_iter().next_back())
 }
 
+async fn latest_active_session_for_issue(
+    store: &SqliteStore,
+    project_id: &str,
+    issue_id: &str,
+) -> anyhow::Result<Option<OpenCodeSessionRecord>> {
+    let mut sessions: Vec<_> = store
+        .opencode_sessions_for_issue(project_id, issue_id)
+        .await?
+        .into_iter()
+        .filter(|session| {
+            matches!(
+                session.lifecycle_stage,
+                LifecycleStage::Running | LifecycleStage::Queued | LifecycleStage::Blocked
+            )
+        })
+        .collect();
+    sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    Ok(sessions.into_iter().next_back())
+}
+
+async fn latest_running_session_for_issue(
+    store: &SqliteStore,
+    project_id: &str,
+    issue_id: &str,
+) -> anyhow::Result<Option<OpenCodeSessionRecord>> {
+    let mut sessions: Vec<_> = store
+        .opencode_sessions_for_issue(project_id, issue_id)
+        .await?
+        .into_iter()
+        .filter(|session| {
+            session.lifecycle_stage == LifecycleStage::Running
+                && !matches!(
+                    session.stage,
+                    OpenCodeStage::Failed | OpenCodeStage::Completed
+                )
+        })
+        .collect();
+    sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    Ok(sessions.into_iter().next_back())
+}
+
 async fn has_reusable_existing_session(
     store: &SqliteStore,
     project_id: &str,
     issue_id: &str,
 ) -> anyhow::Result<bool> {
-    let Some(session) = latest_session_for_issue(store, project_id, issue_id).await? else {
-        return Ok(false);
-    };
-    Ok(!matches!(
-        session.lifecycle_stage,
-        LifecycleStage::Failed | LifecycleStage::Completed
-    ))
+    Ok(latest_active_session_for_issue(store, project_id, issue_id)
+        .await?
+        .is_some())
 }
 
 async fn session_requires_resume(session: &OpenCodeSessionRecord) -> bool {

@@ -48,7 +48,12 @@ pub(super) async fn run_continuous(
                         run_once_with_clients(&poll_config, &store, &linear, &StdioOpenCodeLauncher)
                             .await
                     {
-                        error!(error = %error, "poll failed");
+                        let error_chain = error
+                            .chain()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(": ");
+                        error!(error = %error, error_chain = %error_chain, "poll failed");
                     } else {
                         debug!("poll tick completed");
                     }

@@ -700,6 +700,31 @@ impl ScriptedOpenCodeLauncher {
 }
 
 #[derive(Debug)]
+struct FailingLaunchOpenCodeLauncher {
+    message: String,
+}
+
+impl FailingLaunchOpenCodeLauncher {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl OpenCodeLauncher for FailingLaunchOpenCodeLauncher {
+    async fn launch(
+        &self,
+        _spec: &opencode::OpenCodeLaunchSpec,
+    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+        Err(opencode::OpenCodeError::InvalidWorktree(
+            self.message.clone(),
+        ))
+    }
+}
+
+#[derive(Debug)]
 struct ResumeRecordingOpenCodeLauncher {
     resumed_process_id: u32,
     launches: std::sync::Mutex<Vec<String>>,

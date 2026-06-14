@@ -3,7 +3,6 @@ use std::cmp::Ordering;
 use crate::{
     linear::{LinearBlocker, LinearIssue},
     state::{BlockerRecord, FailureRecord, IssueStateRecord},
-    storage::SqliteStore,
 };
 
 pub(super) fn matching_failure_count(failure: Option<&FailureRecord>, fingerprint: &str) -> u32 {
@@ -95,15 +94,4 @@ pub(super) fn has_new_owner_response(
     };
 
     answer_created_at > observed_at
-}
-
-pub(super) async fn has_existing_session(
-    store: &SqliteStore,
-    project_id: &str,
-    issue_id: &str,
-) -> anyhow::Result<bool> {
-    Ok(!store
-        .opencode_sessions_for_issue(project_id, issue_id)
-        .await?
-        .is_empty())
 }

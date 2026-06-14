@@ -1538,3 +1538,127 @@ async fn orchestration_returns_in_progress_issue_without_session_to_todo() {
         .expect("issue");
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Queued);
 }
+
+#[tokio::test]
+async fn orchestration_records_launch_failure_without_aborting_poll_or_owner_input() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let client = RecordingLinearClient::new(vec![
+        linear_issue("launch-fails", "SYM-201", "Todo", Some(1)),
+        linear_issue("still-runs", "SYM-202", "Todo", Some(2)),
+    ]);
+    let opencode = FailingLaunchOpenCodeLauncher::new("existing worktree is dirty");
+
+    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("launch failure must not abort poll");
+
+    assert!(report.dispatched.is_empty());
+    assert_eq!(
+        client.transitions(),
+        vec![
+            ("launch-fails".into(), LinearTransition::InProgress),
+            ("launch-fails".into(), LinearTransition::Todo),
+            ("still-runs".into(), LinearTransition::InProgress),
+            ("still-runs".into(), LinearTransition::Todo),
+        ]
+    );
+    let evidence = client.evidence();
+    assert_eq!(evidence.len(), 2);
+    assert!(
+        evidence
+            .iter()
+            .all(|(_, evidence)| evidence.kind == "runtime_defect")
+    );
+    assert!(evidence[0].1.body.contains("runtime_defect: launch_failed"));
+    assert!(evidence[0].1.body.contains("issue_id: launch-fails"));
+    assert!(evidence[0].1.body.contains("attempted_worktree_path:"));
+    assert!(
+        evidence[0]
+            .1
+            .body
+            .contains("expected_branch: feature/sym-201")
+    );
+    assert!(evidence[0].1.body.contains("elapsed_seconds: unknown"));
+    assert!(evidence[0].1.body.contains("existing worktree is dirty"));
+    let issue = store
+        .issue("symphony", "launch-fails")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(
+        issue.failure.expect("failure").fingerprint.as_deref(),
+        Some("launch_failed")
+    );
+}
+
+#[tokio::test]
+async fn orchestration_ignores_historical_failed_session_for_in_progress_reconciliation() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let worktree = dir.path().join("SYM-203-worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let mut issue = test_issue("symphony", "historical", "SYM-203");
+    issue.lifecycle_stage = LifecycleStage::Running;
+    store.upsert_issue(issue).await.expect("issue");
+    store
+        .upsert_opencode_session({
+            let mut session = test_session("symphony", "historical", "zz-failed", &worktree);
+            session.lifecycle_stage = LifecycleStage::Failed;
+            session.stage = OpenCodeStage::Failed;
+            session.lifecycle_marker = Some("failed:malformed_handoff".into());
+            session.last_event = Some("failed:missing_handoff_sidecar".into());
+            session
+        })
+        .await
+        .expect("failed session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "historical",
+        "SYM-203",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(Some(success_handoff(
+        "zz-failed",
+        &worktree,
+        "feature/sym-203",
+        "abc",
+    )));
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("poll");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("historical".into(), LinearTransition::Todo)]
+    );
+    assert!(client.evidence().is_empty());
+    let issue = store
+        .issue("symphony", "historical")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Queued);
+    assert_eq!(
+        issue.failure.expect("failure").fingerprint.as_deref(),
+        Some("missing_active_session")
+    );
+    let sessions = store
+        .opencode_sessions_for_issue("symphony", "historical")
+        .await
+        .expect("sessions");
+    assert_eq!(
+        sessions[0].last_event.as_deref(),
+        Some("stale_failed_session_ignored")
+    );
+}

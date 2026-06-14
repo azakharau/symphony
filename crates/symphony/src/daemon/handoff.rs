@@ -11,7 +11,8 @@ use crate::{
         build_acp_launch_spec, worktree_path_allowed,
     },
     state::{
-        BlockerRecord, CleanupStatus, FailureRecord, GitRefRecord, IssueStateRecord, LifecycleStage,
+        BlockerRecord, CleanupStatus, FailureRecord, GitRefRecord, IssueStateRecord,
+        LifecycleStage, OpenCodeStage,
     },
     storage::SqliteStore,
 };
@@ -35,7 +36,8 @@ pub(super) async fn process_in_progress_handoff(
         warn!(
             project_id = %project.id,
             issue = %issue.identifier,
-            "in-progress issue has no recorded OpenCode session yet"
+            reason = "missing_active_session",
+            "in-progress issue has no active OpenCode session yet"
         );
         return Ok(false);
     };
@@ -613,9 +615,19 @@ async fn latest_session(
     project_id: &str,
     issue_id: &str,
 ) -> anyhow::Result<Option<crate::state::OpenCodeSessionRecord>> {
-    let mut sessions = store
+    let mut sessions: Vec<_> = store
         .opencode_sessions_for_issue(project_id, issue_id)
-        .await?;
+        .await?
+        .into_iter()
+        .filter(|session| {
+            session.lifecycle_stage == LifecycleStage::Running
+                && !matches!(
+                    session.stage,
+                    OpenCodeStage::Failed | OpenCodeStage::Completed
+                )
+        })
+        .collect();
+    sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
     Ok(sessions.pop())
 }
 

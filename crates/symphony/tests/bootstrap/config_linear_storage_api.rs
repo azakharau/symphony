@@ -648,6 +648,49 @@ async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
 }
 
 #[tokio::test]
+async fn opencode_sessions_for_issue_orders_by_runtime_update_not_session_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "runtime-order", "SYM-161"))
+        .await
+        .expect("issue");
+
+    let stale_worktree = dir.path().join("SYM-161-stale");
+    let fresh_worktree = dir.path().join("SYM-161-fresh");
+    let mut stale = test_session("symphony", "runtime-order", "zz-stale", &stale_worktree);
+    stale.lifecycle_stage = LifecycleStage::Failed;
+    stale.stage = OpenCodeStage::Failed;
+    store
+        .upsert_opencode_session(stale)
+        .await
+        .expect("stale session");
+    store
+        .upsert_opencode_session(test_session(
+            "symphony",
+            "runtime-order",
+            "aa-fresh",
+            &fresh_worktree,
+        ))
+        .await
+        .expect("fresh session");
+
+    let sessions = store
+        .opencode_sessions_for_issue("symphony", "runtime-order")
+        .await
+        .expect("sessions");
+
+    assert_eq!(
+        sessions.last().expect("latest runtime session").session_id,
+        "aa-fresh"
+    );
+}
+
+#[tokio::test]
 async fn runtime_cleanup_removes_stale_completed_rows_and_keeps_active_state() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

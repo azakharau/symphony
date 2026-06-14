@@ -649,7 +649,6 @@ async fn latest_session(
                 )
         })
         .collect();
-    sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
     Ok(sessions.pop())
 }
 

@@ -58,10 +58,9 @@ async fn project_runner_problem(
     project_id: &str,
 ) -> anyhow::Result<Option<RuntimeLivenessStatus>> {
     for issue in store.issues_for_project(project_id).await? {
-        let mut sessions = store
+        let sessions = store
             .opencode_sessions_for_issue(project_id, &issue.issue_id)
             .await?;
-        sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
         let Some(session) = sessions.into_iter().next_back() else {
             continue;
         };

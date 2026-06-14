@@ -569,7 +569,7 @@ impl SqliteStore {
                        eval_stage, lifecycle_marker, last_event, silence_observed
                 FROM opencode_sessions
                 WHERE project_id = ?1 AND issue_id = ?2
-                ORDER BY session_id ASC
+                ORDER BY updated_at ASC, rowid ASC, session_id ASC
                 "#,
                 params![project_id, issue_id],
             )

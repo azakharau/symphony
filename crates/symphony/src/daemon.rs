@@ -1069,11 +1069,10 @@ async fn latest_session_for_issue(
     project_id: &str,
     issue_id: &str,
 ) -> anyhow::Result<Option<OpenCodeSessionRecord>> {
-    let mut sessions = store
+    Ok(store
         .opencode_sessions_for_issue(project_id, issue_id)
-        .await?;
-    sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
-    Ok(sessions.into_iter().next_back())
+        .await?
+        .pop())
 }
 
 async fn latest_active_session_for_issue(
@@ -1092,8 +1091,7 @@ async fn latest_active_session_for_issue(
             )
         })
         .collect();
-    sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
-    Ok(sessions.into_iter().next_back())
+    Ok(sessions.pop())
 }
 
 async fn latest_running_session_for_issue(
@@ -1113,8 +1111,7 @@ async fn latest_running_session_for_issue(
                 )
         })
         .collect();
-    sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
-    Ok(sessions.into_iter().next_back())
+    Ok(sessions.pop())
 }
 
 async fn has_reusable_existing_session(
@@ -1288,11 +1285,11 @@ async fn refresh_opencode_session_metrics(
     project: &ProjectConfig,
     issue: &LinearIssue,
 ) -> anyhow::Result<()> {
-    let mut sessions = store
+    let Some(mut session) = store
         .opencode_sessions_for_issue(&project.id, &issue.id)
-        .await?;
-    sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
-    let Some(mut session) = sessions.into_iter().next_back() else {
+        .await?
+        .pop()
+    else {
         return Ok(());
     };
     let Some(metrics) =

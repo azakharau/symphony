@@ -34,7 +34,7 @@ async fn daemon_once_entrypoint_validates_config_migrates_and_reconciles_project
 
 #[test]
 fn systemd_user_unit_declares_restart_and_default_target_autostart() {
-    let unit = include_str!("../../../../deploy/systemd/openai-symphony-symphony.service");
+    let unit = include_str!("../../../../deploy/systemd/symphony.service");
 
     assert!(unit.starts_with("[Unit]\n"));
     assert_eq!(unit.matches("[Unit]").count(), 1);

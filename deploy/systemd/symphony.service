@@ -1,5 +1,5 @@
 [Unit]
-Description=Symphony Rust runtime for Symphony
+Description=Symphony multiproject Rust runtime
 After=network-online.target
 Wants=network-online.target
 

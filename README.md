@@ -39,8 +39,8 @@ cargo run -p symphony -- daemon --config config/symphony.projects.toml --databas
 ```
 
 Continuous service mode uses the systemd unit template in
-`deploy/systemd/openai-symphony-symphony.service` after the operator approves a safe host restart
-window. Do not restart currently running user services during documentation or config-only updates.
+`deploy/systemd/symphony.service` after the operator approves a safe host restart window. Do not
+restart currently running user services during documentation or config-only updates.
 Use `--once` only for non-live bootstrap validation. Continuous mode requires `LINEAR_API_KEY` so the
 daemon can poll and mutate Linear through the Rust adapter. The service reads that key from the
 existing file-backed Symphony environment at `/home/agent/.symphony/env/linear.env`; do not duplicate
@@ -63,9 +63,10 @@ SYMPHONY_LIVE_OPENCODE_ACP=1 cargo test -p symphony --test bootstrap \
   installed_opencode_acp_supports_ndjson_config_options_without_prompting -- --nocapture
 cargo build --release -p symphony
 /usr/local/bin/opencode acp
-systemctl --user status openai-symphony-symphony.service
+systemctl --user status symphony.service
 curl -fsS http://127.0.0.1:4115/api/dashboard
 curl -fsS http://127.0.0.1:4115/api/projects/symphony
+curl -fsS http://127.0.0.1:4115/api/projects/mnemesh
 ```
 
 ## Runtime Contract

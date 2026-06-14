@@ -154,9 +154,10 @@ cargo build --release -p symphony
 cargo run -p symphony -- validate-config --config config/symphony.projects.toml
 cargo run -p symphony -- daemon --config config/symphony.projects.toml --database /home/agent/.symphony/symphony/runtime.sqlite3
 /usr/local/bin/opencode acp
-systemctl --user status openai-symphony-symphony.service
+systemctl --user status symphony.service
 curl -fsS http://127.0.0.1:4115/api/dashboard
 curl -fsS http://127.0.0.1:4115/api/projects/symphony
+curl -fsS http://127.0.0.1:4115/api/projects/mnemesh
 ```
 
 The live commands require host service access, Linear credentials, OpenCode availability, and the

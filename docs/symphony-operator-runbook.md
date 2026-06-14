@@ -2,7 +2,7 @@
 
 ## Service
 
-Systemd user-service template: `deploy/systemd/openai-symphony-symphony.service`
+Systemd user-service template: `deploy/systemd/symphony.service`
 
 Install/update:
 
@@ -10,17 +10,15 @@ Install/update:
 cargo build --release -p symphony
 install -Dm0755 target/release/symphony /home/agent/.cargo/bin/symphony
 install -Dm0644 config/symphony.projects.toml /home/agent/.symphony/symphony/projects.toml
-install -Dm0644 deploy/systemd/openai-symphony-symphony.service /home/agent/.config/systemd/user/openai-symphony-symphony.service
+install -Dm0644 deploy/systemd/symphony.service /home/agent/.config/systemd/user/symphony.service
 systemctl --user daemon-reload
-systemctl --user restart openai-symphony-symphony.service
-systemctl --user status openai-symphony-symphony.service
+systemctl --user restart symphony.service
+systemctl --user status symphony.service
 ```
 
 Run the `daemon-reload` and `restart` commands only inside an operator-approved safe restart window.
-Until that cutover, the currently loaded `openai-symphony-vnext-*` user units are legacy-named host
-aliases for the Rust/OpenCode Symphony runtime and must not be interrupted by this repository update.
-The Mnemesh service should receive a primary-named unit in the same approved host cutover, or keep the
-legacy-named user unit documented as a host alias until it can be safely renamed.
+The active host deployment is one multiproject `symphony.service`; do not run project-specific
+legacy units for Symphony orchestration after cutover.
 
 The user service points at `/home/agent/.symphony/symphony/projects.toml` and
 `/home/agent/.symphony/symphony/runtime.sqlite3`. The service reads `LINEAR_API_KEY` from
@@ -29,7 +27,7 @@ configuration.
 
 ## Smoke Checks
 
-Use this lightweight activation smoke before enabling or after changing any configured vNext
+Use this lightweight activation smoke before enabling or after changing any configured
 project. The smoke is non-destructive: it validates config, observes the already-running service and
 dashboard/API state, and checks whether queued work is executable or intentionally idle. Do not run
 service restarts as part of this smoke; restart only during the operator-approved install/cutover path
@@ -51,25 +49,22 @@ above.
    `/usr/local/bin/opencode` with `args = ["acp"]`, `default_suite = "symphony-validation"`,
    and `max_sessions = 1`.
 
-2. Confirm the host services are active without restarting them. Current vNext host deployments may
-   still use legacy-named unit aliases for the Rust/OpenCode runtime:
+2. Confirm the single host service is active without restarting it:
 
    ```bash
-   systemctl --user status openai-symphony-vnext-mnemesh.service --no-pager
-   systemctl --user status openai-symphony-vnext-symphony.service --no-pager
+   systemctl --user status symphony.service --no-pager
    ```
 
-   Host evidence should show both units `active (running)`. Treat inactive or failed units as an
+   Host evidence should show the unit `active (running)`. Treat inactive or failed units as an
    operator blocker, not as permission to restart outside the safe window.
 
-3. Check dashboard and per-project API reachability. The Symphony host service listens on port 4115;
-   the paired Mnemesh vNext host config uses port 4111:
+3. Check dashboard and per-project API reachability. The Symphony host service listens on port 4115
+   and serves all enabled projects from the same daemon:
 
    ```bash
    curl -fsS http://127.0.0.1:4115/api/dashboard
    curl -fsS http://127.0.0.1:4115/api/projects/symphony
-   curl -fsS http://127.0.0.1:4111/api/dashboard
-   curl -fsS http://127.0.0.1:4111/api/projects/mnemesh
+   curl -fsS http://127.0.0.1:4115/api/projects/mnemesh
    ```
 
    The project response must make the project state visible: active capacity, parked blockers,
@@ -124,6 +119,7 @@ Live checks:
 /usr/local/bin/opencode acp
 curl -fsS http://127.0.0.1:4115/api/dashboard
 curl -fsS http://127.0.0.1:4115/api/projects/symphony
+curl -fsS http://127.0.0.1:4115/api/projects/mnemesh
 ```
 
 ## Rollback
@@ -131,9 +127,9 @@ curl -fsS http://127.0.0.1:4115/api/projects/symphony
 Rollback is Rust-service-only:
 
 ```bash
-systemctl --user stop openai-symphony-symphony.service
+systemctl --user stop symphony.service
 cp /home/agent/.symphony/symphony/runtime.sqlite3 /home/agent/.symphony/symphony/runtime.sqlite3.rollback
-systemctl --user start openai-symphony-symphony.service
+systemctl --user start symphony.service
 ```
 
 Do not restart or restore the removed Elixir runtime. If the Rust service cannot run, leave active

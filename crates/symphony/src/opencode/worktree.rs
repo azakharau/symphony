@@ -32,6 +32,7 @@ pub(super) async fn ensure_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), Ope
         tokio::fs::create_dir_all(parent).await?;
     }
 
+    prune_stale_worktree_entries(repo_path).await?;
     create_git_worktree(spec, repo_path, base_ref).await
 }
 
@@ -130,6 +131,24 @@ async fn create_git_worktree(
                 spec.cwd.display(),
                 base_ref
             ),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        })
+    }
+}
+
+async fn prune_stale_worktree_entries(repo_path: &Path) -> Result<(), OpenCodeError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["worktree", "prune"])
+        .output()
+        .await?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(OpenCodeError::GitCommand {
+            command: format!("git -C {} worktree prune", repo_path.display()),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
     }
@@ -297,6 +316,29 @@ mod tests {
         ensure_worktree(&fixture.launch_spec())
             .await
             .expect("clean expected branch can be reused");
+    }
+
+    #[tokio::test]
+    async fn missing_registered_worktree_is_pruned_before_launch() {
+        let fixture = GitFixture::new();
+        fixture.add_worktree("symphony/old", false);
+        fs::remove_dir_all(&fixture.worktree).expect("remove worktree dir");
+
+        ensure_worktree(&fixture.launch_spec())
+            .await
+            .expect("missing registered worktree must be pruned and recreated");
+
+        assert_eq!(
+            git_output(
+                &fixture.worktree,
+                ["branch", "--show-current"],
+                "git branch --show-current",
+            )
+            .await
+            .expect("worktree branch")
+            .trim(),
+            "symphony/SYM-1"
+        );
     }
 
     struct GitFixture {

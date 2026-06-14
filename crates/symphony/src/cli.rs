@@ -33,7 +33,8 @@ enum Command {
 }
 
 pub async fn run() -> anyhow::Result<()> {
-    run_with_args(std::env::args_os()).await
+    let args = std::env::args_os().collect::<Vec<_>>();
+    run_with_args(args).await
 }
 
 pub async fn run_with_args<I, T>(args: I) -> anyhow::Result<()>

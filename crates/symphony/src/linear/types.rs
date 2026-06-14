@@ -41,7 +41,7 @@ impl LinearIssue {
         self
     }
 
-    pub fn with_new_owner_answer(mut self, has_new_owner_answer: bool) -> Self {
+    pub const fn with_new_owner_answer(mut self, has_new_owner_answer: bool) -> Self {
         self.has_new_owner_answer = has_new_owner_answer;
         self
     }
@@ -83,7 +83,7 @@ pub enum LinearTransition {
 }
 
 impl LinearTransition {
-    pub fn state_name(self) -> &'static str {
+    pub const fn state_name(self) -> &'static str {
         match self {
             Self::Todo => "Todo",
             Self::InProgress => "In Progress",

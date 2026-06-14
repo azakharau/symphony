@@ -38,14 +38,14 @@ pub async fn runtime_api_json_response(
     let parts = rest.split('/').collect::<Vec<_>>();
 
     match parts.as_slice() {
-        [project_id] => match api.project_drilldown(project_id)? {
-            Some(project) => json_response(200, project),
-            None => json_response(404, &serde_json::json!({ "error": "project_not_found" })),
-        },
-        [project_id, "issues", issue_id] => match api.issue_detail(project_id, issue_id)? {
-            Some(issue) => json_response(200, issue),
-            None => json_response(404, &serde_json::json!({ "error": "issue_not_found" })),
-        },
+        [project_id] => api.project_drilldown(project_id)?.map_or_else(
+            || json_response(404, &serde_json::json!({ "error": "project_not_found" })),
+            |project| json_response(200, project),
+        ),
+        [project_id, "issues", issue_id] => api.issue_detail(project_id, issue_id)?.map_or_else(
+            || json_response(404, &serde_json::json!({ "error": "issue_not_found" })),
+            |issue| json_response(200, issue),
+        ),
         _ => json_response(404, &serde_json::json!({ "error": "not_found" })),
     }
 }
@@ -152,7 +152,7 @@ impl RuntimeDashboardApi {
         })
     }
 
-    pub fn aggregate(&self) -> &AggregateDashboardResponse {
+    pub const fn aggregate(&self) -> &AggregateDashboardResponse {
         &self.aggregate
     }
 
@@ -380,21 +380,8 @@ fn project_liveness_response(
     project: &ProjectReadModel,
     fallback_capacity: &ProjectCapacity,
 ) -> ProjectRuntimeLivenessResponse {
-    match &project.liveness {
-        Some(liveness) => ProjectRuntimeLivenessResponse {
-            status: liveness.status,
-            reason: liveness.reason.clone(),
-            primary_reason_code: liveness.status.as_str().into(),
-            primary_reason_detail: liveness.reason.clone(),
-            last_poll_at: liveness.last_poll_at.clone(),
-            last_successful_candidate_scan_at: liveness.last_successful_candidate_scan_at.clone(),
-            capacity: ProjectCapacity {
-                max_sessions: liveness.max_sessions,
-                running_sessions: liveness.running_sessions,
-                available_sessions: liveness.available_sessions,
-            },
-        },
-        None => {
+    project.liveness.as_ref().map_or_else(
+        || {
             let reason = if project.enabled {
                 "runtime has not reported a poll for this enabled project"
             } else {
@@ -409,8 +396,21 @@ fn project_liveness_response(
                 last_successful_candidate_scan_at: None,
                 capacity: fallback_capacity.clone(),
             }
-        }
-    }
+        },
+        |liveness| ProjectRuntimeLivenessResponse {
+            status: liveness.status,
+            reason: liveness.reason.clone(),
+            primary_reason_code: liveness.status.as_str().into(),
+            primary_reason_detail: liveness.reason.clone(),
+            last_poll_at: liveness.last_poll_at.clone(),
+            last_successful_candidate_scan_at: liveness.last_successful_candidate_scan_at.clone(),
+            capacity: ProjectCapacity {
+                max_sessions: liveness.max_sessions,
+                running_sessions: liveness.running_sessions,
+                available_sessions: liveness.available_sessions,
+            },
+        },
+    )
 }
 
 fn primary_execution_reason(

@@ -4,7 +4,7 @@ use crate::{
     storage::SqliteStore,
 };
 
-use super::session_requires_resume;
+use super::session::session_requires_resume;
 
 pub(super) async fn project_liveness_projection(
     store: &SqliteStore,

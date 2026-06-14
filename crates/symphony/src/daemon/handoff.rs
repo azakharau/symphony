@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use super::{process_elapsed_seconds, session_has_live_process, terminate_current_session_process};
+use super::session::{
+    process_elapsed_seconds, session_has_live_process, terminate_current_session_process,
+};
 use crate::{
     config::ProjectConfig,
     linear::{LinearClient, LinearIssue, LinearIssueEvidence, LinearTransition},

@@ -38,7 +38,7 @@ pub enum RuntimeLivenessStatus {
 }
 
 impl RuntimeLivenessStatus {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::InactiveRuntime => "inactive_runtime",
             Self::NoEligibleIssues => "no_eligible_issues",
@@ -195,7 +195,7 @@ pub enum OpenCodeStage {
 }
 
 impl OpenCodeStage {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Starting => "starting",
             Self::Running => "running",
@@ -234,7 +234,7 @@ impl FromStr for OpenCodeStage {
 }
 
 impl LifecycleStage {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
@@ -277,7 +277,7 @@ pub enum CleanupStatus {
 }
 
 impl CleanupStatus {
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Clean => "clean",
             Self::Pending => "pending",

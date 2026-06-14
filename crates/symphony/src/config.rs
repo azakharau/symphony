@@ -155,15 +155,15 @@ impl CleanupConfig {
     }
 }
 
-fn default_cleanup_enabled() -> bool {
+const fn default_cleanup_enabled() -> bool {
     true
 }
 
-fn default_cleanup_interval_secs() -> u64 {
+const fn default_cleanup_interval_secs() -> u64 {
     300
 }
 
-fn default_cleanup_retention_secs() -> u64 {
+const fn default_cleanup_retention_secs() -> u64 {
     86_400
 }
 
@@ -220,7 +220,7 @@ pub struct EvalDefaults {
     pub max_identical_failure_fingerprints: u32,
 }
 
-fn default_max_identical_failure_fingerprints() -> u32 {
+const fn default_max_identical_failure_fingerprints() -> u32 {
     2
 }
 

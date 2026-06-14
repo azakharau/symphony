@@ -422,7 +422,7 @@ fn status_class(status: &str) -> &'static str {
     }
 }
 
-fn stage_class(stage: OpenCodeStage) -> &'static str {
+const fn stage_class(stage: OpenCodeStage) -> &'static str {
     match stage {
         OpenCodeStage::Running | OpenCodeStage::Eval | OpenCodeStage::Completed => "ok",
         OpenCodeStage::Failed | OpenCodeStage::Silent => "bad",
@@ -430,7 +430,7 @@ fn stage_class(stage: OpenCodeStage) -> &'static str {
     }
 }
 
-fn issue_status_rank(stage: LifecycleStage) -> u8 {
+const fn issue_status_rank(stage: LifecycleStage) -> u8 {
     match stage {
         LifecycleStage::Running => 0,
         LifecycleStage::Blocked => 1,
@@ -440,7 +440,7 @@ fn issue_status_rank(stage: LifecycleStage) -> u8 {
     }
 }
 
-fn lifecycle_label(stage: LifecycleStage) -> &'static str {
+const fn lifecycle_label(stage: LifecycleStage) -> &'static str {
     match stage {
         LifecycleStage::Queued => "queued",
         LifecycleStage::Running => "running",
@@ -450,7 +450,7 @@ fn lifecycle_label(stage: LifecycleStage) -> &'static str {
     }
 }
 
-fn cleanup_label(status: CleanupStatus) -> &'static str {
+const fn cleanup_label(status: CleanupStatus) -> &'static str {
     match status {
         CleanupStatus::Clean => "clean",
         CleanupStatus::Pending => "pending",
@@ -460,11 +460,11 @@ fn cleanup_label(status: CleanupStatus) -> &'static str {
     }
 }
 
-fn open_code_stage_label(stage: OpenCodeStage) -> &'static str {
+const fn open_code_stage_label(stage: OpenCodeStage) -> &'static str {
     stage.as_str()
 }
 
-fn option_bool(value: Option<bool>) -> &'static str {
+const fn option_bool(value: Option<bool>) -> &'static str {
     match value {
         Some(true) => "true",
         Some(false) => "false",
@@ -472,7 +472,7 @@ fn option_bool(value: Option<bool>) -> &'static str {
     }
 }
 
-fn process_classification(process_alive: Option<bool>) -> &'static str {
+const fn process_classification(process_alive: Option<bool>) -> &'static str {
     match process_alive {
         Some(true) => "live",
         Some(false) => "dead",
@@ -480,7 +480,7 @@ fn process_classification(process_alive: Option<bool>) -> &'static str {
     }
 }
 
-fn bool_label(value: bool) -> &'static str {
+const fn bool_label(value: bool) -> &'static str {
     if value { "true" } else { "false" }
 }
 

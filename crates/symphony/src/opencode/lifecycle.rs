@@ -49,15 +49,15 @@ impl AcpChildLifecycle {
         })
     }
 
-    pub(super) fn process_id(&self) -> Option<u32> {
+    pub(super) const fn process_id(&self) -> Option<u32> {
         self.process_id
     }
 
-    pub(super) fn stdin(&mut self) -> &mut ChildStdin {
+    pub(super) const fn stdin(&mut self) -> &mut ChildStdin {
         &mut self.stdin
     }
 
-    pub(super) fn io(&mut self) -> (&mut ChildStdin, &mut BufReader<ChildStdout>) {
+    pub(super) const fn io(&mut self) -> (&mut ChildStdin, &mut BufReader<ChildStdout>) {
         (&mut self.stdin, &mut self.stdout)
     }
 

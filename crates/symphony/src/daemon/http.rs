@@ -1,0 +1,241 @@
+use std::{path::PathBuf, time::Duration};
+
+use anyhow::Context;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::{TcpListener, TcpStream},
+};
+use tracing::{debug, error, info, warn};
+
+use crate::{
+    config::{OpenCodeStorageConfig, RootConfig},
+    dashboard::runtime_dashboard_response,
+    linear::LinearSdkClient,
+    opencode::{
+        OpenCodeSessionArchiveRequest, StdioOpenCodeLauncher, archive_and_delete_session_tree,
+    },
+    storage::SqliteStore,
+};
+
+use super::run_once_with_clients;
+
+pub(super) async fn run_continuous(
+    config: RootConfig,
+    database_path: PathBuf,
+) -> anyhow::Result<()> {
+    let server = config
+        .server
+        .clone()
+        .context("continuous daemon mode requires server.host and server.port")?;
+    let bind_addr = format!("{}:{}", server.host, server.port);
+    let listener = TcpListener::bind(&bind_addr)
+        .await
+        .with_context(|| format!("bind dashboard API {bind_addr}"))?;
+    info!(%bind_addr, "dashboard API listening");
+
+    let poll_config = config.clone();
+    let poll_database_path = database_path.clone();
+    let linear = LinearSdkClient::from_env()?;
+
+    tokio::spawn(async move {
+        loop {
+            debug!("poll tick started");
+            match SqliteStore::open(&poll_database_path).await {
+                Ok(store) => {
+                    if let Err(error) = store.migrate().await {
+                        error!(error = %error, "poll storage migration failed");
+                    } else if let Err(error) =
+                        run_once_with_clients(&poll_config, &store, &linear, &StdioOpenCodeLauncher)
+                            .await
+                    {
+                        error!(error = %error, "poll failed");
+                    } else {
+                        debug!("poll tick completed");
+                    }
+                }
+                Err(error) => {
+                    error!(error = %error, "poll storage open failed");
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+    });
+
+    if config.cleanup.enabled {
+        let cleanup_database_path = database_path.clone();
+        let cleanup_interval = Duration::from_secs(config.cleanup.interval_secs);
+        let cleanup_retention = Duration::from_secs(config.cleanup.retention_secs);
+        let opencode_storage = config.opencode_storage.clone();
+        info!(
+            interval_secs = cleanup_interval.as_secs(),
+            retention_secs = cleanup_retention.as_secs(),
+            "runtime cleanup worker scheduled"
+        );
+        tokio::spawn(async move {
+            tokio::time::sleep(cleanup_interval).await;
+            loop {
+                debug!(
+                    interval_secs = cleanup_interval.as_secs(),
+                    retention_secs = cleanup_retention.as_secs(),
+                    "runtime cleanup tick started"
+                );
+                match SqliteStore::open(&cleanup_database_path).await {
+                    Ok(store) => {
+                        if let Err(error) = store.migrate().await {
+                            error!(error = %error, "runtime cleanup storage migration failed");
+                        } else {
+                            if let Some(storage) = opencode_storage.as_ref()
+                                && let Err(error) =
+                                    cleanup_opencode_sessions(&store, storage, cleanup_retention)
+                                        .await
+                            {
+                                error!(error = %error, "OpenCode session cleanup failed");
+                            }
+                            match store.cleanup_runtime_state(cleanup_retention).await {
+                                Ok(report) => {
+                                    if report.issues_deleted > 0
+                                        || report.sessions_deleted > 0
+                                        || report.stage_events_deleted > 0
+                                        || report.eval_runs_deleted > 0
+                                    {
+                                        info!(
+                                            issues_deleted = report.issues_deleted,
+                                            sessions_deleted = report.sessions_deleted,
+                                            stage_events_deleted = report.stage_events_deleted,
+                                            eval_runs_deleted = report.eval_runs_deleted,
+                                            "runtime cleanup removed stale rows"
+                                        );
+                                    } else {
+                                        debug!("runtime cleanup found no stale rows");
+                                    }
+                                }
+                                Err(error) => {
+                                    error!(error = %error, "runtime cleanup failed");
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        error!(error = %error, "runtime cleanup storage open failed");
+                    }
+                }
+                tokio::time::sleep(cleanup_interval).await;
+            }
+        });
+    } else {
+        info!("runtime cleanup worker disabled by config");
+    }
+
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        debug!(%peer, "dashboard HTTP connection accepted");
+        if let Err(error) = handle_http_stream(&config, &database_path, stream).await {
+            warn!(error = %error, "dashboard HTTP request failed");
+        }
+    }
+}
+
+async fn cleanup_opencode_sessions(
+    store: &SqliteStore,
+    storage: &OpenCodeStorageConfig,
+    retention: Duration,
+) -> anyhow::Result<()> {
+    let candidates = store.opencode_cleanup_candidates(retention).await?;
+    if candidates.is_empty() {
+        debug!("OpenCode session cleanup found no archive candidates");
+        return Ok(());
+    }
+    for candidate in candidates {
+        let report = archive_and_delete_session_tree(OpenCodeSessionArchiveRequest {
+            opencode_database_path: storage.database_path.clone(),
+            archive_root: storage.archive_root.clone(),
+            project_id: candidate.project_id.clone(),
+            issue_id: candidate.issue_id.clone(),
+            issue_identifier: candidate.issue_identifier.clone(),
+            root_session_id: candidate.session_id.clone(),
+        })
+        .await?;
+        if report.sessions_archived > 0 || report.sessions_deleted > 0 {
+            let runtime_records_deleted = store
+                .delete_opencode_session_record(
+                    &candidate.project_id,
+                    &candidate.issue_id,
+                    &candidate.session_id,
+                )
+                .await?;
+            info!(
+                project_id = %candidate.project_id,
+                issue = %candidate.issue_identifier,
+                session_id = %candidate.session_id,
+                artifact_root = %report.artifact_root.display(),
+                sessions_archived = report.sessions_archived,
+                sessions_deleted = report.sessions_deleted,
+                runtime_records_deleted,
+                "OpenCode session tree archived and cleaned"
+            );
+        } else {
+            debug!(
+                project_id = %candidate.project_id,
+                issue = %candidate.issue_identifier,
+                session_id = %candidate.session_id,
+                "OpenCode session cleanup candidate had no persisted OpenCode rows"
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn handle_http_stream(
+    config: &RootConfig,
+    database_path: &PathBuf,
+    stream: TcpStream,
+) -> anyhow::Result<()> {
+    let mut first_line = String::new();
+    let mut reader = BufReader::new(stream);
+    reader.read_line(&mut first_line).await?;
+    let mut stream = reader.into_inner();
+    let mut parts = first_line.split_whitespace();
+    let method = parts.next().unwrap_or_default();
+    let path = parts.next().unwrap_or("/");
+    debug!(method, path, "dashboard HTTP request");
+
+    if method != "GET" {
+        write_http_response(
+            &mut stream,
+            405,
+            "application/json",
+            r#"{"error":"method_not_allowed"}"#,
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let store = SqliteStore::open(database_path).await?;
+    store.migrate().await?;
+    let (status, content_type, body) = runtime_dashboard_response(config, &store, path).await?;
+    write_http_response(&mut stream, status, content_type, &body).await?;
+    Ok(())
+}
+
+async fn write_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &str,
+) -> std::io::Result<()> {
+    let reason = match status {
+        200 => "OK",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        _ => "Internal Server Error",
+    };
+    stream
+        .write_all(
+            format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+}

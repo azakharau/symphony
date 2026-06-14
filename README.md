@@ -1,40 +1,76 @@
 # Symphony
 
-Symphony turns project work into isolated, autonomous implementation runs, allowing teams to manage
-work instead of supervising coding agents.
+Symphony turns project work into isolated implementation runs. The active Symphony runtime is the Rust
+`symphony` service, which schedules Linear issues and runs OpenCode ACP in per-issue
+worktrees.
 
 [![Symphony demo video preview](.github/media/symphony-demo-poster.jpg)](https://player.vimeo.com/video/1186371009?h=5626e4b899)
 
-_In this [demo video](https://player.vimeo.com/video/1186371009?h=5626e4b899), Symphony monitors a Linear board for work and spawns agents to handle the tasks. The agents complete the tasks and provide proof of work: CI status, PR review feedback, complexity analysis, and walkthrough videos. When accepted, the agents land the PR safely. Engineers do not need to supervise Codex; they can manage the work at a higher level._
-
 > [!WARNING]
-> Symphony is a low-key engineering preview for testing in trusted environments.
+> Symphony is an engineering preview for trusted operator environments.
 
-## Running Symphony
+## Active Runtime
 
-### Requirements
+Symphony is the only active service implementation in this repository. The old Elixir runtime and
+Codex runner integration have been removed from active code, CI, and operator docs.
 
-Symphony works best in codebases that have adopted
-[harness engineering](https://openai.com/index/harness-engineering/). Symphony is the next step --
-moving from managing coding agents to managing work that needs to get done.
+The Rust workspace contains:
 
-### Option 1. Make your own
+- Typed multiproject config loading.
+- Linear project and milestone scoping.
+- OpenCode-only ACP launch configuration with nd-JSON stdio, `session/set_config_option` model and
+  effort selection, and per-issue git worktrees.
+- SQLite runtime state bootstrap and restart-safe state queries.
+- Issue orchestration for `Todo`, `In Progress`, `Need Owner Input`, backlog, blockers, terminal
+  reconciliation, eval repair loops, and git-closure handoffs.
+- Dashboard/API read models for aggregate, project, and issue drilldown views.
 
-Tell your favorite coding agent to build Symphony in a programming language of your choice:
+Symphony parks legacy steward states (`Preparing`, `In Review`, `RCA Required`) instead of treating
+them as executable runtime aliases.
 
-> Implement Symphony according to the following spec:
-> https://github.com/openai/symphony/blob/main/SPEC.md
+## Configuration
 
-### Option 2. Use our experimental reference implementation
+Use the checked-in sample as the active service shape:
 
-Check out [elixir/README.md](elixir/README.md) for instructions on how to set up your environment
-and run the Elixir-based Symphony implementation. You can also ask your favorite coding agent to
-help with the setup:
+```bash
+cargo run -p symphony -- validate-config --config config/symphony.projects.toml
+cargo run -p symphony -- init-store --database /home/agent/.symphony/symphony/runtime.sqlite3
+cargo run -p symphony -- daemon --config config/symphony.projects.toml --database /home/agent/.symphony/symphony/runtime.sqlite3
+```
 
-> Set up Symphony for my repository based on
-> https://github.com/openai/symphony/blob/main/elixir/README.md
+Continuous service mode uses the systemd unit template in
+`deploy/systemd/openai-symphony-symphony.service` after the operator approves a safe host restart
+window. Do not restart currently running user services during documentation or config-only updates.
+Use `--once` only for non-live bootstrap validation. Continuous mode requires `LINEAR_API_KEY` so the
+daemon can poll and mutate Linear through the Rust adapter. The service reads that key from the
+existing file-backed Symphony environment at `/home/agent/.symphony/env/linear.env`; do not duplicate
+the key in project workflow files.
 
----
+## Validation
+
+Default validation does not start OpenCode, mutate Linear, or restart systemd:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+```
+
+Live cutover validation requires host credentials and operator control:
+
+```bash
+SYMPHONY_LIVE_OPENCODE_ACP=1 cargo test -p symphony --test bootstrap \
+  installed_opencode_acp_supports_ndjson_config_options_without_prompting -- --nocapture
+cargo build --release -p symphony
+/usr/local/bin/opencode acp
+systemctl --user status openai-symphony-symphony.service
+curl -fsS http://127.0.0.1:4115/api/dashboard
+curl -fsS http://127.0.0.1:4115/api/projects/symphony
+```
+
+## Runtime Contract
+
+See [SPEC.md](SPEC.md) for the Rust/OpenCode-only Symphony service contract.
 
 ## License
 

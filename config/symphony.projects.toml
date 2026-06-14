@@ -1,0 +1,45 @@
+[server]
+host = "127.0.0.1"
+port = 4115
+
+[cleanup]
+enabled = true
+interval_secs = 300
+retention_secs = 86400
+
+[opencode_storage]
+database_path = "/home/agent/.local/share/opencode/opencode.db"
+archive_root = "/home/agent/mnemesh-benchmark-runs/symphony-opencode-session-archives"
+
+[[projects]]
+id = "symphony"
+name = "Symphony"
+enabled = true
+workflow_path = "/home/agent/proj/symphony/SPEC.md"
+repo_path = "/home/agent/proj/symphony"
+
+[projects.mnemesh]
+workspace_root = "/home/agent/proj/symphony"
+
+[projects.branch]
+base = "fix/vnext-owner-input-repair-gates"
+worktree_root = "/home/agent/.symphony/workspaces/opencode/symphony"
+
+[projects.linear]
+team_key = "SYM"
+project_id = "07df87ce-4e93-4d2c-a73d-84aee1f27e07"
+
+[projects.opencode]
+command = "/usr/local/bin/opencode"
+args = ["acp"]
+agent = "build"
+model = "openai/gpt-5.5"
+effort = "high"
+permission_policy = "reject"
+
+[projects.eval]
+default_suite = "symphony-validation"
+max_identical_failure_fingerprints = 2
+
+[projects.concurrency]
+max_sessions = 1

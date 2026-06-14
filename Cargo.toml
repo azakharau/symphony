@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/symphony"]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.96"
+
+[profile.dev]
+opt-level = 0
+debug = "line-tables-only"
+incremental = true
+codegen-units = 256
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 0
+
+[profile.dev-fast]
+inherits = "dev"
+debug = "line-tables-only"
+incremental = true
+codegen-units = 256
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+debug = "line-tables-only"
+strip = "none"

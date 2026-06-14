@@ -1,0 +1,18 @@
+[Unit]
+Description=Symphony Rust runtime for Symphony
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=HOME=/home/agent
+Environment=PATH=/home/agent/.cargo/bin:/home/agent/.bun/bin:/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=RUST_LOG=info
+EnvironmentFile=/home/agent/.symphony/env/linear.env
+WorkingDirectory=/home/agent/proj/symphony
+ExecStart=/home/agent/.cargo/bin/symphony daemon --config /home/agent/.symphony/symphony/projects.toml --database /home/agent/.symphony/symphony/runtime.sqlite3
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

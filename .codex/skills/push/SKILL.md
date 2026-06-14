@@ -11,6 +11,7 @@ description:
 
 - `gh` CLI is installed and available in `PATH`.
 - `gh auth status` succeeds for GitHub operations in this repo.
+- Rust toolchain for this workspace is installed.
 
 ## Goals
 
@@ -26,7 +27,12 @@ description:
 ## Steps
 
 1. Identify current branch and confirm remote state.
-2. Run local validation (`make -C elixir all`) before pushing.
+2. Run local Rust validation before pushing:
+   - `cargo fmt --all -- --check`
+   - `cargo clippy --all-targets --all-features -- -D warnings`
+   - `cargo test`
+   - If `cargo nextest` is available and the PR scope warrants it, prefer or add
+     `cargo nextest run --all-targets --all-features` for the test gate.
 3. Push branch to `origin` with upstream tracking if needed, using whatever
    remote URL is already configured.
 4. If push is not clean/rejected:
@@ -41,7 +47,7 @@ description:
    - If no PR exists, create one.
    - If a PR exists and is open, update it.
    - If branch is tied to a closed/merged PR, create a new branch + PR.
-   - Write a proper PR title that clearly describes the change outcome
+   - Write a proper PR title that clearly describes the change outcome.
    - For branch updates, explicitly reconsider whether current PR title still
      matches the latest scope; update it if it no longer does.
 6. Write/update PR body explicitly using `.github/pull_request_template.md`:
@@ -52,7 +58,10 @@ description:
      scope (all intended work on the branch), not just the newest commits,
      including newly added work, removed work, or changed approach.
    - Do not reuse stale description text from earlier iterations.
-7. Validate PR body with `mix pr_body.check` and fix all reported issues.
+7. Inspect the PR body before publishing or updating:
+   - Confirm every required template section is present.
+   - Confirm validation commands and outcomes match what actually ran.
+   - Confirm risk, rollout, and test notes are specific to this change.
 8. Reply with the PR URL from `gh pr view`.
 
 ## Commands
@@ -61,8 +70,13 @@ description:
 # Identify branch
 branch=$(git branch --show-current)
 
-# Minimal validation gate
-make -C elixir all
+# Rust validation gate
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+
+# Optional stronger test gate when nextest is installed and useful for scope
+cargo nextest run --all-targets --all-features
 
 # Initial push: respect the current origin remote.
 git push -u origin HEAD
@@ -93,7 +107,7 @@ else
   gh pr edit --title "$pr_title"
 fi
 
-# Write/edit PR body to match .github/pull_request_template.md before validation.
+# Write/edit PR body to match .github/pull_request_template.md before final review.
 # Example workflow:
 # 1) open the template and draft body content for this PR
 # 2) gh pr edit --body-file /tmp/pr_body.md
@@ -101,7 +115,7 @@ fi
 
 tmp_pr_body=$(mktemp)
 gh pr view --json body -q .body > "$tmp_pr_body"
-(cd elixir && mix pr_body.check --file "$tmp_pr_body")
+cat "$tmp_pr_body"
 rm -f "$tmp_pr_body"
 
 # Show PR URL for the reply
@@ -115,3 +129,4 @@ gh pr view --json url -q .url
   - Use the `pull` skill for non-fast-forward or stale-branch issues.
   - Surface auth, permissions, or workflow restrictions directly instead of
     changing remotes or protocols.
+- Keep PR body test evidence aligned with the Rust validation that actually ran.

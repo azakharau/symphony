@@ -111,6 +111,83 @@ async fn opencode_session_tree_activity_exposes_subagents_todos_and_recent_event
 }
 
 #[tokio::test]
+async fn opencode_session_tree_activity_uses_global_bounded_timeline_ordering() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("opencode.db");
+    seed_opencode_session_tree(&db_path).await;
+
+    let database = libsql::Builder::new_local(db_path.display().to_string())
+        .build()
+        .await
+        .expect("build opencode db");
+    let conn = database.connect().expect("connect opencode db");
+    for (session_id, title, part_id, time_created, time_updated, summary) in [
+        (
+            "ses-review",
+            "Review subagent",
+            "part-review",
+            1002_i64,
+            2003_i64,
+            "review transcript",
+        ),
+        (
+            "ses-scout",
+            "Scout subagent",
+            "part-scout",
+            1001_i64,
+            2001_i64,
+            "scout transcript",
+        ),
+    ] {
+        conn.execute(
+            r#"
+            INSERT INTO session (
+                id, project_id, parent_id, slug, directory, title, version,
+                time_created, time_updated, agent, model, cost, tokens_input,
+                tokens_output, tokens_reasoning, tokens_cache_read,
+                tokens_cache_write
+            )
+            VALUES (?1, 'project-row', 'ses-root', ?1, '/tmp/work', ?2, '0',
+                    ?3, ?4, 'rust-engineer', '{"id":"gpt-5.5","providerID":"openai"}',
+                    0.0, 1, 1, 0, 0, 0)
+            "#,
+            libsql::params![session_id, title, time_created, time_updated],
+        )
+        .await
+        .expect("insert extra session");
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+            libsql::params![format!("msg-{session_id}"), session_id, time_created, time_updated, serde_json::json!({"role":"assistant"}).to_string()],
+        )
+        .await
+        .expect("insert extra message");
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            libsql::params![part_id, format!("msg-{session_id}"), session_id, time_created, time_updated, serde_json::json!({"type":"text","text":summary}).to_string()],
+        )
+        .await
+        .expect("insert extra part");
+    }
+
+    let activity = opencode::read_session_tree_activity(&db_path, "ses-root", 3)
+        .await
+        .expect("read activity")
+        .expect("activity exists");
+
+    assert_eq!(activity.subagents.len(), 3);
+    assert_eq!(activity.timeline.len(), 3);
+    assert_eq!(activity.timeline[0].part_id, "part-review");
+    assert_eq!(activity.timeline[1].part_id, "part-scout");
+    assert_eq!(activity.timeline[2].part_id, "part-root");
+    assert!(
+        !activity
+            .timeline
+            .iter()
+            .any(|event| event.part_id == "part-child")
+    );
+}
+
+#[tokio::test]
 async fn dashboard_issue_detail_embeds_live_opencode_activity_from_sqlite() {
     let dir = tempfile::tempdir().expect("tempdir");
     let runtime_db_path = dir.path().join("runtime.sqlite3");

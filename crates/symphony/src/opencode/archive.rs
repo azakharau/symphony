@@ -179,13 +179,9 @@ pub async fn read_session_tree_metrics(
         return Ok(None);
     }
 
-    let session_ids = sessions
-        .iter()
-        .map(|session| session.id.as_str())
-        .collect::<Vec<_>>();
-    let message_count = count_rows_by_session(&conn, "message", &session_ids).await?;
-    let part_count = count_rows_by_session(&conn, "part", &session_ids).await?;
-    let todo_count = count_rows_by_session(&conn, "todo", &session_ids).await?;
+    let message_count = count_rows_by_session(&conn, "message", root_session_id).await?;
+    let part_count = count_rows_by_session(&conn, "part", root_session_id).await?;
+    let todo_count = count_rows_by_session(&conn, "todo", root_session_id).await?;
     Ok(Some(metrics_from_rows(
         root_session_id,
         &sessions,
@@ -206,12 +202,8 @@ pub async fn read_session_tree_activity(
         return Ok(None);
     }
 
-    let session_ids = sessions
-        .iter()
-        .map(|session| session.id.as_str())
-        .collect::<Vec<_>>();
-    let todos = todo_rows(&conn, &session_ids).await?;
-    let timeline = timeline_events(&conn, &session_ids, timeline_limit).await?;
+    let todos = todo_rows(&conn, root_session_id).await?;
+    let timeline = timeline_events(&conn, root_session_id, timeline_limit).await?;
     let running_tool_count = timeline
         .iter()
         .filter(|event| event.status.as_deref() == Some("running"))
@@ -273,10 +265,10 @@ pub async fn archive_and_delete_session_tree(
         .iter()
         .map(|session| session.id.as_str())
         .collect::<Vec<_>>();
-    let messages = message_rows(&conn, &session_ids).await?;
-    let parts = part_rows(&conn, &session_ids).await?;
-    let session_messages = session_message_rows(&conn, &session_ids).await?;
-    let todos = todo_rows(&conn, &session_ids).await?;
+    let messages = message_rows(&conn, &request.root_session_id).await?;
+    let parts = part_rows(&conn, &request.root_session_id).await?;
+    let session_messages = session_message_rows(&conn, &request.root_session_id).await?;
+    let todos = todo_rows(&conn, &request.root_session_id).await?;
     let metrics = metrics_from_rows(
         &request.root_session_id,
         &sessions,
@@ -373,195 +365,196 @@ async fn session_tree(
 async fn count_rows_by_session(
     conn: &Connection,
     table: &str,
-    session_ids: &[&str],
+    root_session_id: &str,
 ) -> Result<u64, OpenCodeError> {
     if !matches!(table, "message" | "part" | "todo") {
         return Err(OpenCodeError::Archive(format!(
             "unsupported OpenCode session table `{table}`"
         )));
     }
-    let mut total = 0_u64;
-    for session_id in session_ids {
-        let mut rows = conn
-            .query(
-                format!("SELECT count(*) FROM {table} WHERE session_id = ?1").as_str(),
-                params![*session_id],
+    let mut rows = conn
+        .query(
+            format!(
+                r#"
+                SELECT count(*)
+                FROM {table}
+                WHERE session_id IN (
+                    SELECT id FROM session WHERE id = ?1 OR parent_id = ?1
+                )
+                "#
             )
-            .await?;
-        let Some(row) = rows.next().await? else {
-            continue;
-        };
-        total = total.saturating_add(get_u64(&row, 0)?);
-    }
-    Ok(total)
+            .as_str(),
+            params![root_session_id],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(0);
+    };
+    get_u64(&row, 0)
 }
 
 async fn message_rows(
     conn: &Connection,
-    session_ids: &[&str],
+    root_session_id: &str,
 ) -> Result<Vec<MessageRow>, OpenCodeError> {
     let mut values = Vec::new();
-    for session_id in session_ids {
-        let mut rows = conn
-            .query(
-                r#"
-                SELECT id, session_id, time_created, time_updated, data
-                FROM message
-                WHERE session_id = ?1
-                ORDER BY time_created ASC, id ASC
-                "#,
-                params![*session_id],
+    let mut rows = conn
+        .query(
+            r#"
+            SELECT id, session_id, time_created, time_updated, data
+            FROM message
+            WHERE session_id IN (
+                SELECT id FROM session WHERE id = ?1 OR parent_id = ?1
             )
-            .await?;
-        while let Some(row) = rows.next().await? {
-            values.push(MessageRow {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                time_created: get_u64(&row, 2)?,
-                time_updated: get_u64(&row, 3)?,
-                data: parse_json_cell(row.get(4)?)?,
-            });
-        }
+            ORDER BY time_created ASC, session_id ASC, id ASC
+            "#,
+            params![root_session_id],
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        values.push(MessageRow {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            time_created: get_u64(&row, 2)?,
+            time_updated: get_u64(&row, 3)?,
+            data: parse_json_cell(row.get(4)?)?,
+        });
     }
     Ok(values)
 }
 
-async fn part_rows(conn: &Connection, session_ids: &[&str]) -> Result<Vec<PartRow>, OpenCodeError> {
+async fn part_rows(
+    conn: &Connection,
+    root_session_id: &str,
+) -> Result<Vec<PartRow>, OpenCodeError> {
     let mut values = Vec::new();
-    for session_id in session_ids {
-        let mut rows = conn
-            .query(
-                r#"
-                SELECT id, message_id, session_id, time_created, time_updated, data
-                FROM part
-                WHERE session_id = ?1
-                ORDER BY time_created ASC, id ASC
-                "#,
-                params![*session_id],
+    let mut rows = conn
+        .query(
+            r#"
+            SELECT id, message_id, session_id, time_created, time_updated, data
+            FROM part
+            WHERE session_id IN (
+                SELECT id FROM session WHERE id = ?1 OR parent_id = ?1
             )
-            .await?;
-        while let Some(row) = rows.next().await? {
-            values.push(PartRow {
-                id: row.get(0)?,
-                message_id: row.get(1)?,
-                session_id: row.get(2)?,
-                time_created: get_u64(&row, 3)?,
-                time_updated: get_u64(&row, 4)?,
-                data: parse_json_cell(row.get(5)?)?,
-            });
-        }
+            ORDER BY time_created ASC, session_id ASC, id ASC
+            "#,
+            params![root_session_id],
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        values.push(PartRow {
+            id: row.get(0)?,
+            message_id: row.get(1)?,
+            session_id: row.get(2)?,
+            time_created: get_u64(&row, 3)?,
+            time_updated: get_u64(&row, 4)?,
+            data: parse_json_cell(row.get(5)?)?,
+        });
     }
     Ok(values)
 }
 
 async fn session_message_rows(
     conn: &Connection,
-    session_ids: &[&str],
+    root_session_id: &str,
 ) -> Result<Vec<SessionMessageRow>, OpenCodeError> {
     let mut values = Vec::new();
-    for session_id in session_ids {
-        let mut rows = conn
-            .query(
-                r#"
-                SELECT id, session_id, type, time_created, time_updated, data
-                FROM session_message
-                WHERE session_id = ?1
-                ORDER BY time_created ASC, id ASC
-                "#,
-                params![*session_id],
+    let mut rows = conn
+        .query(
+            r#"
+            SELECT id, session_id, type, time_created, time_updated, data
+            FROM session_message
+            WHERE session_id IN (
+                SELECT id FROM session WHERE id = ?1 OR parent_id = ?1
             )
-            .await?;
-        while let Some(row) = rows.next().await? {
-            values.push(SessionMessageRow {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                message_type: row.get(2)?,
-                time_created: get_u64(&row, 3)?,
-                time_updated: get_u64(&row, 4)?,
-                data: parse_json_cell(row.get(5)?)?,
-            });
-        }
+            ORDER BY time_created ASC, session_id ASC, id ASC
+            "#,
+            params![root_session_id],
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        values.push(SessionMessageRow {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            message_type: row.get(2)?,
+            time_created: get_u64(&row, 3)?,
+            time_updated: get_u64(&row, 4)?,
+            data: parse_json_cell(row.get(5)?)?,
+        });
     }
     Ok(values)
 }
 
-async fn todo_rows(conn: &Connection, session_ids: &[&str]) -> Result<Vec<TodoRow>, OpenCodeError> {
+async fn todo_rows(
+    conn: &Connection,
+    root_session_id: &str,
+) -> Result<Vec<TodoRow>, OpenCodeError> {
     let mut values = Vec::new();
-    for session_id in session_ids {
-        let mut rows = conn
-            .query(
-                r#"
-                SELECT session_id, content, status, priority, position, time_created, time_updated
-                FROM todo
-                WHERE session_id = ?1
-                ORDER BY position ASC
-                "#,
-                params![*session_id],
+    let mut rows = conn
+        .query(
+            r#"
+            SELECT session_id, content, status, priority, position, time_created, time_updated
+            FROM todo
+            WHERE session_id IN (
+                SELECT id FROM session WHERE id = ?1 OR parent_id = ?1
             )
-            .await?;
-        while let Some(row) = rows.next().await? {
-            values.push(TodoRow {
-                session_id: row.get(0)?,
-                content: row.get(1)?,
-                status: row.get(2)?,
-                priority: row.get(3)?,
-                position: get_u64(&row, 4)?,
-                time_created: get_u64(&row, 5)?,
-                time_updated: get_u64(&row, 6)?,
-            });
-        }
+            ORDER BY session_id ASC, position ASC
+            "#,
+            params![root_session_id],
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        values.push(TodoRow {
+            session_id: row.get(0)?,
+            content: row.get(1)?,
+            status: row.get(2)?,
+            priority: row.get(3)?,
+            position: get_u64(&row, 4)?,
+            time_created: get_u64(&row, 5)?,
+            time_updated: get_u64(&row, 6)?,
+        });
     }
     Ok(values)
 }
 
 async fn timeline_events(
     conn: &Connection,
-    session_ids: &[&str],
+    root_session_id: &str,
     timeline_limit: usize,
 ) -> Result<Vec<OpenCodeTimelineEvent>, OpenCodeError> {
     if timeline_limit == 0 {
         return Ok(Vec::new());
     }
 
-    let per_session_limit = timeline_limit.max(1) as i64;
     let mut values = Vec::new();
-    for session_id in session_ids {
-        let mut rows = conn
-            .query(
-                r#"
-                SELECT id, session_id, time_created, time_updated, data
-                FROM part
-                WHERE session_id = ?1
-                ORDER BY time_updated DESC, time_created DESC, id DESC
-                LIMIT ?2
-                "#,
-                params![*session_id, per_session_limit],
+    let mut rows = conn
+        .query(
+            r#"
+            SELECT id, session_id, time_created, time_updated, data
+            FROM part
+            WHERE session_id IN (
+                SELECT id FROM session WHERE id = ?1 OR parent_id = ?1
             )
-            .await?;
-        while let Some(row) = rows.next().await? {
-            let part_id: String = row.get(0)?;
-            let session_id: String = row.get(1)?;
-            let time_created = get_u64(&row, 2)?;
-            let time_updated = get_u64(&row, 3)?;
-            let data = parse_json_cell(row.get(4)?)?;
-            values.push(timeline_event_from_part(
-                part_id,
-                session_id,
-                time_created,
-                time_updated,
-                &data,
-            ));
-        }
+            ORDER BY time_updated DESC, time_created DESC, session_id ASC, id ASC
+            LIMIT ?2
+            "#,
+            params![root_session_id, timeline_limit as i64],
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let part_id: String = row.get(0)?;
+        let session_id: String = row.get(1)?;
+        let time_created = get_u64(&row, 2)?;
+        let time_updated = get_u64(&row, 3)?;
+        let data = parse_json_cell(row.get(4)?)?;
+        values.push(timeline_event_from_part(
+            part_id,
+            session_id,
+            time_created,
+            time_updated,
+            &data,
+        ));
     }
-    values.sort_by(|left, right| {
-        right
-            .time_updated_ms
-            .cmp(&left.time_updated_ms)
-            .then_with(|| right.time_created_ms.cmp(&left.time_created_ms))
-            .then_with(|| left.session_id.cmp(&right.session_id))
-            .then_with(|| left.part_id.cmp(&right.part_id))
-    });
-    values.truncate(timeline_limit);
     Ok(values)
 }
 

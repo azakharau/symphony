@@ -33,11 +33,27 @@ pub use lifecycle::ProcessTreeTerminationEvidence;
 pub(crate) use lifecycle::terminate_process_tree;
 pub use types::{
     GitClosureEvidence, OpenCodeEvalResult, OpenCodeHandoff, OpenCodeLaunchSpec,
-    OpenCodeRuntimeConfig, OpenCodeSessionEvent, OpenCodeStartedSession, OpenCodeStopReason,
-    PermissionPolicy,
+    OpenCodeProcessStarted, OpenCodeRuntimeConfig, OpenCodeSessionCreated, OpenCodeSessionEvent,
+    OpenCodeStartedSession, OpenCodeStopReason, PermissionPolicy,
 };
 pub use worktree::worktree_path_allowed;
 use worktree::{ensure_worktree, handoff_sidecar_path, remove_stale_handoff_sidecar};
+
+#[async_trait::async_trait]
+pub trait OpenCodeLaunchObserver: Sync {
+    async fn process_started(&self, _event: OpenCodeProcessStarted) -> Result<(), OpenCodeError> {
+        Ok(())
+    }
+
+    async fn session_created(&self, _event: OpenCodeSessionCreated) -> Result<(), OpenCodeError> {
+        Ok(())
+    }
+}
+
+struct NoopOpenCodeLaunchObserver;
+
+#[async_trait::async_trait]
+impl OpenCodeLaunchObserver for NoopOpenCodeLaunchObserver {}
 
 #[async_trait::async_trait]
 pub trait OpenCodeLauncher: Sync {
@@ -45,6 +61,21 @@ pub trait OpenCodeLauncher: Sync {
         &self,
         spec: &OpenCodeLaunchSpec,
     ) -> Result<OpenCodeStartedSession, OpenCodeError>;
+
+    async fn launch_observed(
+        &self,
+        spec: &OpenCodeLaunchSpec,
+        observer: &dyn OpenCodeLaunchObserver,
+    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
+        let started = self.launch(spec).await?;
+        observer
+            .session_created(OpenCodeSessionCreated {
+                session_id: started.session_id.clone(),
+                process_id: started.process_id,
+            })
+            .await?;
+        Ok(started)
+    }
 
     async fn latest_handoff(
         &self,
@@ -254,6 +285,15 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         &self,
         spec: &OpenCodeLaunchSpec,
     ) -> Result<OpenCodeStartedSession, OpenCodeError> {
+        self.launch_observed(spec, &NoopOpenCodeLaunchObserver)
+            .await
+    }
+
+    async fn launch_observed(
+        &self,
+        spec: &OpenCodeLaunchSpec,
+        observer: &dyn OpenCodeLaunchObserver,
+    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
         info!(
             issue = %spec.issue_identifier,
             cwd = %spec.cwd.display(),
@@ -266,6 +306,14 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         remove_stale_handoff_sidecar(&spec.cwd).await?;
         let mut child = AcpChildLifecycle::spawn(spec).await?;
         let process_id = child.process_id();
+        if let Err(error) = observer
+            .process_started(OpenCodeProcessStarted { process_id })
+            .await
+        {
+            return Err(child
+                .setup_failed(&spec.issue_identifier, None, error.to_string())
+                .await);
+        }
 
         let mut next_id = 1_u64;
         let setup = async {
@@ -290,6 +338,12 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
                 cwd = %spec.cwd.display(),
                 "OpenCode ACP session created"
             );
+            observer
+                .session_created(OpenCodeSessionCreated {
+                    session_id: session_id.clone(),
+                    process_id,
+                })
+                .await?;
             configure_acp_session(&mut child, spec, &session_id, &mut next_id).await?;
             Ok::<String, OpenCodeError>(session_id)
         }
@@ -855,4 +909,6 @@ pub enum OpenCodeError {
     Json(#[from] serde_json::Error),
     #[error("opencode archive error: {0}")]
     Archive(String),
+    #[error("opencode launch observer error: {0}")]
+    LaunchObserver(String),
 }

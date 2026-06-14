@@ -9,13 +9,15 @@ mod records;
 use std::{error::Error as StdError, path::PathBuf};
 
 use anyhow::Context;
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::{
     config::{OpenCodeStorageConfig, ProjectConfig, RootConfig},
     linear::{EmptyLinearClient, LinearClient, LinearIssue, LinearIssueEvidence, LinearTransition},
     opencode::{
-        DeterministicOpenCodeLauncher, OpenCodeLauncher, OpenCodeStartedSession,
+        DeterministicOpenCodeLauncher, OpenCodeLaunchObserver, OpenCodeLauncher,
+        OpenCodeProcessStarted, OpenCodeSessionCreated, OpenCodeStartedSession,
         ProcessTreeTerminationEvidence, StdioOpenCodeLauncher,
         apply_session_tree_metrics_preserving_marker, build_acp_launch_spec, new_session_record,
         read_session_tree_metrics, terminate_process_tree,
@@ -608,24 +610,26 @@ async fn reconcile_project(
         );
         store.upsert_issue(&record).await?;
         match candidate {
-            DispatchCandidate::New(issue) => match opencode.launch(&launch_spec).await {
-                Ok(started) => {
-                    let session = new_session_record(project, &issue, started, &launch_spec);
-                    info!(
-                        project_id = %project.id,
-                        issue = %issue.identifier,
-                        session_id = %session.session_id,
-                        worktree_path = %session.worktree_path,
-                        "OpenCode session recorded"
-                    );
-                    store.upsert_opencode_session(&session).await?;
-                    report.dispatched.push(issue.identifier);
+            DispatchCandidate::New(issue) => {
+                let observer = RuntimeLaunchObserver::new(project, &issue, &launch_spec, store);
+                match opencode.launch_observed(&launch_spec, &observer).await {
+                    Ok(started) => {
+                        let session = new_session_record(project, &issue, started, &launch_spec);
+                        info!(
+                            project_id = %project.id,
+                            issue = %issue.identifier,
+                            session_id = %session.session_id,
+                            worktree_path = %session.worktree_path,
+                            "OpenCode session recorded"
+                        );
+                        report.dispatched.push(issue.identifier);
+                    }
+                    Err(error) => {
+                        handle_launch_failure(project, store, linear, &issue, &launch_spec, error)
+                            .await?;
+                    }
                 }
-                Err(error) => {
-                    handle_launch_failure(project, store, linear, &issue, &launch_spec, error)
-                        .await?;
-                }
-            },
+            }
             DispatchCandidate::ExistingSession(issue) => {
                 mark_existing_session_reactivated(store, project, &issue).await?;
                 resume_stale_opencode_session(project, store, opencode, &issue)
@@ -658,6 +662,111 @@ fn missing_mnemesh_workspace_reason(project: &ProjectConfig) -> Option<String> {
         ));
     }
     None
+}
+
+struct RuntimeLaunchObserver<'a> {
+    project: &'a ProjectConfig,
+    issue: &'a LinearIssue,
+    launch_spec: &'a crate::opencode::OpenCodeLaunchSpec,
+    store: &'a SqliteStore,
+    provisional_session_id: Mutex<Option<String>>,
+}
+
+impl<'a> RuntimeLaunchObserver<'a> {
+    fn new(
+        project: &'a ProjectConfig,
+        issue: &'a LinearIssue,
+        launch_spec: &'a crate::opencode::OpenCodeLaunchSpec,
+        store: &'a SqliteStore,
+    ) -> Self {
+        Self {
+            project,
+            issue,
+            launch_spec,
+            store,
+            provisional_session_id: Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl OpenCodeLaunchObserver for RuntimeLaunchObserver<'_> {
+    async fn process_started(
+        &self,
+        event: OpenCodeProcessStarted,
+    ) -> Result<(), crate::opencode::OpenCodeError> {
+        let session_id = provisional_session_id(self.issue, event.process_id);
+        {
+            let mut provisional_session_id = self.provisional_session_id.lock().await;
+            *provisional_session_id = Some(session_id.clone());
+        }
+
+        let mut session = new_session_record(
+            self.project,
+            self.issue,
+            OpenCodeStartedSession {
+                session_id,
+                process_id: event.process_id,
+            },
+            self.launch_spec,
+        );
+        session.lifecycle_marker = Some("acp_process_spawned".into());
+        session.last_event = Some(
+            event
+                .process_id
+                .map(|process_id| format!("acp_process_spawned:{process_id}"))
+                .unwrap_or_else(|| "acp_process_spawned:no_pid".into()),
+        );
+        self.store
+            .upsert_opencode_session(&session)
+            .await
+            .map_err(|error| crate::opencode::OpenCodeError::LaunchObserver(error.to_string()))
+    }
+
+    async fn session_created(
+        &self,
+        event: OpenCodeSessionCreated,
+    ) -> Result<(), crate::opencode::OpenCodeError> {
+        let provisional_session_id = {
+            let mut provisional_session_id = self.provisional_session_id.lock().await;
+            provisional_session_id.take()
+        };
+        if let Some(session_id) = provisional_session_id {
+            self.store
+                .delete_opencode_session(&self.project.id, &self.issue.id, &session_id)
+                .await
+                .map_err(|error| {
+                    crate::opencode::OpenCodeError::LaunchObserver(error.to_string())
+                })?;
+        }
+
+        let mut session = new_session_record(
+            self.project,
+            self.issue,
+            OpenCodeStartedSession {
+                session_id: event.session_id,
+                process_id: event.process_id,
+            },
+            self.launch_spec,
+        );
+        session.lifecycle_marker = Some("acp_session_attached".into());
+        session.last_event = Some(
+            event
+                .process_id
+                .map(|process_id| format!("acp_session_attached:{process_id}"))
+                .unwrap_or_else(|| "acp_session_attached:no_pid".into()),
+        );
+        self.store
+            .upsert_opencode_session(&session)
+            .await
+            .map_err(|error| crate::opencode::OpenCodeError::LaunchObserver(error.to_string()))
+    }
+}
+
+fn provisional_session_id(issue: &LinearIssue, process_id: Option<u32>) -> String {
+    process_id
+        .map(|process_id| format!("starting:{}:{process_id}", issue.identifier))
+        .unwrap_or_else(|| format!("starting:{}:no_pid", issue.identifier))
 }
 
 async fn park_missing_mnemesh_workspace(

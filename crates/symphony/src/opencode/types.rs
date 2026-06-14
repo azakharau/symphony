@@ -47,6 +47,17 @@ pub struct OpenCodeStartedSession {
     pub process_id: Option<u32>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenCodeProcessStarted {
+    pub process_id: Option<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenCodeSessionCreated {
+    pub session_id: String,
+    pub process_id: Option<u32>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct OpenCodeSessionEvent {
     pub stage: Option<OpenCodeStage>,

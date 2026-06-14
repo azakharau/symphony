@@ -554,6 +554,24 @@ impl SqliteStore {
         optional_row(&mut rows, session_from_row).await
     }
 
+    pub async fn delete_opencode_session(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        session_id: &str,
+    ) -> Result<(), StorageError> {
+        self.conn
+            .execute(
+                r#"
+                DELETE FROM opencode_sessions
+                WHERE project_id = ?1 AND issue_id = ?2 AND session_id = ?3
+                "#,
+                params![project_id, issue_id, session_id],
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn opencode_sessions_for_issue(
         &self,
         project_id: &str,

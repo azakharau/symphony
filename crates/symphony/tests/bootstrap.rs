@@ -403,6 +403,45 @@ for line in sys.stdin:
     script_path
 }
 
+fn write_hanging_before_session_new_acp_script(dir: &Path, transcript_path: &Path) -> PathBuf {
+    let script_path = dir.join("fake-opencode-acp-session-new-hang.py");
+    let transcript_literal =
+        serde_json::to_string(&transcript_path.display().to_string()).expect("json path");
+    fs::write(
+        &script_path,
+        format!(
+            r#"#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+import time
+
+transcript_path = pathlib.Path({transcript_literal})
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    with transcript_path.open("a", encoding="utf-8") as transcript:
+        transcript.write(json.dumps(message, sort_keys=True) + "\n")
+
+    if method == "initialize":
+        print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "result": {{"protocolVersion": 1}}}}), flush=True)
+    elif method == "session/new":
+        time.sleep(60)
+    else:
+        print(json.dumps({{"jsonrpc": "2.0", "id": message.get("id"), "error": {{"code": -32601, "message": "unexpected method before session/new"}}}}), flush=True)
+"#
+        ),
+    )
+    .expect("hanging fake acp script");
+    let mut permissions = fs::metadata(&script_path)
+        .expect("hanging fake acp metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script_path, permissions).expect("hanging fake acp executable");
+    script_path
+}
+
 fn write_failing_acp_setup_script(dir: &Path, child_pid_path: &Path) -> PathBuf {
     let script_path = dir.join("fake-opencode-acp-setup-fail.py");
     let child_pid_literal =

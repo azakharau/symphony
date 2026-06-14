@@ -1379,6 +1379,70 @@ async fn orchestration_launches_fresh_session_after_explicit_runtime_failure_cle
 }
 
 #[tokio::test]
+async fn orchestration_records_process_while_acp_session_new_is_still_pending() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let transcript_path = dir.path().join("acp-transcript.jsonl");
+    let script_path = write_hanging_before_session_new_acp_script(dir.path(), &transcript_path);
+    let configured = valid_config_toml().replace(
+        "command = \"/usr/local/bin/opencode\"",
+        &format!("command = \"{}\"", script_path.display()),
+    );
+    let config = RootConfig::from_toml_str(&configured).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "pending-session-new",
+        "SYM-161",
+        "Todo",
+        Some(1),
+    )]);
+    let opencode = opencode::StdioOpenCodeLauncher;
+    let poll = daemon::run_once_with_clients(&config, &store, &client, &opencode);
+    tokio::pin!(poll);
+
+    tokio::select! {
+        result = &mut poll => panic!("poll finished before fake session/new hang: {result:?}"),
+        () = tokio::time::sleep(Duration::from_millis(500)) => {}
+    }
+
+    assert_eq!(
+        client.transitions(),
+        vec![("pending-session-new".into(), LinearTransition::InProgress)]
+    );
+    let issue = store
+        .issue("symphony", "pending-session-new")
+        .await
+        .expect("query issue")
+        .expect("issue row");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    let sessions = store
+        .opencode_sessions_for_issue("symphony", "pending-session-new")
+        .await
+        .expect("sessions");
+    assert_eq!(sessions.len(), 1);
+    let session = sessions.last().expect("provisional session");
+    assert!(session.session_id.starts_with("starting:SYM-161:"));
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(session.stage, OpenCodeStage::Starting);
+    assert_eq!(
+        session.lifecycle_marker.as_deref(),
+        Some("acp_process_spawned")
+    );
+    assert!(
+        session.process_id.is_some(),
+        "process_id should be recorded before session/new returns"
+    );
+
+    if let Some(process_id) = session.process_id {
+        let _ = Command::new("kill")
+            .args(["-TERM", &process_id.to_string()])
+            .status();
+    }
+}
+
+#[tokio::test]
 async fn orchestration_blocks_in_progress_issue_when_linear_blocker_is_not_done() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

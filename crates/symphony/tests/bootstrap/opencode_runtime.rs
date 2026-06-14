@@ -1067,7 +1067,7 @@ async fn opencode_row_count(path: &std::path::Path, table: &str) -> u64 {
 }
 
 #[tokio::test]
-async fn stdio_launcher_repairs_clean_existing_worktree_on_wrong_branch() {
+async fn stdio_launcher_rejects_clean_existing_worktree_on_wrong_branch() {
     let dir = tempfile::tempdir().expect("tempdir");
     let repo = dir.path().join("repo");
     fs::create_dir_all(&repo).expect("repo dir");
@@ -1112,19 +1112,23 @@ async fn stdio_launcher_repairs_clean_existing_worktree_on_wrong_branch() {
         permission_policy: PermissionPolicy::Reject,
     };
 
-    opencode::StdioOpenCodeLauncher
+    let error = opencode::StdioOpenCodeLauncher
         .launch(&spec)
         .await
-        .expect("clean stale worktree can be repaired");
+        .expect_err("clean wrong-branch worktree must be rejected");
 
+    assert!(
+        matches!(error, opencode::OpenCodeError::InvalidWorktree(ref message) if message.contains("is on branch stale-branch but expected feature/sym-204")),
+        "{error:?}"
+    );
     assert_eq!(
         git_output(&worktree, ["branch", "--show-current"]).trim(),
-        "feature/sym-204"
+        "stale-branch"
     );
 }
 
 #[tokio::test]
-async fn stdio_launcher_rejects_dirty_existing_worktree_on_wrong_branch() {
+async fn stdio_launcher_rejects_existing_worktree_on_wrong_branch() {
     let dir = tempfile::tempdir().expect("tempdir");
     let repo = dir.path().join("repo");
     fs::create_dir_all(&repo).expect("repo dir");
@@ -1174,7 +1178,11 @@ async fn stdio_launcher_rejects_dirty_existing_worktree_on_wrong_branch() {
         .expect_err("dirty stale worktree must be rejected");
 
     assert!(
-        matches!(error, opencode::OpenCodeError::InvalidWorktree(ref message) if message.contains("dirty or untracked files prevent safe repair") && message.contains("stale-branch")),
+        matches!(error, opencode::OpenCodeError::InvalidWorktree(ref message) if message.contains("is on branch stale-branch but expected feature/sym-205")),
+        "{error:?}"
+    );
+    assert!(
+        matches!(error, opencode::OpenCodeError::InvalidWorktree(ref message) if message.contains("dirty or untracked files") && message.contains("dirty.txt")),
         "{error:?}"
     );
     assert_eq!(

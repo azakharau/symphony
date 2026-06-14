@@ -435,6 +435,32 @@ fn primary_execution_reason(
             format!("project cleanup is {project_cleanup_status}"),
         );
     }
+    if let Some(issue) = active_issues
+        .iter()
+        .find(|issue| issue_has_worktree_failure(issue))
+    {
+        return (
+            "worktree_blocked",
+            issue
+                .failure
+                .as_ref()
+                .map(|failure| failure.message.clone())
+                .unwrap_or_else(|| "OpenCode worktree validation failed".into()),
+        );
+    }
+    if let Some(issue) = active_issues
+        .iter()
+        .find(|issue| issue_has_git_closure_failure(issue))
+    {
+        return (
+            "git_closure_blocked",
+            issue
+                .failure
+                .as_ref()
+                .map(|failure| failure.message.clone())
+                .unwrap_or_else(|| "OpenCode git closure validation failed".into()),
+        );
+    }
     if liveness.status == RuntimeLivenessStatus::RunnerProcessDead
         || active_issues.iter().any(issue_has_dead_runner)
     {
@@ -505,6 +531,22 @@ fn issue_has_dead_runner(issue: &IssueDetailResponse) -> bool {
             .opencode_sessions
             .iter()
             .any(|session| session.process_alive == Some(false))
+}
+
+fn issue_has_worktree_failure(issue: &IssueDetailResponse) -> bool {
+    issue.lifecycle_stage == LifecycleStage::Failed
+        && issue.failure.as_ref().is_some_and(|failure| {
+            failure.fingerprint.as_deref() == Some("launch_failed")
+                && failure.message.contains("worktree")
+        })
+}
+
+fn issue_has_git_closure_failure(issue: &IssueDetailResponse) -> bool {
+    issue.lifecycle_stage == LifecycleStage::Failed
+        && issue.failure.as_ref().is_some_and(|failure| {
+            failure.fingerprint.as_deref() == Some("git_closure_unverified")
+                || failure.message.contains("git closure")
+        })
 }
 
 fn issue_waits_for_handoff(issue: &IssueDetailResponse) -> bool {

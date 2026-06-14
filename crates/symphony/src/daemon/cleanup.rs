@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
-use tracing::{info, warn};
+use tracing::info;
 
 pub(super) async fn cleanup_worktree(repo_path: &Path, worktree_path: &str) -> anyhow::Result<()> {
     let path = PathBuf::from(worktree_path);
@@ -41,16 +41,11 @@ pub(super) async fn cleanup_worktree(repo_path: &Path, worktree_path: &str) -> a
         );
     }
 
-    warn!(
-        repo_path = %repo_path.display(),
-        worktree_path = %path.display(),
-        "git worktree remove failed, removing accepted non-git directory"
-    );
-    tokio::fs::remove_dir_all(&path)
-        .await
-        .with_context(|| format!("remove accepted non-git worktree {}", path.display()))?;
-    prune_git_worktrees(repo_path).await?;
-    Ok(())
+    bail!(
+        "git worktree remove failed for {} and target is not a registered git worktree: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    )
 }
 
 async fn prune_git_worktrees(repo_path: &Path) -> anyhow::Result<()> {

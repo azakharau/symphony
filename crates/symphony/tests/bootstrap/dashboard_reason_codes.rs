@@ -239,6 +239,67 @@ async fn dashboard_api_and_html_surface_primary_execution_reason_codes() {
         "cleanup_pending"
     );
 
+    let worktree_blocked = project_for(
+        |issue, _| {
+            issue.lifecycle_stage = LifecycleStage::Failed;
+            issue.failure = Some(FailureRecord {
+                kind: "runtime_launch_failed".into(),
+                message:
+                    "OpenCode worktree validation failed: existing worktree is on wrong branch"
+                        .into(),
+                fingerprint: Some("launch_failed".into()),
+                occurrence_count: 1,
+            });
+        },
+        Some((
+            RuntimeLivenessStatus::BlockedIssues,
+            "candidate issues exist but are blocked or parked",
+            2,
+            0,
+        )),
+    )
+    .await;
+    assert_eq!(
+        worktree_blocked.liveness.primary_reason_code,
+        "worktree_blocked"
+    );
+    assert!(
+        worktree_blocked
+            .liveness
+            .primary_reason_detail
+            .contains("worktree validation failed")
+    );
+
+    let git_closure_blocked = project_for(
+        |issue, _| {
+            issue.lifecycle_stage = LifecycleStage::Failed;
+            issue.failure = Some(FailureRecord {
+                kind: "handoff_git_closure_failed".into(),
+                message: "OpenCode git closure validation failed: missing pushed branch evidence"
+                    .into(),
+                fingerprint: Some("git_closure_unverified".into()),
+                occurrence_count: 1,
+            });
+        },
+        Some((
+            RuntimeLivenessStatus::BlockedIssues,
+            "candidate issues exist but are blocked or parked",
+            2,
+            0,
+        )),
+    )
+    .await;
+    assert_eq!(
+        git_closure_blocked.liveness.primary_reason_code,
+        "git_closure_blocked"
+    );
+    assert!(
+        git_closure_blocked
+            .liveness
+            .primary_reason_detail
+            .contains("git closure validation failed")
+    );
+
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");

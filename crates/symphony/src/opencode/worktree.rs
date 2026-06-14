@@ -42,70 +42,58 @@ async fn ensure_existing_git_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), O
         "git branch --show-current",
     )
     .await?;
-    if current_branch.trim() == spec.branch_name {
-        debug!(
-            issue = %spec.issue_identifier,
-            cwd = %spec.cwd.display(),
-            branch_name = %spec.branch_name,
-            "OpenCode worktree already exists on expected branch"
-        );
-        return Ok(());
-    }
-
     let status = git_output(
         &spec.cwd,
-        ["status", "--porcelain"],
-        "git status --porcelain",
+        ["status", "--porcelain", "--untracked-files=all"],
+        "git status --porcelain --untracked-files=all",
     )
     .await?;
-    if !status.trim().is_empty() {
-        let observed_branch = if current_branch.trim().is_empty() {
-            "DETACHED"
-        } else {
-            current_branch.trim()
-        };
-        return Err(OpenCodeError::InvalidWorktree(format!(
-            "existing worktree {} is on branch {} but expected {}; dirty or untracked files prevent safe repair: {}",
-            spec.cwd.display(),
-            observed_branch,
-            spec.branch_name,
-            status.trim().lines().take(5).collect::<Vec<_>>().join("; ")
-        )));
-    }
 
-    let Some(repo_path) = &spec.repo_path else {
+    let observed_branch = current_branch.trim();
+    if observed_branch.is_empty() {
         return Err(OpenCodeError::InvalidWorktree(format!(
-            "existing worktree {} is not on expected branch {} and cannot be repaired without repo_path",
+            "existing worktree {} has detached HEAD; expected branch {}",
             spec.cwd.display(),
             spec.branch_name
         )));
-    };
-
-    let remove = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(["worktree", "remove"])
-        .arg(&spec.cwd)
-        .output()
-        .await?;
-    if !remove.status.success() {
-        return Err(OpenCodeError::GitCommand {
-            command: format!(
-                "git -C {} worktree remove {}",
-                repo_path.display(),
-                spec.cwd.display()
-            ),
-            stderr: String::from_utf8_lossy(&remove.stderr).to_string(),
-        });
     }
 
-    info!(
+    if observed_branch != spec.branch_name {
+        let dirty_evidence = dirty_or_untracked_evidence(&status);
+        let mut message = format!(
+            "existing worktree {} is on branch {} but expected {}",
+            spec.cwd.display(),
+            observed_branch,
+            spec.branch_name
+        );
+        if !dirty_evidence.is_empty() {
+            message.push_str("; dirty or untracked files: ");
+            message.push_str(&dirty_evidence);
+        }
+        return Err(OpenCodeError::InvalidWorktree(message));
+    }
+
+    if !status.trim().is_empty() {
+        return Err(OpenCodeError::InvalidWorktree(format!(
+            "existing worktree {} is on expected branch {} but has dirty or untracked files: {}",
+            spec.cwd.display(),
+            spec.branch_name,
+            dirty_or_untracked_evidence(&status)
+        )));
+    }
+
+    debug!(
         issue = %spec.issue_identifier,
         cwd = %spec.cwd.display(),
         branch_name = %spec.branch_name,
-        "removed clean stale OpenCode worktree before recreation"
+        "OpenCode worktree already exists on expected branch with clean status"
     );
-    create_git_worktree(spec, repo_path, spec.base_ref.as_deref().unwrap_or("HEAD")).await
+    Ok(())
+}
+
+fn dirty_or_untracked_evidence(status: &str) -> String {
+    let status = status.trim();
+    status.lines().take(5).collect::<Vec<_>>().join("; ")
 }
 
 async fn create_git_worktree(
@@ -246,4 +234,158 @@ pub fn worktree_path_allowed(root: &Path, candidate: &Path) -> bool {
         && !candidate
             .components()
             .any(|component| matches!(component, Component::ParentDir))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, process::Command as StdCommand};
+
+    use super::*;
+    use crate::opencode::PermissionPolicy;
+
+    #[tokio::test]
+    async fn existing_worktree_reuse_rejects_wrong_branch() {
+        let fixture = GitFixture::new();
+        fixture.add_worktree("other/SYM-1", false);
+
+        let error = ensure_worktree(&fixture.launch_spec())
+            .await
+            .expect_err("wrong branch must be rejected");
+
+        assert!(
+            matches!(&error, OpenCodeError::InvalidWorktree(message) if message.contains("is on branch other/SYM-1 but expected symphony/SYM-1")),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_worktree_reuse_rejects_detached_head() {
+        let fixture = GitFixture::new();
+        fixture.add_worktree("symphony/SYM-1", true);
+
+        let error = ensure_worktree(&fixture.launch_spec())
+            .await
+            .expect_err("detached worktree must be rejected");
+
+        assert!(
+            matches!(&error, OpenCodeError::InvalidWorktree(message) if message.contains("has detached HEAD")),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_worktree_reuse_rejects_dirty_expected_branch() {
+        let fixture = GitFixture::new();
+        fixture.add_worktree("symphony/SYM-1", false);
+        fs::write(fixture.worktree.join("untracked.txt"), "dirty").expect("write dirty file");
+
+        let error = ensure_worktree(&fixture.launch_spec())
+            .await
+            .expect_err("dirty worktree must be rejected");
+
+        assert!(
+            matches!(&error, OpenCodeError::InvalidWorktree(message) if message.contains("has dirty or untracked files")),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_worktree_reuse_accepts_clean_expected_branch() {
+        let fixture = GitFixture::new();
+        fixture.add_worktree("symphony/SYM-1", false);
+
+        ensure_worktree(&fixture.launch_spec())
+            .await
+            .expect("clean expected branch can be reused");
+    }
+
+    struct GitFixture {
+        _dir: tempfile::TempDir,
+        repo: PathBuf,
+        root: PathBuf,
+        worktree: PathBuf,
+    }
+
+    impl GitFixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let repo = dir.path().join("repo");
+            let root = dir.path().join("worktrees");
+            let worktree = root.join("SYM-1");
+            fs::create_dir_all(&repo).expect("repo dir");
+            fs::create_dir_all(&root).expect("worktree root");
+            run_git(&repo, ["init"]);
+            run_git(&repo, ["config", "user.email", "symphony@example.test"]);
+            run_git(&repo, ["config", "user.name", "Symphony Test"]);
+            fs::write(repo.join("README.md"), "base").expect("readme");
+            run_git(&repo, ["add", "README.md"]);
+            run_git(&repo, ["commit", "-m", "base"]);
+            Self {
+                _dir: dir,
+                repo,
+                root,
+                worktree,
+            }
+        }
+
+        fn add_worktree(&self, branch: &str, detached: bool) {
+            if detached {
+                run_git(
+                    &self.repo,
+                    [
+                        "worktree",
+                        "add",
+                        "--detach",
+                        self.worktree.to_str().expect("worktree utf8"),
+                        "HEAD",
+                    ],
+                );
+            } else {
+                run_git(
+                    &self.repo,
+                    [
+                        "worktree",
+                        "add",
+                        "-b",
+                        branch,
+                        self.worktree.to_str().expect("worktree utf8"),
+                        "HEAD",
+                    ],
+                );
+            }
+        }
+
+        fn launch_spec(&self) -> OpenCodeLaunchSpec {
+            OpenCodeLaunchSpec {
+                command: PathBuf::from("opencode"),
+                args: Vec::new(),
+                cwd: self.worktree.clone(),
+                worktree_root: Some(self.root.clone()),
+                issue_identifier: "SYM-1".into(),
+                branch_name: "symphony/SYM-1".into(),
+                repo_path: Some(self.repo.clone()),
+                mnemesh_workspace_root: None,
+                base_ref: Some("HEAD".into()),
+                agent: "build".into(),
+                model: None,
+                effort: None,
+                prompt: "test".into(),
+                permission_policy: PermissionPolicy::Reject,
+            }
+        }
+    }
+
+    fn run_git<const N: usize>(repo: &Path, args: [&str; N]) {
+        let output = StdCommand::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

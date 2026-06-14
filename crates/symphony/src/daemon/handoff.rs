@@ -355,13 +355,27 @@ async fn close_successful_handoff(
     linear
         .transition_issue(&issue.id, LinearTransition::Done)
         .await?;
-    cleanup_worktree(&project.repo_path, &git.worktree_path).await?;
+    let cleanup_status = match cleanup_worktree(&project.repo_path, &git.worktree_path).await {
+        Ok(()) => CleanupStatus::Complete,
+        Err(error) => {
+            warn!(
+                project_id = %project.id,
+                issue = %issue.identifier,
+                session_id = %session.session_id,
+                worktree_path = %git.worktree_path,
+                error = %error,
+                "accepted OpenCode handoff cleanup failed after Done transition"
+            );
+            CleanupStatus::Failed
+        }
+    };
     info!(
         project_id = %project.id,
         issue = %issue.identifier,
         session_id = %session.session_id,
         branch = %git.branch,
         head_sha = git.head_sha.as_deref().unwrap_or(""),
+        cleanup = %cleanup_status,
         "OpenCode handoff accepted and issue closed"
     );
     let record = IssueStateRecord {
@@ -378,7 +392,7 @@ async fn close_successful_handoff(
             head_sha: git.head_sha.clone(),
             pr_url: git.pr_url.clone(),
         }),
-        cleanup_status: CleanupStatus::Complete,
+        cleanup_status,
     };
     store.upsert_issue(&record).await?;
     let mut completed_session = session.clone();
@@ -386,7 +400,11 @@ async fn close_successful_handoff(
     completed_session.lifecycle_stage = LifecycleStage::Completed;
     completed_session.stage = crate::state::OpenCodeStage::Completed;
     completed_session.lifecycle_marker = Some("handoff_accepted".into());
-    completed_session.last_event = Some("issue_closed".into());
+    completed_session.last_event = Some(match cleanup_status {
+        CleanupStatus::Complete => "issue_closed".into(),
+        CleanupStatus::Failed => "issue_closed_cleanup_failed".into(),
+        _ => "issue_closed_cleanup_unknown".into(),
+    });
     completed_session.silence_observed = false;
     store.upsert_opencode_session(&completed_session).await?;
     Ok(())

@@ -259,12 +259,7 @@ async fn latest_active_session_for_issue(
         .opencode_sessions_for_issue(project_id, issue_id)
         .await?
         .into_iter()
-        .filter(|session| {
-            matches!(
-                session.lifecycle_stage,
-                LifecycleStage::Running | LifecycleStage::Queued | LifecycleStage::Blocked
-            )
-        })
+        .filter(reusable_session_record)
         .collect();
     Ok(sessions.pop())
 }
@@ -279,11 +274,7 @@ pub(super) async fn latest_running_session_for_issue(
         .await?
         .into_iter()
         .filter(|session| {
-            session.lifecycle_stage == LifecycleStage::Running
-                && !matches!(
-                    session.stage,
-                    OpenCodeStage::Failed | OpenCodeStage::Completed
-                )
+            session.lifecycle_stage == LifecycleStage::Running && !terminal_opencode_stage(session)
         })
         .collect();
     Ok(sessions.pop())
@@ -297,6 +288,20 @@ pub(super) async fn has_reusable_existing_session(
     Ok(latest_active_session_for_issue(store, project_id, issue_id)
         .await?
         .is_some())
+}
+
+fn reusable_session_record(session: &OpenCodeSessionRecord) -> bool {
+    matches!(
+        session.lifecycle_stage,
+        LifecycleStage::Running | LifecycleStage::Queued | LifecycleStage::Blocked
+    ) && !terminal_opencode_stage(session)
+}
+
+fn terminal_opencode_stage(session: &OpenCodeSessionRecord) -> bool {
+    matches!(
+        session.stage,
+        OpenCodeStage::Failed | OpenCodeStage::Completed
+    )
 }
 
 pub(super) async fn session_requires_resume(session: &OpenCodeSessionRecord) -> bool {

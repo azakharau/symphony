@@ -1814,3 +1814,108 @@ async fn orchestration_ignores_historical_failed_session_for_in_progress_reconci
         Some("stale_failed_session_ignored")
     );
 }
+
+#[tokio::test]
+async fn orchestration_does_not_reuse_failed_stage_session_for_todo_dispatch() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let worktree = dir.path().join("SYM-204-worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let mut issue = test_issue("symphony", "failed-requeue", "SYM-204");
+    issue.lifecycle_stage = LifecycleStage::Queued;
+    store.upsert_issue(issue).await.expect("issue");
+    let mut failed = test_session("symphony", "failed-requeue", "ses-failed", &worktree);
+    failed.lifecycle_stage = LifecycleStage::Queued;
+    failed.stage = OpenCodeStage::Failed;
+    failed.lifecycle_marker = Some("failed:launch_failed".into());
+    failed.last_event = Some("failed:launch_failed".into());
+    store
+        .upsert_opencode_session(failed)
+        .await
+        .expect("failed session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "failed-requeue",
+        "SYM-204",
+        "Todo",
+        Some(1),
+    )]);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(6204);
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("poll");
+
+    assert_eq!(opencode.launches(), vec!["SYM-204"]);
+    assert!(opencode.continuations().is_empty());
+    let sessions = store
+        .opencode_sessions_for_issue("symphony", "failed-requeue")
+        .await
+        .expect("sessions");
+    assert!(sessions.iter().any(|session| {
+        session.session_id == "ses-failed"
+            && session.lifecycle_stage == LifecycleStage::Queued
+            && session.stage == OpenCodeStage::Failed
+    }));
+    assert!(sessions.iter().any(|session| {
+        session.session_id == "new:SYM-204"
+            && session.lifecycle_stage == LifecycleStage::Running
+            && session.stage == OpenCodeStage::Starting
+    }));
+}
+
+#[tokio::test]
+async fn orchestration_blocker_does_not_reactivate_failed_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let worktree = dir.path().join("SYM-205-worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let mut issue = test_issue("symphony", "blocked-failed", "SYM-205");
+    issue.lifecycle_stage = LifecycleStage::Queued;
+    store.upsert_issue(issue).await.expect("issue");
+    let mut failed = test_session("symphony", "blocked-failed", "ses-failed", &worktree);
+    failed.lifecycle_stage = LifecycleStage::Queued;
+    failed.stage = OpenCodeStage::Failed;
+    failed.lifecycle_marker = Some("failed:launch_failed".into());
+    failed.last_event = Some("failed:launch_failed".into());
+    store
+        .upsert_opencode_session(failed)
+        .await
+        .expect("failed session");
+    let blocked = linear_issue("blocked-failed", "SYM-205", "Todo", Some(1)).blocked_by(vec![
+        LinearBlocker {
+            id: Some("blocker-205".into()),
+            identifier: Some("SYM-204".into()),
+            state: Some("In Progress".into()),
+        },
+    ]);
+    let client = RecordingLinearClient::new(vec![blocked]);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(6205);
+
+    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("poll");
+
+    assert_eq!(report.blocked, vec!["SYM-205"]);
+    assert!(client.transitions().is_empty());
+    assert!(opencode.launches().is_empty());
+    assert!(opencode.continuations().is_empty());
+    let session = store
+        .opencode_session("symphony", "blocked-failed", "ses-failed")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Queued);
+    assert_eq!(session.stage, OpenCodeStage::Failed);
+    assert_eq!(
+        session.lifecycle_marker.as_deref(),
+        Some("failed:launch_failed")
+    );
+}

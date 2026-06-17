@@ -685,6 +685,10 @@ impl RecordingLinearClient {
             .expect("managed issues lock")
             .clone()
     }
+
+    fn relations(&self) -> Vec<(String, String, ManagedLinearRelation)> {
+        self.relations.lock().expect("relations lock").clone()
+    }
 }
 
 #[async_trait::async_trait]

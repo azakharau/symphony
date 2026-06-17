@@ -456,6 +456,7 @@ async fn close_successful_handoff<L: LinearClient>(
     let cleanup_status = match cleanup_worktree(&project.repo_path, &git.worktree_path).await {
         Ok(()) => CleanupStatus::Complete,
         Err(error) => {
+            let message = format!("accepted OpenCode handoff cleanup failed: {error}");
             warn!(
                 project_id = %project.id,
                 issue = %issue.identifier,
@@ -464,6 +465,25 @@ async fn close_successful_handoff<L: LinearClient>(
                 error = %error,
                 "accepted OpenCode handoff cleanup failed after Done transition"
             );
+            let failure = FailureRecord {
+                kind: "cleanup".into(),
+                message: message.clone(),
+                fingerprint: Some("cleanup_failed_after_accepted_closure".into()),
+                occurrence_count: 1,
+            };
+            record_runtime_self_defect(
+                project,
+                store,
+                linear,
+                RuntimeSelfDefectInput {
+                    issue,
+                    evidence_kind: "runtime_defect",
+                    message: &message,
+                    failure: &failure,
+                    session,
+                },
+            )
+            .await?;
             CleanupStatus::Failed
         }
     };

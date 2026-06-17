@@ -1656,23 +1656,51 @@ async fn orchestration_records_launch_failure_without_aborting_poll_or_owner_inp
         ]
     );
     let evidence = client.evidence();
-    assert_eq!(evidence.len(), 2);
+    assert_eq!(evidence.len(), 4);
     assert!(
         evidence
             .iter()
             .all(|(_, evidence)| evidence.kind == "runtime_defect")
     );
-    assert!(evidence[0].1.body.contains("runtime_defect: launch_failed"));
-    assert!(evidence[0].1.body.contains("issue_id: launch-fails"));
-    assert!(evidence[0].1.body.contains("attempted_worktree_path:"));
+    let launch_evidence = evidence
+        .iter()
+        .find(|(issue_id, evidence)| {
+            issue_id == "launch-fails" && evidence.body.contains("runtime_defect: launch_failed")
+        })
+        .expect("source launch failure evidence");
+    assert!(launch_evidence.1.body.contains("issue_id: launch-fails"));
+    assert!(launch_evidence.1.body.contains("attempted_worktree_path:"));
     assert!(
-        evidence[0]
+        launch_evidence
             .1
             .body
             .contains("expected_branch: feature/sym-201")
     );
-    assert!(evidence[0].1.body.contains("elapsed_seconds: unknown"));
-    assert!(evidence[0].1.body.contains("existing worktree is dirty"));
+    assert!(launch_evidence.1.body.contains("elapsed_seconds: unknown"));
+    assert!(
+        launch_evidence
+            .1
+            .body
+            .contains("existing worktree is dirty")
+    );
+    let managed = client.managed_issues();
+    assert_eq!(managed.len(), 1);
+    assert!(
+        managed
+            .iter()
+            .all(|issue| { issue.priority == 1 && issue.state == ManagedLinearIssueState::Todo })
+    );
+    assert!(managed.iter().any(|issue| {
+        issue.source_issue_id == "launch-fails" && issue.fingerprint == "launch_failed"
+    }));
+    assert!(client.relations().iter().any(|relation| {
+        relation
+            == &(
+                "launch-fails".into(),
+                "managed-1".into(),
+                ManagedLinearRelation::Blocks,
+            )
+    }));
     let issue = store
         .issue("symphony", "launch-fails")
         .await

@@ -29,7 +29,8 @@ pub(super) async fn record_runtime_self_defect(
         .fingerprint
         .as_deref()
         .unwrap_or(failure.kind.as_str());
-    let summary = runtime_self_defect_summary(message, failure, session);
+    let policy = ManagedSelfDefectPolicy::for_failure(failure);
+    let summary = runtime_self_defect_summary(message, failure, session, policy);
     let managed_issue = match store.open_self_defect_by_fingerprint(fingerprint).await? {
         Some(record) => LinearIssue {
             id: record.managed_issue_id,
@@ -37,7 +38,7 @@ pub(super) async fn record_runtime_self_defect(
             title: format!("Symphony self-defect: {fingerprint}"),
             description: None,
             state: "Todo".into(),
-            priority: Some(self_defect_priority(failure)),
+            priority: Some(policy.priority),
             branch_name: None,
             url: None,
             labels: Vec::new(),
@@ -59,8 +60,8 @@ pub(super) async fn record_runtime_self_defect(
                             fingerprint: fingerprint.to_string(),
                             title: format!("Symphony self-defect: {fingerprint}"),
                             description: summary.clone(),
-                            priority: self_defect_priority(failure),
-                            state: ManagedLinearIssueState::Todo,
+                            priority: policy.priority,
+                            state: policy.state,
                             project_milestone_id: issue
                                 .project_milestone
                                 .as_ref()
@@ -74,6 +75,7 @@ pub(super) async fn record_runtime_self_defect(
     };
 
     let (relation_mode, linear_relation) = self_defect_relation(&issue.id, &managed_issue.id);
+    let evidence_summary = runtime_self_defect_evidence_summary(&summary, relation_mode);
     linear
         .create_issue_relation(&issue.id, &managed_issue.id, linear_relation)
         .await?;
@@ -82,7 +84,7 @@ pub(super) async fn record_runtime_self_defect(
             &managed_issue.id,
             LinearIssueEvidence {
                 kind: evidence_kind.into(),
-                body: summary.clone(),
+                body: evidence_summary.clone(),
             },
         )
         .await?;
@@ -91,8 +93,8 @@ pub(super) async fn record_runtime_self_defect(
         .record_self_defect_occurrence(&SelfDefectOccurrenceRecord {
             fingerprint: fingerprint.to_string(),
             defect_kind: failure.kind.clone(),
-            category: "runtime".into(),
-            severity: "blocking".into(),
+            category: policy.category.into(),
+            severity: policy.severity.into(),
             initial_routing_decision: "managed_self_defect".into(),
             source_project_id: project.id.clone(),
             source_issue_id: issue.id.clone(),
@@ -101,7 +103,7 @@ pub(super) async fn record_runtime_self_defect(
             source_process_id: session.process_id,
             managed_issue_id: managed_issue.id,
             managed_issue_identifier: managed_issue.identifier,
-            latest_evidence_summary: summary,
+            latest_evidence_summary: evidence_summary,
             relation_mode,
         })
         .await?)
@@ -119,14 +121,18 @@ fn runtime_self_defect_summary(
     message: &str,
     failure: &FailureRecord,
     session: &OpenCodeSessionRecord,
+    policy: ManagedSelfDefectPolicy,
 ) -> String {
     let fingerprint = failure
         .fingerprint
         .as_deref()
         .unwrap_or(failure.kind.as_str());
     format!(
-        "Symphony runtime self-defect\nkind: {kind}\nfingerprint: {fingerprint}\nsource_issue: {source_issue}\nsession_id: {session_id}\nprocess_id: {process_id}\noccurrence: {occurrence}\nsummary: {message}",
+        "Symphony runtime self-defect\nkind: {kind}\nfingerprint: {fingerprint}\nmanaged_severity: {severity}\nmanaged_state: {state}\nsource_project: {source_project}\nsource_issue: {source_issue}\nsession_id: {session_id}\nprocess_id: {process_id}\noccurrence: {occurrence}\nsummary: {message}",
         kind = failure.kind,
+        severity = policy.severity,
+        state = policy.state.state_name(),
+        source_project = session.project_id,
         source_issue = session.issue_id,
         session_id = session.session_id,
         process_id = session
@@ -135,6 +141,16 @@ fn runtime_self_defect_summary(
             .unwrap_or_else(|| "none".into()),
         occurrence = failure.occurrence_count.max(1),
         message = bounded_line(message),
+    )
+}
+
+fn runtime_self_defect_evidence_summary(
+    summary: &str,
+    relation_mode: SelfDefectRelationMode,
+) -> String {
+    format!(
+        "{summary}\nrelation_mode: {relation_mode}",
+        relation_mode = relation_mode.as_str()
     )
 }
 
@@ -151,10 +167,75 @@ fn bounded_line(input: &str) -> String {
     format!("{}…", &collapsed[..end])
 }
 
-fn self_defect_priority(failure: &FailureRecord) -> i64 {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ManagedSelfDefectPolicy {
+    severity: &'static str,
+    category: &'static str,
+    priority: i64,
+    state: ManagedLinearIssueState,
+}
+
+impl ManagedSelfDefectPolicy {
+    fn for_failure(failure: &FailureRecord) -> Self {
+        let fingerprint = failure
+            .fingerprint
+            .as_deref()
+            .unwrap_or(failure.kind.as_str());
+        match fingerprint {
+            "missing_handoff_sidecar"
+            | "malformed_handoff_sidecar"
+            | "incomplete_success_handoff"
+            | "missing_git_closure"
+            | "git_closure_unverified"
+            | "launch_failed"
+            | "session_id_mismatch" => Self::p0(failure_kind_category(failure)),
+            "stale_failed_session_reuse"
+            | "runtime_db_linear_divergence"
+            | "cleanup_failed_after_accepted_closure" => Self::p1(failure_kind_category(failure)),
+            "dashboard_projection_gap_hides_live_execution" => {
+                Self::p2(failure_kind_category(failure))
+            }
+            _ if failure.kind == "malformed_handoff" => Self::p0("handoff"),
+            _ if failure.kind == "runtime_defect" => Self::p1("runtime"),
+            _ => Self::p1("runtime"),
+        }
+    }
+
+    const fn p0(category: &'static str) -> Self {
+        Self {
+            severity: "p0",
+            category,
+            priority: 1,
+            state: ManagedLinearIssueState::Todo,
+        }
+    }
+
+    const fn p1(category: &'static str) -> Self {
+        Self {
+            severity: "p1",
+            category,
+            priority: 2,
+            state: ManagedLinearIssueState::Backlog,
+        }
+    }
+
+    const fn p2(category: &'static str) -> Self {
+        Self {
+            severity: "p2",
+            category,
+            priority: 3,
+            state: ManagedLinearIssueState::Backlog,
+        }
+    }
+}
+
+fn failure_kind_category(failure: &FailureRecord) -> &'static str {
     match failure.kind.as_str() {
-        "malformed_handoff" | "session_id_mismatch" => 1,
-        _ => 2,
+        "malformed_handoff" => "handoff",
+        "git_closure" => "git_closure",
+        "cleanup" => "cleanup",
+        "projection_gap" => "dashboard_api",
+        _ => "runtime",
     }
 }
 
@@ -238,6 +319,11 @@ mod tests {
         .expect("record self-defect");
 
         assert_eq!(record.relation_mode, SelfDefectRelationMode::RelatedOnly);
+        assert!(
+            record
+                .latest_evidence_summary
+                .contains("relation_mode: related_only")
+        );
         assert_eq!(
             linear.relations(),
             vec![(
@@ -246,11 +332,118 @@ mod tests {
                 ManagedLinearRelation::Related
             )]
         );
+        let evidence = linear.evidence();
+        assert_eq!(evidence.len(), 1);
+        assert!(evidence[0].1.body.contains("source_project: symphony"));
+        assert!(evidence[0].1.body.contains("source_issue: issue-1"));
+        assert!(evidence[0].1.body.contains("session_id: oc-session"));
+        assert!(evidence[0].1.body.contains("process_id: 42"));
+        assert!(
+            evidence[0]
+                .1
+                .body
+                .contains("fingerprint: fingerprint-related")
+        );
+        assert!(evidence[0].1.body.contains("relation_mode: related_only"));
+    }
+
+    #[test]
+    fn evidence_summary_names_blocking_relation() {
+        let summary = runtime_self_defect_evidence_summary(
+            "fingerprint: launch_failed\nsource_project: symphony",
+            SelfDefectRelationMode::Blocking,
+        );
+
+        assert!(summary.contains("fingerprint: launch_failed"));
+        assert!(summary.contains("source_project: symphony"));
+        assert!(summary.contains("relation_mode: blocking"));
+    }
+
+    #[test]
+    fn deterministic_policy_routes_known_self_defects_by_severity() {
+        let cases = [
+            (
+                "missing_handoff_sidecar",
+                "malformed_handoff",
+                "p0",
+                ManagedLinearIssueState::Todo,
+                1,
+            ),
+            (
+                "malformed_handoff_sidecar",
+                "malformed_handoff",
+                "p0",
+                ManagedLinearIssueState::Todo,
+                1,
+            ),
+            (
+                "missing_git_closure",
+                "malformed_handoff",
+                "p0",
+                ManagedLinearIssueState::Todo,
+                1,
+            ),
+            (
+                "git_closure_unverified",
+                "malformed_handoff",
+                "p0",
+                ManagedLinearIssueState::Todo,
+                1,
+            ),
+            (
+                "launch_failed",
+                "runtime_defect",
+                "p0",
+                ManagedLinearIssueState::Todo,
+                1,
+            ),
+            (
+                "stale_failed_session_reuse",
+                "runtime_defect",
+                "p1",
+                ManagedLinearIssueState::Backlog,
+                2,
+            ),
+            (
+                "runtime_db_linear_divergence",
+                "runtime_defect",
+                "p1",
+                ManagedLinearIssueState::Backlog,
+                2,
+            ),
+            (
+                "cleanup_failed_after_accepted_closure",
+                "cleanup",
+                "p1",
+                ManagedLinearIssueState::Backlog,
+                2,
+            ),
+            (
+                "dashboard_projection_gap_hides_live_execution",
+                "projection_gap",
+                "p2",
+                ManagedLinearIssueState::Backlog,
+                3,
+            ),
+        ];
+
+        for (fingerprint, kind, severity, state, priority) in cases {
+            let policy = ManagedSelfDefectPolicy::for_failure(&FailureRecord {
+                kind: kind.into(),
+                message: fingerprint.into(),
+                fingerprint: Some(fingerprint.into()),
+                occurrence_count: 1,
+            });
+            assert_eq!(policy.severity, severity, "{fingerprint}");
+            assert_eq!(policy.state, state, "{fingerprint}");
+            assert_eq!(policy.priority, priority, "{fingerprint}");
+        }
     }
 
     struct SameIssueLinearClient {
         issue: LinearIssue,
         relations: Mutex<Vec<(String, String, ManagedLinearRelation)>>,
+        evidence: Mutex<Vec<(String, LinearIssueEvidence)>>,
     }
 
     impl SameIssueLinearClient {
@@ -258,11 +451,16 @@ mod tests {
             Self {
                 issue,
                 relations: Mutex::new(Vec::new()),
+                evidence: Mutex::new(Vec::new()),
             }
         }
 
         fn relations(&self) -> Vec<(String, String, ManagedLinearRelation)> {
             self.relations.lock().expect("relations lock").clone()
+        }
+
+        fn evidence(&self) -> Vec<(String, LinearIssueEvidence)> {
+            self.evidence.lock().expect("evidence lock").clone()
         }
     }
 
@@ -289,6 +487,18 @@ mod tests {
             _fingerprint: &str,
         ) -> Result<Option<LinearIssue>, LinearClientError> {
             Ok(Some(self.issue.clone()))
+        }
+
+        async fn record_issue_evidence(
+            &self,
+            issue_id: &str,
+            evidence: LinearIssueEvidence,
+        ) -> Result<(), LinearClientError> {
+            self.evidence
+                .lock()
+                .expect("evidence lock")
+                .push((issue_id.into(), evidence));
+            Ok(())
         }
 
         async fn create_issue_relation(

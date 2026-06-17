@@ -1152,6 +1152,7 @@ async fn eval_failure_stays_in_opencode_repair_loop_without_linear_churn() {
         .expect("orchestrate once");
 
     assert!(client.transitions().is_empty());
+    assert!(client.managed_issues().is_empty());
     assert_eq!(
         opencode.repairs(),
         vec![("oc-81".into(), "fmt-check-7f".into())]
@@ -1202,6 +1203,7 @@ async fn repeated_identical_eval_failure_parks_typed_blocker_with_typed_evidence
         .expect("orchestrate once");
 
     assert!(client.transitions().is_empty());
+    assert!(client.managed_issues().is_empty());
     assert!(opencode.repairs().is_empty());
     let issue = store
         .issue("symphony", "repeat")
@@ -1224,6 +1226,7 @@ async fn repeated_identical_eval_failure_parks_typed_blocker_with_typed_evidence
 
     assert_eq!(report.blocked, vec!["SYM-82"]);
     assert!(client.transitions().is_empty());
+    assert!(client.managed_issues().is_empty());
     assert!(opencode.repairs().is_empty());
     let issue = store
         .issue("symphony", "repeat")
@@ -1427,6 +1430,7 @@ async fn owner_question_parks_with_owner_visible_question() {
         client.transitions(),
         vec![(issue_id.into(), LinearTransition::NeedOwnerInput)]
     );
+    assert!(client.managed_issues().is_empty());
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "owner_question"
             && evidence

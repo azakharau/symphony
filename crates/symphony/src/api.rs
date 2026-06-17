@@ -461,6 +461,19 @@ fn primary_execution_reason(
                 .unwrap_or_else(|| "OpenCode git closure validation failed".into()),
         );
     }
+    if let Some(issue) = active_issues
+        .iter()
+        .find(|issue| issue_has_runtime_defect_failure(issue))
+    {
+        return (
+            "runtime_defect_blocked",
+            issue
+                .failure
+                .as_ref()
+                .map(|failure| failure.message.clone())
+                .unwrap_or_else(|| "Symphony runtime defect requires repair".into()),
+        );
+    }
     if liveness.status == RuntimeLivenessStatus::RunnerProcessDead
         || active_issues.iter().any(issue_has_dead_runner)
     {
@@ -545,7 +558,17 @@ fn issue_has_git_closure_failure(issue: &IssueDetailResponse) -> bool {
     issue.lifecycle_stage == LifecycleStage::Failed
         && issue.failure.as_ref().is_some_and(|failure| {
             failure.fingerprint.as_deref() == Some("git_closure_unverified")
-                || failure.message.contains("git closure")
+                || failure.kind == "handoff_git_closure_failed"
+        })
+}
+
+fn issue_has_runtime_defect_failure(issue: &IssueDetailResponse) -> bool {
+    issue.lifecycle_stage == LifecycleStage::Failed
+        && issue.failure.as_ref().is_some_and(|failure| {
+            matches!(
+                failure.kind.as_str(),
+                "runtime_defect" | "malformed_handoff" | "runtime_launch_failed"
+            )
         })
 }
 

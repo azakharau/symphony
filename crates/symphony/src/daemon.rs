@@ -339,27 +339,31 @@ async fn reconcile_project(
                         project_id = %project.id,
                         issue = %issue.identifier,
                         reason = "missing_active_session",
-                        "In Progress issue has no active OpenCode session; returning to Todo"
+                        "In Progress issue has no active OpenCode session; marking runtime defect"
                     );
-                    linear
-                        .transition_issue(&issue.id, LinearTransition::Todo)
-                        .await?;
-                    let record = issue_record(
-                        project,
-                        &issue,
-                        LifecycleStage::Queued,
-                        None,
-                        CleanupStatus::Clean,
-                    );
-                    let mut record = record;
-                    record.failure = Some(FailureRecord {
+                    let failure = FailureRecord {
                         kind: "runtime_defect".into(),
                         message:
                             "In Progress issue has no active running or resumable OpenCode session"
                                 .into(),
                         fingerprint: Some("missing_active_session".into()),
                         occurrence_count: 1,
-                    });
+                    };
+                    let mut record = issue_record(
+                        project,
+                        &issue,
+                        LifecycleStage::Failed,
+                        Some(BlockerRecord {
+                            kind: "runtime_defect".into(),
+                            message: format!(
+                                "unresolved runtime defect: {}",
+                                failure.fingerprint.as_deref().unwrap_or(&failure.message)
+                            ),
+                            observed_at: issue.updated_at.clone(),
+                        }),
+                        CleanupStatus::Clean,
+                    );
+                    record.failure = Some(failure);
                     store.upsert_issue(&record).await?;
                     mark_historical_sessions_ignored(store, project, &issue).await?;
                     continue;

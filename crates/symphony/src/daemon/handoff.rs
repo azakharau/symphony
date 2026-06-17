@@ -134,6 +134,7 @@ pub(super) async fn process_in_progress_handoff(
             opencode,
             linear,
             issue,
+            existing_issue.as_ref(),
             "malformed_handoff",
             format!(
                 "handoff session `{}` did not match active session `{}`",
@@ -511,11 +512,40 @@ async fn request_opencode_repair(
     opencode: &impl OpenCodeLauncher,
     linear: &impl LinearClient,
     issue: &LinearIssue,
+    existing_issue: Option<&IssueStateRecord>,
     evidence_kind: &str,
     message: String,
-    failure: FailureRecord,
+    mut failure: FailureRecord,
     session: &crate::state::OpenCodeSessionRecord,
 ) -> anyhow::Result<()> {
+    let fingerprint = failure
+        .fingerprint
+        .as_deref()
+        .unwrap_or(evidence_kind)
+        .to_string();
+    let occurrence_count = matching_failure_count(
+        existing_issue.and_then(|issue| issue.failure.as_ref()),
+        &fingerprint,
+    )
+    .saturating_add(1);
+    failure.occurrence_count = occurrence_count;
+    if occurrence_count >= project.eval.max_identical_failure_fingerprints.max(1) {
+        fail_runtime_defect(
+            project,
+            store,
+            linear,
+            issue,
+            evidence_kind,
+            format!(
+                "repeated OpenCode runtime repair fingerprint `{fingerprint}` reached bounded repair threshold after {occurrence_count} occurrence(s): {message}"
+            ),
+            failure,
+            session,
+        )
+        .await?;
+        return Ok(());
+    }
+
     linear
         .record_issue_evidence(
             &issue.id,
@@ -525,11 +555,6 @@ async fn request_opencode_repair(
             },
         )
         .await?;
-    let fingerprint = failure
-        .fingerprint
-        .as_deref()
-        .unwrap_or(evidence_kind)
-        .to_string();
     let spec = build_acp_launch_spec(project, issue);
     let mut terminating_session = session.clone();
     terminate_current_session_process(project, issue, &mut terminating_session).await?;
@@ -592,15 +617,18 @@ async fn fail_runtime_defect(
         .await?;
     let mut terminating_session = session.clone();
     terminate_current_session_process(project, issue, &mut terminating_session).await?;
-    linear
-        .transition_issue(&issue.id, LinearTransition::Todo)
-        .await?;
-
     let mut record = issue_record(
         project,
         issue,
         LifecycleStage::Failed,
-        None,
+        Some(BlockerRecord {
+            kind: "runtime_defect".into(),
+            message: format!(
+                "unresolved runtime defect: {}",
+                failure.fingerprint.as_deref().unwrap_or(&failure.message)
+            ),
+            observed_at: None,
+        }),
         CleanupStatus::Clean,
     );
     record.failure = Some(failure.clone());
@@ -640,7 +668,7 @@ fn runtime_defect_evidence_body(
         .unwrap_or_else(|| "git_snapshot: unavailable".into());
 
     format!(
-        "Symphony runtime defect: {message}\n\nsession_id: {session_id}\nprocess_id: {process_id}\nelapsed_seconds: {elapsed_seconds}\n\n{git_snapshot}\n\nThe issue was moved back to Todo and the OpenCode session row was marked failed. This is not owner input; fix the runner/tooling defect before retrying.",
+        "Symphony runtime defect: {message}\n\nsession_id: {session_id}\nprocess_id: {process_id}\nelapsed_seconds: {elapsed_seconds}\n\n{git_snapshot}\n\nThe issue was marked as a Symphony runtime defect and left out of ordinary Todo dispatch. This is not owner input; fix the runner/tooling defect before retrying.",
         session_id = session.session_id,
         process_id = session
             .process_id

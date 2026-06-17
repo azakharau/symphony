@@ -192,9 +192,9 @@ async fn orchestration_records_runner_process_dead_liveness_for_stale_running_se
         .await
         .expect("orchestrate once");
 
-    assert_eq!(
-        client.transitions(),
-        vec![("work".into(), LinearTransition::Todo)]
+    assert!(
+        client.transitions().is_empty(),
+        "runtime defect must not return work to Linear Todo"
     );
     let liveness = store
         .project_liveness("symphony")
@@ -706,9 +706,9 @@ async fn orchestration_reconciles_terminal_issues_and_avoids_duplicate_dispatch_
         first_poll.transitions(),
         vec![("new-work".into(), LinearTransition::InProgress)]
     );
-    assert_eq!(
-        restart_poll.transitions(),
-        vec![("new-work".into(), LinearTransition::Todo)]
+    assert!(
+        restart_poll.transitions().is_empty(),
+        "runtime defect must not return new-work to Linear Todo"
     );
     let finished = store
         .issue("symphony", "finished")
@@ -838,9 +838,9 @@ async fn orchestration_fails_stale_in_progress_session_without_handoff_sidecar()
     assert!(opencode.launches().is_empty());
     assert!(opencode.resumes().is_empty());
     assert!(opencode.continuations().is_empty());
-    assert_eq!(
-        client.transitions(),
-        vec![("work".into(), LinearTransition::Todo)]
+    assert!(
+        client.transitions().is_empty(),
+        "runtime defect must not return work to Linear Todo"
     );
     let resumed = store
         .opencode_session("symphony", "work", "ses-existing")
@@ -905,9 +905,9 @@ async fn orchestration_does_not_reissue_repair_prompt_for_stale_malformed_handof
     assert!(opencode.launches().is_empty());
     assert!(opencode.resumes().is_empty());
     assert!(opencode.repairs().is_empty());
-    assert_eq!(
-        client.transitions(),
-        vec![("repair-stale".into(), LinearTransition::Todo)]
+    assert!(
+        client.transitions().is_empty(),
+        "stale malformed handoff defect must not return repair-stale to Linear Todo"
     );
     let repaired = store
         .opencode_session("symphony", "repair-stale", "ses-repair-stale")
@@ -1508,7 +1508,7 @@ async fn orchestration_capacity_gates_requeued_issue_with_existing_session() {
 }
 
 #[tokio::test]
-async fn orchestration_returns_in_progress_issue_without_session_to_todo() {
+async fn orchestration_blocks_in_progress_issue_without_session_as_runtime_defect() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
@@ -1526,16 +1526,20 @@ async fn orchestration_returns_in_progress_issue_without_session_to_todo() {
         .await
         .expect("poll");
 
-    assert_eq!(
-        client.transitions(),
-        vec![("lost-session".into(), LinearTransition::Todo)]
+    assert!(
+        client.transitions().is_empty(),
+        "missing session runtime defect must not return lost-session to Linear Todo"
     );
     let issue = store
         .issue("symphony", "lost-session")
         .await
         .expect("query issue")
         .expect("issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Queued);
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(
+        issue.failure.expect("failure").fingerprint.as_deref(),
+        Some("missing_active_session")
+    );
 }
 
 #[tokio::test]
@@ -1761,9 +1765,9 @@ async fn orchestration_ignores_historical_failed_session_for_in_progress_reconci
         .await
         .expect("poll");
 
-    assert_eq!(
-        client.transitions(),
-        vec![("historical".into(), LinearTransition::Todo)]
+    assert!(
+        client.transitions().is_empty(),
+        "historical failed-session defect must not return historical to Linear Todo"
     );
     assert!(client.evidence().is_empty());
     let issue = store
@@ -1771,7 +1775,7 @@ async fn orchestration_ignores_historical_failed_session_for_in_progress_reconci
         .await
         .expect("query issue")
         .expect("issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Queued);
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
     assert_eq!(
         issue.failure.expect("failure").fingerprint.as_deref(),
         Some("missing_active_session")

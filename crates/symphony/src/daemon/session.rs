@@ -23,7 +23,7 @@ pub(super) async fn mark_historical_sessions_ignored(
     {
         if matches!(
             session.lifecycle_stage,
-            LifecycleStage::Failed | LifecycleStage::Completed
+            LifecycleStage::Failed | LifecycleStage::Canceled | LifecycleStage::Completed
         ) || matches!(
             session.stage,
             OpenCodeStage::Failed | OpenCodeStage::Completed

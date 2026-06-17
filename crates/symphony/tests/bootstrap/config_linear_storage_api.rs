@@ -805,6 +805,36 @@ async fn runtime_cleanup_removes_stale_completed_rows_and_keeps_active_state() {
 }
 
 #[tokio::test]
+async fn sqlite_store_reads_canceled_terminal_issue_state() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store
+        .upsert_project(ProjectStateRecord {
+            project_id: "nervure".into(),
+            name: "Nervure".into(),
+            enabled: true,
+            lifecycle_stage: LifecycleStage::Running,
+            cleanup_status: CleanupStatus::Clean,
+        })
+        .await
+        .expect("project");
+
+    let mut canceled = test_issue("nervure", "canceled", "NRV-8");
+    canceled.lifecycle_stage = LifecycleStage::Canceled;
+    canceled.cleanup_status = CleanupStatus::Complete;
+    store.upsert_issue(canceled).await.expect("canceled issue");
+
+    let issues = store
+        .issues_for_project("nervure")
+        .await
+        .expect("issue rows");
+
+    assert_eq!(issues[0].lifecycle_stage, LifecycleStage::Canceled);
+}
+
+#[tokio::test]
 async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

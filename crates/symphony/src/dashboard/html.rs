@@ -452,7 +452,7 @@ const fn issue_status_rank(stage: LifecycleStage) -> u8 {
         LifecycleStage::Blocked => 1,
         LifecycleStage::Queued => 2,
         LifecycleStage::Failed => 3,
-        LifecycleStage::Completed => 4,
+        LifecycleStage::Canceled | LifecycleStage::Completed => 4,
     }
 }
 
@@ -462,6 +462,7 @@ const fn lifecycle_label(stage: LifecycleStage) -> &'static str {
         LifecycleStage::Running => "running",
         LifecycleStage::Blocked => "blocked",
         LifecycleStage::Failed => "failed",
+        LifecycleStage::Canceled => "canceled",
         LifecycleStage::Completed => "completed",
     }
 }

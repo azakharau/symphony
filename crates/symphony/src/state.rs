@@ -178,6 +178,7 @@ pub enum LifecycleStage {
     Running,
     Blocked,
     Completed,
+    Canceled,
     Failed,
 }
 
@@ -240,6 +241,7 @@ impl LifecycleStage {
             Self::Running => "running",
             Self::Blocked => "blocked",
             Self::Completed => "completed",
+            Self::Canceled => "canceled",
             Self::Failed => "failed",
         }
     }
@@ -260,6 +262,7 @@ impl FromStr for LifecycleStage {
             "running" => Ok(Self::Running),
             "blocked" => Ok(Self::Blocked),
             "completed" => Ok(Self::Completed),
+            "canceled" => Ok(Self::Canceled),
             "failed" => Ok(Self::Failed),
             other => Err(StateParseError::LifecycleStage(other.into())),
         }

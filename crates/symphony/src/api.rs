@@ -682,7 +682,7 @@ fn runtime_defect_next_action(issue: &IssueStateRecord) -> &'static str {
         (LifecycleStage::Failed, _) => "queue_repair",
         (LifecycleStage::Blocked, _) => "unblock_before_repair",
         (LifecycleStage::Queued, _) => "start_repair",
-        (LifecycleStage::Completed, _) => "monitor",
+        (LifecycleStage::Canceled | LifecycleStage::Completed, _) => "monitor",
     }
 }
 
@@ -797,6 +797,7 @@ fn issue_display_status(
         (LifecycleStage::Completed, CleanupStatus::InProgress) => "cleanup pending".into(),
         (LifecycleStage::Completed, CleanupStatus::Complete) => "completed cleanup".into(),
         (LifecycleStage::Completed, _) => "done".into(),
+        (LifecycleStage::Canceled, _) => "canceled".into(),
         (LifecycleStage::Failed, _) => "failed".into(),
         (LifecycleStage::Queued, _) => "queued".into(),
     }

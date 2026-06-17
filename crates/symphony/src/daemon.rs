@@ -880,10 +880,15 @@ async fn retain_typed_non_owner_blocker(
         return Ok(false);
     }
 
+    let lifecycle_stage = if existing.lifecycle_stage == LifecycleStage::Failed {
+        LifecycleStage::Failed
+    } else {
+        LifecycleStage::Blocked
+    };
     let mut record = issue_record(
         project,
         issue,
-        LifecycleStage::Blocked,
+        lifecycle_stage,
         Some(blocker.clone()),
         CleanupStatus::Clean,
     );
@@ -896,7 +901,10 @@ async fn retain_typed_non_owner_blocker(
 fn is_typed_non_owner_blocker_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "provider_blocker" | "mnemesh_workspace_missing" | "repeated_eval_failure"
+        "provider_blocker"
+            | "mnemesh_workspace_missing"
+            | "repeated_eval_failure"
+            | "runtime_defect"
     )
 }
 

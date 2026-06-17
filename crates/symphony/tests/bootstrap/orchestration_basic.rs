@@ -1608,6 +1608,25 @@ async fn orchestration_blocks_in_progress_issue_without_session_as_runtime_defec
         issue.failure.expect("failure").fingerprint.as_deref(),
         Some("missing_active_session")
     );
+
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("second poll");
+    assert_eq!(
+        report.blocked,
+        vec!["SYM-64"],
+        "recorded runtime defects should be retained instead of reprocessed as missing sessions"
+    );
+    let retained = store
+        .issue("symphony", "lost-session")
+        .await
+        .expect("query retained issue")
+        .expect("retained issue");
+    assert_eq!(retained.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(
+        retained.blocker.expect("runtime blocker").kind,
+        "runtime_defect"
+    );
 }
 
 #[tokio::test]

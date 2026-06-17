@@ -1,4 +1,5 @@
 mod rows;
+mod self_defects;
 
 use std::{borrow::Borrow, path::Path, time::Duration};
 
@@ -26,6 +27,7 @@ pub struct CleanupReport {
     pub sessions_deleted: u64,
     pub stage_events_deleted: u64,
     pub eval_runs_deleted: u64,
+    pub self_defects_deleted: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -763,6 +765,18 @@ impl SqliteStore {
             )
             .await?;
 
+        let self_defects_deleted = self
+            .conn
+            .execute(
+                r#"
+                DELETE FROM self_defect_registry
+                WHERE resolution_state != 'open'
+                  AND last_seen_at <= datetime('now', ?1)
+                "#,
+                params![cutoff_modifier.as_str()],
+            )
+            .await?;
+
         let issues_deleted = self
             .conn
             .execute(
@@ -786,6 +800,7 @@ impl SqliteStore {
             sessions_deleted,
             stage_events_deleted,
             eval_runs_deleted,
+            self_defects_deleted,
         })
     }
 
@@ -851,4 +866,6 @@ pub enum StorageError {
     State(#[from] StateParseError),
     #[error("state serialization error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("storage invariant violation: {0}")]
+    Invariant(String),
 }

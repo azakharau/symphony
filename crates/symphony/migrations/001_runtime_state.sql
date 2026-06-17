@@ -91,4 +91,33 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     FOREIGN KEY (project_id, issue_id) REFERENCES issues(project_id, issue_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS self_defect_registry (
+    registry_id TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    defect_kind TEXT NOT NULL,
+    category TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    initial_routing_decision TEXT NOT NULL,
+    source_project_id TEXT NOT NULL,
+    source_issue_id TEXT NOT NULL,
+    source_issue_identifier TEXT NOT NULL,
+    source_session_id TEXT,
+    source_process_id INTEGER,
+    managed_issue_id TEXT NOT NULL,
+    managed_issue_identifier TEXT NOT NULL,
+    occurrence_count INTEGER NOT NULL,
+    first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    latest_evidence_summary TEXT NOT NULL,
+    resolution_state TEXT NOT NULL,
+    relation_mode TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_self_defect_registry_open_fingerprint
+ON self_defect_registry(fingerprint)
+WHERE resolution_state = 'open';
+
+CREATE INDEX IF NOT EXISTS idx_self_defect_registry_managed_issue
+ON self_defect_registry(managed_issue_id);
+
 INSERT OR IGNORE INTO schema_migrations (id) VALUES ('001_runtime_state');

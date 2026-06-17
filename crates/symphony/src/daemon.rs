@@ -5,6 +5,7 @@ mod http;
 mod liveness;
 mod policy;
 mod records;
+mod self_defects;
 mod session;
 
 use std::{error::Error as StdError, path::PathBuf};
@@ -25,7 +26,7 @@ use crate::{
     },
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, LifecycleStage, OpenCodeSessionRecord,
-        OpenCodeStage, RuntimeLivenessStatus,
+        OpenCodeStage, RuntimeLivenessStatus, SelfDefectResolutionState,
     },
     storage::SqliteStore,
 };
@@ -228,6 +229,11 @@ async fn reconcile_project(
                 }
             }
             state if is_terminal_state(state) => {
+                if let Some(resolution) = self_defect_resolution_for_linear_state(state) {
+                    store
+                        .mark_self_defect_managed_issue_resolved(&issue.id, resolution)
+                        .await?;
+                }
                 let existing = store.issue(&project.id, &issue.id).await?;
                 let mut record = issue_record(
                     project,
@@ -1114,6 +1120,14 @@ fn active_runnable_todo_milestone(issues: &[LinearIssue]) -> Option<String> {
                 .as_ref()
                 .map(|milestone| milestone.id.clone())
         })
+}
+
+fn self_defect_resolution_for_linear_state(state: &str) -> Option<SelfDefectResolutionState> {
+    match state {
+        "Done" => Some(SelfDefectResolutionState::Done),
+        "Canceled" => Some(SelfDefectResolutionState::Canceled),
+        _ => None,
+    }
 }
 
 fn runnable_todo_milestone_count(issues: &[LinearIssue]) -> usize {

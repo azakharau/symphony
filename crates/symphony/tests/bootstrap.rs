@@ -656,6 +656,8 @@ struct RecordingLinearClient {
     issues: Vec<LinearIssue>,
     transitions: std::sync::Mutex<Vec<(String, LinearTransition)>>,
     evidence: std::sync::Mutex<Vec<(String, LinearIssueEvidence)>>,
+    managed_issues: std::sync::Mutex<Vec<ManagedLinearIssueCreate>>,
+    relations: std::sync::Mutex<Vec<(String, String, ManagedLinearRelation)>>,
 }
 
 impl RecordingLinearClient {
@@ -664,6 +666,8 @@ impl RecordingLinearClient {
             issues,
             transitions: std::sync::Mutex::new(Vec::new()),
             evidence: std::sync::Mutex::new(Vec::new()),
+            managed_issues: std::sync::Mutex::new(Vec::new()),
+            relations: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -673,6 +677,13 @@ impl RecordingLinearClient {
 
     fn evidence(&self) -> Vec<(String, LinearIssueEvidence)> {
         self.evidence.lock().expect("evidence lock").clone()
+    }
+
+    fn managed_issues(&self) -> Vec<ManagedLinearIssueCreate> {
+        self.managed_issues
+            .lock()
+            .expect("managed issues lock")
+            .clone()
     }
 }
 
@@ -706,6 +717,50 @@ impl LinearClient for RecordingLinearClient {
             .lock()
             .expect("evidence lock")
             .push((issue_id.to_string(), evidence));
+        Ok(())
+    }
+
+    async fn create_managed_issue(
+        &self,
+        _project: &symphony::config::ProjectConfig,
+        request: ManagedLinearIssueCreate,
+    ) -> Result<LinearIssue, LinearClientError> {
+        let identifier = format!("SYM-DEFECT-{}", self.managed_issues().len() + 1);
+        let issue = LinearIssue {
+            id: format!("managed-{}", self.managed_issues().len() + 1),
+            identifier,
+            title: request.title.clone(),
+            description: Some(request.description_with_fingerprint()),
+            state: request.state.state_name().into(),
+            priority: Some(request.priority),
+            branch_name: None,
+            url: None,
+            labels: Vec::new(),
+            project_milestone: None,
+            blocked_by: Vec::new(),
+            has_new_owner_answer: false,
+            owner_answer_created_at: None,
+            created_at: None,
+            updated_at: None,
+        };
+        self.managed_issues
+            .lock()
+            .expect("managed issues lock")
+            .push(request);
+        Ok(issue)
+    }
+
+    async fn create_issue_relation(
+        &self,
+        source_issue_id: &str,
+        managed_issue_id: &str,
+        relation: ManagedLinearRelation,
+    ) -> Result<(), LinearClientError> {
+        self.relations.lock().expect("relations lock").push((
+            source_issue_id.to_string(),
+            managed_issue_id.to_string(),
+            relation,
+        ));
         Ok(())
     }
 }

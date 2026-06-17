@@ -26,6 +26,7 @@ use super::{
     git_closure::{GitClosureResult, verify_and_integrate_git_closure},
     policy::{matching_failure_count, stable_fingerprint},
     records::{git_closure_evidence_body, issue_record},
+    self_defects::{RuntimeSelfDefectInput, record_runtime_self_defect},
 };
 
 pub(super) async fn process_in_progress_handoff(
@@ -746,6 +747,19 @@ async fn fail_runtime_defect(
             },
         )
         .await?;
+    let registry_record = record_runtime_self_defect(
+        project,
+        store,
+        linear,
+        RuntimeSelfDefectInput {
+            issue,
+            evidence_kind,
+            message: &message,
+            failure: &failure,
+            session,
+        },
+    )
+    .await?;
     let mut terminating_session = session.clone();
     terminate_current_session_process(project, issue, &mut terminating_session).await?;
     let mut record = issue_record(
@@ -755,8 +769,9 @@ async fn fail_runtime_defect(
         Some(BlockerRecord {
             kind: "runtime_defect".into(),
             message: format!(
-                "unresolved runtime defect: {}",
-                failure.fingerprint.as_deref().unwrap_or(&failure.message)
+                "unresolved runtime defect: {} (managed by {})",
+                failure.fingerprint.as_deref().unwrap_or(&failure.message),
+                registry_record.managed_issue_identifier
             ),
             observed_at: None,
         }),

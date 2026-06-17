@@ -145,6 +145,81 @@ pub struct EvalRunRecord {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SelfDefectRecord {
+    pub registry_id: String,
+    pub fingerprint: String,
+    pub defect_kind: String,
+    pub category: String,
+    pub severity: String,
+    pub initial_routing_decision: String,
+    pub source_project_id: String,
+    pub source_issue_id: String,
+    pub source_issue_identifier: String,
+    pub source_session_id: Option<String>,
+    pub source_process_id: Option<u32>,
+    pub managed_issue_id: String,
+    pub managed_issue_identifier: String,
+    pub occurrence_count: u32,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub latest_evidence_summary: String,
+    pub resolution_state: SelfDefectResolutionState,
+    pub relation_mode: SelfDefectRelationMode,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SelfDefectOccurrenceRecord {
+    pub fingerprint: String,
+    pub defect_kind: String,
+    pub category: String,
+    pub severity: String,
+    pub initial_routing_decision: String,
+    pub source_project_id: String,
+    pub source_issue_id: String,
+    pub source_issue_identifier: String,
+    pub source_session_id: Option<String>,
+    pub source_process_id: Option<u32>,
+    pub managed_issue_id: String,
+    pub managed_issue_identifier: String,
+    pub latest_evidence_summary: String,
+    pub relation_mode: SelfDefectRelationMode,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfDefectResolutionState {
+    Open,
+    Done,
+    Canceled,
+}
+
+impl SelfDefectResolutionState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Done => "done",
+            Self::Canceled => "canceled",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfDefectRelationMode {
+    Blocking,
+    RelatedOnly,
+}
+
+impl SelfDefectRelationMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Blocking => "blocking",
+            Self::RelatedOnly => "related_only",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BlockerRecord {
     pub kind: String,
     pub message: String,

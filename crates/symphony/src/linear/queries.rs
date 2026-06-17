@@ -88,3 +88,76 @@ mutation CreateIssueEvidence($issueId: String!, $body: String!) {
   }
 }
 "#;
+
+pub(super) const TEAM_CREATE_CONTEXT_QUERY: &str = r#"
+query TeamCreateContext($teamKey: String!) {
+  teams(filter: { key: { eq: $teamKey } }, first: 1) {
+    nodes {
+      id
+      states {
+        nodes {
+          id
+          name
+        }
+      }
+    }
+  }
+}
+"#;
+
+pub(super) const CREATE_MANAGED_ISSUE_MUTATION: &str = r#"
+mutation CreateManagedIssue($input: IssueCreateInput!) {
+  issueCreate(input: $input) {
+    success
+    issue {
+      id
+      identifier
+      title
+      description
+      state { name }
+      priority
+      branchName
+      url
+      projectMilestone { id name }
+      labels { nodes { name } }
+      comments(last: 50, orderBy: createdAt) {
+        nodes {
+          body
+          parent { id }
+          createdAt
+        }
+      }
+      relations {
+        nodes {
+          type
+          relatedIssue {
+            id
+            identifier
+            state { name }
+          }
+        }
+      }
+      inverseRelations {
+        nodes {
+          type
+          issue {
+            id
+            identifier
+            state { name }
+          }
+        }
+      }
+      createdAt
+      updatedAt
+    }
+  }
+}
+"#;
+
+pub(super) const CREATE_ISSUE_RELATION_MUTATION: &str = r#"
+mutation CreateIssueRelation($issueId: String!, $relatedIssueId: String!, $type: IssueRelationType!) {
+  issueRelationCreate(input: { issueId: $issueId, relatedIssueId: $relatedIssueId, type: $type }) {
+    success
+  }
+}
+"#;

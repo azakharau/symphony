@@ -8,12 +8,14 @@ use tracing::{debug, info};
 use crate::config::ProjectConfig;
 use graphql_model::{LinearIssueConnection, LinearIssueNode, WorkflowStateNode};
 use queries::{
-    CANDIDATE_ISSUES_QUERY, CREATE_COMMENT_MUTATION, ISSUE_STATES_QUERY,
+    CANDIDATE_ISSUES_QUERY, CREATE_COMMENT_MUTATION, CREATE_ISSUE_RELATION_MUTATION,
+    CREATE_MANAGED_ISSUE_MUTATION, ISSUE_STATES_QUERY, TEAM_CREATE_CONTEXT_QUERY,
     UPDATE_ISSUE_STATE_MUTATION,
 };
 pub use types::{
     LinearBlocker, LinearClientError, LinearIssue, LinearIssueEvidence, LinearMilestone,
-    LinearProjectConfig, LinearTransition,
+    LinearProjectConfig, LinearTransition, ManagedLinearIssueCreate, ManagedLinearIssueState,
+    ManagedLinearRelation,
 };
 
 const CANDIDATE_STATES: &[&str] = &[
@@ -42,6 +44,37 @@ pub trait LinearClient: Sync {
         &self,
         _issue_id: &str,
         _evidence: LinearIssueEvidence,
+    ) -> Result<(), LinearClientError> {
+        Ok(())
+    }
+
+    async fn find_managed_issue(
+        &self,
+        project: &ProjectConfig,
+        fingerprint: &str,
+    ) -> Result<Option<LinearIssue>, LinearClientError> {
+        Ok(self
+            .fetch_candidate_issues(project)
+            .await?
+            .into_iter()
+            .find(|issue| is_open_managed_issue(issue, fingerprint)))
+    }
+
+    async fn create_managed_issue(
+        &self,
+        _project: &ProjectConfig,
+        _request: ManagedLinearIssueCreate,
+    ) -> Result<LinearIssue, LinearClientError> {
+        Err(LinearClientError::Message(
+            "managed Linear issue creation is not configured".into(),
+        ))
+    }
+
+    async fn create_issue_relation(
+        &self,
+        _source_issue_id: &str,
+        _managed_issue_id: &str,
+        _relation: ManagedLinearRelation,
     ) -> Result<(), LinearClientError> {
         Ok(())
     }
@@ -199,6 +232,46 @@ impl LinearClient for LinearSdkClient {
         );
         Ok(())
     }
+
+    async fn create_managed_issue(
+        &self,
+        project: &ProjectConfig,
+        request: ManagedLinearIssueCreate,
+    ) -> Result<LinearIssue, LinearClientError> {
+        let issue = create_managed_issue_with(
+            |request| async move {
+                self.client
+                    .execute::<Value>(request.query, request.variables, request.data_path)
+                    .await
+                    .map_err(LinearClientError::from)
+            },
+            project,
+            request,
+        )
+        .await?;
+        info!(issue_id = %issue.id, "Linear SDK created managed issue");
+        Ok(issue)
+    }
+
+    async fn create_issue_relation(
+        &self,
+        source_issue_id: &str,
+        managed_issue_id: &str,
+        relation: ManagedLinearRelation,
+    ) -> Result<(), LinearClientError> {
+        create_issue_relation_with(
+            |request| async move {
+                self.client
+                    .execute::<Value>(request.query, request.variables, request.data_path)
+                    .await
+                    .map_err(LinearClientError::from)
+            },
+            source_issue_id,
+            managed_issue_id,
+            relation,
+        )
+        .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -283,6 +356,48 @@ where
             "Linear GraphQL recorded issue evidence"
         );
         Ok(())
+    }
+
+    async fn create_managed_issue(
+        &self,
+        project: &ProjectConfig,
+        request: ManagedLinearIssueCreate,
+    ) -> Result<LinearIssue, LinearClientError> {
+        let issue = create_managed_issue_with(
+            |request| async move {
+                self.post(json!({
+                    "query": request.query,
+                    "variables": request.variables,
+                }))
+                .await
+            },
+            project,
+            request,
+        )
+        .await?;
+        info!(issue_id = %issue.id, "Linear GraphQL created managed issue");
+        Ok(issue)
+    }
+
+    async fn create_issue_relation(
+        &self,
+        source_issue_id: &str,
+        managed_issue_id: &str,
+        relation: ManagedLinearRelation,
+    ) -> Result<(), LinearClientError> {
+        create_issue_relation_with(
+            |request| async move {
+                self.post(json!({
+                    "query": request.query,
+                    "variables": request.variables,
+                }))
+                .await
+            },
+            source_issue_id,
+            managed_issue_id,
+            relation,
+        )
+        .await
     }
 }
 
@@ -405,6 +520,125 @@ where
         .find(|state| state.name == state_name)
         .map(|state| state.id)
         .ok_or_else(|| LinearClientError::Message(format!("missing state `{state_name}`")))
+}
+
+async fn create_managed_issue_with<F, Fut>(
+    mut execute: F,
+    project: &ProjectConfig,
+    request: ManagedLinearIssueCreate,
+) -> Result<LinearIssue, LinearClientError>
+where
+    F: FnMut(GraphqlRequest) -> Fut,
+    Fut: std::future::Future<Output = Result<Value, LinearClientError>>,
+{
+    let project_id = project
+        .linear
+        .project_id
+        .as_deref()
+        .ok_or_else(|| LinearClientError::Message("linear.project_id is required".into()))?;
+    let context = execute(GraphqlRequest {
+        query: TEAM_CREATE_CONTEXT_QUERY,
+        variables: json!({ "teamKey": project.linear.team_key }),
+        data_path: "teams",
+    })
+    .await?;
+    let team = context
+        .pointer("/nodes/0")
+        .or_else(|| context.pointer("/teams/nodes/0"))
+        .or_else(|| context.pointer("/data/teams/nodes/0"))
+        .ok_or_else(|| LinearClientError::Message("missing Linear team context".into()))?;
+    let team_id = team
+        .pointer("/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| LinearClientError::Message("missing Linear team id".into()))?;
+    let state_id = state_id_from_team(team, request.state.state_name())?;
+
+    let mut input = json!({
+        "teamId": team_id,
+        "projectId": project_id,
+        "title": request.title,
+        "description": request.description_with_fingerprint(),
+        "priority": request.priority,
+        "stateId": state_id,
+    });
+    if let Some(project_milestone_id) = request.project_milestone_id {
+        input["projectMilestoneId"] = json!(project_milestone_id);
+    }
+    if !request.label_ids.is_empty() {
+        input["labelIds"] = json!(request.label_ids);
+    }
+
+    let response = execute(GraphqlRequest {
+        query: CREATE_MANAGED_ISSUE_MUTATION,
+        variables: json!({ "input": input }),
+        data_path: "issueCreate",
+    })
+    .await?;
+    ensure_success(&response, "/success", "issueCreate")
+        .or_else(|_| ensure_success(&response, "/data/issueCreate/success", "issueCreate"))?;
+    let issue = response
+        .pointer("/issue")
+        .or_else(|| response.pointer("/data/issueCreate/issue"))
+        .cloned()
+        .ok_or_else(|| LinearClientError::Message("missing created managed issue".into()))?;
+    serde_json::from_value::<LinearIssueNode>(issue)
+        .map(LinearIssueNode::into_issue)
+        .map_err(|error| LinearClientError::Message(format!("decode managed issue: {error}")))
+}
+
+async fn create_issue_relation_with<F, Fut>(
+    execute: F,
+    source_issue_id: &str,
+    managed_issue_id: &str,
+    relation: ManagedLinearRelation,
+) -> Result<(), LinearClientError>
+where
+    F: FnOnce(GraphqlRequest) -> Fut,
+    Fut: std::future::Future<Output = Result<Value, LinearClientError>>,
+{
+    let relation = if source_issue_id == managed_issue_id {
+        ManagedLinearRelation::Related
+    } else {
+        relation
+    };
+    let response = execute(GraphqlRequest {
+        query: CREATE_ISSUE_RELATION_MUTATION,
+        variables: json!({
+            "issueId": source_issue_id,
+            "relatedIssueId": managed_issue_id,
+            "type": relation.relation_type(),
+        }),
+        data_path: "issueRelationCreate",
+    })
+    .await?;
+    ensure_success(&response, "/success", "issueRelationCreate").or_else(|_| {
+        ensure_success(
+            &response,
+            "/data/issueRelationCreate/success",
+            "issueRelationCreate",
+        )
+    })
+}
+
+fn state_id_from_team(team: &Value, state_name: &str) -> Result<String, LinearClientError> {
+    let states = team
+        .pointer("/states/nodes")
+        .cloned()
+        .ok_or_else(|| LinearClientError::Message("missing team workflow states".into()))?;
+    serde_json::from_value::<Vec<WorkflowStateNode>>(states)
+        .map_err(|error| LinearClientError::Message(format!("decode states: {error}")))?
+        .into_iter()
+        .find(|state| state.name == state_name)
+        .map(|state| state.id)
+        .ok_or_else(|| LinearClientError::Message(format!("missing state `{state_name}`")))
+}
+
+fn is_open_managed_issue(issue: &LinearIssue, fingerprint: &str) -> bool {
+    !matches!(issue.state.as_str(), "Done" | "Canceled")
+        && issue
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains(fingerprint))
 }
 
 fn ensure_success(

@@ -73,6 +73,61 @@ pub struct LinearIssueEvidence {
     pub body: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedLinearIssueCreate {
+    pub source_issue_id: String,
+    pub fingerprint: String,
+    pub title: String,
+    pub description: String,
+    pub priority: i64,
+    pub state: ManagedLinearIssueState,
+    pub project_milestone_id: Option<String>,
+    pub label_ids: Vec<String>,
+}
+
+impl ManagedLinearIssueCreate {
+    pub fn description_with_fingerprint(&self) -> String {
+        format!(
+            "{}\n\n<!-- symphony:managed-self-bug fingerprint={} -->",
+            self.description.trim_end(),
+            self.fingerprint
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedLinearIssueState {
+    Backlog,
+    Todo,
+}
+
+impl ManagedLinearIssueState {
+    pub const fn state_name(self) -> &'static str {
+        match self {
+            Self::Backlog => "Backlog",
+            Self::Todo => "Todo",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedLinearRelation {
+    Blocks,
+    Related,
+}
+
+impl ManagedLinearRelation {
+    pub const fn relation_type(self) -> &'static str {
+        match self {
+            Self::Blocks => "blocks",
+            Self::Related => "related",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinearTransition {

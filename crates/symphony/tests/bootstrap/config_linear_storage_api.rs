@@ -358,6 +358,209 @@ async fn linear_graphql_client_paginates_candidate_issues_until_exhausted() {
 }
 
 #[tokio::test]
+async fn linear_client_finds_open_managed_issue_by_fingerprint() {
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let project = config.project("symphony").expect("project");
+    let client = RecordingLinearClient::new(vec![
+        linear_issue("done-managed", "SYM-10", "Done", Some(1))
+            .with_description("<!-- symphony:managed-self-bug fingerprint=sym-self-1 -->"),
+        linear_issue("open-managed", "SYM-11", "Todo", Some(1))
+            .with_description("<!-- symphony:managed-self-bug fingerprint=sym-self-1 -->"),
+    ]);
+
+    let issue = client
+        .find_managed_issue(project, "sym-self-1")
+        .await
+        .expect("find managed issue")
+        .expect("managed issue");
+
+    assert_eq!(issue.id, "open-managed");
+}
+
+#[tokio::test]
+async fn linear_graphql_client_creates_managed_issue_in_configured_project() {
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let project = config.project("symphony").expect("project");
+    let mut created = linear_issue_node_json("managed-1", "SYM-200", "Todo", 2);
+    created["description"] = serde_json::json!(
+        "panic evidence\n\n<!-- symphony:managed-self-bug fingerprint=sym-self-2 -->"
+    );
+    let transport = RecordingGraphqlTransport::new(vec![
+        serde_json::json!({
+            "data": {
+                "teams": {
+                    "nodes": [{
+                        "id": "team-symphony",
+                        "states": { "nodes": [{ "id": "state-todo", "name": "Todo" }] }
+                    }]
+                }
+            }
+        }),
+        serde_json::json!({
+            "data": {
+                "issueCreate": {
+                    "success": true,
+                    "issue": created
+                }
+            }
+        }),
+    ]);
+    let client = LinearGraphqlClient::new(
+        "https://linear.example/graphql",
+        "linear-token",
+        transport.clone(),
+    );
+
+    let issue = client
+        .create_managed_issue(
+            project,
+            ManagedLinearIssueCreate {
+                source_issue_id: "source-issue".into(),
+                fingerprint: "sym-self-2".into(),
+                title: "Managed self bug".into(),
+                description: "panic evidence".into(),
+                priority: 2,
+                state: ManagedLinearIssueState::Todo,
+                project_milestone_id: Some("milestone-1".into()),
+                label_ids: vec!["label-symphony".into()],
+            },
+        )
+        .await
+        .expect("create managed issue");
+
+    assert_eq!(issue.identifier, "SYM-200");
+    let requests = transport.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["variables"]["teamKey"], "SYM");
+    let input = &requests[1]["variables"]["input"];
+    assert_eq!(input["teamId"], "team-symphony");
+    assert_eq!(input["projectId"], "07df87ce-4e93-4d2c-a73d-84aee1f27e07");
+    assert_eq!(input["stateId"], "state-todo");
+    assert_eq!(input["projectMilestoneId"], "milestone-1");
+    assert_eq!(input["labelIds"], serde_json::json!(["label-symphony"]));
+    assert!(
+        input["description"]
+            .as_str()
+            .expect("description")
+            .contains("fingerprint=sym-self-2")
+    );
+}
+
+#[tokio::test]
+async fn linear_managed_issue_creation_accepts_sdk_extracted_response_shapes() {
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let project = config.project("symphony").expect("project");
+    let mut created = linear_issue_node_json("managed-sdk", "SYM-202", "Backlog", 1);
+    created["description"] =
+        serde_json::json!("sdk evidence\n\n<!-- symphony:managed-self-bug fingerprint=sym-sdk -->");
+    let transport = RecordingGraphqlTransport::new(vec![
+        serde_json::json!({
+            "nodes": [{
+                "id": "team-symphony",
+                "states": { "nodes": [{ "id": "state-backlog", "name": "Backlog" }] }
+            }]
+        }),
+        serde_json::json!({
+            "success": true,
+            "issue": created
+        }),
+    ]);
+    let client = LinearGraphqlClient::new(
+        "https://linear.example/graphql",
+        "linear-token",
+        transport.clone(),
+    );
+
+    let issue = client
+        .create_managed_issue(
+            project,
+            ManagedLinearIssueCreate {
+                source_issue_id: "source-issue".into(),
+                fingerprint: "sym-sdk".into(),
+                title: "Managed SDK self bug".into(),
+                description: "sdk evidence".into(),
+                priority: 1,
+                state: ManagedLinearIssueState::Backlog,
+                project_milestone_id: None,
+                label_ids: Vec::new(),
+            },
+        )
+        .await
+        .expect("create managed issue from sdk-shaped responses");
+
+    assert_eq!(issue.identifier, "SYM-202");
+    let requests = transport.requests();
+    assert_eq!(
+        requests[1]["variables"]["input"]["stateId"],
+        "state-backlog"
+    );
+}
+
+#[tokio::test]
+async fn linear_graphql_client_creates_relation_and_uses_related_for_self_deadlock() {
+    let transport = RecordingGraphqlTransport::new(vec![
+        serde_json::json!({ "data": { "issueRelationCreate": { "success": true } } }),
+        serde_json::json!({ "data": { "issueRelationCreate": { "success": true } } }),
+    ]);
+    let client = LinearGraphqlClient::new(
+        "https://linear.example/graphql",
+        "linear-token",
+        transport.clone(),
+    );
+
+    client
+        .create_issue_relation(
+            "source-issue",
+            "managed-issue",
+            ManagedLinearRelation::Blocks,
+        )
+        .await
+        .expect("relation");
+    client
+        .create_issue_relation(
+            "managed-issue",
+            "managed-issue",
+            ManagedLinearRelation::Blocks,
+        )
+        .await
+        .expect("self relation");
+
+    let requests = transport.requests();
+    assert_eq!(requests[0]["variables"]["type"], "blocks");
+    assert_eq!(requests[1]["variables"]["type"], "related");
+}
+
+#[tokio::test]
+async fn duplicate_managed_issue_reuse_records_occurrence_comment() {
+    let client = RecordingLinearClient::new(vec![
+        linear_issue("managed-duplicate", "SYM-201", "Todo", Some(1))
+            .with_description("<!-- symphony:managed-self-bug fingerprint=sym-self-3 -->"),
+    ]);
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let project = config.project("symphony").expect("project");
+
+    let existing = client
+        .find_managed_issue(project, "sym-self-3")
+        .await
+        .expect("find")
+        .expect("existing managed issue");
+    client
+        .record_issue_evidence(
+            &existing.id,
+            LinearIssueEvidence {
+                kind: "duplicate_occurrence".into(),
+                body: "second occurrence evidence".into(),
+            },
+        )
+        .await
+        .expect("record duplicate occurrence");
+
+    assert_eq!(client.evidence().len(), 1);
+    assert_eq!(client.evidence()[0].0, "managed-duplicate");
+    assert_eq!(client.evidence()[0].1.kind, "duplicate_occurrence");
+}
+
+#[tokio::test]
 async fn sqlite_migrations_initialize_empty_runtime_store() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

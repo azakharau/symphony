@@ -16,6 +16,7 @@ use symphony::{
     linear::{
         LinearBlocker, LinearClient, LinearClientError, LinearGraphqlClient,
         LinearGraphqlTransport, LinearIssue, LinearIssueEvidence, LinearTransition,
+        ManagedLinearIssueCreate, ManagedLinearIssueState, ManagedLinearRelation,
     },
     opencode::{
         self, GitClosureEvidence, OpenCodeEvalResult, OpenCodeHandoff, OpenCodeLauncher,

@@ -11,7 +11,7 @@ use std::{error::Error as StdError, path::PathBuf};
 
 use anyhow::Context;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     config::{OpenCodeStorageConfig, ProjectConfig, RootConfig},
@@ -25,7 +25,7 @@ use crate::{
     },
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, LifecycleStage, OpenCodeSessionRecord,
-        OpenCodeStage,
+        OpenCodeStage, RuntimeLivenessStatus,
     },
     storage::SqliteStore,
 };
@@ -120,7 +120,7 @@ pub async fn run_once_with_clients(
 
     let mut report = OrchestrationReport::default();
     for project in config.projects().iter().filter(|project| project.enabled) {
-        reconcile_project(
+        if let Err(error) = reconcile_project(
             project,
             config.opencode_storage.as_ref(),
             store,
@@ -129,10 +129,47 @@ pub async fn run_once_with_clients(
             &mut report,
         )
         .await
-        .with_context(|| format!("orchestrate project `{}`", project.id))?;
+        {
+            record_project_orchestration_error(store, project, &error).await?;
+        }
     }
 
     Ok(report)
+}
+
+async fn record_project_orchestration_error(
+    store: &SqliteStore,
+    project: &ProjectConfig,
+    error: &anyhow::Error,
+) -> anyhow::Result<()> {
+    let error_chain = error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ");
+    error!(
+        project_id = %project.id,
+        error = %error,
+        error_chain = %error_chain,
+        "project orchestration failed without aborting global poll"
+    );
+    let running = store
+        .issues_for_project(&project.id)
+        .await?
+        .into_iter()
+        .filter(|issue| issue.lifecycle_stage == LifecycleStage::Running)
+        .count() as u32;
+    store
+        .mark_project_liveness_poll(
+            &project.id,
+            RuntimeLivenessStatus::RunnerSetupFailed,
+            &format!("project orchestration failed: {error_chain}"),
+            project.concurrency.max_sessions,
+            running,
+            false,
+        )
+        .await?;
+    Ok(())
 }
 
 async fn reconcile_project(

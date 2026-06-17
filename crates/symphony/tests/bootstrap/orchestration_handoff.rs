@@ -879,8 +879,11 @@ async fn no_change_handoff_with_unreported_commit_does_not_close_or_cleanup() {
         .await
         .expect("query unreported")
         .expect("unreported issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
-    assert!(issue.blocker.is_none());
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(
+        issue.blocker.expect("runtime defect blocker").kind,
+        "runtime_defect"
+    );
     assert_eq!(
         issue.failure.expect("failure").fingerprint.as_deref(),
         Some("git_closure_unverified")
@@ -1601,22 +1604,22 @@ async fn malformed_handoff_sidecar_fails_fast_kills_process_tree_and_does_not_re
         Some("malformed_handoff_sidecar")
     );
     assert!(failure.message.contains("unknown field `status`"));
-    assert_eq!(
-        opencode.repairs(),
-        vec![("oc-86".into(), "malformed_handoff_sidecar".into())]
-    );
+    assert!(opencode.repairs().is_empty());
     let session = store
         .opencode_session("symphony", "malformed-json", "oc-86")
         .await
         .expect("query session")
         .expect("session");
-    assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(session.stage, OpenCodeStage::Running);
-    assert_eq!(session.process_id, Some(stale_process_id));
-    assert_eq!(session.lifecycle_marker.as_deref(), Some("repair_prompted"));
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(session.stage, OpenCodeStage::Failed);
+    assert_eq!(session.process_id, None);
+    assert_eq!(
+        session.lifecycle_marker.as_deref(),
+        Some("failed:malformed_handoff")
+    );
     assert_eq!(
         session.last_event.as_deref(),
-        Some("repair_prompted:malformed_handoff_sidecar")
+        Some("failed:malformed_handoff_sidecar")
     );
 }
 
@@ -1661,16 +1664,13 @@ async fn dead_in_progress_session_without_handoff_sidecar_fails_fast_instead_of_
                 .body
                 .contains(".symphony/opencode-handoff.json was not produced")
     }));
-    assert_eq!(
-        opencode.repairs(),
-        vec![("oc-87".into(), "missing_handoff_sidecar".into())]
-    );
+    assert!(opencode.repairs().is_empty());
     let issue = store
         .issue("symphony", "missing-sidecar")
         .await
         .expect("query issue")
         .expect("issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
     assert_eq!(
         issue.failure.expect("failure").fingerprint.as_deref(),
         Some("missing_handoff_sidecar")
@@ -1680,8 +1680,8 @@ async fn dead_in_progress_session_without_handoff_sidecar_fails_fast_instead_of_
         .await
         .expect("query session")
         .expect("session");
-    assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(session.stage, OpenCodeStage::Running);
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(session.stage, OpenCodeStage::Failed);
     assert_eq!(session.process_id, None);
 }
 
@@ -1774,32 +1774,34 @@ async fn missing_handoff_after_local_commit_records_worktree_git_snapshot_and_pr
         .await
         .expect("query issue")
         .expect("issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
-    assert!(issue.git_ref.is_none());
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
+    assert!(issue.git_ref.is_some());
     assert_eq!(
         issue.failure.expect("failure").fingerprint.as_deref(),
         Some("missing_handoff_sidecar")
     );
     assert!(evidence.contains("fingerprint: missing_handoff_sidecar"));
     assert!(evidence.contains("repair_attempt: 1"));
-    assert!(evidence.contains("next_action: continue_repair"));
-    assert_eq!(
-        opencode.repairs(),
-        vec![("oc-88".into(), "missing_handoff_sidecar".into())]
-    );
+    assert!(evidence.contains("next_action: fix_runner_tooling_defect_before_retry"));
+    assert!(opencode.repairs().is_empty());
 
     let session = store
         .opencode_session("symphony", "missing-sidecar-commit", "oc-88")
         .await
         .expect("query session")
         .expect("session");
-    assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(session.stage, OpenCodeStage::Running);
-    assert_eq!(session.process_id, Some(u32::MAX));
-    assert_eq!(session.lifecycle_marker.as_deref(), Some("repair_prompted"));
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(session.stage, OpenCodeStage::Failed);
+    assert_eq!(session.process_id, None);
     assert_eq!(
-        session.last_event.as_deref(),
-        Some("repair_prompted:missing_handoff_sidecar")
+        session.lifecycle_marker.as_deref(),
+        Some("failed:malformed_handoff")
+    );
+    assert!(
+        session
+            .last_event
+            .as_deref()
+            .is_some_and(|event| event.starts_with("failed:missing_handoff_sidecar"))
     );
 }
 
@@ -1851,10 +1853,7 @@ async fn missing_handoff_after_dirty_worktree_records_dirty_salvage_snapshot() {
     assert!(evidence.contains("salvage_state: dirty_worktree"));
     assert!(evidence.contains("status_short:"));
     assert!(evidence.contains("dirty.txt"));
-    assert_eq!(
-        opencode.repairs(),
-        vec![("oc-89".into(), "missing_handoff_sidecar".into())]
-    );
+    assert!(opencode.repairs().is_empty());
     assert!(repo.exists(), "dirty worktree must be preserved for repair");
 }
 
@@ -1906,10 +1905,7 @@ async fn missing_handoff_after_no_diff_records_explicit_no_change_salvage_snapsh
     assert!(evidence.contains("base_changed_files:\nnone"));
     assert!(evidence.contains("explicit no-change handoff instead of a fake commit"));
     assert!(client.transitions().is_empty());
-    assert_eq!(
-        opencode.repairs(),
-        vec![("oc-91".into(), "missing_handoff_sidecar".into())]
-    );
+    assert!(opencode.repairs().is_empty());
 }
 
 #[tokio::test]
@@ -1982,10 +1978,7 @@ async fn missing_handoff_after_unpushed_branch_records_unpushed_salvage_snapshot
     assert!(evidence.contains(&head_sha));
     assert!(evidence.contains("artifact.txt"));
     assert!(client.transitions().is_empty());
-    assert_eq!(
-        opencode.repairs(),
-        vec![("oc-92".into(), "missing_handoff_sidecar".into())]
-    );
+    assert!(opencode.repairs().is_empty());
 }
 
 fn config_for_repo_and_worktree_root(

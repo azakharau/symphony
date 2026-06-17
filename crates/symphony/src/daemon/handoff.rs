@@ -66,13 +66,11 @@ pub(super) async fn process_in_progress_handoff(
                 message,
                 "OpenCode session ended without handoff sidecar"
             );
-            request_opencode_repair(
+            fail_runtime_defect(
                 project,
                 store,
-                opencode,
                 linear,
                 issue,
-                existing_issue.as_ref(),
                 "malformed_handoff",
                 message.clone(),
                 FailureRecord {
@@ -94,13 +92,11 @@ pub(super) async fn process_in_progress_handoff(
                 message,
                 "OpenCode handoff sidecar failed validation"
             );
-            request_opencode_repair(
+            fail_runtime_defect(
                 project,
                 store,
-                opencode,
                 linear,
                 issue,
-                existing_issue.as_ref(),
                 "malformed_handoff",
                 message.clone(),
                 FailureRecord {
@@ -356,13 +352,11 @@ async fn close_successful_handoff<O: OpenCodeLauncher, L: LinearClient>(
                     message,
                     "successful OpenCode handoff failed git closure verification"
                 );
-                request_opencode_repair(
+                fail_runtime_defect(
                     project,
                     store,
-                    opencode,
                     linear,
                     issue,
-                    existing_issue,
                     "malformed_handoff",
                     message.clone(),
                     FailureRecord {
@@ -611,9 +605,31 @@ async fn request_opencode_repair(
     let spec = build_acp_launch_spec(project, issue);
     let mut terminating_session = session.clone();
     terminate_current_session_process(project, issue, &mut terminating_session).await?;
-    let started = opencode
+    let started = match opencode
         .continue_repair(&spec, session, &fingerprint, &message)
-        .await?;
+        .await
+    {
+        Ok(started) => started,
+        Err(error) => {
+            fail_runtime_defect(
+                project,
+                store,
+                linear,
+                issue,
+                "runtime_defect",
+                format!("OpenCode repair launch failed for fingerprint `{fingerprint}`: {error}"),
+                FailureRecord {
+                    kind: "runtime_defect".into(),
+                    message: error.to_string(),
+                    fingerprint: Some("repair_launch_failed".into()),
+                    occurrence_count,
+                },
+                session,
+            )
+            .await?;
+            return Ok(());
+        }
+    };
     let mut record = issue_record(
         project,
         issue,
@@ -692,6 +708,7 @@ async fn fail_runtime_defect(
     store.upsert_issue(&record).await?;
 
     let mut failed_session = session.clone();
+    failed_session.process_id = None;
     failed_session.lifecycle_stage = LifecycleStage::Failed;
     failed_session.stage = crate::state::OpenCodeStage::Failed;
     failed_session.lifecycle_marker = Some(format!("failed:{}", failure.kind));

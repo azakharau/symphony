@@ -757,6 +757,65 @@ impl LinearClient for ProjectAwareLinearClient {
     }
 }
 
+#[derive(Debug)]
+struct PartiallyFailingProjectLinearClient {
+    failing_project_id: String,
+    issues_by_project: std::collections::HashMap<String, Vec<LinearIssue>>,
+    transitions: std::sync::Mutex<Vec<(String, LinearTransition)>>,
+}
+
+impl PartiallyFailingProjectLinearClient {
+    fn new<const N: usize>(
+        failing_project_id: impl Into<String>,
+        issues: [(&str, Vec<LinearIssue>); N],
+    ) -> Self {
+        Self {
+            failing_project_id: failing_project_id.into(),
+            issues_by_project: issues
+                .into_iter()
+                .map(|(project_id, issues)| (project_id.to_string(), issues))
+                .collect(),
+            transitions: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn transitions(&self) -> Vec<(String, LinearTransition)> {
+        self.transitions.lock().expect("transitions lock").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl LinearClient for PartiallyFailingProjectLinearClient {
+    async fn fetch_candidate_issues(
+        &self,
+        project: &symphony::config::ProjectConfig,
+    ) -> Result<Vec<LinearIssue>, LinearClientError> {
+        if project.id == self.failing_project_id {
+            return Err(LinearClientError::Message(format!(
+                "synthetic fetch failure for {}",
+                project.id
+            )));
+        }
+        Ok(self
+            .issues_by_project
+            .get(&project.id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn transition_issue(
+        &self,
+        issue_id: &str,
+        transition: LinearTransition,
+    ) -> Result<(), LinearClientError> {
+        self.transitions
+            .lock()
+            .expect("transitions lock")
+            .push((issue_id.to_string(), transition));
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default)]
 struct ScriptedOpenCodeLauncher {
     handoff: Option<OpenCodeHandoff>,

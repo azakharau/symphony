@@ -17,8 +17,10 @@ pub(super) async fn ensure_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), Ope
         return Ok(());
     };
 
+    let base_ref = effective_base_ref(repo_path, base_ref).await?;
+
     if tokio::fs::try_exists(spec.cwd.join(".git")).await? {
-        return ensure_existing_git_worktree(spec).await;
+        return ensure_existing_git_worktree(spec, repo_path, &base_ref).await;
     }
 
     if tokio::fs::try_exists(&spec.cwd).await? && directory_has_entries(&spec.cwd).await? {
@@ -33,10 +35,14 @@ pub(super) async fn ensure_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), Ope
     }
 
     prune_stale_worktree_entries(repo_path).await?;
-    create_git_worktree(spec, repo_path, base_ref).await
+    create_git_worktree(spec, repo_path, &base_ref).await
 }
 
-async fn ensure_existing_git_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), OpenCodeError> {
+async fn ensure_existing_git_worktree(
+    spec: &OpenCodeLaunchSpec,
+    repo_path: &Path,
+    base_ref: &str,
+) -> Result<(), OpenCodeError> {
     let current_branch = git_output(
         &spec.cwd,
         ["branch", "--show-current"],
@@ -83,13 +89,113 @@ async fn ensure_existing_git_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), O
         )));
     }
 
+    align_existing_worktree_to_base(spec, repo_path, base_ref).await?;
+
     debug!(
         issue = %spec.issue_identifier,
         cwd = %spec.cwd.display(),
         branch_name = %spec.branch_name,
+        base_ref,
         "OpenCode worktree already exists on expected branch with clean status"
     );
     Ok(())
+}
+
+async fn effective_base_ref(repo_path: &Path, base_ref: &str) -> Result<String, OpenCodeError> {
+    let base_ref = base_ref.trim();
+    if base_ref.is_empty() {
+        return Err(OpenCodeError::InvalidWorktree(
+            "configured base ref must not be empty".into(),
+        ));
+    }
+
+    if base_ref == "HEAD"
+        || base_ref.starts_with("refs/")
+        || base_ref.starts_with("origin/")
+        || !remote_refreshed_base_by_default(base_ref)
+    {
+        return Ok(base_ref.into());
+    }
+
+    if git_output(
+        repo_path,
+        ["remote", "get-url", "origin"],
+        "git remote get-url origin",
+    )
+    .await
+    .is_err()
+    {
+        return Ok(base_ref.into());
+    }
+
+    let remote_base = format!("refs/remotes/origin/{base_ref}");
+    let fetch_refspec = format!("+refs/heads/{base_ref}:{remote_base}");
+    git_status(
+        repo_path,
+        ["fetch", "origin", &fetch_refspec],
+        "git fetch origin <base>",
+    )
+    .await?;
+    Ok(remote_base)
+}
+
+fn remote_refreshed_base_by_default(base_ref: &str) -> bool {
+    matches!(base_ref, "main" | "master" | "trunk")
+}
+
+async fn align_existing_worktree_to_base(
+    spec: &OpenCodeLaunchSpec,
+    repo_path: &Path,
+    base_ref: &str,
+) -> Result<(), OpenCodeError> {
+    let base_commit_ref = format!("{base_ref}^{{commit}}");
+    let base_head = git_output(
+        repo_path,
+        ["rev-parse", "--verify", &base_commit_ref],
+        "git rev-parse --verify <base>^{commit}",
+    )
+    .await?;
+    if git_success(
+        &spec.cwd,
+        ["merge-base", "--is-ancestor", base_head.trim(), "HEAD"],
+    )
+    .await?
+    {
+        return Ok(());
+    }
+
+    info!(
+        issue = %spec.issue_identifier,
+        cwd = %spec.cwd.display(),
+        branch_name = %spec.branch_name,
+        base_ref,
+        base_head = %base_head.trim(),
+        "rebasing clean existing OpenCode worktree onto current base before launch"
+    );
+    match git_status(&spec.cwd, ["rebase", base_head.trim()], "git rebase <base>").await {
+        Ok(()) => {
+            let status = git_output(
+                &spec.cwd,
+                ["status", "--porcelain", "--untracked-files=all"],
+                "git status --porcelain --untracked-files=all",
+            )
+            .await?;
+            if status.trim().is_empty() {
+                Ok(())
+            } else {
+                Err(OpenCodeError::InvalidWorktree(format!(
+                    "existing worktree {} was dirty after rebasing onto base {}: {}",
+                    spec.cwd.display(),
+                    base_ref,
+                    dirty_or_untracked_evidence(&status)
+                )))
+            }
+        }
+        Err(error) => {
+            let _ = git_status(&spec.cwd, ["rebase", "--abort"], "git rebase --abort").await;
+            Err(error)
+        }
+    }
 }
 
 fn dirty_or_untracked_evidence(status: &str) -> String {
@@ -154,6 +260,27 @@ async fn prune_stale_worktree_entries(repo_path: &Path) -> Result<(), OpenCodeEr
     }
 }
 
+async fn git_status<const N: usize>(
+    cwd: &Path,
+    args: [&str; N],
+    command: &str,
+) -> Result<(), OpenCodeError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .await?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(OpenCodeError::GitCommand {
+            command: format!("git -C {} {command}", cwd.display()),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        })
+    }
+}
+
 async fn git_output<const N: usize>(
     cwd: &Path,
     args: [&str; N],
@@ -173,6 +300,16 @@ async fn git_output<const N: usize>(
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
     }
+}
+
+async fn git_success<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<bool, OpenCodeError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .await?;
+    Ok(output.status.success())
 }
 
 async fn directory_has_entries(path: &Path) -> Result<bool, OpenCodeError> {
@@ -319,6 +456,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn existing_worktree_reuse_rebases_clean_stale_branch_onto_current_base() {
+        let fixture = GitFixture::new();
+        fixture.add_worktree("symphony/SYM-1", false);
+        fs::write(fixture.repo.join("README.md"), "base\nadvanced\n").expect("advance readme");
+        run_git(&fixture.repo, ["add", "README.md"]);
+        run_git(&fixture.repo, ["commit", "-m", "advance base"]);
+        let base_head = git_output(
+            &fixture.repo,
+            ["rev-parse", "master"],
+            "git rev-parse master",
+        )
+        .await
+        .expect("base head");
+
+        ensure_worktree(&fixture.launch_spec())
+            .await
+            .expect("clean stale branch should be rebased before launch");
+
+        assert!(
+            git_success(
+                &fixture.worktree,
+                ["merge-base", "--is-ancestor", base_head.trim(), "HEAD"]
+            )
+            .await
+            .expect("merge-base check"),
+            "existing worktree HEAD must descend from current base"
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.worktree.join("README.md")).expect("read worktree file"),
+            "base\nadvanced\n"
+        );
+    }
+
+    #[tokio::test]
     async fn missing_registered_worktree_is_pruned_before_launch() {
         let fixture = GitFixture::new();
         fixture.add_worktree("symphony/old", false);
@@ -356,7 +527,7 @@ mod tests {
             let worktree = root.join("SYM-1");
             fs::create_dir_all(&repo).expect("repo dir");
             fs::create_dir_all(&root).expect("worktree root");
-            run_git(&repo, ["init"]);
+            run_git(&repo, ["init", "--initial-branch", "master"]);
             run_git(&repo, ["config", "user.email", "symphony@example.test"]);
             run_git(&repo, ["config", "user.name", "Symphony Test"]);
             fs::write(repo.join("README.md"), "base").expect("readme");
@@ -407,7 +578,7 @@ mod tests {
                 branch_name: "symphony/SYM-1".into(),
                 repo_path: Some(self.repo.clone()),
                 mnemesh_workspace_root: None,
-                base_ref: Some("HEAD".into()),
+                base_ref: Some("master".into()),
                 agent: "build".into(),
                 model: None,
                 effort: None,

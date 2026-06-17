@@ -99,6 +99,49 @@ async fn orchestration_records_no_eligible_liveness_without_launching_opencode()
 }
 
 #[tokio::test]
+async fn orchestration_continues_other_projects_when_one_project_poll_fails() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(two_project_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let client = PartiallyFailingProjectLinearClient::new(
+        "alpha",
+        [(
+            "symphony",
+            vec![linear_issue("symphony-work", "SYM-64", "Todo", Some(1))],
+        )],
+    );
+
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("one project failure must not abort global poll");
+
+    assert_eq!(report.dispatched, vec!["SYM-64"]);
+    assert_eq!(
+        client.transitions(),
+        vec![("symphony-work".into(), LinearTransition::InProgress)]
+    );
+    let alpha_liveness = store
+        .project_liveness("alpha")
+        .await
+        .expect("query alpha liveness")
+        .expect("alpha liveness");
+    assert_eq!(
+        alpha_liveness.status,
+        RuntimeLivenessStatus::RunnerSetupFailed
+    );
+    assert!(
+        alpha_liveness
+            .reason
+            .contains("synthetic fetch failure for alpha"),
+        "reason={}",
+        alpha_liveness.reason
+    );
+}
+
+#[tokio::test]
 async fn orchestration_records_blocked_issues_liveness_when_candidates_are_blocked() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
@@ -196,22 +239,23 @@ async fn orchestration_schedules_repair_for_dead_running_session_without_handoff
         client.transitions().is_empty(),
         "runtime defect must not return work to Linear Todo"
     );
-    assert_eq!(
-        opencode.repairs(),
-        vec![("SYM-65".into(), "missing_handoff_sidecar".into())]
-    );
+    assert!(opencode.repairs().is_empty());
     let liveness = store
         .project_liveness("symphony")
         .await
         .expect("query liveness")
         .expect("liveness row");
-    assert_eq!(liveness.status, RuntimeLivenessStatus::RunnerProcessDead);
+    assert_eq!(liveness.status, RuntimeLivenessStatus::NoEligibleIssues);
     let issue = store
         .issue("symphony", "work")
         .await
         .expect("query work")
         .expect("work issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(
+        issue.blocker.expect("runtime defect blocker").kind,
+        "runtime_defect"
+    );
     let failure = issue.failure.expect("failure");
     assert_eq!(
         failure.fingerprint.as_deref(),
@@ -850,10 +894,7 @@ async fn orchestration_repairs_stale_in_progress_session_without_handoff_sidecar
     assert!(opencode.launches().is_empty());
     assert!(opencode.resumes().is_empty());
     assert!(opencode.continuations().is_empty());
-    assert_eq!(
-        opencode.repairs(),
-        vec![("SYM-65".into(), "missing_handoff_sidecar".into())]
-    );
+    assert!(opencode.repairs().is_empty());
     assert!(
         client.transitions().is_empty(),
         "runtime defect must not return work to Linear Todo"
@@ -867,20 +908,23 @@ async fn orchestration_repairs_stale_in_progress_session_without_handoff_sidecar
                 .body
                 .contains("fingerprint: missing_handoff_sidecar")
     }));
-    let resumed = store
+    let failed = store
         .opencode_session("symphony", "work", "ses-existing")
         .await
         .expect("query session")
         .expect("session");
-    assert_eq!(resumed.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(resumed.stage, OpenCodeStage::Running);
-    assert_eq!(resumed.process_id, Some(4242));
-    assert_eq!(resumed.lifecycle_marker.as_deref(), Some("repair_prompted"));
+    assert_eq!(failed.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(failed.stage, OpenCodeStage::Failed);
+    assert_eq!(failed.process_id, None);
     assert_eq!(
-        resumed.last_event.as_deref(),
-        Some("repair_prompted:missing_handoff_sidecar")
+        failed.lifecycle_marker.as_deref(),
+        Some("failed:malformed_handoff")
     );
-    assert!(!resumed.silence_observed);
+    assert_eq!(
+        failed.last_event.as_deref(),
+        Some("failed:missing_handoff_sidecar")
+    );
+    assert!(!failed.silence_observed);
 }
 
 #[tokio::test]
@@ -926,10 +970,7 @@ async fn orchestration_reissues_repair_prompt_for_stale_malformed_handoff_sessio
 
     assert!(opencode.launches().is_empty());
     assert!(opencode.resumes().is_empty());
-    assert_eq!(
-        opencode.repairs(),
-        vec![("SYM-66".into(), "missing_handoff_sidecar".into())]
-    );
+    assert!(opencode.repairs().is_empty());
     assert!(
         client.transitions().is_empty(),
         "stale malformed handoff defect must not return repair-stale to Linear Todo"
@@ -939,7 +980,7 @@ async fn orchestration_reissues_repair_prompt_for_stale_malformed_handoff_sessio
         .await
         .expect("query repair issue")
         .expect("repair issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
     let failure = issue.failure.expect("failure");
     assert_eq!(
         failure.fingerprint.as_deref(),
@@ -947,18 +988,18 @@ async fn orchestration_reissues_repair_prompt_for_stale_malformed_handoff_sessio
     );
     assert_eq!(failure.occurrence_count, 1);
 
-    let repaired = store
+    let failed = store
         .opencode_session("symphony", "repair-stale", "ses-repair-stale")
         .await
         .expect("query session")
         .expect("session");
     assert_eq!(
-        repaired.last_event.as_deref(),
-        Some("repair_prompted:missing_handoff_sidecar")
+        failed.last_event.as_deref(),
+        Some("failed:missing_handoff_sidecar")
     );
     assert_eq!(
-        repaired.lifecycle_marker.as_deref(),
-        Some("repair_prompted")
+        failed.lifecycle_marker.as_deref(),
+        Some("failed:malformed_handoff")
     );
 }
 

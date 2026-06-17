@@ -300,6 +300,35 @@ async fn dashboard_api_and_html_surface_primary_execution_reason_codes() {
             .contains("git closure validation failed")
     );
 
+    let runtime_defect_blocked = project_for(
+        |issue, _| {
+            issue.lifecycle_stage = LifecycleStage::Failed;
+            issue.failure = Some(FailureRecord {
+                kind: "malformed_handoff".into(),
+                message: "successful handoff did not include git closure evidence".into(),
+                fingerprint: Some("missing_git_closure".into()),
+                occurrence_count: 1,
+            });
+        },
+        Some((
+            RuntimeLivenessStatus::BlockedIssues,
+            "candidate issues exist but are blocked or parked",
+            2,
+            0,
+        )),
+    )
+    .await;
+    assert_eq!(
+        runtime_defect_blocked.liveness.primary_reason_code,
+        "runtime_defect_blocked"
+    );
+    assert!(
+        runtime_defect_blocked
+            .liveness
+            .primary_reason_detail
+            .contains("git closure evidence")
+    );
+
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");

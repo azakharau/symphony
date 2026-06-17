@@ -62,6 +62,59 @@ impl LinearClient for DoneRequiresStoppedProcessLinearClient {
     }
 }
 
+#[derive(Debug)]
+struct MismatchedHandoffOpenCodeLauncher {
+    handoff: OpenCodeHandoff,
+    repairs: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+impl MismatchedHandoffOpenCodeLauncher {
+    fn new(handoff: OpenCodeHandoff) -> Self {
+        Self {
+            handoff,
+            repairs: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn repairs(&self) -> Vec<(String, String)> {
+        self.repairs.lock().expect("repairs lock").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl OpenCodeLauncher for MismatchedHandoffOpenCodeLauncher {
+    async fn launch(
+        &self,
+        _spec: &opencode::OpenCodeLaunchSpec,
+    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+        unreachable!("mismatched handoff test should not launch OpenCode")
+    }
+
+    async fn latest_handoff(
+        &self,
+        _session: &OpenCodeSessionRecord,
+    ) -> Result<Option<OpenCodeHandoff>, opencode::OpenCodeError> {
+        Ok(Some(self.handoff.clone()))
+    }
+
+    async fn continue_repair(
+        &self,
+        _spec: &opencode::OpenCodeLaunchSpec,
+        session: &OpenCodeSessionRecord,
+        failure_fingerprint: &str,
+        _repair_message: &str,
+    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+        self.repairs
+            .lock()
+            .expect("repairs lock")
+            .push((session.session_id.clone(), failure_fingerprint.to_string()));
+        Ok(opencode::OpenCodeStartedSession {
+            session_id: session.session_id.clone(),
+            process_id: session.process_id,
+        })
+    }
+}
+
 fn test_process_is_alive(process_id: u32) -> bool {
     let path = format!("/proc/{process_id}/cmdline");
     fs::read(path)
@@ -591,9 +644,9 @@ async fn successful_handoff_with_unpushed_issue_commit_does_not_close_or_cleanup
         .await
         .expect("orchestrate once");
 
-    assert_eq!(
-        client.transitions(),
-        vec![("unpushed".into(), LinearTransition::Todo)]
+    assert!(
+        client.transitions().is_empty(),
+        "unverified git closure must not return unpushed to Linear Todo"
     );
     assert!(
         worktree.exists(),
@@ -759,9 +812,9 @@ async fn successful_handoff_with_worktree_outside_configured_root_is_parked_with
         .await
         .expect("orchestrate once");
 
-    assert_eq!(
-        client.transitions(),
-        vec![("completed".into(), LinearTransition::Todo)]
+    assert!(
+        client.transitions().is_empty(),
+        "malformed handoff closure must not return completed to Linear Todo"
     );
     assert!(outside.exists(), "outside path must not be removed");
     assert!(
@@ -824,9 +877,9 @@ async fn successful_handoff_with_sibling_worktree_is_parked_without_cleanup() {
         .await
         .expect("orchestrate once");
 
-    assert_eq!(
-        client.transitions(),
-        vec![("completed".into(), LinearTransition::Todo)]
+    assert!(
+        client.transitions().is_empty(),
+        "malformed handoff closure must not return completed to Linear Todo"
     );
     assert!(active.exists(), "active worktree must not be removed");
     assert!(sibling.exists(), "sibling worktree must not be removed");
@@ -887,9 +940,9 @@ async fn successful_handoff_with_whitespace_worktree_path_is_parked_without_clea
         .await
         .expect("orchestrate once");
 
-    assert_eq!(
-        client.transitions(),
-        vec![("completed".into(), LinearTransition::Todo)]
+    assert!(
+        client.transitions().is_empty(),
+        "malformed handoff closure must not return completed to Linear Todo"
     );
     assert!(active.exists(), "active worktree must not be removed");
     assert!(client.evidence().iter().any(|(_, evidence)| {
@@ -1000,6 +1053,74 @@ async fn repeated_identical_eval_failure_parks_owner_input_with_typed_evidence()
         issue.blocker.expect("blocker").kind,
         "repeated_eval_failure"
     );
+}
+
+#[tokio::test]
+async fn repeated_session_id_mismatch_hits_runtime_repair_threshold() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let worktree = dir.path().join("SYM-83-worktree");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let mut issue = test_issue("symphony", "session-mismatch", "SYM-83");
+    issue.failure = Some(FailureRecord {
+        kind: "malformed_handoff".into(),
+        message: "session id mismatch".into(),
+        fingerprint: Some("session_id_mismatch".into()),
+        occurrence_count: 1,
+    });
+    store.upsert_issue(issue).await.expect("running issue");
+    store
+        .upsert_opencode_session(test_session(
+            "symphony",
+            "session-mismatch",
+            "oc-83",
+            &worktree,
+        ))
+        .await
+        .expect("running session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "session-mismatch",
+        "SYM-83",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = MismatchedHandoffOpenCodeLauncher::new(success_handoff(
+        "stale-oc-83",
+        &worktree,
+        "agent-server/opencode-runner-extension",
+        "abc123",
+    ));
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert!(opencode.repairs().is_empty());
+    assert!(
+        client.transitions().is_empty(),
+        "repeated session mismatch must not return session-mismatch to Linear Todo"
+    );
+    assert!(client.evidence().iter().any(|(_, evidence)| {
+        evidence.kind == "malformed_handoff"
+            && evidence.body.contains("reached bounded repair threshold")
+    }));
+    let issue = store
+        .issue("symphony", "session-mismatch")
+        .await
+        .expect("query session mismatch")
+        .expect("session mismatch issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(
+        issue.blocker.as_ref().expect("blocker").kind,
+        "runtime_defect"
+    );
+    let failure = issue.failure.expect("failure");
+    assert_eq!(failure.kind, "malformed_handoff");
+    assert_eq!(failure.fingerprint.as_deref(), Some("session_id_mismatch"));
+    assert_eq!(failure.occurrence_count, 2);
 }
 
 #[tokio::test]
@@ -1145,9 +1266,9 @@ async fn malformed_success_handoff_fails_fast_without_opencode_repair_or_owner_i
         .await
         .expect("orchestrate once");
 
-    assert_eq!(
-        client.transitions(),
-        vec![("malformed".into(), LinearTransition::Todo)]
+    assert!(
+        client.transitions().is_empty(),
+        "malformed success handoff must not return malformed to Linear Todo"
     );
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff"
@@ -1162,7 +1283,10 @@ async fn malformed_success_handoff_fails_fast_without_opencode_repair_or_owner_i
         .expect("query issue")
         .expect("issue");
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
-    assert!(issue.blocker.is_none());
+    assert_eq!(
+        issue.blocker.as_ref().expect("blocker").kind,
+        "runtime_defect"
+    );
     assert_eq!(
         issue.failure.expect("failure").fingerprint.as_deref(),
         Some("incomplete_success_handoff")
@@ -1243,9 +1367,9 @@ async fn malformed_handoff_sidecar_fails_fast_kills_process_tree_and_does_not_re
         stale_terminated,
         "malformed handoff must terminate the previous active ACP process"
     );
-    assert_eq!(
-        client.transitions(),
-        vec![("malformed-json".into(), LinearTransition::Todo)]
+    assert!(
+        client.transitions().is_empty(),
+        "malformed sidecar must not return malformed-json to Linear Todo"
     );
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff" && evidence.body.contains("unknown field `status`")
@@ -1256,7 +1380,10 @@ async fn malformed_handoff_sidecar_fails_fast_kills_process_tree_and_does_not_re
         .expect("query malformed")
         .expect("malformed issue");
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
-    assert!(issue.blocker.is_none());
+    assert_eq!(
+        issue.blocker.as_ref().expect("blocker").kind,
+        "runtime_defect"
+    );
     let failure = issue.failure.expect("failure");
     assert_eq!(failure.kind, "malformed_handoff");
     assert_eq!(
@@ -1317,10 +1444,7 @@ async fn dead_in_progress_session_without_handoff_sidecar_fails_fast_instead_of_
         .await
         .expect("orchestrate once");
 
-    assert_eq!(
-        client.transitions(),
-        vec![("missing-sidecar".into(), LinearTransition::Todo)]
-    );
+    assert!(client.transitions().is_empty());
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff"
             && evidence
@@ -1418,10 +1542,7 @@ async fn missing_handoff_after_local_commit_records_worktree_git_snapshot_and_pr
         .await
         .expect("orchestrate once");
 
-    assert_eq!(
-        client.transitions(),
-        vec![("missing-sidecar-commit".into(), LinearTransition::Todo)]
-    );
+    assert!(client.transitions().is_empty());
     let evidence = client
         .evidence()
         .into_iter()

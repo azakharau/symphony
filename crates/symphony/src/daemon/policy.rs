@@ -7,10 +7,7 @@ use crate::{
 
 pub(super) fn matching_failure_count(failure: Option<&FailureRecord>, fingerprint: &str) -> u32 {
     failure
-        .filter(|failure| {
-            failure.kind == "eval_failure"
-                && failure.fingerprint.as_deref().unwrap_or(&failure.message) == fingerprint
-        })
+        .filter(|failure| failure.fingerprint.as_deref().unwrap_or(&failure.message) == fingerprint)
         .map(|failure| failure.occurrence_count.max(1))
         .unwrap_or(0)
 }
@@ -94,4 +91,46 @@ pub(super) fn has_new_owner_response(
     };
 
     answer_created_at > observed_at
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn failure(
+        kind: &str,
+        fingerprint: Option<&str>,
+        message: &str,
+        occurrence_count: u32,
+    ) -> FailureRecord {
+        FailureRecord {
+            kind: kind.into(),
+            message: message.into(),
+            fingerprint: fingerprint.map(str::to_owned),
+            occurrence_count,
+        }
+    }
+
+    #[test]
+    fn matching_failure_count_preserves_eval_failure_matching() {
+        let failure = failure("eval_failure", Some("fmt-check-7f"), "fmt failed", 2);
+
+        assert_eq!(matching_failure_count(Some(&failure), "fmt-check-7f"), 2);
+        assert_eq!(matching_failure_count(Some(&failure), "clippy-loop"), 0);
+    }
+
+    #[test]
+    fn matching_failure_count_matches_runtime_repair_fingerprints() {
+        let failure = failure(
+            "malformed_handoff",
+            Some("session_id_mismatch"),
+            "session id mismatch",
+            1,
+        );
+
+        assert_eq!(
+            matching_failure_count(Some(&failure), "session_id_mismatch"),
+            1
+        );
+    }
 }

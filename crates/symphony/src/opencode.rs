@@ -33,7 +33,9 @@ pub use archive::{
 use lifecycle::AcpChildLifecycle;
 pub use lifecycle::ProcessTreeTerminationEvidence;
 pub(crate) use lifecycle::terminate_process_tree;
-use prompt::{build_issue_prompt, commit_policy_text, validation_policy_text};
+use prompt::{
+    build_issue_prompt, commit_policy_text, mnemesh_workspace_contract_text, validation_policy_text,
+};
 pub use session_metrics::{
     apply_session_tree_metrics, apply_session_tree_metrics_preserving_marker, ingest_session_event,
     mark_session_silence,
@@ -496,6 +498,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             "Symphony repair required for existing ACP session `{}`.\n\n\
              Failure fingerprint: `{}`\n\n\
              Repair details:\n{}\n\n\
+             Mnemesh evidence workspace contract:\n{}\n\n\
              Validation policy:\n{}\n\n\
              Commit policy for successful handoff:\n{}\n\n\
              Continue the same implementation session. Do not start a new task. \
@@ -504,6 +507,10 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             session.session_id,
             failure_fingerprint,
             repair_message,
+            mnemesh_workspace_contract_text(
+                spec.mnemesh_workspace_root.as_deref(),
+                spec.cwd.as_path()
+            ),
             validation_policy_text(),
             commit_policy_text()
         );
@@ -582,9 +589,14 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             "Symphony continuation required for existing ACP session `{}`.\n\n\
              Continue the same implementation session. Do not start a new task. \
              Do not repeat already completed work unless validation requires it.\n\n\
+             Mnemesh evidence workspace contract:\n{}\n\n\
              Validation policy:\n{}\n\n\
              Commit policy for successful handoff:\n{}\n\n{}",
             session.session_id,
+            mnemesh_workspace_contract_text(
+                spec.mnemesh_workspace_root.as_deref(),
+                spec.cwd.as_path()
+            ),
             validation_policy_text(),
             commit_policy_text(),
             continuation_message

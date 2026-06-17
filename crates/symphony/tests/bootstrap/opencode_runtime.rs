@@ -274,6 +274,20 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         "{}",
         spec.prompt
     );
+    assert!(
+        spec.prompt.contains(
+            "`mcp__mnemesh__create_task.worktree` payload: `repo_root` must be `/home/agent/proj/symphony`, `worktree_path` must be `/home/agent/proj/symphony`"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "Never set `mcp__mnemesh__create_task.worktree.worktree_path` to `/home/agent/.symphony/workspaces/opencode/symphony/SYM-27`"
+        ),
+        "{}",
+        spec.prompt
+    );
     assert!(spec.prompt.contains("symphony-smoke"), "{}", spec.prompt);
     assert!(
         spec.prompt
@@ -357,6 +371,7 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
     let transcript_path = dir.path().join("acp-transcript.jsonl");
     let script_path = write_fake_acp_script(dir.path(), &transcript_path);
     let worktree = dir.path().join("worktree");
+    let mnemesh_workspace_root = dir.path().join("mnemesh-root");
     let spec = opencode::OpenCodeLaunchSpec {
         command: script_path,
         args: Vec::new(),
@@ -365,7 +380,7 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
         issue_identifier: "SYM-200".into(),
         branch_name: "feature/sym-200".into(),
         repo_path: None,
-        mnemesh_workspace_root: Some(worktree.clone()),
+        mnemesh_workspace_root: Some(mnemesh_workspace_root.clone()),
         base_ref: None,
         agent: "build".into(),
         model: Some("openai/gpt-5.5".into()),
@@ -420,6 +435,20 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
             );
             assert!(
                 transcript.contains("OpenCode ACP session id: ses-test"),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(&format!(
+                    r#""SYMPHONY_MNEMESH_WORKSPACE_ROOT": "{}""#,
+                    mnemesh_workspace_root.display()
+                )),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(&format!(
+                    r#""SYMPHONY_ISSUE_WORKTREE": "{}""#,
+                    worktree.display()
+                )),
                 "{transcript}"
             );
 

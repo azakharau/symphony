@@ -26,6 +26,12 @@ pub(super) async fn verify_and_integrate_git_closure(
         .filter(|sha| !sha.is_empty())
     else {
         if changed_files.is_empty() {
+            ensure_no_unreported_worktree_commits(
+                &project.repo_path,
+                worktree_path,
+                &project.branch.base,
+            )
+            .await?;
             return Ok(GitClosureResult::NoGitChanges);
         }
         bail!("git closure evidence did not include a commit SHA for changed files");
@@ -73,6 +79,43 @@ async fn ensure_worktree_head(worktree_path: &Path, head_sha: &str) -> anyhow::R
             actual_head.trim()
         );
     }
+}
+
+async fn ensure_no_unreported_worktree_commits(
+    repo_path: &Path,
+    worktree_path: &Path,
+    base_branch: &str,
+) -> anyhow::Result<()> {
+    let worktree_head = git_output(worktree_path, &["rev-parse", "HEAD"]).await?;
+    let base_head = resolve_base_head(repo_path, base_branch).await?;
+    if same_sha(worktree_head.trim(), base_head.trim()) {
+        Ok(())
+    } else {
+        bail!(
+            "no-change handoff omitted git.head_sha, but worktree HEAD `{}` differs from base `{base_branch}` at `{}`; commit, push, and report git.head_sha before cleanup",
+            worktree_head.trim(),
+            base_head.trim()
+        );
+    }
+}
+
+async fn resolve_base_head(repo_path: &Path, base_branch: &str) -> anyhow::Result<String> {
+    if base_branch.trim().is_empty() {
+        bail!("configured base branch must not be empty");
+    }
+
+    if git_output(repo_path, &["remote", "get-url", "origin"])
+        .await
+        .is_ok()
+    {
+        let remote_base = format!("refs/remotes/origin/{base_branch}");
+        let fetch_refspec = format!("+refs/heads/{base_branch}:{remote_base}");
+        git_status(repo_path, &["fetch", "origin", &fetch_refspec]).await?;
+        return git_output(repo_path, &["rev-parse", &remote_base]).await;
+    }
+
+    let local_base = format!("refs/heads/{base_branch}");
+    git_output(repo_path, &["rev-parse", &local_base]).await
 }
 
 async fn ensure_commit_exists(repo_path: &Path, head_sha: &str) -> anyhow::Result<()> {

@@ -322,12 +322,15 @@ fn write_fake_acp_script(dir: &Path, transcript_path: &Path) -> PathBuf {
         format!(
             r#"#!/usr/bin/env python3
 import json
+import os
 import pathlib
 import sys
 
 transcript_path = pathlib.Path({transcript_literal})
 cwd = None
 config = {{"mode": "build", "model": "opencode/big-pickle", "effort": "none"}}
+with transcript_path.open("a", encoding="utf-8") as transcript:
+    transcript.write(json.dumps({{"env": {{"SYMPHONY_MNEMESH_WORKSPACE_ROOT": os.environ.get("SYMPHONY_MNEMESH_WORKSPACE_ROOT"), "SYMPHONY_ISSUE_WORKTREE": os.environ.get("SYMPHONY_ISSUE_WORKTREE")}}}}, sort_keys=True) + "\n")
 
 def config_options():
     return [

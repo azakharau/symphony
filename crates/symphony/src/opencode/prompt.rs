@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::{config::ProjectConfig, linear::LinearIssue};
 
 use super::worktree::handoff_sidecar_path;
@@ -20,8 +22,8 @@ pub(super) fn build_issue_prompt(
          Eval default suite: {eval_suite} (fallback metadata, not a blanket workspace gate)\n\
          Linear state: {state}\n\
          URL: {url}\n\n\
-         Mnemesh evidence policy:\n\
-         {mnemesh_policy}\n\n\
+         Mnemesh evidence workspace contract:\n\
+         {mnemesh_workspace_contract}\n\n\
          Validation policy:\n\
          {validation_policy}\n\n\
          Commit policy for successful handoff:\n\
@@ -53,27 +55,49 @@ pub(super) fn build_issue_prompt(
             .worktree_root
             .join(&issue.identifier)
             .display(),
-        mnemesh_workspace_root = project
-            .mnemesh
-            .as_ref()
-            .map(|mnemesh| mnemesh.workspace_root.display().to_string())
-            .unwrap_or_else(|| "missing".to_owned()),
+        mnemesh_workspace_root = mnemesh_workspace_root_display(
+            project
+                .mnemesh
+                .as_ref()
+                .map(|mnemesh| { mnemesh.workspace_root.as_path() })
+        ),
         handoff_path =
             handoff_sidecar_path(project.branch.worktree_root.join(&issue.identifier)).display(),
         eval_suite = project.eval.default_suite,
         state = issue.state,
         url = issue.url.as_deref().unwrap_or("none"),
-        mnemesh_policy = mnemesh_policy_text(),
+        mnemesh_workspace_contract = mnemesh_workspace_contract_text(
+            project
+                .mnemesh
+                .as_ref()
+                .map(|mnemesh| mnemesh.workspace_root.as_path()),
+            &project.branch.worktree_root.join(&issue.identifier),
+        ),
         validation_policy = validation_policy_text(),
         commit_policy = commit_policy_text(),
     )
 }
 
-const fn mnemesh_policy_text() -> &'static str {
-    "- Use the listed Mnemesh workspace root as the durable project evidence workspace for all Mnemesh MCP calls, observations, claims, evidence, verification, and handoff records.\n\
-     - The Mnemesh workspace belongs to the canonical project root, not the isolated issue worktree.\n\
-     - Do not create or register a separate Mnemesh workspace for the isolated worktree.\n\
-     - If that global workspace is missing or unavailable, stop with provider_blocker and explain the workspace failure; do not continue with degraded local evidence."
+pub(super) fn mnemesh_workspace_contract_text(
+    mnemesh_workspace_root: Option<&Path>,
+    isolated_worktree: &Path,
+) -> String {
+    let workspace_root = mnemesh_workspace_root_display(mnemesh_workspace_root);
+    let isolated_worktree = isolated_worktree.display();
+    format!(
+        "- Use `{workspace_root}` as the durable project evidence workspace for all Mnemesh MCP calls, observations, claims, evidence, verification, and handoff records.\n\
+         - The Mnemesh workspace belongs to the canonical project root, not the isolated issue worktree.\n\
+         - Do not create or register a separate Mnemesh workspace for the isolated worktree `{isolated_worktree}`.\n\
+         - Required `mcp__mnemesh__create_task.worktree` payload: `repo_root` must be `{workspace_root}`, `worktree_path` must be `{workspace_root}`, and `head` must describe the current git HEAD of `{workspace_root}` using only `reference` and `commit` fields.\n\
+         - Never set `mcp__mnemesh__create_task.worktree.worktree_path` to `{isolated_worktree}`. Mention the isolated implementation worktree only in free-text objective or workstream label when useful.\n\
+         - If `{workspace_root}` is missing or unavailable, stop with provider_blocker and explain the workspace failure; do not continue with degraded local evidence."
+    )
+}
+
+fn mnemesh_workspace_root_display(mnemesh_workspace_root: Option<&Path>) -> String {
+    mnemesh_workspace_root
+        .map(|root| root.display().to_string())
+        .unwrap_or_else(|| "missing".to_owned())
 }
 
 pub(super) const fn validation_policy_text() -> &'static str {

@@ -718,6 +718,112 @@ async fn no_code_success_handoff_can_close_without_commit_sha() {
 }
 
 #[tokio::test]
+async fn no_change_handoff_with_unreported_commit_does_not_close_or_cleanup() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    run_git(&repo, ["init"]);
+    run_git(&repo, ["config", "user.email", "symphony@example.test"]);
+    run_git(&repo, ["config", "user.name", "Symphony Test"]);
+    fs::write(repo.join("README.md"), "base checkout").expect("readme");
+    run_git(&repo, ["add", "README.md"]);
+    run_git(&repo, ["commit", "-m", "base"]);
+    run_git(&repo, ["branch", "agent-server/opencode-runner-extension"]);
+    let worktree_root = dir.path().join("allowed-worktrees");
+    let worktree = worktree_root.join("SYM-82");
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "--detach",
+            worktree.to_str().expect("worktree path utf8"),
+            "agent-server/opencode-runner-extension",
+        ],
+    );
+    fs::write(worktree.join("artifact.txt"), "unreported").expect("artifact");
+    run_git(&worktree, ["add", "artifact.txt"]);
+    run_git(
+        &worktree,
+        ["commit", "-m", "SYM-82 unreported implementation"],
+    );
+
+    let config_toml = valid_config_toml()
+        .replace(
+            "repo_path = \"/home/agent/proj/symphony\"",
+            &format!("repo_path = \"{}\"", repo.display()),
+        )
+        .replace(
+            "/home/agent/.symphony/workspaces/opencode/symphony",
+            &worktree_root.display().to_string(),
+        );
+    let config = RootConfig::from_toml_str(&config_toml).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "unreported", "SYM-82"))
+        .await
+        .expect("running issue");
+    store
+        .upsert_opencode_session(test_session("symphony", "unreported", "oc-82", &worktree))
+        .await
+        .expect("running session");
+
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "unreported",
+        "SYM-82",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(Some(OpenCodeHandoff {
+        session_id: "oc-82".into(),
+        lifecycle_stages: vec![
+            OpenCodeStage::Running,
+            OpenCodeStage::Handoff,
+            OpenCodeStage::Completed,
+        ],
+        subagents: Vec::new(),
+        eval_results: vec![OpenCodeEvalResult {
+            suite: "symphony-smoke".into(),
+            passed: true,
+            failure_fingerprint: None,
+            details: Some("claimed no git changes".into()),
+            evidence_ref: None,
+        }],
+        changed_files: Vec::new(),
+        git: Some(GitClosureEvidence {
+            branch: "agent-server/opencode-runner-extension".into(),
+            head_sha: None,
+            pr_url: None,
+            worktree_path: worktree.display().to_string(),
+        }),
+        risks: Vec::new(),
+        stop_reason: OpenCodeStopReason::Success,
+    }));
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("unreported".into(), LinearTransition::Todo)]
+    );
+    assert!(
+        worktree.exists(),
+        "unreported committed work must not be cleaned up"
+    );
+    assert!(client.evidence().iter().any(|(_, evidence)| {
+        evidence.kind == "malformed_handoff"
+            && evidence
+                .body
+                .contains("no-change handoff omitted git.head_sha")
+    }));
+}
+
+#[tokio::test]
 async fn successful_handoff_with_worktree_outside_configured_root_is_parked_without_cleanup() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

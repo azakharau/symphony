@@ -88,7 +88,7 @@ repo_path = "/home/agent/proj/mnemesh"
 workspace_root = "/home/agent/proj/mnemesh"
 
 [projects.branch]
-base = "feature/mne-97-refactor-graph-read-mcp-hot-paths-for-latency-and"
+base = "master"
 worktree_root = "/home/agent/.symphony/workspaces/opencode/mnemesh"
 
 [projects.linear]
@@ -105,6 +105,39 @@ permission_policy = "reject"
 
 [projects.eval]
 default_suite = "mnemesh-refactor-validation"
+max_identical_failure_fingerprints = 2
+
+[projects.concurrency]
+max_sessions = 6
+
+[[projects]]
+id = "nervure"
+name = "Nervure"
+enabled = true
+workflow_path = "/home/agent/proj/nervure/WORKFLOW.md"
+repo_path = "/home/agent/proj/nervure"
+
+[projects.mnemesh]
+workspace_root = "/home/agent/proj/nervure"
+
+[projects.branch]
+base = "main"
+worktree_root = "/home/agent/.symphony/workspaces/opencode/nervure"
+
+[projects.linear]
+team_key = "NRV"
+project_id = "fc0bbd97-7f24-46ca-be14-d6332d4d48fb"
+
+[projects.opencode]
+command = "/usr/local/bin/opencode"
+args = ["acp"]
+agent = "build"
+model = "openai/gpt-5.5"
+effort = "high"
+permission_policy = "reject"
+
+[projects.eval]
+default_suite = "nervure-validation"
 max_identical_failure_fingerprints = 2
 
 [projects.concurrency]

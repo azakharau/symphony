@@ -28,13 +28,18 @@ pub struct ProcessTreeTerminationEvidence {
 
 impl AcpChildLifecycle {
     pub(super) async fn spawn(spec: &OpenCodeLaunchSpec) -> Result<Self, OpenCodeError> {
-        let mut child = Command::new(&spec.command)
+        let mut command = Command::new(&spec.command);
+        command
             .args(&spec.args)
             .current_dir(&spec.cwd)
+            .env("SYMPHONY_ISSUE_WORKTREE", &spec.cwd)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
+            .stderr(std::process::Stdio::piped());
+        if let Some(mnemesh_workspace_root) = &spec.mnemesh_workspace_root {
+            command.env("SYMPHONY_MNEMESH_WORKSPACE_ROOT", mnemesh_workspace_root);
+        }
+        let mut child = command.spawn()?;
         let process_id = child.id();
         let stdin = child.stdin.take().ok_or(OpenCodeError::MissingStdin)?;
         let stdout = child.stdout.take().ok_or(OpenCodeError::MissingStdout)?;

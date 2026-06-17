@@ -160,6 +160,20 @@ fn evidence_panel(body: &mut String, issue: &IssueDetailResponse) {
             &format!("{}: {}", failure.kind, failure.message),
         );
     }
+    if let Some(defect) = &issue.runtime_defect {
+        fact(body, "runtime defect", &defect.classification);
+        fact(
+            body,
+            "runtime fingerprint",
+            defect.fingerprint.as_deref().unwrap_or("none"),
+        );
+        fact(
+            body,
+            "repair attempts",
+            &defect.repair_attempt_count.to_string(),
+        );
+        fact(body, "next action", &defect.next_action);
+    }
     body.push_str(
         "</dl></article><article class=\"card\"><h2>Worktree / git</h2><dl class=\"facts\">",
     );
@@ -415,8 +429,10 @@ pub(super) fn trim_middle(value: &str, max_chars: usize) -> String {
 fn status_class(status: &str) -> &'static str {
     match status {
         "running" | "eval running" | "clean" | "complete" | "completed cleanup" | "done" => "ok",
-        "blocked" | "provider/infra blocker" | "owner input" | "repair loop" => "warn",
-        "failed" | "activity_error" => "bad",
+        "blocked" | "provider/infra blocker" | "owner input" | "repair loop" | "runtime repair" => {
+            "warn"
+        }
+        "failed" | "activity_error" | "runtime defect" => "bad",
         "queued" | "idle" => "idle",
         _ => "neutral",
     }

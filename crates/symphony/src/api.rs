@@ -272,12 +272,21 @@ pub struct IssueDetailResponse {
     pub display_status: String,
     pub blocker: Option<crate::state::BlockerRecord>,
     pub failure: Option<crate::state::FailureRecord>,
+    pub runtime_defect: Option<RuntimeDefectProjection>,
     pub git_ref: Option<GitRefRecord>,
     pub cleanup_status: CleanupStatus,
     pub stop_reason: Option<String>,
     pub last_runner_event: Option<String>,
     pub opencode_sessions: Vec<OpenCodeSessionDetail>,
     pub eval_results: Vec<EvalRunRecord>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RuntimeDefectProjection {
+    pub classification: String,
+    pub fingerprint: Option<String>,
+    pub repair_attempt_count: u32,
+    pub next_action: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -463,7 +472,7 @@ fn primary_execution_reason(
     }
     if let Some(issue) = active_issues
         .iter()
-        .find(|issue| issue_has_runtime_defect_failure(issue))
+        .find(|issue| issue.runtime_defect.is_some())
     {
         return (
             "runtime_defect_blocked",
@@ -562,16 +571,6 @@ fn issue_has_git_closure_failure(issue: &IssueDetailResponse) -> bool {
         })
 }
 
-fn issue_has_runtime_defect_failure(issue: &IssueDetailResponse) -> bool {
-    issue.lifecycle_stage == LifecycleStage::Failed
-        && issue.failure.as_ref().is_some_and(|failure| {
-            matches!(
-                failure.kind.as_str(),
-                "runtime_defect" | "malformed_handoff" | "runtime_launch_failed"
-            )
-        })
-}
-
 fn issue_waits_for_handoff(issue: &IssueDetailResponse) -> bool {
     issue.lifecycle_stage == LifecycleStage::Running
         && issue
@@ -638,6 +637,7 @@ async fn issue_detail_response(
                 .map(|blocker| blocker.kind.clone())
         });
     let display_status = issue_display_status(&issue.issue, sessions.last());
+    let runtime_defect = runtime_defect_projection(&issue.issue);
 
     Ok(IssueDetailResponse {
         project_id: issue.issue.project_id,
@@ -648,6 +648,7 @@ async fn issue_detail_response(
         display_status,
         blocker: issue.issue.blocker,
         failure: issue.issue.failure,
+        runtime_defect,
         git_ref: issue.issue.git_ref,
         cleanup_status: issue.issue.cleanup_status,
         stop_reason,
@@ -655,6 +656,34 @@ async fn issue_detail_response(
         opencode_sessions: sessions,
         eval_results,
     })
+}
+
+fn runtime_defect_projection(issue: &IssueStateRecord) -> Option<RuntimeDefectProjection> {
+    let failure = issue.failure.as_ref()?;
+    if !matches!(
+        failure.kind.as_str(),
+        "runtime_defect" | "malformed_handoff" | "runtime_launch_failed"
+    ) {
+        return None;
+    }
+
+    Some(RuntimeDefectProjection {
+        classification: failure.kind.clone(),
+        fingerprint: failure.fingerprint.clone(),
+        repair_attempt_count: failure.occurrence_count,
+        next_action: runtime_defect_next_action(issue).into(),
+    })
+}
+
+fn runtime_defect_next_action(issue: &IssueStateRecord) -> &'static str {
+    match (issue.lifecycle_stage, issue.cleanup_status) {
+        (_, CleanupStatus::Pending | CleanupStatus::InProgress) => "wait_for_cleanup",
+        (LifecycleStage::Running, _) => "continue_repair",
+        (LifecycleStage::Failed, _) => "queue_repair",
+        (LifecycleStage::Blocked, _) => "unblock_before_repair",
+        (LifecycleStage::Queued, _) => "start_repair",
+        (LifecycleStage::Completed, _) => "monitor",
+    }
 }
 
 async fn session_detail(
@@ -728,6 +757,14 @@ fn issue_display_status(
     issue: &IssueStateRecord,
     latest_session: Option<&OpenCodeSessionDetail>,
 ) -> String {
+    if runtime_defect_projection(issue).is_some() {
+        return match issue.lifecycle_stage {
+            LifecycleStage::Running => "runtime repair".into(),
+            LifecycleStage::Failed => "runtime defect".into(),
+            _ => "runtime defect".into(),
+        };
+    }
+
     if let Some(blocker) = &issue.blocker {
         return match blocker.kind.as_str() {
             "owner_input" | "owner_question" => "owner input".into(),

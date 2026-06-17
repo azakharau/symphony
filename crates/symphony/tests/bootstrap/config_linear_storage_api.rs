@@ -1019,10 +1019,14 @@ async fn dashboard_html_routes_render_aggregate_project_issue_and_keep_json_api(
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
-    store
-        .upsert_issue(test_issue("symphony", "html-issue", "SYM-101"))
-        .await
-        .expect("issue");
+    let mut html_issue = test_issue("symphony", "html-issue", "SYM-101");
+    html_issue.failure = Some(FailureRecord {
+        kind: "malformed_handoff".into(),
+        message: "handoff session id did not match the launched root session".into(),
+        fingerprint: Some("session_id_mismatch".into()),
+        occurrence_count: 2,
+    });
+    store.upsert_issue(html_issue).await.expect("issue");
     let mut session = test_session(
         "symphony",
         "html-issue",
@@ -1061,6 +1065,10 @@ async fn dashboard_html_routes_render_aggregate_project_issue_and_keep_json_api(
     assert!(project.2.contains("Recent history"));
     assert!(issue.2.contains("process_alive"));
     assert!(issue.2.contains("process: <strong>dead</strong>"));
+    assert!(issue.2.contains("runtime defect"));
+    assert!(issue.2.contains("session_id_mismatch"));
+    assert!(issue.2.contains("repair attempts"));
+    assert!(issue.2.contains("continue_repair"));
     assert!(issue.2.contains("root session"));
     assert!(issue.2.contains("title: Child engineer"));
     assert!(issue.2.contains("updated: 2000"));

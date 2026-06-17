@@ -328,6 +328,80 @@ async fn dashboard_api_and_html_surface_primary_execution_reason_codes() {
             .primary_reason_detail
             .contains("git closure evidence")
     );
+    let runtime_defect = runtime_defect_blocked.active_issues[0]
+        .runtime_defect
+        .as_ref()
+        .expect("runtime defect projection");
+    assert_eq!(runtime_defect.classification, "malformed_handoff");
+    assert_eq!(
+        runtime_defect.fingerprint.as_deref(),
+        Some("missing_git_closure")
+    );
+    assert_eq!(runtime_defect.repair_attempt_count, 1);
+    assert_eq!(runtime_defect.next_action, "queue_repair");
+
+    let active_runtime_repair = project_for(
+        |issue, session| {
+            issue.lifecycle_stage = LifecycleStage::Running;
+            issue.failure = Some(FailureRecord {
+                kind: "malformed_handoff".into(),
+                message: "repairing malformed handoff from previous OpenCode session".into(),
+                fingerprint: Some("session_id_mismatch".into()),
+                occurrence_count: 2,
+            });
+            *session = Some(test_session(
+                &issue.project_id,
+                &issue.issue_id,
+                "oc-repair-runtime-defect",
+                "/tmp/symphony-runtime-repair",
+            ));
+        },
+        Some((
+            RuntimeLivenessStatus::BlockedIssues,
+            "downstream blocked issues should not mask active repair",
+            2,
+            1,
+        )),
+    )
+    .await;
+    assert_eq!(
+        active_runtime_repair.liveness.primary_reason_code,
+        "runtime_defect_blocked"
+    );
+    assert_eq!(
+        active_runtime_repair.active_issues[0]
+            .runtime_defect
+            .as_ref()
+            .expect("runtime defect")
+            .next_action,
+        "continue_repair"
+    );
+    assert_eq!(
+        active_runtime_repair.active_issues[0].display_status,
+        "runtime repair"
+    );
+
+    let stale_session = project_for(
+        |issue, session| {
+            let mut stale = test_session(
+                &issue.project_id,
+                &issue.issue_id,
+                "oc-stale-killed",
+                "/tmp/symphony-stale",
+            );
+            stale.stage = OpenCodeStage::Silent;
+            stale.process_id = Some(u32::MAX);
+            *session = Some(stale);
+        },
+        Some((
+            RuntimeLivenessStatus::RunnerStaleKilled,
+            "stale OpenCode session was killed",
+            2,
+            1,
+        )),
+    )
+    .await;
+    assert_eq!(stale_session.liveness.primary_reason_code, "runner_dead");
 
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

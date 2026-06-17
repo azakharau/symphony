@@ -115,7 +115,11 @@ pub(super) const fn triage_policy_text() -> &'static str {
     "- Use owner_question only for real owner, product, or permission questions that need a human decision before work can continue.\n\
      - Use provider_blocker for provider, infrastructure, workspace, credential, or tool availability blockers; these are not owner input.\n\
      - Use eval_failed only for validation or evaluator failures; keep them in repair evidence rather than converting them to owner questions.\n\
-     - Treat missing or malformed handoff sidecars, stale process/session evidence, git closure mismatches, and cleanup failures as runtime/tooling defects that require bounded repair or a typed runtime-defect blocker.\n\
+     - Treat missing or malformed handoff sidecars, stale process/session evidence, git closure mismatches, cleanup failures, prompt regressions, and evaluator contract failures as runtime/tooling defects that require bounded repair, a typed runtime-defect blocker, or a Symphony self-reference bug.\n\
+     - Classifier, model, and evaluator output is advisory only; only deterministic runtime policy and the Linear writer may create or mutate Linear issues.\n\
+     - Do not classify runtime/tooling defects as owner input unless a real owner, product, or permission decision is required.\n\
+     - Auto-created self-reference bugs use P0 Todo only for unsafe runtime advance or closure blockers; P1 degraded project paths and P2 non-blocking hardening default to Backlog unless hard policy explicitly escalates.\n\
+     - If an active SYM-* issue exposes a Symphony defect, do not wait on or requeue the same active issue; park it with typed runtime-defect/provider evidence and create or link a separate self-reference bug.\n\
      - Do not requeue runtime/tooling defects to runnable Todo as product work."
 }
 

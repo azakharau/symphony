@@ -75,14 +75,31 @@ Legacy steward states such as `Preparing`, `In Review`, and `RCA Required` are n
 states in Symphony. If the Rust runtime sees them in the active queue, it parks the issue with typed
 evidence instead of preserving hidden compatibility aliases.
 
-Runtime triage keeps owner questions separate from system failures:
+Runtime triage keeps owner questions separate from system failures and self-reference bugs:
 
 - Provider or infrastructure blockers are typed provider evidence, not owner input.
 - Eval failures stay in the OpenCode repair loop until they pass or hit the typed repeated-fingerprint
   policy.
 - Runtime/tooling defects such as missing or malformed handoff sidecars, stale OpenCode
-  process/session evidence, git closure mismatches, or cleanup failures route to bounded repair or a
-  typed runtime-defect blocked state.
+  process/session evidence, git closure mismatches, cleanup failures, prompt-policy regressions, or
+  evaluator contract failures route to bounded repair, typed runtime-defect blocked evidence, or an
+  auto-created Symphony self-reference bug.
+- Self-reference issues are `SYM-*` bugs about Symphony runtime, prompt, evaluator, worktree,
+  Mnemesh, Linear, or git-closure behavior. The defect taxonomy is: runtime defect,
+  orchestration defect, OpenCode implementation failure, product issue blocker, provider/infra
+  blocker, owner question, eval failure, and cleanup failure. Classifier, model, and evaluator output
+  is advisory only; only the deterministic runtime policy and Linear writer may create or mutate Linear
+  issues.
+- Symphony creates a self-reference bug for reproducible runtime/tooling defects, failed deterministic
+  invariants, or broken generated handoff/prompt contracts. It does not create one for owner, product,
+  permission, or acceptance-criteria questions; those use `Need Owner Input` only when a human decision
+  is actually required.
+- Auto-created P0 self-reference bugs may enter executable `Todo` when a bounded repair can run and
+  the runtime cannot safely advance or close active work. P1 degraded project paths and P2 non-blocking
+  hardening or follow-up default to `Backlog` unless explicitly escalated by hard policy.
+- If an active `SYM-*` issue exposes a Symphony defect that would make Symphony wait on or requeue the
+  same active issue, Symphony must not create a self-deadlock; it parks the active issue with typed
+  runtime-defect/provider evidence and creates or links a separate self-reference bug instead.
 - Runtime/tooling defects must not be requeued to executable `Todo` as product work.
 
 ## OpenCode Handoff
@@ -115,9 +132,10 @@ The root config contains one or more projects with:
 - Per-project concurrency.
 - Optional root `opencode_storage` with the OpenCode SQLite database path and local archive root.
 
-Only enabled projects are reconciled. Work is ordered by Linear priority, then identifier, then
-issue id. Running sessions consume project capacity and survive restarts through the SQLite runtime
-store.
+Only enabled projects are reconciled. Work is ordered by explicit Linear blockers/dependencies, then
+project milestone ordering, then Linear priority and stable issue identifiers. Description text may
+explain sequencing intent, but it is not executable ordering authority. Running sessions consume
+project capacity and survive restarts through the SQLite runtime store.
 
 ## Runtime Cleanup
 

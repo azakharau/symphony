@@ -332,7 +332,7 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
     );
     assert!(
         spec.prompt.contains(
-            "Treat missing or malformed handoff sidecars, stale process/session evidence, git closure mismatches, and cleanup failures as runtime/tooling defects"
+            "Treat missing or malformed handoff sidecars, stale process/session evidence, git closure mismatches, cleanup failures, prompt regressions, and evaluator contract failures as runtime/tooling defects"
         ),
         "{}",
         spec.prompt
@@ -340,6 +340,34 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
     assert!(
         spec.prompt
             .contains("Do not requeue runtime/tooling defects to runnable Todo as product work"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "Classifier, model, and evaluator output is advisory only; only deterministic runtime policy and the Linear writer may create or mutate Linear issues"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "Do not classify runtime/tooling defects as owner input unless a real owner, product, or permission decision is required"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "Auto-created self-reference bugs use P0 Todo only for unsafe runtime advance or closure blockers; P1 degraded project paths and P2 non-blocking hardening default to Backlog unless hard policy explicitly escalates"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "do not wait on or requeue the same active issue; park it with typed runtime-defect/provider evidence and create or link a separate self-reference bug"
+        ),
         "{}",
         spec.prompt
     );

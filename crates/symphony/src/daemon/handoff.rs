@@ -588,7 +588,7 @@ async fn request_opencode_repair(
         Some(process_id) => process_elapsed_seconds(process_id).await,
         None => None,
     };
-    let git_snapshot = RuntimeDefectGitSnapshot::capture(session).await;
+    let git_snapshot = RuntimeDefectGitSnapshot::capture(project, session).await;
     linear
         .record_issue_evidence(
             &issue.id,
@@ -653,7 +653,7 @@ async fn fail_runtime_defect(
         Some(process_id) => process_elapsed_seconds(process_id).await,
         None => None,
     };
-    let git_snapshot = RuntimeDefectGitSnapshot::capture(session).await;
+    let git_snapshot = RuntimeDefectGitSnapshot::capture(project, session).await;
     linear
         .record_issue_evidence(
             &issue.id,
@@ -782,16 +782,21 @@ impl RuntimeDefectRepairEvidence<'_> {
 #[derive(Debug)]
 struct RuntimeDefectGitSnapshot {
     worktree_path: String,
+    base_branch: String,
     branch: Option<String>,
     head_sha: Option<String>,
     status_short: Option<String>,
+    base_changed_files: Option<String>,
     head_changed_files: Option<String>,
     upstream: Option<String>,
     unpushed_commits: Option<u64>,
 }
 
 impl RuntimeDefectGitSnapshot {
-    async fn capture(session: &crate::state::OpenCodeSessionRecord) -> Option<Self> {
+    async fn capture(
+        project: &ProjectConfig,
+        session: &crate::state::OpenCodeSessionRecord,
+    ) -> Option<Self> {
         let worktree_path = session.worktree_path.trim();
         if worktree_path.is_empty() {
             return None;
@@ -822,11 +827,15 @@ impl RuntimeDefectGitSnapshot {
             None
         };
 
+        let base_range = format!("{}...HEAD", project.branch.base);
+
         Some(Self {
             worktree_path: worktree_path.into(),
+            base_branch: project.branch.base.clone(),
             branch: git_output(path, ["branch", "--show-current"]).await,
             head_sha: git_output(path, ["rev-parse", "HEAD"]).await,
             status_short: git_output(path, ["status", "--short", "--branch"]).await,
+            base_changed_files: git_output(path, ["diff", "--name-status", &base_range]).await,
             head_changed_files: git_output(
                 path,
                 ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
@@ -853,10 +862,12 @@ impl RuntimeDefectGitSnapshot {
 
     fn evidence_body(&self) -> String {
         let mut body = format!(
-            "git_snapshot:\nworktree_path: {worktree_path}\nbranch: {branch}\nhead_sha: {head_sha}\nupstream: {upstream}\nunpushed_commits: {unpushed_commits}",
+            "git_snapshot:\nsalvage_state: {salvage_state}\nworktree_path: {worktree_path}\nbranch: {branch}\nhead_sha: {head_sha}\nbase_branch: {base_branch}\nupstream: {upstream}\nunpushed_commits: {unpushed_commits}",
+            salvage_state = self.salvage_state(),
             worktree_path = self.worktree_path,
             branch = self.branch.as_deref().unwrap_or("unknown"),
             head_sha = self.head_sha.as_deref().unwrap_or("unknown"),
+            base_branch = self.base_branch,
             upstream = self.upstream.as_deref().unwrap_or("none"),
             unpushed_commits = self
                 .unpushed_commits
@@ -872,8 +883,51 @@ impl RuntimeDefectGitSnapshot {
             body.push_str("\nhead_changed_files:\n");
             body.push_str(files);
         }
+        body.push_str("\nbase_changed_files:\n");
+        body.push_str(self.base_changed_files.as_deref().unwrap_or("none"));
+        if matches!(self.salvage_state(), "no_local_changes") {
+            body.push_str(
+                "\nrepair_instruction: produce an explicit no-change handoff instead of a fake commit",
+            );
+        }
 
         body
+    }
+
+    fn salvage_state(&self) -> &'static str {
+        if self.has_uncommitted_changes() {
+            return "dirty_worktree";
+        }
+        if self.unpushed_commits.is_some_and(|count| count > 0) {
+            return "unpushed_commits";
+        }
+        if self
+            .base_changed_files
+            .as_deref()
+            .is_some_and(has_git_output)
+        {
+            return "local_commits";
+        }
+        if self
+            .head_changed_files
+            .as_deref()
+            .is_some_and(has_git_output)
+        {
+            return "local_commits";
+        }
+        if self.status_short.as_deref().is_some_and(has_git_output) {
+            return "no_local_changes";
+        }
+
+        "snapshot_only"
+    }
+
+    fn has_uncommitted_changes(&self) -> bool {
+        self.status_short.as_deref().is_some_and(|status| {
+            status
+                .lines()
+                .any(|line| !line.starts_with("##") && !line.trim().is_empty())
+        })
     }
 
     fn failure_event(&self, default_event: &str) -> String {
@@ -883,6 +937,10 @@ impl RuntimeDefectGitSnapshot {
         let short_sha = head_sha.get(..12).unwrap_or(head_sha);
         format!("{default_event}:git_head:{short_sha}")
     }
+}
+
+fn has_git_output(output: &str) -> bool {
+    !output.trim().is_empty()
 }
 
 async fn git_output<const N: usize>(worktree_path: &Path, args: [&str; N]) -> Option<String> {

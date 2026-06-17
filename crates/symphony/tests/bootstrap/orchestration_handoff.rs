@@ -1804,6 +1804,216 @@ async fn missing_handoff_after_local_commit_records_worktree_git_snapshot_and_pr
 }
 
 #[tokio::test]
+async fn missing_handoff_after_dirty_worktree_records_dirty_salvage_snapshot() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    run_git(&repo, ["init"]);
+    run_git(&repo, ["config", "user.email", "symphony@example.test"]);
+    run_git(&repo, ["config", "user.name", "Symphony Test"]);
+    fs::write(repo.join("README.md"), "base\n").expect("base readme");
+    run_git(&repo, ["add", "README.md"]);
+    run_git(&repo, ["commit", "-m", "base"]);
+    run_git(&repo, ["branch", "agent-server/opencode-runner-extension"]);
+    run_git(&repo, ["checkout", "-b", "symphony/SYM-89"]);
+    fs::write(repo.join("dirty.txt"), "uncommitted repair evidence\n").expect("dirty file");
+    let config = config_for_repo_and_worktree_root(&repo, dir.path());
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "missing-sidecar-dirty", "SYM-89"))
+        .await
+        .expect("running issue");
+    store
+        .upsert_opencode_session(test_session(
+            "symphony",
+            "missing-sidecar-dirty",
+            "oc-89",
+            &repo,
+        ))
+        .await
+        .expect("running session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "missing-sidecar-dirty",
+        "SYM-89",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(None);
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    let evidence = malformed_handoff_evidence_body(&client);
+    assert!(evidence.contains("salvage_state: dirty_worktree"));
+    assert!(evidence.contains("status_short:"));
+    assert!(evidence.contains("dirty.txt"));
+    assert_eq!(
+        opencode.repairs(),
+        vec![("oc-89".into(), "missing_handoff_sidecar".into())]
+    );
+    assert!(repo.exists(), "dirty worktree must be preserved for repair");
+}
+
+#[tokio::test]
+async fn missing_handoff_after_no_diff_records_explicit_no_change_salvage_snapshot() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    run_git(&repo, ["init"]);
+    run_git(&repo, ["config", "user.email", "symphony@example.test"]);
+    run_git(&repo, ["config", "user.name", "Symphony Test"]);
+    fs::write(repo.join("README.md"), "base\n").expect("base readme");
+    run_git(&repo, ["add", "README.md"]);
+    run_git(&repo, ["commit", "-m", "base"]);
+    run_git(&repo, ["branch", "agent-server/opencode-runner-extension"]);
+    run_git(&repo, ["checkout", "-b", "symphony/SYM-91"]);
+    let config = config_for_repo_and_worktree_root(&repo, dir.path());
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "missing-sidecar-no-diff", "SYM-91"))
+        .await
+        .expect("running issue");
+    store
+        .upsert_opencode_session(test_session(
+            "symphony",
+            "missing-sidecar-no-diff",
+            "oc-91",
+            &repo,
+        ))
+        .await
+        .expect("running session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "missing-sidecar-no-diff",
+        "SYM-91",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(None);
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    let evidence = malformed_handoff_evidence_body(&client);
+    assert!(evidence.contains("salvage_state: no_local_changes"));
+    assert!(evidence.contains("base_changed_files:\nnone"));
+    assert!(evidence.contains("explicit no-change handoff instead of a fake commit"));
+    assert!(client.transitions().is_empty());
+    assert_eq!(
+        opencode.repairs(),
+        vec![("oc-91".into(), "missing_handoff_sidecar".into())]
+    );
+}
+
+#[tokio::test]
+async fn missing_handoff_after_unpushed_branch_records_unpushed_salvage_snapshot() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let repo = dir.path().join("repo");
+    let origin = dir.path().join("origin.git");
+    fs::create_dir_all(&origin).expect("origin dir");
+    run_git(&origin, ["init", "--bare"]);
+    fs::create_dir_all(&repo).expect("repo dir");
+    run_git(&repo, ["init"]);
+    run_git(&repo, ["config", "user.email", "symphony@example.test"]);
+    run_git(&repo, ["config", "user.name", "Symphony Test"]);
+    run_git(
+        &repo,
+        [
+            "remote",
+            "add",
+            "origin",
+            origin.to_str().expect("origin utf8"),
+        ],
+    );
+    fs::write(repo.join("README.md"), "base\n").expect("base readme");
+    run_git(&repo, ["add", "README.md"]);
+    run_git(&repo, ["commit", "-m", "base"]);
+    run_git(&repo, ["branch", "agent-server/opencode-runner-extension"]);
+    run_git(
+        &repo,
+        ["push", "origin", "agent-server/opencode-runner-extension"],
+    );
+    run_git(&repo, ["checkout", "-b", "symphony/SYM-92"]);
+    run_git(&repo, ["push", "-u", "origin", "symphony/SYM-92"]);
+    fs::write(repo.join("artifact.txt"), "unpushed implementation\n").expect("artifact");
+    run_git(&repo, ["add", "artifact.txt"]);
+    run_git(&repo, ["commit", "-m", "SYM-92 implementation"]);
+    let head_sha = git_output(&repo, ["rev-parse", "HEAD"]).trim().to_owned();
+    let config = config_for_repo_and_worktree_root(&repo, dir.path());
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "missing-sidecar-unpushed", "SYM-92"))
+        .await
+        .expect("running issue");
+    store
+        .upsert_opencode_session(test_session(
+            "symphony",
+            "missing-sidecar-unpushed",
+            "oc-92",
+            &repo,
+        ))
+        .await
+        .expect("running session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "missing-sidecar-unpushed",
+        "SYM-92",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(None);
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    let evidence = malformed_handoff_evidence_body(&client);
+    assert!(evidence.contains("salvage_state: unpushed_commits"));
+    assert!(evidence.contains("unpushed_commits: 1"));
+    assert!(evidence.contains(&head_sha));
+    assert!(evidence.contains("artifact.txt"));
+    assert!(client.transitions().is_empty());
+    assert_eq!(
+        opencode.repairs(),
+        vec![("oc-92".into(), "missing_handoff_sidecar".into())]
+    );
+}
+
+fn config_for_repo_and_worktree_root(
+    repo: &std::path::Path,
+    worktree_root: &std::path::Path,
+) -> RootConfig {
+    let config_toml = valid_config_toml()
+        .replace(
+            "repo_path = \"/home/agent/proj/symphony\"",
+            &format!("repo_path = \"{}\"", repo.display()),
+        )
+        .replace(
+            "/home/agent/.symphony/workspaces/opencode/symphony",
+            &worktree_root.display().to_string(),
+        );
+    RootConfig::from_toml_str(&config_toml).expect("config")
+}
+
+fn malformed_handoff_evidence_body(client: &RecordingLinearClient) -> String {
+    client
+        .evidence()
+        .into_iter()
+        .find(|(_, evidence)| evidence.kind == "malformed_handoff")
+        .map(|(_, evidence)| evidence.body)
+        .expect("runtime defect evidence")
+}
+
+#[tokio::test]
 async fn orchestration_processes_multiple_projects_in_config_order() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

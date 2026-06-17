@@ -1869,6 +1869,7 @@ async fn orchestration_ignores_historical_failed_session_for_in_progress_reconci
         .opencode_sessions_for_issue("symphony", "historical")
         .await
         .expect("sessions");
+    assert_eq!(sessions[0].process_id, None);
     assert_eq!(
         sessions[0].last_event.as_deref(),
         Some("stale_failed_session_ignored")

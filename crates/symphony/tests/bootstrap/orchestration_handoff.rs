@@ -1706,6 +1706,86 @@ async fn dead_in_progress_session_without_handoff_sidecar_fails_fast_instead_of_
 }
 
 #[tokio::test]
+async fn dead_acp_process_with_active_opencode_child_session_waits_for_real_handoff() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let opencode_db_path = dir.path().join("opencode.sqlite3");
+    super::opencode_runtime::seed_opencode_session_tree(&opencode_db_path).await;
+    let config = RootConfig::from_toml_str(&valid_config_toml().replacen(
+        "[[projects]]",
+        &format!(
+            "[opencode_storage]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]",
+            opencode_db_path.display(),
+            dir.path().join("archives").display()
+        ),
+        1,
+    ))
+    .expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let worktree = dir.path().join("SYM-91-worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    store
+        .upsert_issue(test_issue("symphony", "active-child", "SYM-91"))
+        .await
+        .expect("running issue");
+    store
+        .upsert_opencode_session({
+            let mut session = test_session("symphony", "active-child", "ses-root", &worktree);
+            session.process_id = None;
+            session
+        })
+        .await
+        .expect("running session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "active-child",
+        "SYM-91",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(None);
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert!(
+        client.evidence().is_empty(),
+        "active OpenCode child session must not be reported as missing handoff"
+    );
+    assert!(opencode.repairs().is_empty());
+    let issue = store
+        .issue("symphony", "active-child")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    assert!(issue.failure.is_none());
+    let session = store
+        .opencode_session("symphony", "active-child", "ses-root")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(session.stage, OpenCodeStage::Running);
+    assert_eq!(session.process_id, None);
+    assert_eq!(session.subagent_count, 1);
+    assert_eq!(
+        session.lifecycle_marker.as_deref(),
+        Some("opencode_db_active")
+    );
+    assert!(
+        session
+            .last_event
+            .as_deref()
+            .is_some_and(|event| event.starts_with("opencode_db_active_subtask")),
+        "last_event={:?}",
+        session.last_event
+    );
+}
+
+#[tokio::test]
 async fn missing_handoff_after_local_commit_records_worktree_git_snapshot_and_process_ref() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

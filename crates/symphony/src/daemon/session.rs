@@ -28,6 +28,7 @@ pub(super) async fn mark_historical_sessions_ignored(
             session.stage,
             OpenCodeStage::Failed | OpenCodeStage::Completed
         ) {
+            session.process_id = None;
             session.last_event = Some("stale_failed_session_ignored".into());
             store.upsert_opencode_session(&session).await?;
         }

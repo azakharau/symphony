@@ -410,8 +410,16 @@ async fn reconcile_project(
                     mark_historical_sessions_ignored(store, project, &issue).await?;
                     continue;
                 }
-                if process_in_progress_handoff(project, store, linear, opencode, &issue, existing)
-                    .await?
+                if process_in_progress_handoff(
+                    project,
+                    opencode_storage,
+                    store,
+                    linear,
+                    opencode,
+                    &issue,
+                    existing,
+                )
+                .await?
                 {
                     continue;
                 }

@@ -7,11 +7,12 @@ use super::session::{
     process_elapsed_seconds, session_has_live_process, terminate_current_session_process,
 };
 use crate::{
-    config::ProjectConfig,
+    config::{OpenCodeStorageConfig, ProjectConfig},
     linear::{LinearClient, LinearIssue, LinearIssueEvidence, LinearTransition},
     opencode::{
-        OpenCodeError, OpenCodeHandoff, OpenCodeLauncher, OpenCodeStopReason,
-        build_acp_launch_spec, worktree_path_allowed,
+        OpenCodeError, OpenCodeHandoff, OpenCodeLauncher, OpenCodeSessionTreeActivity,
+        OpenCodeStopReason, apply_session_tree_metrics_preserving_marker, build_acp_launch_spec,
+        read_session_tree_activity, read_session_tree_metrics, worktree_path_allowed,
     },
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, GitRefRecord, IssueStateRecord,
@@ -29,6 +30,7 @@ use super::{
 
 pub(super) async fn process_in_progress_handoff(
     project: &ProjectConfig,
+    opencode_storage: Option<&OpenCodeStorageConfig>,
     store: &SqliteStore,
     linear: &impl LinearClient,
     opencode: &impl OpenCodeLauncher,
@@ -55,6 +57,12 @@ pub(super) async fn process_in_progress_handoff(
                     "OpenCode handoff not available yet"
                 );
                 return Ok(false);
+            }
+
+            if session_has_active_opencode_tree(opencode_storage, store, project, issue, &session)
+                .await?
+            {
+                return Ok(true);
             }
 
             let message = ".symphony/opencode-handoff.json was not produced before the OpenCode ACP process ended".to_string();
@@ -227,6 +235,71 @@ pub(super) async fn process_in_progress_handoff(
     }
 
     Ok(true)
+}
+
+async fn session_has_active_opencode_tree(
+    opencode_storage: Option<&OpenCodeStorageConfig>,
+    store: &SqliteStore,
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+    session: &crate::state::OpenCodeSessionRecord,
+) -> anyhow::Result<bool> {
+    let Some(storage) = opencode_storage else {
+        return Ok(false);
+    };
+    let Some(activity) =
+        read_session_tree_activity(&storage.database_path, &session.session_id, 40).await?
+    else {
+        return Ok(false);
+    };
+    if !opencode_tree_has_active_work(&activity) {
+        return Ok(false);
+    }
+
+    let previous_last_event = session.last_event.clone();
+    let previous_marker = session.lifecycle_marker.clone();
+    let mut active_session = session.clone();
+    if let Some(metrics) =
+        read_session_tree_metrics(&storage.database_path, &session.session_id).await?
+    {
+        apply_session_tree_metrics_preserving_marker(
+            &mut active_session,
+            &metrics,
+            previous_last_event.as_deref(),
+            previous_marker.as_deref(),
+        );
+    }
+    active_session.process_id = None;
+    active_session.lifecycle_stage = LifecycleStage::Running;
+    active_session.stage = OpenCodeStage::Running;
+    active_session.lifecycle_marker = Some("opencode_db_active".into());
+    active_session.last_event = Some(activity.last_updated_ms.map_or_else(
+        || "opencode_db_active_subtask".into(),
+        |updated| format!("opencode_db_active_subtask:{updated}"),
+    ));
+    active_session.silence_observed = false;
+    store.upsert_opencode_session(&active_session).await?;
+    info!(
+        project_id = %project.id,
+        issue = %issue.identifier,
+        session_id = %session.session_id,
+        subagents = activity.subagents.len(),
+        running_tools = activity.running_tool_count,
+        pending_tools = activity.pending_tool_count,
+        "OpenCode persisted session tree is still active after ACP process exit"
+    );
+    Ok(true)
+}
+
+fn opencode_tree_has_active_work(activity: &OpenCodeSessionTreeActivity) -> bool {
+    activity.running_tool_count > 0
+        || activity.pending_tool_count > 0
+        || activity.todos.iter().any(|todo| {
+            !matches!(
+                todo.status.as_str(),
+                "completed" | "done" | "cancelled" | "canceled"
+            )
+        })
 }
 
 struct SuccessfulHandoffContext<'a, L: LinearClient> {

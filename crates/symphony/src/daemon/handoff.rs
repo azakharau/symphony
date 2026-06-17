@@ -66,11 +66,13 @@ pub(super) async fn process_in_progress_handoff(
                 message,
                 "OpenCode session ended without handoff sidecar"
             );
-            fail_runtime_defect(
+            request_opencode_repair(
                 project,
                 store,
+                opencode,
                 linear,
                 issue,
+                existing_issue.as_ref(),
                 "malformed_handoff",
                 message.clone(),
                 FailureRecord {
@@ -92,11 +94,13 @@ pub(super) async fn process_in_progress_handoff(
                 message,
                 "OpenCode handoff sidecar failed validation"
             );
-            fail_runtime_defect(
+            request_opencode_repair(
                 project,
                 store,
+                opencode,
                 linear,
                 issue,
+                existing_issue.as_ref(),
                 "malformed_handoff",
                 message.clone(),
                 FailureRecord {
@@ -154,8 +158,19 @@ pub(super) async fn process_in_progress_handoff(
 
     match &handoff.stop_reason {
         OpenCodeStopReason::Success => {
-            close_successful_handoff(project, store, opencode, linear, issue, &session, &handoff)
-                .await?;
+            close_successful_handoff(
+                SuccessfulHandoffContext {
+                    project,
+                    store,
+                    opencode,
+                    linear,
+                    issue,
+                    existing_issue: existing_issue.as_ref(),
+                    session: &session,
+                },
+                &handoff,
+            )
+            .await?;
         }
         OpenCodeStopReason::EvalFailed {
             failure_fingerprint,
@@ -220,15 +235,30 @@ pub(super) async fn process_in_progress_handoff(
     Ok(true)
 }
 
-async fn close_successful_handoff(
-    project: &ProjectConfig,
-    store: &SqliteStore,
-    _opencode: &impl OpenCodeLauncher,
-    linear: &impl LinearClient,
-    issue: &LinearIssue,
-    session: &crate::state::OpenCodeSessionRecord,
+struct SuccessfulHandoffContext<'a, O: OpenCodeLauncher, L: LinearClient> {
+    project: &'a ProjectConfig,
+    store: &'a SqliteStore,
+    opencode: &'a O,
+    linear: &'a L,
+    issue: &'a LinearIssue,
+    existing_issue: Option<&'a IssueStateRecord>,
+    session: &'a crate::state::OpenCodeSessionRecord,
+}
+
+async fn close_successful_handoff<O: OpenCodeLauncher, L: LinearClient>(
+    ctx: SuccessfulHandoffContext<'_, O, L>,
     handoff: &OpenCodeHandoff,
 ) -> anyhow::Result<()> {
+    let SuccessfulHandoffContext {
+        project,
+        store,
+        opencode,
+        linear,
+        issue,
+        existing_issue,
+        session,
+    } = ctx;
+
     if let Some(message) = successful_handoff_error(handoff) {
         warn!(
             project_id = %project.id,
@@ -237,11 +267,13 @@ async fn close_successful_handoff(
             message,
             "successful OpenCode handoff failed validation"
         );
-        fail_runtime_defect(
+        request_opencode_repair(
             project,
             store,
+            opencode,
             linear,
             issue,
+            existing_issue,
             "malformed_handoff",
             message.clone(),
             FailureRecord {
@@ -263,11 +295,13 @@ async fn close_successful_handoff(
             session_id = %session.session_id,
             "successful OpenCode handoff missing git evidence"
         );
-        fail_runtime_defect(
+        request_opencode_repair(
             project,
             store,
+            opencode,
             linear,
             issue,
+            existing_issue,
             "malformed_handoff",
             "successful handoff did not include git closure evidence".into(),
             FailureRecord {
@@ -289,11 +323,13 @@ async fn close_successful_handoff(
             message,
             "successful OpenCode handoff has unsafe worktree evidence"
         );
-        fail_runtime_defect(
+        request_opencode_repair(
             project,
             store,
+            opencode,
             linear,
             issue,
+            existing_issue,
             "malformed_handoff",
             message.clone(),
             FailureRecord {
@@ -320,11 +356,13 @@ async fn close_successful_handoff(
                     message,
                     "successful OpenCode handoff failed git closure verification"
                 );
-                fail_runtime_defect(
+                request_opencode_repair(
                     project,
                     store,
+                    opencode,
                     linear,
                     issue,
+                    existing_issue,
                     "malformed_handoff",
                     message.clone(),
                     FailureRecord {
@@ -546,12 +584,27 @@ async fn request_opencode_repair(
         return Ok(());
     }
 
+    let elapsed_seconds = match session.process_id {
+        Some(process_id) => process_elapsed_seconds(process_id).await,
+        None => None,
+    };
+    let git_snapshot = RuntimeDefectGitSnapshot::capture(session).await;
     linear
         .record_issue_evidence(
             &issue.id,
             LinearIssueEvidence {
                 kind: evidence_kind.into(),
-                body: message.clone(),
+                body: RuntimeDefectRepairEvidence {
+                    message: &message,
+                    session,
+                    elapsed_seconds,
+                    fingerprint: &fingerprint,
+                    occurrence_count,
+                    max_attempts: project.eval.max_identical_failure_fingerprints.max(1),
+                    next_action: "continue_repair",
+                    git_snapshot: git_snapshot.as_ref(),
+                }
+                .evidence_body(),
             },
         )
         .await?;
@@ -608,6 +661,7 @@ async fn fail_runtime_defect(
                 kind: evidence_kind.into(),
                 body: runtime_defect_evidence_body(
                     &message,
+                    &failure,
                     session,
                     elapsed_seconds,
                     git_snapshot.as_ref(),
@@ -659,6 +713,7 @@ async fn fail_runtime_defect(
 
 fn runtime_defect_evidence_body(
     message: &str,
+    failure: &FailureRecord,
     session: &crate::state::OpenCodeSessionRecord,
     elapsed_seconds: Option<u64>,
     git_snapshot: Option<&RuntimeDefectGitSnapshot>,
@@ -668,7 +723,7 @@ fn runtime_defect_evidence_body(
         .unwrap_or_else(|| "git_snapshot: unavailable".into());
 
     format!(
-        "Symphony runtime defect: {message}\n\nsession_id: {session_id}\nprocess_id: {process_id}\nelapsed_seconds: {elapsed_seconds}\n\n{git_snapshot}\n\nThe issue was marked as a Symphony runtime defect and left out of ordinary Todo dispatch. This is not owner input; fix the runner/tooling defect before retrying.",
+        "Symphony runtime defect: {message}\n\nsession_id: {session_id}\nprocess_id: {process_id}\nelapsed_seconds: {elapsed_seconds}\nfingerprint: {fingerprint}\nrepair_attempt: {repair_attempt}\nnext_action: fix_runner_tooling_defect_before_retry\n\n{git_snapshot}\n\nThe issue was marked as a Symphony runtime defect and left out of ordinary Todo dispatch. This is not owner input; fix the runner/tooling defect before retrying.",
         session_id = session.session_id,
         process_id = session
             .process_id
@@ -677,7 +732,51 @@ fn runtime_defect_evidence_body(
         elapsed_seconds = elapsed_seconds
             .map(|seconds| seconds.to_string())
             .unwrap_or_else(|| "unknown".into()),
+        fingerprint = failure
+            .fingerprint
+            .as_deref()
+            .unwrap_or(failure.kind.as_str()),
+        repair_attempt = failure.occurrence_count,
     )
+}
+
+struct RuntimeDefectRepairEvidence<'a> {
+    message: &'a str,
+    session: &'a crate::state::OpenCodeSessionRecord,
+    elapsed_seconds: Option<u64>,
+    fingerprint: &'a str,
+    occurrence_count: u32,
+    max_attempts: u32,
+    next_action: &'a str,
+    git_snapshot: Option<&'a RuntimeDefectGitSnapshot>,
+}
+
+impl RuntimeDefectRepairEvidence<'_> {
+    fn evidence_body(&self) -> String {
+        let git_snapshot = self
+            .git_snapshot
+            .map(RuntimeDefectGitSnapshot::evidence_body)
+            .unwrap_or_else(|| "git_snapshot: unavailable".into());
+
+        format!(
+            "Symphony runtime defect repair scheduled: {message}\n\nsession_id: {session_id}\nprocess_id: {process_id}\nelapsed_seconds: {elapsed_seconds}\nfingerprint: {fingerprint}\nrepair_attempt: {occurrence_count}\nmax_repair_attempts: {max_attempts}\nnext_action: {next_action}\n\n{git_snapshot}\n\nThe issue remains in OpenCode repair and is not returned to ordinary Todo dispatch.",
+            message = self.message,
+            session_id = self.session.session_id,
+            process_id = self
+                .session
+                .process_id
+                .map(|process_id| process_id.to_string())
+                .unwrap_or_else(|| "none".into()),
+            elapsed_seconds = self
+                .elapsed_seconds
+                .map(|seconds| seconds.to_string())
+                .unwrap_or_else(|| "unknown".into()),
+            fingerprint = self.fingerprint,
+            occurrence_count = self.occurrence_count,
+            max_attempts = self.max_attempts,
+            next_action = self.next_action,
+        )
+    }
 }
 
 #[derive(Debug)]

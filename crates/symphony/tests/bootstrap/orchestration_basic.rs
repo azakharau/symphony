@@ -162,7 +162,7 @@ async fn orchestration_records_healthy_capacity_liveness_before_dispatch() {
 }
 
 #[tokio::test]
-async fn orchestration_records_runner_process_dead_liveness_for_stale_running_session() {
+async fn orchestration_schedules_repair_for_dead_running_session_without_handoff_sidecar() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
@@ -196,22 +196,28 @@ async fn orchestration_records_runner_process_dead_liveness_for_stale_running_se
         client.transitions().is_empty(),
         "runtime defect must not return work to Linear Todo"
     );
+    assert_eq!(
+        opencode.repairs(),
+        vec![("SYM-65".into(), "missing_handoff_sidecar".into())]
+    );
     let liveness = store
         .project_liveness("symphony")
         .await
         .expect("query liveness")
         .expect("liveness row");
-    assert_eq!(liveness.status, RuntimeLivenessStatus::NoEligibleIssues);
+    assert_eq!(liveness.status, RuntimeLivenessStatus::RunnerProcessDead);
     let issue = store
         .issue("symphony", "work")
         .await
         .expect("query work")
         .expect("work issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    let failure = issue.failure.expect("failure");
     assert_eq!(
-        issue.failure.expect("failure").fingerprint.as_deref(),
+        failure.fingerprint.as_deref(),
         Some("missing_handoff_sidecar")
     );
+    assert_eq!(failure.occurrence_count, 1);
 }
 
 #[tokio::test]
@@ -808,7 +814,7 @@ async fn orchestration_refreshes_active_opencode_session_metrics_from_persisted_
 }
 
 #[tokio::test]
-async fn orchestration_fails_stale_in_progress_session_without_handoff_sidecar() {
+async fn orchestration_repairs_stale_in_progress_session_without_handoff_sidecar() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
@@ -844,31 +850,41 @@ async fn orchestration_fails_stale_in_progress_session_without_handoff_sidecar()
     assert!(opencode.launches().is_empty());
     assert!(opencode.resumes().is_empty());
     assert!(opencode.continuations().is_empty());
+    assert_eq!(
+        opencode.repairs(),
+        vec![("SYM-65".into(), "missing_handoff_sidecar".into())]
+    );
     assert!(
         client.transitions().is_empty(),
         "runtime defect must not return work to Linear Todo"
     );
+    assert!(client.evidence().iter().any(|(_, evidence)| {
+        evidence.kind == "malformed_handoff"
+            && evidence
+                .body
+                .contains(".symphony/opencode-handoff.json was not produced")
+            && evidence
+                .body
+                .contains("fingerprint: missing_handoff_sidecar")
+    }));
     let resumed = store
         .opencode_session("symphony", "work", "ses-existing")
         .await
         .expect("query session")
         .expect("session");
-    assert_eq!(resumed.lifecycle_stage, LifecycleStage::Failed);
-    assert_eq!(resumed.stage, OpenCodeStage::Failed);
-    assert_eq!(resumed.process_id, None);
-    assert_eq!(
-        resumed.lifecycle_marker.as_deref(),
-        Some("failed:malformed_handoff")
-    );
+    assert_eq!(resumed.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(resumed.stage, OpenCodeStage::Running);
+    assert_eq!(resumed.process_id, Some(4242));
+    assert_eq!(resumed.lifecycle_marker.as_deref(), Some("repair_prompted"));
     assert_eq!(
         resumed.last_event.as_deref(),
-        Some("failed:missing_handoff_sidecar")
+        Some("repair_prompted:missing_handoff_sidecar")
     );
     assert!(!resumed.silence_observed);
 }
 
 #[tokio::test]
-async fn orchestration_does_not_reissue_repair_prompt_for_stale_malformed_handoff_session() {
+async fn orchestration_reissues_repair_prompt_for_stale_malformed_handoff_session_under_bound() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
@@ -910,11 +926,27 @@ async fn orchestration_does_not_reissue_repair_prompt_for_stale_malformed_handof
 
     assert!(opencode.launches().is_empty());
     assert!(opencode.resumes().is_empty());
-    assert!(opencode.repairs().is_empty());
+    assert_eq!(
+        opencode.repairs(),
+        vec![("SYM-66".into(), "missing_handoff_sidecar".into())]
+    );
     assert!(
         client.transitions().is_empty(),
         "stale malformed handoff defect must not return repair-stale to Linear Todo"
     );
+    let issue = store
+        .issue("symphony", "repair-stale")
+        .await
+        .expect("query repair issue")
+        .expect("repair issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    let failure = issue.failure.expect("failure");
+    assert_eq!(
+        failure.fingerprint.as_deref(),
+        Some("missing_handoff_sidecar")
+    );
+    assert_eq!(failure.occurrence_count, 1);
+
     let repaired = store
         .opencode_session("symphony", "repair-stale", "ses-repair-stale")
         .await
@@ -922,11 +954,11 @@ async fn orchestration_does_not_reissue_repair_prompt_for_stale_malformed_handof
         .expect("session");
     assert_eq!(
         repaired.last_event.as_deref(),
-        Some("failed:missing_handoff_sidecar")
+        Some("repair_prompted:missing_handoff_sidecar")
     );
     assert_eq!(
         repaired.lifecycle_marker.as_deref(),
-        Some("failed:malformed_handoff")
+        Some("repair_prompted")
     );
 }
 

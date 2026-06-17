@@ -158,10 +158,8 @@ pub(super) async fn process_in_progress_handoff(
                 SuccessfulHandoffContext {
                     project,
                     store,
-                    opencode,
                     linear,
                     issue,
-                    existing_issue: existing_issue.as_ref(),
                     session: &session,
                 },
                 &handoff,
@@ -231,27 +229,23 @@ pub(super) async fn process_in_progress_handoff(
     Ok(true)
 }
 
-struct SuccessfulHandoffContext<'a, O: OpenCodeLauncher, L: LinearClient> {
+struct SuccessfulHandoffContext<'a, L: LinearClient> {
     project: &'a ProjectConfig,
     store: &'a SqliteStore,
-    opencode: &'a O,
     linear: &'a L,
     issue: &'a LinearIssue,
-    existing_issue: Option<&'a IssueStateRecord>,
     session: &'a crate::state::OpenCodeSessionRecord,
 }
 
-async fn close_successful_handoff<O: OpenCodeLauncher, L: LinearClient>(
-    ctx: SuccessfulHandoffContext<'_, O, L>,
+async fn close_successful_handoff<L: LinearClient>(
+    ctx: SuccessfulHandoffContext<'_, L>,
     handoff: &OpenCodeHandoff,
 ) -> anyhow::Result<()> {
     let SuccessfulHandoffContext {
         project,
         store,
-        opencode,
         linear,
         issue,
-        existing_issue,
         session,
     } = ctx;
 
@@ -263,13 +257,11 @@ async fn close_successful_handoff<O: OpenCodeLauncher, L: LinearClient>(
             message,
             "successful OpenCode handoff failed validation"
         );
-        request_opencode_repair(
+        fail_runtime_defect(
             project,
             store,
-            opencode,
             linear,
             issue,
-            existing_issue,
             "malformed_handoff",
             message.clone(),
             FailureRecord {
@@ -291,13 +283,11 @@ async fn close_successful_handoff<O: OpenCodeLauncher, L: LinearClient>(
             session_id = %session.session_id,
             "successful OpenCode handoff missing git evidence"
         );
-        request_opencode_repair(
+        fail_runtime_defect(
             project,
             store,
-            opencode,
             linear,
             issue,
-            existing_issue,
             "malformed_handoff",
             "successful handoff did not include git closure evidence".into(),
             FailureRecord {
@@ -319,13 +309,11 @@ async fn close_successful_handoff<O: OpenCodeLauncher, L: LinearClient>(
             message,
             "successful OpenCode handoff has unsafe worktree evidence"
         );
-        request_opencode_repair(
+        fail_runtime_defect(
             project,
             store,
-            opencode,
             linear,
             issue,
-            existing_issue,
             "malformed_handoff",
             message.clone(),
             FailureRecord {

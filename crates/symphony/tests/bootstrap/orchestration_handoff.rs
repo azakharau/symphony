@@ -893,12 +893,19 @@ async fn no_change_handoff_with_unreported_commit_does_not_close_or_cleanup() {
         .await
         .expect("query unreported session")
         .expect("unreported session");
-    assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(session.stage, OpenCodeStage::Running);
-    assert_eq!(session.lifecycle_marker.as_deref(), Some("repair_prompted"));
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(session.stage, OpenCodeStage::Failed);
     assert_eq!(
-        session.last_event.as_deref(),
-        Some("repair_prompted:git_closure_unverified")
+        session.lifecycle_marker.as_deref(),
+        Some("failed:malformed_handoff")
+    );
+    assert!(
+        session
+            .last_event
+            .as_deref()
+            .is_some_and(|event| event.starts_with("failed:git_closure_unverified")),
+        "last_event={:?}",
+        session.last_event
     );
 }
 
@@ -956,16 +963,17 @@ async fn successful_handoff_with_worktree_outside_configured_root_is_parked_with
             .any(|(_, evidence)| evidence.kind == "malformed_handoff"
                 && evidence.body.contains("outside configured worktree root"))
     );
-    assert_eq!(
-        opencode.repairs(),
-        vec![("oc-80".into(), "unsafe_worktree_path".into())]
-    );
+    assert!(opencode.repairs().is_empty());
     let issue = store
         .issue("symphony", "completed")
         .await
         .expect("query repair")
         .expect("repair issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(
+        issue.blocker.as_ref().expect("runtime defect blocker").kind,
+        "runtime_defect"
+    );
     assert_eq!(
         issue.failure.expect("failure").fingerprint.as_deref(),
         Some("unsafe_worktree_path")
@@ -1028,16 +1036,17 @@ async fn successful_handoff_with_sibling_worktree_is_parked_without_cleanup() {
                 .body
                 .contains("does not match active session worktree")
     }));
-    assert_eq!(
-        opencode.repairs(),
-        vec![("oc-80".into(), "unsafe_worktree_path".into())]
-    );
+    assert!(opencode.repairs().is_empty());
     let issue = store
         .issue("symphony", "completed")
         .await
         .expect("query repair")
         .expect("repair issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(
+        issue.blocker.as_ref().expect("runtime defect blocker").kind,
+        "runtime_defect"
+    );
     assert_eq!(
         issue.failure.expect("failure").fingerprint.as_deref(),
         Some("unsafe_worktree_path")
@@ -1095,16 +1104,17 @@ async fn successful_handoff_with_whitespace_worktree_path_is_parked_without_clea
         evidence.kind == "malformed_handoff"
             && evidence.body.contains("leading or trailing whitespace")
     }));
-    assert_eq!(
-        opencode.repairs(),
-        vec![("oc-80".into(), "unsafe_worktree_path".into())]
-    );
+    assert!(opencode.repairs().is_empty());
     let issue = store
         .issue("symphony", "completed")
         .await
         .expect("query repair")
         .expect("repair issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(
+        issue.blocker.as_ref().expect("runtime defect blocker").kind,
+        "runtime_defect"
+    );
     assert_eq!(
         issue.failure.expect("failure").fingerprint.as_deref(),
         Some("unsafe_worktree_path")
@@ -1491,17 +1501,17 @@ async fn malformed_success_handoff_fails_fast_without_opencode_repair_or_owner_i
                 .body
                 .contains("successful handoff did not include git closure evidence")
     }));
-    assert_eq!(
-        opencode.repairs(),
-        vec![("oc-malformed".into(), "incomplete_success_handoff".into())]
-    );
+    assert!(opencode.repairs().is_empty());
     let issue = store
         .issue("symphony", "malformed")
         .await
         .expect("query issue")
         .expect("issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
-    assert!(issue.blocker.is_none());
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(
+        issue.blocker.as_ref().expect("runtime defect blocker").kind,
+        "runtime_defect"
+    );
     assert_eq!(
         issue.failure.expect("failure").fingerprint.as_deref(),
         Some("incomplete_success_handoff")
@@ -1511,13 +1521,20 @@ async fn malformed_success_handoff_fails_fast_without_opencode_repair_or_owner_i
         .await
         .expect("query session")
         .expect("session");
-    assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(session.stage, OpenCodeStage::Running);
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(session.stage, OpenCodeStage::Failed);
     assert_eq!(session.process_id, None);
-    assert_eq!(session.lifecycle_marker.as_deref(), Some("repair_prompted"));
     assert_eq!(
-        session.last_event.as_deref(),
-        Some("repair_prompted:incomplete_success_handoff")
+        session.lifecycle_marker.as_deref(),
+        Some("failed:malformed_handoff")
+    );
+    assert!(
+        session
+            .last_event
+            .as_deref()
+            .is_some_and(|event| event.starts_with("failed:incomplete_success_handoff")),
+        "last_event={:?}",
+        session.last_event
     );
 }
 
@@ -1595,8 +1612,11 @@ async fn malformed_handoff_sidecar_fails_fast_kills_process_tree_and_does_not_re
         .await
         .expect("query malformed")
         .expect("malformed issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
-    assert!(issue.blocker.is_none());
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(
+        issue.blocker.as_ref().expect("runtime defect blocker").kind,
+        "runtime_defect"
+    );
     let failure = issue.failure.expect("failure");
     assert_eq!(failure.kind, "malformed_handoff");
     assert_eq!(

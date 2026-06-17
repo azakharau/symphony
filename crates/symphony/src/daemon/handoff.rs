@@ -179,7 +179,7 @@ pub(super) async fn process_in_progress_handoff(
                 session_id = %session.session_id,
                 "OpenCode provider blocker parked issue"
             );
-            park_need_owner_input(
+            park_typed_blocker(
                 project,
                 store,
                 linear,
@@ -444,7 +444,7 @@ async fn handle_eval_failure(
             max_identical,
             "OpenCode repeated eval failure reached parking threshold"
         );
-        park_need_owner_input(
+        park_typed_blocker(
             project,
             store,
             linear,
@@ -915,6 +915,57 @@ pub(super) async fn park_need_owner_input(
         .await?;
     linear
         .transition_issue(&issue.id, LinearTransition::NeedOwnerInput)
+        .await?;
+    let record = IssueStateRecord {
+        project_id: project.id.clone(),
+        issue_id: issue.id.clone(),
+        identifier: issue.identifier.clone(),
+        title: issue.title.clone(),
+        lifecycle_stage: LifecycleStage::Blocked,
+        blocker: Some(BlockerRecord {
+            kind: blocker_kind.into(),
+            message,
+            observed_at: issue.updated_at.clone(),
+        }),
+        failure,
+        git_ref: None,
+        cleanup_status: CleanupStatus::Clean,
+    };
+    store.upsert_issue(&record).await?;
+    if let Some(session) = session {
+        let mut parked_session = session.clone();
+        parked_session.process_id = None;
+        parked_session.lifecycle_stage = LifecycleStage::Blocked;
+        parked_session.stage = crate::state::OpenCodeStage::Failed;
+        parked_session.lifecycle_marker = Some("parked".into());
+        parked_session.last_event = Some(format!("parked:{blocker_kind}"));
+        store.upsert_opencode_session(&parked_session).await?;
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "typed parking needs project, adapters, issue, session, evidence, and durable failure evidence"
+)]
+pub(super) async fn park_typed_blocker(
+    project: &ProjectConfig,
+    store: &SqliteStore,
+    linear: &impl LinearClient,
+    issue: &LinearIssue,
+    session: Option<&crate::state::OpenCodeSessionRecord>,
+    blocker_kind: &str,
+    message: String,
+    failure: Option<FailureRecord>,
+) -> anyhow::Result<()> {
+    linear
+        .record_issue_evidence(
+            &issue.id,
+            LinearIssueEvidence {
+                kind: blocker_kind.into(),
+                body: message.clone(),
+            },
+        )
         .await?;
     let record = IssueStateRecord {
         project_id: project.id.clone(),

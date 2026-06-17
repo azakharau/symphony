@@ -860,9 +860,9 @@ async fn no_change_handoff_with_unreported_commit_does_not_close_or_cleanup() {
         .await
         .expect("orchestrate once");
 
-    assert_eq!(
-        client.transitions(),
-        vec![("unreported".into(), LinearTransition::Todo)]
+    assert!(
+        client.transitions().is_empty(),
+        "malformed no-change handoff must not return unreported to Linear Todo"
     );
     assert!(
         worktree.exists(),
@@ -874,6 +874,31 @@ async fn no_change_handoff_with_unreported_commit_does_not_close_or_cleanup() {
                 .body
                 .contains("no-change handoff omitted git.head_sha")
     }));
+    let issue = store
+        .issue("symphony", "unreported")
+        .await
+        .expect("query unreported")
+        .expect("unreported issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(
+        issue.blocker.as_ref().expect("blocker").kind,
+        "runtime_defect"
+    );
+    assert_eq!(
+        issue.failure.expect("failure").fingerprint.as_deref(),
+        Some("git_closure_unverified")
+    );
+    let session = store
+        .opencode_session("symphony", "unreported", "oc-82")
+        .await
+        .expect("query unreported session")
+        .expect("unreported session");
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(session.stage, OpenCodeStage::Failed);
+    assert_eq!(
+        session.lifecycle_marker.as_deref(),
+        Some("failed:malformed_handoff")
+    );
 }
 
 #[tokio::test]
@@ -1112,7 +1137,7 @@ async fn eval_failure_stays_in_opencode_repair_loop_without_linear_churn() {
 }
 
 #[tokio::test]
-async fn repeated_identical_eval_failure_parks_owner_input_with_typed_evidence() {
+async fn repeated_identical_eval_failure_parks_typed_blocker_with_typed_evidence() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let worktree = dir.path().join("SYM-82-worktree");
@@ -1144,10 +1169,7 @@ async fn repeated_identical_eval_failure_parks_owner_input_with_typed_evidence()
         .await
         .expect("orchestrate once");
 
-    assert_eq!(
-        client.transitions(),
-        vec![("repeat".into(), LinearTransition::NeedOwnerInput)]
-    );
+    assert!(client.transitions().is_empty());
     assert!(opencode.repairs().is_empty());
     let issue = store
         .issue("symphony", "repeat")
@@ -1157,6 +1179,28 @@ async fn repeated_identical_eval_failure_parks_owner_input_with_typed_evidence()
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Blocked);
     assert_eq!(
         issue.blocker.expect("blocker").kind,
+        "repeated_eval_failure"
+    );
+
+    let client =
+        RecordingLinearClient::new(vec![linear_issue("repeat", "SYM-82", "Todo", Some(1))]);
+    let opencode = ScriptedOpenCodeLauncher::new(None);
+
+    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate requeued repeated eval failure");
+
+    assert_eq!(report.blocked, vec!["SYM-82"]);
+    assert!(client.transitions().is_empty());
+    assert!(opencode.repairs().is_empty());
+    let issue = store
+        .issue("symphony", "repeat")
+        .await
+        .expect("query retained repeat")
+        .expect("retained repeat issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Blocked);
+    assert_eq!(
+        issue.blocker.expect("retained blocker").kind,
         "repeated_eval_failure"
     );
 }
@@ -1230,7 +1274,7 @@ async fn repeated_session_id_mismatch_hits_runtime_repair_threshold() {
 }
 
 #[tokio::test]
-async fn provider_blocker_and_owner_question_park_with_owner_visible_question() {
+async fn provider_blocker_records_typed_evidence_without_owner_input_transition() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
@@ -1238,89 +1282,132 @@ async fn provider_blocker_and_owner_question_park_with_owner_visible_question() 
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
 
-    let cases = [
-        (
-            "provider",
-            "SYM-83",
-            OpenCodeHandoff {
-                session_id: "oc-provider".into(),
-                lifecycle_stages: vec![OpenCodeStage::Running, OpenCodeStage::Failed],
-                subagents: vec!["rust-engineer".into()],
-                eval_results: Vec::new(),
-                changed_files: Vec::new(),
-                git: None,
-                risks: vec!["provider quota exhausted".into()],
-                stop_reason: OpenCodeStopReason::ProviderBlocker {
-                    message: "provider quota exhausted".into(),
-                },
-            },
-            "provider_blocker",
-        ),
-        (
-            "owner",
-            "SYM-84",
-            OpenCodeHandoff {
-                session_id: "oc-owner".into(),
-                lifecycle_stages: vec![OpenCodeStage::Running, OpenCodeStage::Handoff],
-                subagents: vec!["rust-engineer".into()],
-                eval_results: Vec::new(),
-                changed_files: Vec::new(),
-                git: None,
-                risks: Vec::new(),
-                stop_reason: OpenCodeStopReason::OwnerQuestion {
-                    question: "Which branch should receive the PR?".into(),
-                },
-            },
-            "owner_question",
-        ),
-    ];
+    let issue_id = "provider";
+    let identifier = "SYM-83";
+    let worktree = dir.path().join(format!("{identifier}-worktree"));
+    store
+        .upsert_issue(test_issue("symphony", issue_id, identifier))
+        .await
+        .expect("running issue");
+    store
+        .upsert_opencode_session(test_session("symphony", issue_id, "oc-provider", &worktree))
+        .await
+        .expect("running session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        issue_id,
+        identifier,
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(Some(OpenCodeHandoff {
+        session_id: "oc-provider".into(),
+        lifecycle_stages: vec![OpenCodeStage::Running, OpenCodeStage::Failed],
+        subagents: vec!["rust-engineer".into()],
+        eval_results: Vec::new(),
+        changed_files: Vec::new(),
+        git: None,
+        risks: vec!["provider quota exhausted".into()],
+        stop_reason: OpenCodeStopReason::ProviderBlocker {
+            message: "provider quota exhausted".into(),
+        },
+    }));
 
-    for (issue_id, identifier, handoff, expected_kind) in cases {
-        let worktree = dir.path().join(format!("{identifier}-worktree"));
-        store
-            .upsert_issue(test_issue("symphony", issue_id, identifier))
-            .await
-            .expect("running issue");
-        store
-            .upsert_opencode_session(test_session(
-                "symphony",
-                issue_id,
-                &handoff.session_id,
-                &worktree,
-            ))
-            .await
-            .expect("running session");
-        let client = RecordingLinearClient::new(vec![linear_issue(
-            issue_id,
-            identifier,
-            "In Progress",
-            Some(1),
-        )]);
-        let opencode = ScriptedOpenCodeLauncher::new(Some(handoff));
+    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
 
-        daemon::run_once_with_clients(&config, &store, &client, &opencode)
-            .await
-            .expect("orchestrate once");
+    assert!(report.parked_owner_input.is_empty());
+    assert!(client.transitions().is_empty());
+    let evidence = client.evidence();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].1.kind, "provider_blocker");
+    assert_eq!(evidence[0].1.body, "provider quota exhausted");
+    assert!(!evidence[0].1.body.contains("Owner input needed"));
+    let issue = store
+        .issue("symphony", issue_id)
+        .await
+        .expect("query parked")
+        .expect("parked issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Blocked);
+    assert_eq!(
+        issue.blocker.as_ref().expect("blocker").kind,
+        "provider_blocker"
+    );
 
-        assert_eq!(
-            client.transitions(),
-            vec![(issue_id.into(), LinearTransition::NeedOwnerInput)]
-        );
-        assert!(client.evidence().iter().any(|(_, evidence)| {
-            evidence.kind == expected_kind
-                && (evidence.body.contains("Owner input needed")
-                    || evidence
-                        .body
-                        .contains("Which branch should receive the PR?"))
-        }));
-        let issue = store
-            .issue("symphony", issue_id)
-            .await
-            .expect("query parked")
-            .expect("parked issue");
-        assert_eq!(issue.lifecycle_stage, LifecycleStage::Blocked);
-        assert_eq!(issue.blocker.expect("blocker").kind, expected_kind);
-    }
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        issue_id,
+        identifier,
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(None);
+    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate again");
+    assert_eq!(report.blocked, vec![identifier]);
+    assert!(client.transitions().is_empty());
+}
+
+#[tokio::test]
+async fn owner_question_parks_with_owner_visible_question() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let issue_id = "owner";
+    let identifier = "SYM-84";
+    let worktree = dir.path().join(format!("{identifier}-worktree"));
+    store
+        .upsert_issue(test_issue("symphony", issue_id, identifier))
+        .await
+        .expect("running issue");
+    store
+        .upsert_opencode_session(test_session("symphony", issue_id, "oc-owner", &worktree))
+        .await
+        .expect("running session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        issue_id,
+        identifier,
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(Some(OpenCodeHandoff {
+        session_id: "oc-owner".into(),
+        lifecycle_stages: vec![OpenCodeStage::Running, OpenCodeStage::Handoff],
+        subagents: vec!["rust-engineer".into()],
+        eval_results: Vec::new(),
+        changed_files: Vec::new(),
+        git: None,
+        risks: Vec::new(),
+        stop_reason: OpenCodeStopReason::OwnerQuestion {
+            question: "Which branch should receive the PR?".into(),
+        },
+    }));
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert_eq!(
+        client.transitions(),
+        vec![(issue_id.into(), LinearTransition::NeedOwnerInput)]
+    );
+    assert!(client.evidence().iter().any(|(_, evidence)| {
+        evidence.kind == "owner_question"
+            && evidence
+                .body
+                .contains("Which branch should receive the PR?")
+    }));
+    let issue = store
+        .issue("symphony", issue_id)
+        .await
+        .expect("query parked")
+        .expect("parked issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Blocked);
+    assert_eq!(issue.blocker.expect("blocker").kind, "owner_question");
 }
 
 #[tokio::test]

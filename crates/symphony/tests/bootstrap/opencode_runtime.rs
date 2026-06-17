@@ -313,6 +313,37 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         spec.prompt
     );
     assert!(
+        spec.prompt.contains("Triage and owner-input boundary"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt
+            .contains("Use owner_question only for real owner, product, or permission questions"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "Use provider_blocker for provider, infrastructure, workspace, credential, or tool availability blockers; these are not owner input"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "Treat missing or malformed handoff sidecars, stale process/session evidence, git closure mismatches, and cleanup failures as runtime/tooling defects"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt
+            .contains("Do not requeue runtime/tooling defects to runnable Todo as product work"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
         spec.prompt.contains("Commit policy for successful handoff"),
         "{}",
         spec.prompt

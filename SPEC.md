@@ -51,7 +51,8 @@ Purpose: Define the active Symphony runtime that orchestrates project work throu
 - Symphony passes that global workspace root into every OpenCode task prompt. OpenCode must use it
   for Mnemesh MCP calls, observations, claims, evidence, verification, and handoff records.
 - Symphony must not start an OpenCode runner when the Mnemesh workspace root is missing from project
-  config. It parks the issue in `Need Owner Input` with `provider_blocker` evidence instead.
+  config. It records typed `provider_blocker` evidence without classifying the blocker as
+  `Need Owner Input`.
 - OpenCode must not create or register a separate Mnemesh workspace for an issue worktree. If the
   global project workspace is unavailable, OpenCode stops with a provider blocker rather than
   continuing with local degraded evidence.
@@ -66,13 +67,23 @@ Symphony uses this executable lifecycle:
   moves eligible work to `In Progress` when capacity is available.
 - `In Progress`: OpenCode-owned implementation session. Symphony records the ACP session, observes
   handoff evidence, and keeps repair loops in this state until closure or a typed blocker appears.
-- `Need Owner Input`: parked state for owner questions, provider blockers, malformed handoffs, and
-  repeated identical eval failures.
+- `Need Owner Input`: parked state only for real owner/product/permission questions that require a
+  human decision before OpenCode can continue.
 - Terminal states: `Done`, `Canceled`, `Cancelled`, `Closed`, and `Duplicate`.
 
 Legacy steward states such as `Preparing`, `In Review`, and `RCA Required` are not executable runtime
-states in Symphony. If the Rust runtime sees them in the active queue, it parks the issue in
-`Need Owner Input` with typed evidence instead of preserving hidden compatibility aliases.
+states in Symphony. If the Rust runtime sees them in the active queue, it parks the issue with typed
+evidence instead of preserving hidden compatibility aliases.
+
+Runtime triage keeps owner questions separate from system failures:
+
+- Provider or infrastructure blockers are typed provider evidence, not owner input.
+- Eval failures stay in the OpenCode repair loop until they pass or hit the typed repeated-fingerprint
+  policy.
+- Runtime/tooling defects such as missing or malformed handoff sidecars, stale OpenCode
+  process/session evidence, git closure mismatches, or cleanup failures route to bounded repair or a
+  typed runtime-defect blocked state.
+- Runtime/tooling defects must not be requeued to executable `Todo` as product work.
 
 ## OpenCode Handoff
 
@@ -89,8 +100,8 @@ Successful handoffs move the issue to `Done` only after Symphony verifies that t
 commit is pushed and integrated into the configured base branch. Linear comments alone are not
 closure evidence for any task that changes tracked repository state, including documentation or audit
 artifacts. After verified closure, Symphony persists git metadata and removes the completed per-issue
-worktree immediately. Eval failures stay in the OpenCode repair loop until they pass or hit the
-configured repeated-fingerprint policy.
+worktree immediately. Eval failures stay in the OpenCode repair loop until they pass or hit the typed
+repeated-fingerprint policy.
 
 ## Multiproject Runtime
 

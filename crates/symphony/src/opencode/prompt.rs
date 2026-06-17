@@ -26,6 +26,8 @@ pub(super) fn build_issue_prompt(
          {mnemesh_workspace_contract}\n\n\
          Validation policy:\n\
          {validation_policy}\n\n\
+         Triage and owner-input boundary:\n\
+         {triage_policy}\n\n\
          Commit policy for successful handoff:\n\
          {commit_policy}\n\n\
          After validation, commit, and push are complete, write the structured Symphony handoff JSON to:\n\
@@ -74,6 +76,7 @@ pub(super) fn build_issue_prompt(
             &project.branch.worktree_root.join(&issue.identifier),
         ),
         validation_policy = validation_policy_text(),
+        triage_policy = triage_policy_text(),
         commit_policy = commit_policy_text(),
     )
 }
@@ -106,6 +109,14 @@ pub(super) const fn validation_policy_text() -> &'static str {
      - For docs-only/no-code changes, run documentation/file-level validation such as git diff --check and reference checks; do not run cargo nextest --workspace, full workspace tests, or release gates unless the issue explicitly requires them.\n\
      - For Rust source changes, prefer the narrowest package/filter/profile that covers the changed behavior before escalating to workspace-level checks.\n\
      - If a broader check is intentionally skipped, record the reason in eval_results.details and risks."
+}
+
+pub(super) const fn triage_policy_text() -> &'static str {
+    "- Use owner_question only for real owner, product, or permission questions that need a human decision before work can continue.\n\
+     - Use provider_blocker for provider, infrastructure, workspace, credential, or tool availability blockers; these are not owner input.\n\
+     - Use eval_failed only for validation or evaluator failures; keep them in repair evidence rather than converting them to owner questions.\n\
+     - Treat missing or malformed handoff sidecars, stale process/session evidence, git closure mismatches, and cleanup failures as runtime/tooling defects that require bounded repair or a typed runtime-defect blocker.\n\
+     - Do not requeue runtime/tooling defects to runnable Todo as product work."
 }
 
 pub(super) const fn commit_policy_text() -> &'static str {

@@ -285,12 +285,10 @@ async fn orchestration_parks_todo_issue_when_mnemesh_workspace_root_is_missing()
         .expect("orchestrate once");
 
     assert!(report.dispatched.is_empty());
-    assert_eq!(report.parked_owner_input, vec!["SYM-250"]);
+    assert!(report.parked_owner_input.is_empty());
+    assert_eq!(report.blocked, vec!["SYM-250"]);
     assert!(opencode.launches().is_empty());
-    assert_eq!(
-        client.transitions(),
-        vec![("missing-workspace".into(), LinearTransition::NeedOwnerInput)]
-    );
+    assert!(client.transitions().is_empty());
     let evidence = client.evidence();
     assert_eq!(evidence.len(), 1);
     assert_eq!(evidence[0].0, "missing-workspace");
@@ -312,6 +310,14 @@ async fn orchestration_parks_todo_issue_when_mnemesh_workspace_root_is_missing()
         parked.blocker.expect("blocker").kind,
         "mnemesh_workspace_missing"
     );
+
+    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate again");
+    assert!(report.dispatched.is_empty());
+    assert_eq!(report.blocked, vec!["SYM-250"]);
+    assert!(opencode.launches().is_empty());
+    assert!(client.transitions().is_empty());
 }
 
 #[tokio::test]
@@ -925,7 +931,7 @@ async fn orchestration_does_not_reissue_repair_prompt_for_stale_malformed_handof
 }
 
 #[tokio::test]
-async fn orchestration_continues_requeued_owner_input_session_during_dispatch() {
+async fn orchestration_keeps_requeued_provider_blocker_blocked_without_continuation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
@@ -966,34 +972,23 @@ async fn orchestration_continues_requeued_owner_input_session_during_dispatch() 
         RecordingLinearClient::new(vec![linear_issue("answered", "SYM-67", "Todo", Some(1))]);
     let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
 
-    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
         .expect("orchestrate once");
 
-    assert!(
-        opencode.launches().is_empty(),
-        "answered owner-input retry must not launch a duplicate fresh session"
-    );
-    assert_eq!(
-        opencode.continuations(),
-        vec![("SYM-67".to_string(), "ses-owner-input".to_string())]
-    );
-    assert_eq!(
-        client.transitions(),
-        vec![("answered".into(), LinearTransition::InProgress)]
-    );
-    let resumed = store
+    assert_eq!(report.blocked, vec!["SYM-67"]);
+    assert!(opencode.launches().is_empty());
+    assert!(opencode.continuations().is_empty());
+    assert!(client.transitions().is_empty());
+    let parked = store
         .opencode_session("symphony", "answered", "ses-owner-input")
         .await
         .expect("query session")
         .expect("session");
-    assert_eq!(resumed.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(resumed.stage, OpenCodeStage::Running);
-    assert_eq!(resumed.process_id, Some(4242));
-    assert_eq!(
-        resumed.lifecycle_marker.as_deref(),
-        Some("continuation_prompted")
-    );
+    assert_eq!(parked.lifecycle_stage, LifecycleStage::Blocked);
+    assert_eq!(parked.stage, OpenCodeStage::Failed);
+    assert_eq!(parked.process_id, None);
+    assert_eq!(parked.lifecycle_marker.as_deref(), Some("parked"));
 }
 
 #[tokio::test]
@@ -1565,9 +1560,7 @@ async fn orchestration_records_launch_failure_without_aborting_poll_or_owner_inp
         client.transitions(),
         vec![
             ("launch-fails".into(), LinearTransition::InProgress),
-            ("launch-fails".into(), LinearTransition::Todo),
             ("still-runs".into(), LinearTransition::InProgress),
-            ("still-runs".into(), LinearTransition::Todo),
         ]
     );
     let evidence = client.evidence();

@@ -319,6 +319,11 @@ async fn reconcile_project(
                     "checking in-progress OpenCode handoff"
                 );
                 let existing = store.issue(&project.id, &issue.id).await?;
+                if retain_typed_non_owner_blocker(project, store, &issue, existing.as_ref()).await?
+                {
+                    report.blocked.push(issue.identifier);
+                    continue;
+                }
                 let mut record = issue_record(
                     project,
                     &issue,
@@ -388,6 +393,12 @@ async fn reconcile_project(
                 store.upsert_issue(&record).await?;
             }
             "Todo" => {
+                let existing = store.issue(&project.id, &issue.id).await?;
+                if retain_typed_non_owner_blocker(project, store, &issue, existing.as_ref()).await?
+                {
+                    report.blocked.push(issue.identifier);
+                    continue;
+                }
                 if has_unanswered_owner_input {
                     debug!(
                         project_id = %project.id,
@@ -601,7 +612,7 @@ async fn reconcile_project(
                 "parking issue because Mnemesh workspace is not configured"
             );
             park_missing_mnemesh_workspace(project, store, linear, issue, reason).await?;
-            report.parked_owner_input.push(issue.identifier.clone());
+            report.blocked.push(issue.identifier.clone());
             continue;
         }
         info!(
@@ -801,9 +812,6 @@ async fn park_missing_mnemesh_workspace(
             },
         )
         .await?;
-    linear
-        .transition_issue(&issue.id, LinearTransition::NeedOwnerInput)
-        .await?;
     let record = issue_record(
         project,
         issue,
@@ -817,6 +825,42 @@ async fn park_missing_mnemesh_workspace(
     );
     store.upsert_issue(&record).await?;
     Ok(())
+}
+
+async fn retain_typed_non_owner_blocker(
+    project: &ProjectConfig,
+    store: &SqliteStore,
+    issue: &LinearIssue,
+    existing: Option<&crate::state::IssueStateRecord>,
+) -> anyhow::Result<bool> {
+    let Some(existing) = existing else {
+        return Ok(false);
+    };
+    let Some(blocker) = existing.blocker.as_ref() else {
+        return Ok(false);
+    };
+    if !is_typed_non_owner_blocker_kind(&blocker.kind) {
+        return Ok(false);
+    }
+
+    let mut record = issue_record(
+        project,
+        issue,
+        LifecycleStage::Blocked,
+        Some(blocker.clone()),
+        CleanupStatus::Clean,
+    );
+    record.failure.clone_from(&existing.failure);
+    record.git_ref.clone_from(&existing.git_ref);
+    store.upsert_issue(&record).await?;
+    Ok(true)
+}
+
+fn is_typed_non_owner_blocker_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "provider_blocker" | "mnemesh_workspace_missing" | "repeated_eval_failure"
+    )
 }
 
 async fn handle_launch_failure(
@@ -845,9 +889,6 @@ async fn handle_launch_failure(
                 body: launch_failure_evidence_body(issue, launch_spec, &failure_reason),
             },
         )
-        .await?;
-    linear
-        .transition_issue(&issue.id, LinearTransition::Todo)
         .await?;
 
     let failure = FailureRecord {

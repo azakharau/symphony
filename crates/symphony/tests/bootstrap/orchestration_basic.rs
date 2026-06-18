@@ -1204,7 +1204,7 @@ async fn orchestration_reissues_repair_prompt_for_stale_malformed_handoff_sessio
 }
 
 #[tokio::test]
-async fn orchestration_retries_requeued_provider_blocker_when_todo_is_unblocked() {
+async fn orchestration_continues_requeued_provider_blocker_when_todo_is_unblocked() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
@@ -1249,30 +1249,32 @@ async fn orchestration_retries_requeued_provider_blocker_when_todo_is_unblocked(
         .await
         .expect("orchestrate once");
 
-    assert_eq!(report.dispatched, vec!["SYM-67"]);
-    assert_eq!(opencode.launches(), vec!["SYM-67"]);
+    assert!(report.dispatched.is_empty());
+    assert!(opencode.launches().is_empty());
     assert!(opencode.continuations().is_empty());
+    assert_eq!(
+        opencode.repairs(),
+        vec![("SYM-67".into(), "workspace-not-found".into())]
+    );
     assert_eq!(
         client.transitions(),
         vec![("answered".into(), LinearTransition::InProgress)]
     );
-    let retried = store
-        .opencode_session("symphony", "answered", "new:SYM-67")
-        .await
-        .expect("query session")
-        .expect("session");
-    assert_eq!(retried.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(retried.stage, OpenCodeStage::Starting);
-    assert_eq!(retried.process_id, Some(4243));
-    let retired = store
+    let continued = store
         .opencode_session("symphony", "answered", "ses-owner-input")
         .await
-        .expect("query retired provider blocker session")
-        .expect("retired session");
-    assert_eq!(retired.lifecycle_stage, LifecycleStage::Canceled);
+        .expect("query continued provider blocker session")
+        .expect("continued session");
+    assert_eq!(continued.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(continued.stage, OpenCodeStage::Running);
+    assert_eq!(continued.process_id, Some(4242));
     assert_eq!(
-        retired.lifecycle_marker.as_deref(),
-        Some("retry_retired_provider_blocker")
+        continued.lifecycle_marker.as_deref(),
+        Some("repair_prompted")
+    );
+    assert_eq!(
+        continued.last_event.as_deref(),
+        Some("repair_prompted:workspace-not-found")
     );
     let issue = store
         .issue("symphony", "answered")
@@ -1281,6 +1283,84 @@ async fn orchestration_retries_requeued_provider_blocker_when_todo_is_unblocked(
         .expect("issue");
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
     assert!(issue.blocker.is_none());
+}
+
+#[tokio::test]
+async fn orchestration_recovers_retired_provider_blocker_session_after_launch_failed_retry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let mut issue = test_issue("symphony", "answered-dirty", "SYM-68");
+    issue.lifecycle_stage = LifecycleStage::Failed;
+    issue.blocker = Some(BlockerRecord {
+        kind: "runtime_defect".into(),
+        message: "OpenCode launch failed after Linear transition".into(),
+        observed_at: Some("2026-06-18T19:20:58Z".into()),
+    });
+    issue.failure = Some(FailureRecord {
+        kind: "runtime_defect".into(),
+        message: "existing worktree is dirty".into(),
+        fingerprint: Some("launch_failed".into()),
+        occurrence_count: 1,
+    });
+    store.upsert_issue(issue).await.expect("issue");
+
+    let mut session = test_session(
+        "symphony",
+        "answered-dirty",
+        "ses-retired-provider",
+        "/home/agent/.symphony/workspaces/opencode/symphony/SYM-68",
+    );
+    session.process_id = None;
+    session.lifecycle_stage = LifecycleStage::Canceled;
+    session.stage = OpenCodeStage::Failed;
+    session.lifecycle_marker = Some("retry_retired_provider_blocker".into());
+    session.last_event = Some("stale_provider_blocker_session_retired_for_todo_retry".into());
+    store
+        .upsert_opencode_session(session)
+        .await
+        .expect("session");
+
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "answered-dirty",
+        "SYM-68",
+        "Todo",
+        Some(1),
+    )]);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(4268);
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert!(opencode.launches().is_empty());
+    assert!(opencode.continuations().is_empty());
+    assert_eq!(
+        opencode.repairs(),
+        vec![("SYM-68".into(), "launch_failed".into())]
+    );
+    assert_eq!(
+        client.transitions(),
+        vec![("answered-dirty".into(), LinearTransition::InProgress)]
+    );
+
+    let session = store
+        .opencode_session("symphony", "answered-dirty", "ses-retired-provider")
+        .await
+        .expect("query recovered session")
+        .expect("recovered session");
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(session.stage, OpenCodeStage::Running);
+    assert_eq!(session.process_id, Some(4268));
+    assert_eq!(session.lifecycle_marker.as_deref(), Some("repair_prompted"));
+    assert_eq!(
+        session.last_event.as_deref(),
+        Some("repair_prompted:launch_failed")
+    );
 }
 
 #[tokio::test]

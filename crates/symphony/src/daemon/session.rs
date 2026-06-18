@@ -36,30 +36,6 @@ pub(super) async fn mark_historical_sessions_ignored(
     Ok(())
 }
 
-pub(super) async fn retire_parked_provider_blocker_sessions(
-    store: &SqliteStore,
-    project: &ProjectConfig,
-    issue: &LinearIssue,
-) -> anyhow::Result<()> {
-    for mut session in store
-        .opencode_sessions_for_issue(&project.id, &issue.id)
-        .await?
-    {
-        if session.last_event.as_deref() != Some("parked:provider_blocker") {
-            continue;
-        }
-        terminate_current_session_process(project, issue, &mut session).await?;
-        session.process_id = None;
-        session.lifecycle_stage = LifecycleStage::Canceled;
-        session.stage = OpenCodeStage::Failed;
-        session.lifecycle_marker = Some("retry_retired_provider_blocker".into());
-        session.last_event = Some("stale_provider_blocker_session_retired_for_todo_retry".into());
-        session.silence_observed = false;
-        store.upsert_opencode_session(&session).await?;
-    }
-    Ok(())
-}
-
 pub(super) async fn mark_existing_session_queued(
     store: &SqliteStore,
     project: &ProjectConfig,
@@ -323,17 +299,24 @@ pub(super) async fn has_reusable_existing_session(
 }
 
 fn reusable_session_record(session: &OpenCodeSessionRecord) -> bool {
-    matches!(
+    (matches!(
         session.lifecycle_stage,
         LifecycleStage::Running
             | LifecycleStage::Queued
             | LifecycleStage::Blocked
             | LifecycleStage::Failed
-    ) && !terminal_completed_stage(session)
+    ) || retired_provider_blocker_retry_session(session))
+        && !terminal_completed_stage(session)
 }
 
 fn terminal_completed_stage(session: &OpenCodeSessionRecord) -> bool {
     matches!(session.stage, OpenCodeStage::Completed)
+}
+
+fn retired_provider_blocker_retry_session(session: &OpenCodeSessionRecord) -> bool {
+    session.lifecycle_stage == LifecycleStage::Canceled
+        && session.stage == OpenCodeStage::Failed
+        && session.lifecycle_marker.as_deref() == Some("retry_retired_provider_blocker")
 }
 
 fn failed_or_completed_stage(session: &OpenCodeSessionRecord) -> bool {

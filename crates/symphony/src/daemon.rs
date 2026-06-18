@@ -51,8 +51,7 @@ use session::{
     has_reusable_existing_session, latest_running_session_for_issue, mark_existing_session_blocked,
     mark_existing_session_failed_for_unresolved_runtime_defect, mark_existing_session_queued,
     mark_existing_session_waiting_for_project_owner_input, mark_historical_sessions_ignored,
-    mark_issue_sessions_terminal, resume_stale_opencode_session,
-    retire_parked_provider_blocker_sessions, unresolved_runtime_defect,
+    mark_issue_sessions_terminal, resume_stale_opencode_session, unresolved_runtime_defect,
 };
 use task_selection::{
     DispatchSelection, TaskClass, compare_dispatch_selections, is_managed_self_defect_issue,
@@ -757,13 +756,17 @@ async fn reconcile_project(
                         issue = %issue.identifier,
                         "existing OpenCode session found; queued for capacity-gated resume"
                     );
-                    let record = issue_record(
+                    let mut record = issue_record(
                         project,
                         &issue,
                         LifecycleStage::Queued,
                         None,
                         CleanupStatus::Clean,
                     );
+                    if let Some(existing) = &existing {
+                        record.failure.clone_from(&existing.failure);
+                        record.git_ref.clone_from(&existing.git_ref);
+                    }
                     store.upsert_issue(&record).await?;
                     mark_existing_session_queued(store, project, &issue).await?;
                     eligible.push(DispatchCandidate::ExistingSession(issue));
@@ -878,13 +881,19 @@ async fn dispatch_candidate(
         .transition_issue(&issue.id, LinearTransition::InProgress)
         .await?;
     let launch_spec = build_acp_launch_spec(project, issue);
-    let record = issue_record(
+    let existing_record = store.issue(&project.id, &issue.id).await?;
+    let mut record = issue_record(
         project,
         issue,
         LifecycleStage::Running,
         None,
         CleanupStatus::Clean,
     );
+    if let Some(existing) = &existing_record {
+        record.failure.clone_from(&existing.failure);
+        record.git_ref.clone_from(&existing.git_ref);
+        record.cleanup_status = existing.cleanup_status;
+    }
     store.upsert_issue(&record).await?;
     match candidate {
         DispatchCandidate::New(issue) => {
@@ -1138,9 +1147,6 @@ async fn retain_typed_non_owner_blocker(
         && unaccepted_blocker(&issue.blocked_by).is_none()
         && retryable_todo_blocker_kind(&blocker.kind)
     {
-        if blocker.kind == "provider_blocker" {
-            retire_parked_provider_blocker_sessions(store, project, issue).await?;
-        }
         return Ok(false);
     }
 

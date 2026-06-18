@@ -27,6 +27,8 @@ pub(super) fn stable_fingerprint(input: &str) -> String {
 
 pub(super) fn recoverable_opencode_failure(failure: &FailureRecord) -> bool {
     failure.kind == "eval_failure"
+        || failure.kind == "provider_blocker"
+        || failure.fingerprint.as_deref() == Some("launch_failed")
         || failure.fingerprint.as_deref() == Some("git_closure_unverified")
 }
 

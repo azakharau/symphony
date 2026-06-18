@@ -34,7 +34,8 @@ use lifecycle::AcpChildLifecycle;
 pub use lifecycle::ProcessTreeTerminationEvidence;
 pub(crate) use lifecycle::terminate_process_tree;
 use prompt::{
-    build_issue_prompt, commit_policy_text, mnemesh_workspace_contract_text, validation_policy_text,
+    build_issue_prompt, commit_policy_text, mcp_tool_loop_guard_text,
+    mnemesh_workspace_contract_text, validation_policy_text,
 };
 pub use session_metrics::{
     apply_session_tree_metrics, apply_session_tree_metrics_preserving_marker, ingest_session_event,
@@ -501,6 +502,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
              Failure fingerprint: `{}`\n\n\
              Repair details:\n{}\n\n\
              Mnemesh evidence workspace contract:\n{}\n\n\
+             MCP tool-schema loop guard:\n{}\n\n\
              Validation policy:\n{}\n\n\
              Commit policy for successful handoff:\n{}\n\n\
              Continue the same implementation session. Do not start a new task. \
@@ -513,6 +515,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
                 spec.mnemesh_workspace_root.as_deref(),
                 spec.cwd.as_path()
             ),
+            mcp_tool_loop_guard_text(),
             validation_policy_text(),
             commit_policy_text()
         );
@@ -561,7 +564,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             command = %spec.command.display(),
             "continuing OpenCode ACP session"
         );
-        ensure_worktree(spec).await?;
+        ensure_resumable_worktree(spec).await?;
         remove_stale_handoff_sidecar(&spec.cwd).await?;
         let mut child = AcpChildLifecycle::spawn(spec).await?;
         let process_id = child.process_id();
@@ -592,6 +595,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
              Continue the same implementation session. Do not start a new task. \
              Do not repeat already completed work unless validation requires it.\n\n\
              Mnemesh evidence workspace contract:\n{}\n\n\
+             MCP tool-schema loop guard:\n{}\n\n\
              Validation policy:\n{}\n\n\
              Commit policy for successful handoff:\n{}\n\n{}",
             session.session_id,
@@ -599,6 +603,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
                 spec.mnemesh_workspace_root.as_deref(),
                 spec.cwd.as_path()
             ),
+            mcp_tool_loop_guard_text(),
             validation_policy_text(),
             commit_policy_text(),
             continuation_message

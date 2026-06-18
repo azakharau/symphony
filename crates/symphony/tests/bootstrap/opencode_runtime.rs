@@ -288,6 +288,18 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         "{}",
         spec.prompt
     );
+    assert!(
+        spec.prompt.contains("MCP tool-schema loop guard"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "After two failed calls to the same MCP method for schema/validation reasons, stop retrying that method in this session"
+        ),
+        "{}",
+        spec.prompt
+    );
     assert!(spec.prompt.contains("symphony-smoke"), "{}", spec.prompt);
     assert!(
         spec.prompt
@@ -734,6 +746,95 @@ async fn stdio_launcher_resumes_existing_session_without_replaying_prompt() {
     assert!(
         !transcript.contains("Original prompt must not be replayed"),
         "{transcript}"
+    );
+}
+
+#[tokio::test]
+async fn stdio_launcher_continues_existing_session_from_dirty_resumable_worktree() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transcript_path = dir.path().join("acp-transcript.jsonl");
+    let script_path = write_fake_acp_resume_script(dir.path(), &transcript_path);
+    let repo = dir.path().join("repo");
+    let worktree_root = dir.path().join("worktrees");
+    let worktree = worktree_root.join("SYM-203");
+    fs::create_dir_all(&repo).expect("repo dir");
+    run_git(&repo, ["init", "-b", "main"]);
+    fs::write(repo.join("README.md"), "base\n").expect("readme");
+    run_git(&repo, ["add", "README.md"]);
+    run_git(&repo, ["commit", "-m", "initial"]);
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "-b",
+            "feature/sym-203",
+            worktree.to_str().expect("worktree path utf8"),
+            "main",
+        ],
+    );
+    fs::write(worktree.join("in-flight.txt"), "uncommitted work\n").expect("dirty file");
+    let spec = opencode::OpenCodeLaunchSpec {
+        command: script_path,
+        args: Vec::new(),
+        cwd: worktree.clone(),
+        worktree_root: Some(worktree_root),
+        issue_identifier: "SYM-203".into(),
+        branch_name: "feature/sym-203".into(),
+        repo_path: Some(repo),
+        mnemesh_workspace_root: Some(dir.path().to_path_buf()),
+        base_ref: Some("main".into()),
+        agent: "build".into(),
+        model: Some("openai/gpt-5.5".into()),
+        effort: Some("high".into()),
+        prompt: "Original prompt must not be replayed on continue".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+    let mut session = test_session("symphony", "issue-203", "ses-existing", &worktree);
+    session.process_id = None;
+    let launcher = opencode::StdioOpenCodeLauncher;
+
+    let continued = launcher
+        .continue_session(&spec, &session, "continue after process restart")
+        .await
+        .expect("continue existing session from dirty worktree");
+
+    assert_eq!(continued.session_id, "ses-existing");
+    assert!(continued.process_id.is_some());
+    for _ in 0..50 {
+        if let Ok(transcript) = fs::read_to_string(&transcript_path)
+            && transcript.contains(r#""method": "session/prompt""#)
+        {
+            assert!(
+                transcript.contains(r#""method": "session/resume""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains("MCP tool-schema loop guard"),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(
+                    "After two failed calls to the same MCP method for schema/validation reasons"
+                ),
+                "{transcript}"
+            );
+            assert!(
+                !transcript.contains(r#""method": "session/new""#),
+                "{transcript}"
+            );
+            assert!(
+                !transcript.contains("Original prompt must not be replayed"),
+                "{transcript}"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    panic!(
+        "ACP continuation prompt was not observed; transcript={:?}",
+        fs::read_to_string(transcript_path)
     );
 }
 

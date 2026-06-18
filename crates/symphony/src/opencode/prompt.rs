@@ -24,6 +24,8 @@ pub(super) fn build_issue_prompt(
          URL: {url}\n\n\
          Mnemesh evidence workspace contract:\n\
          {mnemesh_workspace_contract}\n\n\
+         MCP tool-schema loop guard:\n\
+         {mcp_tool_loop_guard}\n\n\
          Validation policy:\n\
          {validation_policy}\n\n\
          Triage and owner-input boundary:\n\
@@ -76,6 +78,7 @@ pub(super) fn build_issue_prompt(
             &project.branch.worktree_root.join(&issue.identifier),
         ),
         validation_policy = validation_policy_text(),
+        mcp_tool_loop_guard = mcp_tool_loop_guard_text(),
         triage_policy = triage_policy_text(),
         commit_policy = commit_policy_text(),
     )
@@ -109,6 +112,14 @@ pub(super) const fn validation_policy_text() -> &'static str {
      - For docs-only/no-code changes, run documentation/file-level validation such as git diff --check and reference checks; do not run cargo nextest --workspace, full workspace tests, or release gates unless the issue explicitly requires them.\n\
      - For Rust source changes, prefer the narrowest package/filter/profile that covers the changed behavior before escalating to workspace-level checks.\n\
      - If a broader check is intentionally skipped, record the reason in eval_results.details and risks."
+}
+
+pub(super) const fn mcp_tool_loop_guard_text() -> &'static str {
+    "- Treat MCP tool schema, validation, or version conflicts as bounded infrastructure feedback, not as an invitation to keep guessing payload shapes.\n\
+     - After two failed calls to the same MCP method for schema/validation reasons, stop retrying that method in this session.\n\
+     - If the failed MCP call is required for the issue's acceptance or durable evidence policy, write a provider_blocker handoff sidecar with the exact method name and error text.\n\
+     - If the failed MCP call is only optional planning/artifact decoration and the issue has enough git, validation, and handoff evidence, skip that optional MCP call, record the skipped method and errors in risks, and continue to closure.\n\
+     - Never spend additional turns reverse-engineering MCP payloads after the bounded retry limit; use the handoff sidecar to make the blocker explicit."
 }
 
 pub(super) const fn triage_policy_text() -> &'static str {

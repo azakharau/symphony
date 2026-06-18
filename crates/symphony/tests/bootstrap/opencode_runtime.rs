@@ -300,6 +300,26 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         "{}",
         spec.prompt
     );
+    assert!(
+        spec.prompt
+            .contains("Delegated review/evaluator subagent contract"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "Delegated reviewer/evaluator subagents are read-only unless the issue spec explicitly says otherwise"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "Do not ask delegated reviewer/evaluator subagents to call Mnemesh mutation tools"
+        ),
+        "{}",
+        spec.prompt
+    );
     assert!(spec.prompt.contains("symphony-smoke"), "{}", spec.prompt);
     assert!(
         spec.prompt
@@ -816,6 +836,16 @@ async fn stdio_launcher_continues_existing_session_from_dirty_resumable_worktree
             assert!(
                 transcript.contains(
                     "After two failed calls to the same MCP method for schema/validation reasons"
+                ),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains("Delegated review/evaluator subagent contract"),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(
+                    "Delegated reviewer/evaluator subagents are read-only unless the issue spec explicitly says otherwise"
                 ),
                 "{transcript}"
             );

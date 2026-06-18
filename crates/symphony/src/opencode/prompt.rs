@@ -26,6 +26,8 @@ pub(super) fn build_issue_prompt(
          {mnemesh_workspace_contract}\n\n\
          MCP tool-schema loop guard:\n\
          {mcp_tool_loop_guard}\n\n\
+         Delegated review/evaluator subagent contract:\n\
+         {delegated_subagent_contract}\n\n\
          Validation policy:\n\
          {validation_policy}\n\n\
          Triage and owner-input boundary:\n\
@@ -79,6 +81,7 @@ pub(super) fn build_issue_prompt(
         ),
         validation_policy = validation_policy_text(),
         mcp_tool_loop_guard = mcp_tool_loop_guard_text(),
+        delegated_subagent_contract = delegated_subagent_contract_text(),
         triage_policy = triage_policy_text(),
         commit_policy = commit_policy_text(),
     )
@@ -120,6 +123,14 @@ pub(super) const fn mcp_tool_loop_guard_text() -> &'static str {
      - If the failed MCP call is required for the issue's acceptance or durable evidence policy, write a provider_blocker handoff sidecar with the exact method name and error text.\n\
      - If the failed MCP call is only optional planning/artifact decoration and the issue has enough git, validation, and handoff evidence, skip that optional MCP call, record the skipped method and errors in risks, and continue to closure.\n\
      - Never spend additional turns reverse-engineering MCP payloads after the bounded retry limit; use the handoff sidecar to make the blocker explicit."
+}
+
+pub(super) const fn delegated_subagent_contract_text() -> &'static str {
+    "- Delegated reviewer/evaluator subagents are read-only unless the issue spec explicitly says otherwise.\n\
+     - Do not ask delegated reviewer/evaluator subagents to call Mnemesh mutation tools such as record_artifact, attach_evidence, record_verification, or create_task.\n\
+     - Delegated reviewer/evaluator subagents should inspect files/tests/evidence and return a concise structured verdict to the parent OpenCode session.\n\
+     - The parent OpenCode session owns any required Mnemesh writeback after reading the subagent verdict.\n\
+     - If a delegated subagent already failed an MCP mutation because of schema/version errors, do not retry that mutation from another delegated subagent; continue with a text verdict and parent-owned writeback."
 }
 
 pub(super) const fn triage_policy_text() -> &'static str {

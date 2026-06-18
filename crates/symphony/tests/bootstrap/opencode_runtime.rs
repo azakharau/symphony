@@ -276,7 +276,33 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
     );
     assert!(
         spec.prompt.contains(
-            "`mcp__mnemesh__create_task.worktree` payload: `repo_root` must be `/home/agent/proj/symphony`, `worktree_path` must be `/home/agent/proj/symphony`"
+            "Required `mcp__mnemesh__create_task` payload shape is exactly `objective`, `playbook`, `requested_by`, and `worktree` at top level"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains("Do not send top-level `session_id`, `project`, `workspace`, `repo_root`, `worktree_path`, `actor_id`, `actor_type`, `label`, or `role`"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "`mcp__mnemesh__create_task.requested_by` payload: include `actor_id`, `actor_type`, `label`, and `role`"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "\"requested_by\":{\"actor_id\":\"symphony-opencode\",\"actor_type\":\"agent\",\"label\":\"Symphony OpenCode\",\"role\":\"implementation-runner\"}"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "\"worktree\":{\"repo_root\":\"/home/agent/proj/symphony\",\"worktree_path\":\"/home/agent/proj/symphony\""
         ),
         "{}",
         spec.prompt

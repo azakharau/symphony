@@ -100,8 +100,12 @@ pub(super) fn mnemesh_workspace_contract_text(
         "- Use `{workspace_root}` as the durable project evidence workspace for all Mnemesh MCP calls, observations, claims, evidence, verification, and handoff records.\n\
          - The Mnemesh workspace belongs to the canonical project root, not the isolated issue worktree.\n\
          - Do not create or register a separate Mnemesh workspace for the isolated worktree `{isolated_worktree}`.\n\
+         - Required `mcp__mnemesh__create_task` payload shape is exactly `objective`, `playbook`, `requested_by`, and `worktree` at top level. Do not send top-level `session_id`, `project`, `workspace`, `repo_root`, `worktree_path`, `actor_id`, `actor_type`, `label`, or `role`.\n\
+         - Use `playbook: \"coding\"` for implementation tasks, `\"investigation\"` for RCA/audit tasks, and `\"planning\"` only for explicit planning specs.\n\
+         - Required `mcp__mnemesh__create_task.requested_by` payload: include `actor_id`, `actor_type`, `label`, and `role`, for example `{{\"actor_id\":\"symphony-opencode\",\"actor_type\":\"agent\",\"label\":\"Symphony OpenCode\",\"role\":\"implementation-runner\"}}`.\n\
          - Required `mcp__mnemesh__create_task.worktree` payload: `repo_root` must be `{workspace_root}`, `worktree_path` must be `{workspace_root}`, and `head` must describe the current git HEAD of `{workspace_root}` using only `reference` and `commit` fields.\n\
          - Never set `mcp__mnemesh__create_task.worktree.worktree_path` to `{isolated_worktree}`. Mention the isolated implementation worktree only in free-text objective or workstream label when useful.\n\
+         - Minimal valid `mcp__mnemesh__create_task` example: `{{\"objective\":\"<issue identifier and objective>\",\"playbook\":\"coding\",\"requested_by\":{{\"actor_id\":\"symphony-opencode\",\"actor_type\":\"agent\",\"label\":\"Symphony OpenCode\",\"role\":\"implementation-runner\"}},\"worktree\":{{\"repo_root\":\"{workspace_root}\",\"worktree_path\":\"{workspace_root}\",\"head\":{{\"reference\":\"<current branch ref>\",\"commit\":\"<current commit sha>\"}}}}}}`.\n\
          - If `{workspace_root}` is missing or unavailable, stop with provider_blocker and explain the workspace failure; do not continue with degraded local evidence."
     )
 }

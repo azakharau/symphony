@@ -238,11 +238,12 @@ async fn reconcile_project(
                         .mark_self_defect_managed_issue_resolved(&issue.id, resolution)
                         .await?;
                 }
+                let terminal_lifecycle_stage = lifecycle_stage_for_terminal_linear_state(state);
                 let existing = store.issue(&project.id, &issue.id).await?;
                 let mut record = issue_record(
                     project,
                     &issue,
-                    LifecycleStage::Completed,
+                    terminal_lifecycle_stage,
                     None,
                     CleanupStatus::Pending,
                 );
@@ -260,7 +261,9 @@ async fn reconcile_project(
                 if issue_changed {
                     store.upsert_issue(&record).await?;
                 }
-                let sessions_changed = mark_issue_sessions_terminal(store, project, &issue).await?;
+                let sessions_changed =
+                    mark_issue_sessions_terminal(store, project, &issue, terminal_lifecycle_stage)
+                        .await?;
                 if issue_changed || sessions_changed {
                     info!(
                         project_id = %project.id,
@@ -922,6 +925,21 @@ async fn retain_typed_non_owner_blocker(
         && issue.state == "Todo"
         && unaccepted_blocker(&issue.blocked_by).is_none()
     {
+        if let Some(managed_blocker) =
+            open_managed_runtime_defect_blocker(store, issue, existing).await?
+        {
+            let mut record = issue_record(
+                project,
+                issue,
+                LifecycleStage::Failed,
+                Some(managed_blocker),
+                CleanupStatus::Clean,
+            );
+            record.failure.clone_from(&existing.failure);
+            record.git_ref.clone_from(&existing.git_ref);
+            store.upsert_issue(&record).await?;
+            return Ok(true);
+        }
         return Ok(false);
     }
 
@@ -941,6 +959,31 @@ async fn retain_typed_non_owner_blocker(
     record.git_ref.clone_from(&existing.git_ref);
     store.upsert_issue(&record).await?;
     Ok(true)
+}
+
+async fn open_managed_runtime_defect_blocker(
+    store: &SqliteStore,
+    issue: &LinearIssue,
+    existing: &crate::state::IssueStateRecord,
+) -> anyhow::Result<Option<BlockerRecord>> {
+    let Some(failure) = existing.failure.as_ref() else {
+        return Ok(None);
+    };
+    let fingerprint = failure
+        .fingerprint
+        .as_deref()
+        .unwrap_or(failure.kind.as_str());
+    let Some(managed) = store.open_self_defect_by_fingerprint(fingerprint).await? else {
+        return Ok(None);
+    };
+    Ok(Some(BlockerRecord {
+        kind: "runtime_defect".into(),
+        message: format!(
+            "unresolved runtime defect: {fingerprint} (managed by {})",
+            managed.managed_issue_identifier
+        ),
+        observed_at: issue.updated_at.clone(),
+    }))
 }
 
 fn is_typed_non_owner_blocker_kind(kind: &str) -> bool {
@@ -1218,6 +1261,13 @@ fn self_defect_resolution_for_linear_state(state: &str) -> Option<SelfDefectReso
         "Done" => Some(SelfDefectResolutionState::Done),
         "Canceled" => Some(SelfDefectResolutionState::Canceled),
         _ => None,
+    }
+}
+
+fn lifecycle_stage_for_terminal_linear_state(state: &str) -> LifecycleStage {
+    match state {
+        "Canceled" => LifecycleStage::Canceled,
+        _ => LifecycleStage::Completed,
     }
 }
 

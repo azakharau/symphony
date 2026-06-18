@@ -1111,6 +1111,83 @@ async fn terminal_reconciliation_marks_cleanup_complete_when_worktree_is_already
 }
 
 #[tokio::test]
+async fn terminal_reconciliation_terminates_live_opencode_process_tree() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let missing_worktree = dir.path().join("already-removed").join("SYM-69");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let mut active = test_issue("symphony", "closed-live", "SYM-69");
+    active.lifecycle_stage = LifecycleStage::Running;
+    active.cleanup_status = CleanupStatus::Pending;
+    active.git_ref = Some(GitRefRecord {
+        branch: "feature/sym-69".into(),
+        worktree_path: missing_worktree.display().to_string(),
+        head_sha: None,
+        pr_url: None,
+    });
+    store.upsert_issue(active).await.expect("active issue");
+    let mut active_process = Command::new("bash")
+        .arg("-c")
+        .arg("exec -a opencode sleep 120")
+        .spawn()
+        .expect("spawn active opencode-shaped process");
+    thread::sleep(Duration::from_millis(100));
+    let process_id = active_process.id();
+    let mut live_session = test_session("symphony", "closed-live", "oc-69", &missing_worktree);
+    live_session.process_id = Some(process_id);
+    live_session.lifecycle_stage = LifecycleStage::Running;
+    live_session.stage = OpenCodeStage::Running;
+    store
+        .upsert_opencode_session(live_session)
+        .await
+        .expect("live session");
+
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "closed-live",
+        "SYM-69",
+        "Canceled",
+        Some(1),
+    )]);
+
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("terminal reconciliation");
+
+    assert_eq!(report.terminal_reconciled, vec!["SYM-69"]);
+    let _ = active_process.wait();
+    assert!(
+        !process_exists(process_id),
+        "terminal reconciliation must stop the live opencode process"
+    );
+    let closed = store
+        .issue("symphony", "closed-live")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    assert_eq!(closed.lifecycle_stage, LifecycleStage::Canceled);
+    let session = store
+        .opencode_session("symphony", "closed-live", "oc-69")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Canceled);
+    assert_eq!(session.stage, OpenCodeStage::Completed);
+    assert_eq!(session.process_id, None);
+    assert!(
+        session
+            .last_event
+            .as_deref()
+            .expect("last event")
+            .starts_with("linear_terminal_reconciled:stale_killed:"),
+        "last_event={:?}",
+        session.last_event
+    );
+}
+
+#[tokio::test]
 async fn terminal_reconciliation_skips_unchanged_issue_and_session_rows() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
@@ -2001,6 +2078,86 @@ async fn orchestration_releases_runtime_defect_after_linear_blocker_is_done() {
 }
 
 #[tokio::test]
+async fn orchestration_retains_runtime_defect_while_managed_self_defect_is_open() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let worktree = dir.path().join("SYM-208-worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let mut issue = test_issue("symphony", "runtime-held", "SYM-208");
+    issue.lifecycle_stage = LifecycleStage::Failed;
+    issue.blocker = Some(BlockerRecord {
+        kind: "runtime_defect".into(),
+        message: "OpenCode launch failed after Linear transition".into(),
+        observed_at: None,
+    });
+    issue.failure = Some(FailureRecord {
+        kind: "runtime_defect".into(),
+        message: "OpenCode launch failed after Linear transition".into(),
+        fingerprint: Some("launch_failed".into()),
+        occurrence_count: 1,
+    });
+    store.upsert_issue(issue).await.expect("issue");
+    let mut failed = test_session("symphony", "runtime-held", "ses-failed", &worktree);
+    failed.lifecycle_stage = LifecycleStage::Failed;
+    failed.stage = OpenCodeStage::Failed;
+    failed.lifecycle_marker = Some("failed:launch_failed".into());
+    failed.last_event = Some("failed:launch_failed".into());
+    store
+        .upsert_opencode_session(failed)
+        .await
+        .expect("failed session");
+    store
+        .record_self_defect_occurrence(&SelfDefectOccurrenceRecord {
+            fingerprint: "launch_failed".into(),
+            defect_kind: "runtime_defect".into(),
+            category: "runtime".into(),
+            severity: "p0".into(),
+            initial_routing_decision: "managed_self_defect".into(),
+            source_project_id: "symphony".into(),
+            source_issue_id: "runtime-held".into(),
+            source_issue_identifier: "SYM-208".into(),
+            source_session_id: Some("ses-failed".into()),
+            source_process_id: None,
+            managed_issue_id: "managed-launch-failed".into(),
+            managed_issue_identifier: "SYM-62".into(),
+            latest_evidence_summary: "launch failure still open".into(),
+            relation_mode: SelfDefectRelationMode::Blocking,
+        })
+        .await
+        .expect("self defect");
+
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "runtime-held",
+        "SYM-208",
+        "Todo",
+        Some(1),
+    )]);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(6208);
+
+    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("poll");
+
+    assert_eq!(report.blocked, vec!["SYM-208"]);
+    assert!(client.transitions().is_empty());
+    assert!(opencode.launches().is_empty());
+    let record = store
+        .issue("symphony", "runtime-held")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    assert_eq!(record.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(
+        record.blocker.expect("blocker").message,
+        "unresolved runtime defect: launch_failed (managed by SYM-62)"
+    );
+}
+
+#[tokio::test]
 async fn orchestration_dispatches_managed_self_defect_without_milestone() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
@@ -2078,4 +2235,8 @@ async fn orchestration_blocker_does_not_reactivate_failed_session() {
         session.lifecycle_marker.as_deref(),
         Some("failed:launch_failed")
     );
+}
+
+fn process_exists(process_id: u32) -> bool {
+    Path::new(&format!("/proc/{process_id}")).exists()
 }

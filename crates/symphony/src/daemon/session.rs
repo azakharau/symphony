@@ -156,6 +156,7 @@ pub(super) async fn mark_issue_sessions_terminal(
     store: &SqliteStore,
     project: &ProjectConfig,
     issue: &LinearIssue,
+    lifecycle_stage: LifecycleStage,
 ) -> anyhow::Result<bool> {
     let mut changed = false;
     for mut session in store
@@ -166,21 +167,44 @@ pub(super) async fn mark_issue_sessions_terminal(
             && session.lifecycle_stage == LifecycleStage::Completed
             && session.stage == OpenCodeStage::Completed
             && session.lifecycle_marker.as_deref() == Some("linear_terminal_reconciled")
-            && session.last_event.as_deref() == Some("linear_terminal_reconciled")
+            && terminal_reconciliation_event_is_stable(session.last_event.as_deref())
             && !session.silence_observed
         {
             continue;
         }
+        let previous_process_id = session.process_id;
+        terminate_current_session_process(project, issue, &mut session).await?;
+        let terminal_event =
+            terminal_reconciliation_event(previous_process_id, session.last_event.as_deref());
         session.process_id = None;
-        session.lifecycle_stage = LifecycleStage::Completed;
+        session.lifecycle_stage = lifecycle_stage;
         session.stage = OpenCodeStage::Completed;
         session.lifecycle_marker = Some("linear_terminal_reconciled".into());
-        session.last_event = Some("linear_terminal_reconciled".into());
+        session.last_event = Some(terminal_event);
         session.silence_observed = false;
         store.upsert_opencode_session(&session).await?;
         changed = true;
     }
     Ok(changed)
+}
+
+fn terminal_reconciliation_event(
+    previous_process_id: Option<u32>,
+    last_event: Option<&str>,
+) -> String {
+    match (previous_process_id, last_event) {
+        (Some(_), Some(event)) if event.starts_with("stale_killed:") => {
+            format!("linear_terminal_reconciled:{event}")
+        }
+        _ => "linear_terminal_reconciled".into(),
+    }
+}
+
+fn terminal_reconciliation_event_is_stable(last_event: Option<&str>) -> bool {
+    last_event.is_some_and(|event| {
+        event == "linear_terminal_reconciled"
+            || event.starts_with("linear_terminal_reconciled:stale_killed:")
+    })
 }
 
 pub(super) async fn mark_existing_session_reactivated(

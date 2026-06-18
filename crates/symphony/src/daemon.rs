@@ -38,6 +38,7 @@ use policy::{
     unaccepted_blocker,
 };
 use records::issue_record;
+use self_defects::{RuntimeSelfDefectInput, record_runtime_self_defect};
 use session::{
     has_reusable_existing_session, latest_running_session_for_issue, mark_existing_session_blocked,
     mark_existing_session_failed_for_unresolved_runtime_defect, mark_existing_session_queued,
@@ -973,12 +974,59 @@ async fn handle_launch_failure(
         }),
         CleanupStatus::Clean,
     );
-    record.failure = Some(failure);
+    record.failure = Some(failure.clone());
     store.upsert_issue(&record).await?;
-    if let Some(session) = setup_failure_session(project, issue, launch_spec, &error) {
+    let session = launch_failure_session(project, issue, launch_spec, &error);
+    record_runtime_self_defect(
+        project,
+        store,
+        linear,
+        RuntimeSelfDefectInput {
+            issue,
+            evidence_kind: "runtime_defect",
+            message: "OpenCode launch failed after Linear transition",
+            failure: &failure,
+            session: &session,
+        },
+    )
+    .await?;
+    if matches!(error, crate::opencode::OpenCodeError::AcpSetupFailed { .. }) {
         store.upsert_opencode_session(&session).await?;
     }
     Ok(())
+}
+
+fn launch_failure_session(
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+    launch_spec: &crate::opencode::OpenCodeLaunchSpec,
+    error: &crate::opencode::OpenCodeError,
+) -> OpenCodeSessionRecord {
+    setup_failure_session(project, issue, launch_spec, error).unwrap_or_else(|| {
+        OpenCodeSessionRecord {
+            project_id: project.id.clone(),
+            issue_id: issue.id.clone(),
+            session_id: format!("launch-failed:{}", issue.identifier),
+            agent: project.opencode.agent.clone(),
+            model: project.opencode.model.clone(),
+            worktree_path: launch_spec.cwd.display().to_string(),
+            process_id: None,
+            lifecycle_stage: LifecycleStage::Failed,
+            stage: OpenCodeStage::Failed,
+            active_agent: Some(project.opencode.agent.clone()),
+            active_model: project.opencode.model.clone(),
+            message_count: 0,
+            todo_count: 0,
+            part_count: 0,
+            token_count: 0,
+            cost_micros: 0,
+            subagent_count: 0,
+            eval_stage: None,
+            lifecycle_marker: Some("launch_failed".into()),
+            last_event: Some("launch_failed".into()),
+            silence_observed: false,
+        }
+    })
 }
 
 fn setup_failure_session(

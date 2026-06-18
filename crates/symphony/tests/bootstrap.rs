@@ -685,6 +685,10 @@ impl RecordingLinearClient {
             .expect("managed issues lock")
             .clone()
     }
+
+    fn relations(&self) -> Vec<(String, String, ManagedLinearRelation)> {
+        self.relations.lock().expect("relations lock").clone()
+    }
 }
 
 fn assert_todo_transition(transitions: &[(String, LinearTransition)], issue_id: &str) {

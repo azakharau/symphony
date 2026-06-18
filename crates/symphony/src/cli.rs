@@ -41,7 +41,7 @@ enum Command {
         source_issue: String,
         #[arg(long)]
         session_id: String,
-        #[arg(long)]
+        #[arg(long, default_value = "live_acceptance_related_only")]
         fingerprint: String,
         #[arg(long)]
         message: String,

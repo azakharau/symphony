@@ -263,6 +263,7 @@ impl ManagedSelfDefectPolicy {
             "stale_failed_session_reuse"
             | "runtime_db_linear_divergence"
             | "cleanup_failed_after_accepted_closure" => Self::p1(failure_kind_category(failure)),
+            "live_acceptance_related_only" => Self::p2(failure_kind_category(failure)),
             "dashboard_projection_gap_hides_live_execution" => {
                 Self::p2(failure_kind_category(failure))
             }
@@ -822,6 +823,13 @@ mod tests {
                 "p1",
                 ManagedLinearIssueState::Backlog,
                 2,
+            ),
+            (
+                "live_acceptance_related_only",
+                "runtime_defect",
+                "p2",
+                ManagedLinearIssueState::Backlog,
+                3,
             ),
             (
                 "dashboard_projection_gap_hides_live_execution",

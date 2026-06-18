@@ -9,6 +9,8 @@ use crate::{
 
 use super::self_defects::{RuntimeSelfDefectInput, record_runtime_self_defect};
 
+const LIVE_ACCEPTANCE_SELF_DEFECT_FINGERPRINT: &str = "live_acceptance_related_only";
+
 pub(super) struct AcceptanceSelfDefectInput<'a> {
     pub source_project_id: &'a str,
     pub source_issue_identifier: &'a str,
@@ -24,6 +26,11 @@ pub(super) async fn record_acceptance_self_defect_with_linear_client(
     linear: &impl LinearClient,
     input: AcceptanceSelfDefectInput<'_>,
 ) -> anyhow::Result<SelfDefectRecord> {
+    anyhow::ensure!(
+        input.fingerprint == LIVE_ACCEPTANCE_SELF_DEFECT_FINGERPRINT,
+        "acceptance self-defect fingerprint must be `{}`",
+        LIVE_ACCEPTANCE_SELF_DEFECT_FINGERPRINT
+    );
     let project = config.project(input.source_project_id).ok_or_else(|| {
         anyhow::anyhow!(
             "source project `{}` is not configured",
@@ -50,9 +57,9 @@ pub(super) async fn record_acceptance_self_defect_with_linear_client(
         })?;
 
     let failure = FailureRecord {
-        kind: "malformed_handoff".into(),
+        kind: "runtime_defect".into(),
         message: input.message.into(),
-        fingerprint: Some(input.fingerprint.into()),
+        fingerprint: Some(LIVE_ACCEPTANCE_SELF_DEFECT_FINGERPRINT.into()),
         occurrence_count: 1,
     };
     let session = acceptance_session_record(project, &issue, input.session_id, input.process_id);
@@ -137,7 +144,7 @@ mod tests {
                 source_project_id: "symphony",
                 source_issue_identifier: "SYM-59",
                 session_id: "live-acceptance-session",
-                fingerprint: "malformed_handoff_sidecar",
+                fingerprint: "live_acceptance_related_only",
                 message: "controlled live acceptance occurrence",
                 process_id: Some(1234),
             },
@@ -167,7 +174,13 @@ mod tests {
         let evidence = linear.evidence();
         assert_eq!(evidence.len(), 1);
         assert_eq!(evidence[0].0, "managed-issue");
-        assert!(evidence[0].1.body.contains("kind: malformed_handoff"));
+        assert!(evidence[0].1.body.contains("kind: runtime_defect"));
+        assert!(
+            evidence[0]
+                .1
+                .body
+                .contains("fingerprint: live_acceptance_related_only")
+        );
         assert!(evidence[0].1.body.contains("source_issue: source-issue"));
         assert!(
             evidence[0]
@@ -181,6 +194,41 @@ mod tests {
                 .body
                 .contains("skipped_blocker_reason: active_symphony_self_deadlock_prevention")
         );
+    }
+
+    #[tokio::test]
+    async fn acceptance_self_defect_rejects_normal_malformed_handoff_fingerprint() {
+        let store = test_store().await;
+        let config = RootConfig::from_toml_str(test_config_toml()).expect("config");
+        store.reconcile_projects(&config).await.expect("projects");
+        let source = linear_issue_with_state("source-issue", "SYM-59", "In Progress");
+        let managed = linear_issue("managed-issue", "SYM-60");
+        let linear = RecordingLinearClient::new(managed, vec![source]);
+
+        let error = record_acceptance_self_defect_with_linear_client(
+            &config,
+            &store,
+            &linear,
+            AcceptanceSelfDefectInput {
+                source_project_id: "symphony",
+                source_issue_identifier: "SYM-59",
+                session_id: "live-acceptance-session",
+                fingerprint: "malformed_handoff_sidecar",
+                message: "controlled live acceptance occurrence",
+                process_id: None,
+            },
+        )
+        .await
+        .expect_err("reserved runtime fingerprint must be rejected");
+
+        assert!(
+            error.to_string().contains(
+                "acceptance self-defect fingerprint must be `live_acceptance_related_only`"
+            )
+        );
+        assert!(linear.relations().is_empty());
+        assert!(linear.evidence().is_empty());
+        assert!(linear.transitions().is_empty());
     }
 
     struct RecordingLinearClient {

@@ -121,9 +121,11 @@ pub async fn run_once_with_clients(
     store.reconcile_projects(config).await?;
 
     let mut report = OrchestrationReport::default();
+    let self_defect_project = config.project("symphony");
     for project in config.projects().iter().filter(|project| project.enabled) {
         if let Err(error) = reconcile_project(
             project,
+            self_defect_project.unwrap_or(project),
             config.opencode_storage.as_ref(),
             store,
             linear,
@@ -176,6 +178,7 @@ async fn record_project_orchestration_error(
 
 async fn reconcile_project(
     project: &ProjectConfig,
+    self_defect_project: &ProjectConfig,
     opencode_storage: Option<&OpenCodeStorageConfig>,
     store: &SqliteStore,
     linear: &impl LinearClient,
@@ -425,6 +428,7 @@ async fn reconcile_project(
                 }
                 if process_in_progress_handoff(
                     project,
+                    self_defect_project,
                     opencode_storage,
                     store,
                     linear,
@@ -706,8 +710,16 @@ async fn reconcile_project(
                         report.dispatched.push(issue.identifier);
                     }
                     Err(error) => {
-                        handle_launch_failure(project, store, linear, &issue, &launch_spec, error)
-                            .await?;
+                        handle_launch_failure(
+                            project,
+                            self_defect_project,
+                            store,
+                            linear,
+                            &issue,
+                            &launch_spec,
+                            error,
+                        )
+                        .await?;
                     }
                 }
             }
@@ -931,6 +943,7 @@ fn is_typed_non_owner_blocker_kind(kind: &str) -> bool {
 
 async fn handle_launch_failure(
     project: &ProjectConfig,
+    self_defect_project: &ProjectConfig,
     store: &SqliteStore,
     linear: &impl LinearClient,
     issue: &LinearIssue,
@@ -979,6 +992,7 @@ async fn handle_launch_failure(
     let session = launch_failure_session(project, issue, launch_spec, &error);
     record_runtime_self_defect(
         project,
+        self_defect_project,
         store,
         linear,
         RuntimeSelfDefectInput {

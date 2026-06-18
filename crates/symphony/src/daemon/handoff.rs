@@ -35,8 +35,13 @@ use super::{
 const OPENCODE_DB_ACTIVE_FRESHNESS_MS: u64 = 10 * 60 * 1000;
 const PLAUSIBLE_EPOCH_MS: u64 = 1_600_000_000_000;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "in-progress handoff reconciliation needs project routing, adapters, issue, and current runtime record"
+)]
 pub(super) async fn process_in_progress_handoff(
     project: &ProjectConfig,
+    self_defect_project: &ProjectConfig,
     opencode_storage: Option<&OpenCodeStorageConfig>,
     store: &SqliteStore,
     linear: &impl LinearClient,
@@ -84,6 +89,7 @@ pub(super) async fn process_in_progress_handoff(
             );
             fail_runtime_defect(
                 project,
+                self_defect_project,
                 store,
                 linear,
                 issue,
@@ -110,6 +116,7 @@ pub(super) async fn process_in_progress_handoff(
             );
             fail_runtime_defect(
                 project,
+                self_defect_project,
                 store,
                 linear,
                 issue,
@@ -146,6 +153,7 @@ pub(super) async fn process_in_progress_handoff(
         );
         request_opencode_repair(
             project,
+            self_defect_project,
             store,
             opencode,
             linear,
@@ -173,6 +181,7 @@ pub(super) async fn process_in_progress_handoff(
             close_successful_handoff(
                 SuccessfulHandoffContext {
                     project,
+                    self_defect_project,
                     store,
                     linear,
                     issue,
@@ -365,6 +374,7 @@ mod tests {
 
 struct SuccessfulHandoffContext<'a, L: LinearClient> {
     project: &'a ProjectConfig,
+    self_defect_project: &'a ProjectConfig,
     store: &'a SqliteStore,
     linear: &'a L,
     issue: &'a LinearIssue,
@@ -377,6 +387,7 @@ async fn close_successful_handoff<L: LinearClient>(
 ) -> anyhow::Result<()> {
     let SuccessfulHandoffContext {
         project,
+        self_defect_project,
         store,
         linear,
         issue,
@@ -393,6 +404,7 @@ async fn close_successful_handoff<L: LinearClient>(
         );
         fail_runtime_defect(
             project,
+            self_defect_project,
             store,
             linear,
             issue,
@@ -419,6 +431,7 @@ async fn close_successful_handoff<L: LinearClient>(
         );
         fail_runtime_defect(
             project,
+            self_defect_project,
             store,
             linear,
             issue,
@@ -445,6 +458,7 @@ async fn close_successful_handoff<L: LinearClient>(
         );
         fail_runtime_defect(
             project,
+            self_defect_project,
             store,
             linear,
             issue,
@@ -476,6 +490,7 @@ async fn close_successful_handoff<L: LinearClient>(
                 );
                 fail_runtime_defect(
                     project,
+                    self_defect_project,
                     store,
                     linear,
                     issue,
@@ -533,6 +548,7 @@ async fn close_successful_handoff<L: LinearClient>(
             };
             record_runtime_self_defect(
                 project,
+                self_defect_project,
                 store,
                 linear,
                 RuntimeSelfDefectInput {
@@ -682,6 +698,7 @@ async fn handle_eval_failure(
 )]
 async fn request_opencode_repair(
     project: &ProjectConfig,
+    self_defect_project: &ProjectConfig,
     store: &SqliteStore,
     opencode: &impl OpenCodeLauncher,
     linear: &impl LinearClient,
@@ -706,6 +723,7 @@ async fn request_opencode_repair(
     if occurrence_count >= project.eval.max_identical_failure_fingerprints.max(1) {
         fail_runtime_defect(
             project,
+            self_defect_project,
             store,
             linear,
             issue,
@@ -755,6 +773,7 @@ async fn request_opencode_repair(
         Err(error) => {
             fail_runtime_defect(
                 project,
+                self_defect_project,
                 store,
                 linear,
                 issue,
@@ -799,6 +818,7 @@ async fn request_opencode_repair(
 )]
 async fn fail_runtime_defect(
     project: &ProjectConfig,
+    self_defect_project: &ProjectConfig,
     store: &SqliteStore,
     linear: &impl LinearClient,
     issue: &LinearIssue,
@@ -829,6 +849,7 @@ async fn fail_runtime_defect(
         .await?;
     let registry_record = record_runtime_self_defect(
         project,
+        self_defect_project,
         store,
         linear,
         RuntimeSelfDefectInput {

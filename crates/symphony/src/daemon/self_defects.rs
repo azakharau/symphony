@@ -13,6 +13,7 @@ use crate::{
 
 pub(super) async fn record_runtime_self_defect(
     project: &ProjectConfig,
+    managed_project: &ProjectConfig,
     store: &SqliteStore,
     linear: &impl LinearClient,
     input: RuntimeSelfDefectInput<'_>,
@@ -49,12 +50,15 @@ pub(super) async fn record_runtime_self_defect(
             created_at: None,
             updated_at: None,
         },
-        None => match linear.find_managed_issue(project, fingerprint).await? {
+        None => match linear
+            .find_managed_issue(managed_project, fingerprint)
+            .await?
+        {
             Some(issue) => issue,
             None => {
                 linear
                     .create_managed_issue(
-                        project,
+                        managed_project,
                         ManagedLinearIssueCreate {
                             source_issue_id: issue.id.clone(),
                             fingerprint: fingerprint.to_string(),
@@ -62,10 +66,11 @@ pub(super) async fn record_runtime_self_defect(
                             description: summary.clone(),
                             priority: policy.priority,
                             state: policy.state,
-                            project_milestone_id: issue
-                                .project_milestone
-                                .as_ref()
-                                .map(|milestone| milestone.id.clone()),
+                            project_milestone_id: managed_issue_milestone_id(
+                                project,
+                                managed_project,
+                                issue,
+                            ),
                             label_ids: Vec::new(),
                         },
                     )
@@ -74,10 +79,14 @@ pub(super) async fn record_runtime_self_defect(
         },
     };
 
-    let (relation_mode, linear_relation) = self_defect_relation(&issue.id, &managed_issue.id);
-    let evidence_summary = runtime_self_defect_evidence_summary(&summary, relation_mode);
+    let relation = self_defect_relation(&issue.id, &managed_issue.id);
+    let evidence_summary = runtime_self_defect_evidence_summary(&summary, relation.mode);
     linear
-        .create_issue_relation(&issue.id, &managed_issue.id, linear_relation)
+        .create_issue_relation(
+            &relation.issue_id,
+            &relation.related_issue_id,
+            relation.kind,
+        )
         .await?;
     linear
         .record_issue_evidence(
@@ -104,9 +113,24 @@ pub(super) async fn record_runtime_self_defect(
             managed_issue_id: managed_issue.id,
             managed_issue_identifier: managed_issue.identifier,
             latest_evidence_summary: evidence_summary,
-            relation_mode,
+            relation_mode: relation.mode,
         })
         .await?)
+}
+
+fn managed_issue_milestone_id(
+    source_project: &ProjectConfig,
+    managed_project: &ProjectConfig,
+    source_issue: &LinearIssue,
+) -> Option<String> {
+    if source_project.id == managed_project.id {
+        source_issue
+            .project_milestone
+            .as_ref()
+            .map(|milestone| milestone.id.clone())
+    } else {
+        None
+    }
 }
 
 pub(super) struct RuntimeSelfDefectInput<'a> {
@@ -239,20 +263,28 @@ fn failure_kind_category(failure: &FailureRecord) -> &'static str {
     }
 }
 
-fn self_defect_relation(
-    source_issue_id: &str,
-    managed_issue_id: &str,
-) -> (SelfDefectRelationMode, ManagedLinearRelation) {
+struct SelfDefectRelation {
+    issue_id: String,
+    related_issue_id: String,
+    kind: ManagedLinearRelation,
+    mode: SelfDefectRelationMode,
+}
+
+fn self_defect_relation(source_issue_id: &str, managed_issue_id: &str) -> SelfDefectRelation {
     if source_issue_id == managed_issue_id {
-        (
-            SelfDefectRelationMode::RelatedOnly,
-            ManagedLinearRelation::Related,
-        )
+        SelfDefectRelation {
+            issue_id: source_issue_id.to_owned(),
+            related_issue_id: managed_issue_id.to_owned(),
+            kind: ManagedLinearRelation::Related,
+            mode: SelfDefectRelationMode::RelatedOnly,
+        }
     } else {
-        (
-            SelfDefectRelationMode::Blocking,
-            ManagedLinearRelation::Blocks,
-        )
+        SelfDefectRelation {
+            issue_id: managed_issue_id.to_owned(),
+            related_issue_id: source_issue_id.to_owned(),
+            kind: ManagedLinearRelation::Blocks,
+            mode: SelfDefectRelationMode::Blocking,
+        }
     }
 }
 
@@ -277,6 +309,7 @@ mod tests {
         let linear = SameIssueLinearClient::new(issue.clone());
 
         let record = record_runtime_self_defect(
+            &project,
             &project,
             &store,
             &linear,
@@ -357,6 +390,68 @@ mod tests {
         assert!(summary.contains("fingerprint: launch_failed"));
         assert!(summary.contains("source_project: symphony"));
         assert!(summary.contains("relation_mode: blocking"));
+    }
+
+    #[tokio::test]
+    async fn managed_self_defect_blocks_source_issue_not_the_reverse() {
+        let store = test_store().await;
+        let project = test_project();
+        let source = linear_issue("source-issue", "NRV-10");
+        let managed = linear_issue("managed-issue", "SYM-60");
+        let linear = SameIssueLinearClient::new(managed);
+
+        let record = record_runtime_self_defect(
+            &project,
+            &project,
+            &store,
+            &linear,
+            RuntimeSelfDefectInput {
+                issue: &source,
+                evidence_kind: "runtime_defect",
+                message: "missing handoff should route to self-defect",
+                failure: &FailureRecord {
+                    kind: "malformed_handoff".into(),
+                    message: "missing sidecar".into(),
+                    fingerprint: Some("missing_handoff_sidecar".into()),
+                    occurrence_count: 1,
+                },
+                session: &OpenCodeSessionRecord {
+                    project_id: project.id.clone(),
+                    issue_id: source.id.clone(),
+                    session_id: "oc-session".into(),
+                    agent: "build".into(),
+                    model: None,
+                    worktree_path: "/tmp/worktree".into(),
+                    process_id: None,
+                    lifecycle_stage: LifecycleStage::Failed,
+                    stage: OpenCodeStage::Failed,
+                    active_agent: None,
+                    active_model: None,
+                    message_count: 0,
+                    todo_count: 0,
+                    part_count: 0,
+                    token_count: 0,
+                    cost_micros: 0,
+                    subagent_count: 0,
+                    eval_stage: None,
+                    lifecycle_marker: None,
+                    last_event: None,
+                    silence_observed: false,
+                },
+            },
+        )
+        .await
+        .expect("record self-defect");
+
+        assert_eq!(record.relation_mode, SelfDefectRelationMode::Blocking);
+        assert_eq!(
+            linear.relations(),
+            vec![(
+                "managed-issue".into(),
+                "source-issue".into(),
+                ManagedLinearRelation::Blocks
+            )]
+        );
     }
 
     #[test]

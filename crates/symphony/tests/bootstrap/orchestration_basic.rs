@@ -1681,8 +1681,8 @@ async fn orchestration_records_launch_failure_without_aborting_poll_or_owner_inp
     assert!(client.relations().iter().any(|relation| {
         relation
             == &(
-                "launch-fails".into(),
                 "managed-1".into(),
+                "launch-fails".into(),
                 ManagedLinearRelation::Blocks,
             )
     }));

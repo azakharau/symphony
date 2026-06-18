@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::{
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context, bail};
 use tokio::process::Command;
@@ -176,17 +179,28 @@ async fn integrate_base_branch(
     let remote_base = format!("refs/remotes/origin/{base_branch}");
     let fetch_refspec = format!("+refs/heads/{base_branch}:{remote_base}");
     git_status(repo_path, &["fetch", "origin", &fetch_refspec]).await?;
-    git_status(
+
+    let integrated_head = if git_status(
         repo_path,
         &["merge-base", "--is-ancestor", &remote_base, head_sha],
     )
     .await
-    .with_context(|| {
-        format!(
-            "handoff commit `{head_sha}` is not a fast-forward descendant of origin/{base_branch}"
-        )
-    })?;
+    .is_ok()
+    {
+        integrate_fast_forward_base_branch(repo_path, base_branch, head_sha).await?
+    } else {
+        integrate_merge_base_branch(repo_path, base_branch, &remote_base, head_sha).await?
+    };
 
+    let push_refspec = format!("{integrated_head}:refs/heads/{base_branch}");
+    git_status(repo_path, &["push", "origin", &push_refspec]).await
+}
+
+async fn integrate_fast_forward_base_branch(
+    repo_path: &Path,
+    base_branch: &str,
+    head_sha: &str,
+) -> anyhow::Result<String> {
     let current_branch = git_output(repo_path, &["branch", "--show-current"]).await?;
     if current_branch.trim() == base_branch {
         if worktree_is_clean(repo_path).await? {
@@ -196,9 +210,79 @@ async fn integrate_base_branch(
         let local_base = format!("refs/heads/{base_branch}");
         git_status(repo_path, &["update-ref", &local_base, head_sha]).await?;
     }
+    Ok(head_sha.to_owned())
+}
 
-    let push_refspec = format!("{head_sha}:refs/heads/{base_branch}");
-    git_status(repo_path, &["push", "origin", &push_refspec]).await
+async fn integrate_merge_base_branch(
+    repo_path: &Path,
+    base_branch: &str,
+    remote_base: &str,
+    head_sha: &str,
+) -> anyhow::Result<String> {
+    let merge_worktree = temporary_merge_worktree_path(base_branch)?;
+    let merge_path = merge_worktree.as_path();
+    git_status(
+        repo_path,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            merge_path
+                .to_str()
+                .context("temporary merge worktree path is not valid UTF-8")?,
+            remote_base,
+        ],
+    )
+    .await?;
+
+    let merge_result = async {
+        git_status(merge_path, &["merge", "--no-ff", "--no-edit", head_sha]).await?;
+        let merge_head = git_output(merge_path, &["rev-parse", "HEAD"]).await?;
+        let remote_tracking_ref = format!("refs/remotes/origin/{base_branch}");
+        git_status(
+            repo_path,
+            &["update-ref", &remote_tracking_ref, merge_head.trim()],
+        )
+        .await?;
+        Ok::<String, anyhow::Error>(merge_head.trim().to_owned())
+    }
+    .await;
+
+    let _ = git_status(merge_path, &["merge", "--abort"]).await;
+    let cleanup_result = git_status(
+        repo_path,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            merge_path
+                .to_str()
+                .context("temporary merge worktree path is not valid UTF-8")?,
+        ],
+    )
+    .await;
+
+    let merge_head = merge_result?;
+    cleanup_result?;
+    Ok(merge_head)
+}
+
+fn temporary_merge_worktree_path(base_branch: &str) -> anyhow::Result<PathBuf> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_nanos();
+    let safe_branch = base_branch
+        .chars()
+        .map(|character| match character {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' => character,
+            _ => '-',
+        })
+        .collect::<String>();
+    Ok(std::env::temp_dir().join(format!(
+        "symphony-merge-{safe_branch}-{}-{now}",
+        std::process::id()
+    )))
 }
 
 async fn ensure_remote_base_points_at(
@@ -211,10 +295,18 @@ async fn ensure_remote_base_points_at(
     let Some(remote_head) = output.split_whitespace().next() else {
         bail!("origin/{base_branch} was not found after push");
     };
-    if same_sha(remote_head, head_sha) {
+    if git_status(
+        repo_path,
+        &["merge-base", "--is-ancestor", head_sha, remote_head],
+    )
+    .await
+    .is_ok()
+    {
         Ok(())
     } else {
-        bail!("origin/{base_branch} points at `{remote_head}` instead of `{head_sha}` after push");
+        bail!(
+            "origin/{base_branch} points at `{remote_head}` without containing handoff commit `{head_sha}` after push"
+        );
     }
 }
 

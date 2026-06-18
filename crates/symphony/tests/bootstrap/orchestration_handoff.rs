@@ -684,6 +684,138 @@ async fn passing_handoff_accepts_force_updated_issue_branch_after_repair() {
 }
 
 #[tokio::test]
+async fn passing_handoff_merges_pushed_issue_branch_when_base_advanced() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let repo = dir.path().join("repo");
+    let origin = dir.path().join("origin.git");
+    fs::create_dir_all(&origin).expect("origin dir");
+    run_git(&origin, ["init", "--bare"]);
+    fs::create_dir_all(&repo).expect("repo dir");
+    run_git(&repo, ["init"]);
+    run_git(&repo, ["config", "user.email", "symphony@example.test"]);
+    run_git(&repo, ["config", "user.name", "Symphony Test"]);
+    run_git(
+        &repo,
+        [
+            "remote",
+            "add",
+            "origin",
+            origin.to_str().expect("origin utf8"),
+        ],
+    );
+    fs::write(repo.join("README.md"), "base checkout").expect("readme");
+    run_git(&repo, ["add", "README.md"]);
+    run_git(&repo, ["commit", "-m", "base"]);
+    run_git(&repo, ["branch", "agent-server/opencode-runner-extension"]);
+    run_git(
+        &repo,
+        ["checkout", "agent-server/opencode-runner-extension"],
+    );
+    run_git(
+        &repo,
+        ["push", "origin", "agent-server/opencode-runner-extension"],
+    );
+
+    let worktree_root = dir.path().join("allowed-worktrees");
+    let worktree = worktree_root.join("SYM-89");
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "--detach",
+            worktree.to_str().expect("worktree path utf8"),
+            "agent-server/opencode-runner-extension",
+        ],
+    );
+    let issue_branch = "symphony/SYM-89";
+    fs::write(worktree.join("artifact.txt"), "implementation").expect("artifact");
+    run_git(&worktree, ["add", "artifact.txt"]);
+    run_git(&worktree, ["commit", "-m", "SYM-89 implementation"]);
+    let head_sha = git_output(&worktree, ["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    let issue_refspec = format!("HEAD:refs/heads/{issue_branch}");
+    run_git(&worktree, ["push", "origin", &issue_refspec]);
+
+    fs::write(repo.join("base-advanced.txt"), "new base work").expect("base advance");
+    run_git(&repo, ["add", "base-advanced.txt"]);
+    run_git(&repo, ["commit", "-m", "advance base"]);
+    run_git(
+        &repo,
+        ["push", "origin", "agent-server/opencode-runner-extension"],
+    );
+    assert_ne!(
+        git_output(
+            &origin,
+            ["rev-parse", "agent-server/opencode-runner-extension"]
+        )
+        .trim(),
+        head_sha
+    );
+
+    let config_toml = valid_config_toml()
+        .replace(
+            "repo_path = \"/home/agent/proj/symphony\"",
+            &format!("repo_path = \"{}\"", repo.display()),
+        )
+        .replace(
+            "/home/agent/.symphony/workspaces/opencode/symphony",
+            &worktree_root.display().to_string(),
+        );
+    let config = RootConfig::from_toml_str(&config_toml).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "stale-base", "SYM-89"))
+        .await
+        .expect("running issue");
+    store
+        .upsert_opencode_session(test_session("symphony", "stale-base", "oc-89", &worktree))
+        .await
+        .expect("running session");
+
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "stale-base",
+        "SYM-89",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(Some(success_handoff(
+        "oc-89",
+        &worktree,
+        issue_branch,
+        &head_sha,
+    )));
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("stale-base".into(), LinearTransition::Done)]
+    );
+    let base_head = git_output(
+        &origin,
+        ["rev-parse", "agent-server/opencode-runner-extension"],
+    );
+    assert_ne!(base_head.trim(), head_sha);
+    assert!(
+        git_output(
+            &repo,
+            ["merge-base", "--is-ancestor", &head_sha, base_head.trim()]
+        )
+        .trim()
+        .is_empty(),
+        "integrated base must contain issue commit"
+    );
+    assert!(!worktree.exists(), "accepted handoff must remove worktree");
+}
+
+#[tokio::test]
 async fn successful_handoff_with_unpushed_issue_commit_does_not_close_or_cleanup() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

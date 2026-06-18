@@ -183,8 +183,10 @@ pub(super) async fn process_in_progress_handoff(
                     project,
                     self_defect_project,
                     store,
+                    opencode,
                     linear,
                     issue,
+                    existing_issue: existing_issue.as_ref(),
                     session: &session,
                 },
                 &handoff,
@@ -372,25 +374,29 @@ mod tests {
     }
 }
 
-struct SuccessfulHandoffContext<'a, L: LinearClient> {
+struct SuccessfulHandoffContext<'a, L: LinearClient, O: OpenCodeLauncher> {
     project: &'a ProjectConfig,
     self_defect_project: &'a ProjectConfig,
     store: &'a SqliteStore,
+    opencode: &'a O,
     linear: &'a L,
     issue: &'a LinearIssue,
+    existing_issue: Option<&'a IssueStateRecord>,
     session: &'a crate::state::OpenCodeSessionRecord,
 }
 
-async fn close_successful_handoff<L: LinearClient>(
-    ctx: SuccessfulHandoffContext<'_, L>,
+async fn close_successful_handoff<L: LinearClient, O: OpenCodeLauncher>(
+    ctx: SuccessfulHandoffContext<'_, L, O>,
     handoff: &OpenCodeHandoff,
 ) -> anyhow::Result<()> {
     let SuccessfulHandoffContext {
         project,
         self_defect_project,
         store,
+        opencode,
         linear,
         issue,
+        existing_issue,
         session,
     } = ctx;
 
@@ -476,38 +482,44 @@ async fn close_successful_handoff<L: LinearClient>(
         return Ok(());
     }
 
-    let integration =
-        match verify_and_integrate_git_closure(project, git, &handoff.changed_files).await {
-            Ok(integration) => integration,
-            Err(error) => {
-                let message = error.to_string();
-                warn!(
-                    project_id = %project.id,
-                    issue = %issue.identifier,
-                    session_id = %session.session_id,
+    let integration = match verify_and_integrate_git_closure(project, git, &handoff.changed_files)
+        .await
+    {
+        Ok(integration) => integration,
+        Err(error) => {
+            let message = error.to_string();
+            warn!(
+                project_id = %project.id,
+                issue = %issue.identifier,
+                session_id = %session.session_id,
+                message,
+                "successful OpenCode handoff failed git closure verification"
+            );
+            request_opencode_repair(
+                project,
+                self_defect_project,
+                store,
+                opencode,
+                linear,
+                issue,
+                existing_issue,
+                "malformed_handoff",
+                format!(
+                    "successful handoff could not be integrated into `{}`; repair the issue branch against the current base branch, rerun validation, push the repaired branch, and rewrite the handoff sidecar: {message}",
+                    project.branch.base
+                ),
+                FailureRecord {
+                    kind: "malformed_handoff".into(),
                     message,
-                    "successful OpenCode handoff failed git closure verification"
-                );
-                fail_runtime_defect(
-                    project,
-                    self_defect_project,
-                    store,
-                    linear,
-                    issue,
-                    "malformed_handoff",
-                    message.clone(),
-                    FailureRecord {
-                        kind: "malformed_handoff".into(),
-                        message,
-                        fingerprint: Some("git_closure_unverified".into()),
-                        occurrence_count: 1,
-                    },
-                    session,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
+                    fingerprint: Some("git_closure_unverified".into()),
+                    occurrence_count: 1,
+                },
+                session,
+            )
+            .await?;
+            return Ok(());
+        }
+    };
 
     let integrated_base = match &integration {
         GitClosureResult::NoGitChanges => None,

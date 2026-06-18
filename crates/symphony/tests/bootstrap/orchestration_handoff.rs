@@ -903,7 +903,7 @@ async fn successful_handoff_with_unpushed_issue_commit_does_not_close_or_cleanup
         .await
         .expect("orchestrate once");
 
-    assert_todo_transition(&client.transitions(), "unpushed");
+    assert!(client.transitions().is_empty());
     assert!(
         worktree.exists(),
         "unverified git closure must keep worktree"
@@ -914,6 +914,21 @@ async fn successful_handoff_with_unpushed_issue_commit_does_not_close_or_cleanup
             .iter()
             .any(|(_, evidence)| evidence.kind == "malformed_handoff"
                 && evidence.body.contains("refs/heads/symphony/SYM-81"))
+    );
+    assert_eq!(
+        opencode.repairs(),
+        vec![("oc-81".into(), "git_closure_unverified".into())]
+    );
+    let issue = store
+        .issue("symphony", "unpushed")
+        .await
+        .expect("query unpushed")
+        .expect("unpushed issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    assert!(issue.blocker.is_none());
+    assert_eq!(
+        issue.failure.expect("failure").fingerprint.as_deref(),
+        Some("git_closure_unverified")
     );
 }
 
@@ -1116,7 +1131,7 @@ async fn no_change_handoff_with_unreported_commit_does_not_close_or_cleanup() {
         .await
         .expect("orchestrate once");
 
-    assert_todo_transition(&client.transitions(), "unreported");
+    assert!(client.transitions().is_empty());
     assert!(
         worktree.exists(),
         "unreported committed work must not be cleaned up"
@@ -1127,36 +1142,37 @@ async fn no_change_handoff_with_unreported_commit_does_not_close_or_cleanup() {
                 .body
                 .contains("no-change handoff omitted git.head_sha")
     }));
+    assert_eq!(
+        opencode.repairs(),
+        vec![("oc-82".into(), "git_closure_unverified".into())]
+    );
     let issue = store
         .issue("symphony", "unreported")
         .await
         .expect("query unreported")
         .expect("unreported issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    assert!(issue.blocker.is_none());
+    let failure = issue.failure.expect("failure");
+    assert_eq!(failure.kind, "malformed_handoff");
     assert_eq!(
-        issue.blocker.expect("runtime defect blocker").kind,
-        "runtime_defect"
-    );
-    assert_eq!(
-        issue.failure.expect("failure").fingerprint.as_deref(),
+        failure.fingerprint.as_deref(),
         Some("git_closure_unverified")
     );
+    assert_eq!(failure.occurrence_count, 1);
     let session = store
         .opencode_session("symphony", "unreported", "oc-82")
         .await
         .expect("query unreported session")
         .expect("unreported session");
-    assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
-    assert_eq!(session.stage, OpenCodeStage::Failed);
-    assert_eq!(
-        session.lifecycle_marker.as_deref(),
-        Some("failed:malformed_handoff")
-    );
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(session.stage, OpenCodeStage::Running);
+    assert_eq!(session.lifecycle_marker.as_deref(), Some("repair_prompted"));
     assert!(
         session
             .last_event
             .as_deref()
-            .is_some_and(|event| event.starts_with("failed:git_closure_unverified")),
+            .is_some_and(|event| event.starts_with("repair_prompted:git_closure_unverified")),
         "last_event={:?}",
         session.last_event
     );

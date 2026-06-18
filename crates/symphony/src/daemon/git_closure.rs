@@ -331,11 +331,14 @@ async fn run_git(repo_path: &Path, args: &[&str]) -> anyhow::Result<std::process
     if output.status.success() {
         Ok(output)
     } else {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
         bail!(
-            "git -C {} {} failed: {}",
+            "git -C {} {} failed: stdout: {}; stderr: {}",
             repo_path.display(),
             args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
+            stdout.trim(),
+            stderr.trim()
         );
     }
 }

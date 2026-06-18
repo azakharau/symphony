@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use tokio::process::Command;
 use tracing::{debug, info, warn};
@@ -28,6 +31,9 @@ use super::{
     records::{git_closure_evidence_body, issue_record},
     self_defects::{RuntimeSelfDefectInput, record_runtime_self_defect},
 };
+
+const OPENCODE_DB_ACTIVE_FRESHNESS_MS: u64 = 10 * 60 * 1000;
+const PLAUSIBLE_EPOCH_MS: u64 = 1_600_000_000_000;
 
 pub(super) async fn process_in_progress_handoff(
     project: &ProjectConfig,
@@ -256,6 +262,17 @@ async fn session_has_active_opencode_tree(
     if !opencode_tree_has_active_work(&activity) {
         return Ok(false);
     }
+    if !opencode_tree_activity_is_fresh(activity.last_updated_ms) {
+        warn!(
+            project_id = %project.id,
+            issue = %issue.identifier,
+            session_id = %session.session_id,
+            last_updated_ms = activity.last_updated_ms,
+            freshness_ms = OPENCODE_DB_ACTIVE_FRESHNESS_MS,
+            "OpenCode persisted session tree is stale after ACP process exit"
+        );
+        return Ok(false);
+    }
 
     let previous_last_event = session.last_event.clone();
     let previous_marker = session.lifecycle_marker.clone();
@@ -292,6 +309,20 @@ async fn session_has_active_opencode_tree(
     Ok(true)
 }
 
+fn opencode_tree_activity_is_fresh(last_updated_ms: Option<u64>) -> bool {
+    let Some(last_updated_ms) = last_updated_ms else {
+        return true;
+    };
+    if last_updated_ms < PLAUSIBLE_EPOCH_MS {
+        return true;
+    }
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return true;
+    };
+    let now_ms = now.as_millis().min(u128::from(u64::MAX)) as u64;
+    now_ms.saturating_sub(last_updated_ms) <= OPENCODE_DB_ACTIVE_FRESHNESS_MS
+}
+
 fn opencode_tree_has_active_work(activity: &OpenCodeSessionTreeActivity) -> bool {
     activity.running_tool_count > 0
         || activity.pending_tool_count > 0
@@ -301,6 +332,27 @@ fn opencode_tree_has_active_work(activity: &OpenCodeSessionTreeActivity) -> bool
                 "completed" | "done" | "cancelled" | "canceled"
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_epoch_opencode_activity_is_not_fresh() {
+        let stale = (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after unix epoch")
+            .as_millis() as u64)
+            .saturating_sub(OPENCODE_DB_ACTIVE_FRESHNESS_MS + 1);
+
+        assert!(!opencode_tree_activity_is_fresh(Some(stale)));
+    }
+
+    #[test]
+    fn legacy_fixture_timestamps_do_not_trip_freshness_gate() {
+        assert!(opencode_tree_activity_is_fresh(Some(2_000)));
+    }
 }
 
 struct SuccessfulHandoffContext<'a, L: LinearClient> {

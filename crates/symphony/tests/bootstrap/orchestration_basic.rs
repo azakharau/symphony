@@ -1637,7 +1637,9 @@ async fn orchestration_records_launch_failure_without_aborting_poll_or_owner_inp
         client.transitions(),
         vec![
             ("launch-fails".into(), LinearTransition::InProgress),
+            ("launch-fails".into(), LinearTransition::Todo),
             ("still-runs".into(), LinearTransition::InProgress),
+            ("still-runs".into(), LinearTransition::Todo),
         ]
     );
     let evidence = client.evidence();
@@ -1996,6 +1998,33 @@ async fn orchestration_releases_runtime_defect_after_linear_blocker_is_done() {
         .expect("issue");
     assert_eq!(record.lifecycle_stage, LifecycleStage::Running);
     assert!(record.blocker.is_none());
+}
+
+#[tokio::test]
+async fn orchestration_dispatches_managed_self_defect_without_milestone() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let mut issue = linear_issue("managed-self", "SYM-207", "Todo", Some(1));
+    issue.title = "Symphony self-defect: launch_failed".into();
+    issue.description = Some("<!-- symphony:managed-self-bug fingerprint=launch_failed -->".into());
+    issue.project_milestone = None;
+    let client = RecordingLinearClient::new(vec![issue]);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(6207);
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("poll");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("managed-self".into(), LinearTransition::InProgress)]
+    );
+    assert_eq!(opencode.launches(), vec!["SYM-207"]);
 }
 
 #[tokio::test]

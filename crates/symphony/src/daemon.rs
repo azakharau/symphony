@@ -483,13 +483,17 @@ async fn reconcile_project(
                         .await?;
                     continue;
                 }
-                let Some(issue_milestone) = issue.project_milestone.as_ref() else {
-                    info!(
-                        project_id = %project.id,
-                        issue = %issue.identifier,
-                        "Todo issue suppressed because it has no Linear milestone"
-                    );
-                    let record = issue_record(
+                let managed_self_defect = is_managed_self_defect_issue(&issue);
+                let issue_milestone = match issue.project_milestone.as_ref() {
+                    Some(milestone) => Some(milestone),
+                    None if managed_self_defect => None,
+                    None => {
+                        info!(
+                            project_id = %project.id,
+                            issue = %issue.identifier,
+                            "Todo issue suppressed because it has no Linear milestone"
+                        );
+                        let record = issue_record(
                         project,
                         &issue,
                         LifecycleStage::Blocked,
@@ -500,9 +504,10 @@ async fn reconcile_project(
                         }),
                         CleanupStatus::Clean,
                     );
-                    store.upsert_issue(&record).await?;
-                    report.blocked.push(issue.identifier);
-                    continue;
+                        store.upsert_issue(&record).await?;
+                        report.blocked.push(issue.identifier);
+                        continue;
+                    }
                 };
                 if let Some(blocker) = unaccepted_blocker(&issue.blocked_by) {
                     info!(
@@ -552,7 +557,7 @@ async fn reconcile_project(
                     )
                     .await?;
                     report.blocked.push(issue.identifier);
-                } else if runnable_todo_milestone_count > 1 {
+                } else if issue_milestone.is_some() && runnable_todo_milestone_count > 1 {
                     let record = issue_record(
                         project,
                         &issue,
@@ -561,8 +566,9 @@ async fn reconcile_project(
                         CleanupStatus::Clean,
                     );
                     store.upsert_issue(&record).await?;
-                } else if active_runnable_todo_milestone.as_deref()
-                    != Some(issue_milestone.id.as_str())
+                } else if let Some(issue_milestone) = issue_milestone
+                    && active_runnable_todo_milestone.as_deref()
+                        != Some(issue_milestone.id.as_str())
                 {
                     debug!(
                         project_id = %project.id,
@@ -947,6 +953,14 @@ fn is_typed_non_owner_blocker_kind(kind: &str) -> bool {
     )
 }
 
+fn is_managed_self_defect_issue(issue: &LinearIssue) -> bool {
+    issue.title.starts_with("Symphony self-defect:")
+        || issue
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("symphony:managed-self-bug"))
+}
+
 async fn handle_launch_failure(
     project: &ProjectConfig,
     self_defect_project: &ProjectConfig,
@@ -1010,6 +1024,9 @@ async fn handle_launch_failure(
         },
     )
     .await?;
+    linear
+        .transition_issue(&issue.id, LinearTransition::Todo)
+        .await?;
     if matches!(error, crate::opencode::OpenCodeError::AcpSetupFailed { .. }) {
         store.upsert_opencode_session(&session).await?;
     }

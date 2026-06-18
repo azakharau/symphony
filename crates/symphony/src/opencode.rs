@@ -680,6 +680,8 @@ fn normalize_handoff_sidecar_value(value: &mut Value) {
 
     object.remove("status");
     object.remove("repair_fingerprint");
+    object.remove("task_id");
+    object.remove("subtask_id");
 
     if !object.contains_key("subagents") {
         if let Some(subagents_used) = object.remove("subagents_used") {
@@ -717,11 +719,18 @@ fn normalize_handoff_sidecar_value(value: &mut Value) {
             .get("failure_fingerprint")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let details = eval
-            .get("details")
-            .or_else(|| eval.get("summary"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
+        let details =
+            eval.get("details")
+                .or_else(|| eval.get("summary"))
+                .map(|value| match value {
+                    Value::String(details) => details.clone(),
+                    Value::Array(items) => items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    other => other.to_string(),
+                });
         object.insert(
             "eval_results".to_owned(),
             json!([{
@@ -751,6 +760,8 @@ fn normalize_handoff_sidecar_value(value: &mut Value) {
         git.remove("base_branch");
         git.remove("base_sha");
         git.remove("previous_head_sha");
+        git.remove("remote_ref");
+        git.remove("remote_head_sha");
     }
 
     if let Some(stop_reason) = object.get_mut("stop_reason")
@@ -769,6 +780,7 @@ fn canonical_handoff_stage(stage: &str) -> Option<&'static str> {
         "repair_intake" | "base_fetch" | "merge_origin_master" | "conflict_resolution" | "push" => {
             Some("running")
         }
+        "git_closure_repair" => Some("running"),
         "verification" | "evaluation" => Some("eval"),
         "review" => Some("review"),
         "handoff" => Some("handoff"),

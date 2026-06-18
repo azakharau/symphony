@@ -710,6 +710,8 @@ async fn handoff_sidecar_normalizes_opencode_acp_shape() {
         r#"{
   "status": "completed",
   "session_id": "ses_12805fdb5ffevWVN8GOADoEkPu",
+  "task_id": "324e3b33-b003-443a-8ca7-ce90253acad7",
+  "subtask_id": "e71bb704-790b-40a6-80cc-03613d7158ba",
   "repair_fingerprint": "git_closure_unverified",
   "lifecycle_stages": [
     "repair_intake",
@@ -719,13 +721,17 @@ async fn handoff_sidecar_normalizes_opencode_acp_shape() {
     "verification",
     "review",
     "evaluation",
+    "git_closure_repair",
     "push",
     "handoff"
   ],
   "subagents_used": ["integrator", "rust-engineer", "evaluator"],
   "eval_results": {
     "outcome": "accept",
-    "details": "Final evaluator accepted after verification, review, clean pushed branch, and commit/push closure.",
+    "details": [
+      "Final evaluator accepted after verification, review, clean pushed branch, and commit/push closure.",
+      "The branch merges cleanly into origin/master."
+    ],
     "verification_ref": "2b8782b1-9705-4fab-adc9-873fd96cede3",
     "evaluation_ref": "mne188-final-evaluation-accept-pushed"
   },
@@ -746,6 +752,8 @@ async fn handoff_sidecar_normalizes_opencode_acp_shape() {
     "head_sha": "661f44082359591b3a820c55464ae32a3e62c1ce",
     "previous_head_sha": "481fe2611342a90a7d7efeac159ad10f0ad28804",
     "pushed": true,
+    "remote_ref": "origin/feature/mne-188-p1-graph-summary-and-bounded-graph-query-projections",
+    "remote_head_sha": "661f44082359591b3a820c55464ae32a3e62c1ce",
     "status": "clean_tracking_origin",
     "evidence_ref": "506015a7-71cb-4a14-9f40-e792b1e312e4"
   },
@@ -782,6 +790,7 @@ async fn handoff_sidecar_normalizes_opencode_acp_shape() {
             OpenCodeStage::Review,
             OpenCodeStage::Eval,
             OpenCodeStage::Running,
+            OpenCodeStage::Running,
             OpenCodeStage::Handoff,
         ]
     );
@@ -791,6 +800,11 @@ async fn handoff_sidecar_normalizes_opencode_acp_shape() {
     assert_eq!(
         handoff.eval_results[0].evidence_ref.as_deref(),
         Some("mne188-final-evaluation-accept-pushed")
+    );
+    assert!(
+        handoff.eval_results[0].details.as_ref().is_some_and(
+            |details| details.contains("The branch merges cleanly into origin/master.")
+        )
     );
     assert_eq!(
         handoff.git.expect("git evidence").head_sha.as_deref(),

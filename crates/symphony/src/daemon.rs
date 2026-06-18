@@ -508,11 +508,17 @@ async fn reconcile_project(
                     "checking in-progress OpenCode handoff"
                 );
                 let existing = store.issue(&project.id, &issue.id).await?;
+                let should_requeue_retained_blocker = existing
+                    .as_ref()
+                    .and_then(|record| record.blocker.as_ref())
+                    .is_some_and(|blocker| blocker.kind != "runtime_defect");
                 if retain_typed_non_owner_blocker(project, store, &issue, existing.as_ref()).await?
                 {
-                    linear
-                        .transition_issue(&issue.id, LinearTransition::Todo)
-                        .await?;
+                    if should_requeue_retained_blocker {
+                        linear
+                            .transition_issue(&issue.id, LinearTransition::Todo)
+                            .await?;
+                    }
                     report.blocked.push(issue.identifier);
                     continue;
                 }
@@ -1108,10 +1114,7 @@ async fn retain_typed_non_owner_blocker(
     if !is_typed_non_owner_blocker_kind(&blocker.kind) {
         return Ok(false);
     }
-    if blocker.kind == "runtime_defect"
-        && issue.state == "Todo"
-        && unaccepted_blocker(&issue.blocked_by).is_none()
-    {
+    if blocker.kind == "runtime_defect" && unaccepted_blocker(&issue.blocked_by).is_none() {
         if let Some(managed_blocker) =
             open_managed_runtime_defect_blocker(store, issue, existing).await?
         {
@@ -1127,7 +1130,9 @@ async fn retain_typed_non_owner_blocker(
             store.upsert_issue(&record).await?;
             return Ok(true);
         }
-        return Ok(false);
+        if issue.state == "Todo" {
+            return Ok(false);
+        }
     }
     if issue.state == "Todo"
         && unaccepted_blocker(&issue.blocked_by).is_none()
@@ -1259,9 +1264,6 @@ async fn handle_launch_failure(
         },
     )
     .await?;
-    linear
-        .transition_issue(&issue.id, LinearTransition::Todo)
-        .await?;
     if matches!(error, crate::opencode::OpenCodeError::AcpSetupFailed { .. }) {
         store.upsert_opencode_session(&session).await?;
     }

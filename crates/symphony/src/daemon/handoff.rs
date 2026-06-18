@@ -875,9 +875,6 @@ async fn fail_runtime_defect(
         },
     )
     .await?;
-    linear
-        .transition_issue(&issue.id, LinearTransition::Todo)
-        .await?;
     let mut terminating_session = session.clone();
     terminate_current_session_process(project, issue, &mut terminating_session).await?;
     let mut record = issue_record(

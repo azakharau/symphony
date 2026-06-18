@@ -1959,9 +1959,7 @@ async fn orchestration_records_launch_failure_without_aborting_poll_or_owner_inp
         client.transitions(),
         vec![
             ("launch-fails".into(), LinearTransition::InProgress),
-            ("launch-fails".into(), LinearTransition::Todo),
             ("still-runs".into(), LinearTransition::InProgress),
-            ("still-runs".into(), LinearTransition::Todo),
         ]
     );
     let evidence = client.evidence();
@@ -2464,6 +2462,87 @@ async fn orchestration_retains_runtime_defect_while_managed_self_defect_is_open(
     assert!(opencode.launches().is_empty());
     let record = store
         .issue("symphony", "runtime-held")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    assert_eq!(record.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(
+        record.blocker.expect("blocker").message,
+        "unresolved runtime defect: launch_failed (managed by SYM-62)"
+    );
+}
+
+#[tokio::test]
+async fn orchestration_retains_in_progress_runtime_defect_without_todo_requeue() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let worktree = dir.path().join("SYM-209-worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let mut issue = test_issue("symphony", "runtime-held-progress", "SYM-209");
+    issue.lifecycle_stage = LifecycleStage::Failed;
+    issue.blocker = Some(BlockerRecord {
+        kind: "runtime_defect".into(),
+        message: "OpenCode launch failed after Linear transition".into(),
+        observed_at: None,
+    });
+    issue.failure = Some(FailureRecord {
+        kind: "runtime_defect".into(),
+        message: "OpenCode launch failed after Linear transition".into(),
+        fingerprint: Some("launch_failed".into()),
+        occurrence_count: 1,
+    });
+    store.upsert_issue(issue).await.expect("issue");
+    let mut failed = test_session("symphony", "runtime-held-progress", "ses-failed", &worktree);
+    failed.lifecycle_stage = LifecycleStage::Failed;
+    failed.stage = OpenCodeStage::Failed;
+    failed.lifecycle_marker = Some("failed:launch_failed".into());
+    failed.last_event = Some("failed:launch_failed".into());
+    store
+        .upsert_opencode_session(failed)
+        .await
+        .expect("failed session");
+    store
+        .record_self_defect_occurrence(&SelfDefectOccurrenceRecord {
+            fingerprint: "launch_failed".into(),
+            defect_kind: "runtime_defect".into(),
+            category: "runtime".into(),
+            severity: "p0".into(),
+            initial_routing_decision: "managed_self_defect".into(),
+            source_project_id: "symphony".into(),
+            source_issue_id: "runtime-held-progress".into(),
+            source_issue_identifier: "SYM-209".into(),
+            source_session_id: Some("ses-failed".into()),
+            source_process_id: None,
+            managed_issue_id: "managed-launch-failed".into(),
+            managed_issue_identifier: "SYM-62".into(),
+            latest_evidence_summary: "launch failure still open".into(),
+            relation_mode: SelfDefectRelationMode::Blocking,
+        })
+        .await
+        .expect("self defect");
+
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "runtime-held-progress",
+        "SYM-209",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(6209);
+
+    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("poll");
+
+    assert_eq!(report.blocked, vec!["SYM-209"]);
+    assert!(client.transitions().is_empty());
+    assert!(opencode.launches().is_empty());
+    assert!(opencode.continuations().is_empty());
+    let record = store
+        .issue("symphony", "runtime-held-progress")
         .await
         .expect("query issue")
         .expect("issue");

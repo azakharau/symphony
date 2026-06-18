@@ -911,9 +911,13 @@ async fn orchestration_repairs_stale_in_progress_session_without_handoff_sidecar
         failed.lifecycle_marker.as_deref(),
         Some("failed:malformed_handoff")
     );
-    assert_eq!(
-        failed.last_event.as_deref(),
-        Some("failed:missing_handoff_sidecar")
+    assert!(
+        failed
+            .last_event
+            .as_deref()
+            .is_some_and(|event| event.starts_with("failed:missing_handoff_sidecar")),
+        "last_event={:?}",
+        failed.last_event
     );
     assert!(!failed.silence_observed);
 }
@@ -1392,7 +1396,7 @@ async fn orchestration_restores_requeued_issue_with_existing_session_without_dup
 }
 
 #[tokio::test]
-async fn orchestration_launches_fresh_session_after_explicit_runtime_failure_cleanup() {
+async fn orchestration_resumes_failed_runtime_defect_session_after_blocker_release() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let worktree = dir.path().join("SYM-62-worktree");
@@ -1402,9 +1406,19 @@ async fn orchestration_launches_fresh_session_after_explicit_runtime_failure_cle
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
     store
-        .upsert_issue(test_issue("symphony", "requeued", "SYM-62"))
+        .upsert_issue({
+            let mut issue = test_issue("symphony", "requeued", "SYM-62");
+            issue.lifecycle_stage = LifecycleStage::Failed;
+            issue.failure = Some(FailureRecord {
+                kind: "malformed_handoff".into(),
+                message: ".symphony/opencode-handoff.json was not produced".into(),
+                fingerprint: Some("missing_handoff_sidecar".into()),
+                occurrence_count: 1,
+            });
+            issue
+        })
         .await
-        .expect("clean issue");
+        .expect("failed runtime-defect issue");
     store
         .upsert_opencode_session({
             let mut session = test_session("symphony", "requeued", "oc-62", &worktree);
@@ -1430,20 +1444,24 @@ async fn orchestration_launches_fresh_session_after_explicit_runtime_failure_cle
         client.transitions(),
         vec![("requeued".into(), LinearTransition::InProgress)]
     );
-    assert_eq!(opencode.launches(), vec!["SYM-62"]);
-    assert!(opencode.continuations().is_empty());
+    assert!(opencode.launches().is_empty());
+    assert_eq!(
+        opencode.continuations(),
+        vec![("SYM-62".into(), "oc-62".into())]
+    );
     assert!(opencode.repairs().is_empty());
     let sessions = store
         .opencode_sessions_for_issue("symphony", "requeued")
         .await
         .expect("sessions");
-    assert_eq!(sessions.len(), 2);
-    assert!(sessions.iter().any(|session| {
-        session.session_id == "oc-62" && session.lifecycle_stage == LifecycleStage::Failed
-    }));
-    assert!(sessions.iter().any(|session| {
-        session.session_id == "new:SYM-62" && session.lifecycle_stage == LifecycleStage::Running
-    }));
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id, "oc-62");
+    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(sessions[0].stage, OpenCodeStage::Running);
+    assert_eq!(
+        sessions[0].lifecycle_marker.as_deref(),
+        Some("continuation_prompted")
+    );
 }
 
 #[tokio::test]
@@ -1966,7 +1984,7 @@ async fn orchestration_ignores_historical_failed_session_for_in_progress_reconci
 }
 
 #[tokio::test]
-async fn orchestration_does_not_reuse_failed_stage_session_for_todo_dispatch() {
+async fn orchestration_reuses_failed_stage_session_for_todo_dispatch() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let worktree = dir.path().join("SYM-204-worktree");
@@ -1999,22 +2017,23 @@ async fn orchestration_does_not_reuse_failed_stage_session_for_todo_dispatch() {
         .await
         .expect("poll");
 
-    assert_eq!(opencode.launches(), vec!["SYM-204"]);
-    assert!(opencode.continuations().is_empty());
+    assert!(opencode.launches().is_empty());
+    assert_eq!(
+        opencode.continuations(),
+        vec![("SYM-204".into(), "ses-failed".into())]
+    );
     let sessions = store
         .opencode_sessions_for_issue("symphony", "failed-requeue")
         .await
         .expect("sessions");
-    assert!(sessions.iter().any(|session| {
-        session.session_id == "ses-failed"
-            && session.lifecycle_stage == LifecycleStage::Queued
-            && session.stage == OpenCodeStage::Failed
-    }));
-    assert!(sessions.iter().any(|session| {
-        session.session_id == "new:SYM-204"
-            && session.lifecycle_stage == LifecycleStage::Running
-            && session.stage == OpenCodeStage::Starting
-    }));
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id, "ses-failed");
+    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(sessions[0].stage, OpenCodeStage::Running);
+    assert_eq!(
+        sessions[0].lifecycle_marker.as_deref(),
+        Some("continuation_prompted")
+    );
 }
 
 #[tokio::test]
@@ -2134,7 +2153,11 @@ async fn orchestration_releases_runtime_defect_after_linear_blocker_is_done() {
         client.transitions(),
         vec![("runtime-released".into(), LinearTransition::InProgress)]
     );
-    assert_eq!(opencode.launches(), vec!["SYM-206"]);
+    assert!(opencode.launches().is_empty());
+    assert_eq!(
+        opencode.continuations(),
+        vec![("SYM-206".into(), "ses-failed".into())]
+    );
     let record = store
         .issue("symphony", "runtime-released")
         .await

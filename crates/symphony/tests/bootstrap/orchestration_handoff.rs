@@ -644,10 +644,7 @@ async fn successful_handoff_with_unpushed_issue_commit_does_not_close_or_cleanup
         .await
         .expect("orchestrate once");
 
-    assert!(
-        client.transitions().is_empty(),
-        "unverified git closure must not return unpushed to Linear Todo"
-    );
+    assert_todo_transition(&client.transitions(), "unpushed");
     assert!(
         worktree.exists(),
         "unverified git closure must keep worktree"
@@ -860,10 +857,7 @@ async fn no_change_handoff_with_unreported_commit_does_not_close_or_cleanup() {
         .await
         .expect("orchestrate once");
 
-    assert!(
-        client.transitions().is_empty(),
-        "malformed no-change handoff must not return unreported to Linear Todo"
-    );
+    assert_todo_transition(&client.transitions(), "unreported");
     assert!(
         worktree.exists(),
         "unreported committed work must not be cleaned up"
@@ -951,10 +945,7 @@ async fn successful_handoff_with_worktree_outside_configured_root_is_parked_with
         .await
         .expect("orchestrate once");
 
-    assert!(
-        client.transitions().is_empty(),
-        "malformed handoff closure must not return completed to Linear Todo"
-    );
+    assert_todo_transition(&client.transitions(), "completed");
     assert!(outside.exists(), "outside path must not be removed");
     assert!(
         client
@@ -1024,10 +1015,7 @@ async fn successful_handoff_with_sibling_worktree_is_parked_without_cleanup() {
         .await
         .expect("orchestrate once");
 
-    assert!(
-        client.transitions().is_empty(),
-        "malformed handoff closure must not return completed to Linear Todo"
-    );
+    assert_todo_transition(&client.transitions(), "completed");
     assert!(active.exists(), "active worktree must not be removed");
     assert!(sibling.exists(), "sibling worktree must not be removed");
     assert!(client.evidence().iter().any(|(_, evidence)| {
@@ -1095,10 +1083,7 @@ async fn successful_handoff_with_whitespace_worktree_path_is_parked_without_clea
         .await
         .expect("orchestrate once");
 
-    assert!(
-        client.transitions().is_empty(),
-        "malformed handoff closure must not return completed to Linear Todo"
-    );
+    assert_todo_transition(&client.transitions(), "completed");
     assert!(active.exists(), "active worktree must not be removed");
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff"
@@ -1281,10 +1266,7 @@ async fn repeated_session_id_mismatch_hits_runtime_repair_threshold() {
         .expect("orchestrate once");
 
     assert!(opencode.repairs().is_empty());
-    assert!(
-        client.transitions().is_empty(),
-        "repeated session mismatch must not return session-mismatch to Linear Todo"
-    );
+    assert_todo_transition(&client.transitions(), "session-mismatch");
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff"
             && evidence.body.contains("reached bounded repair threshold")
@@ -1377,7 +1359,7 @@ async fn provider_blocker_records_typed_evidence_without_owner_input_transition(
         .await
         .expect("orchestrate again");
     assert_eq!(report.blocked, vec![identifier]);
-    assert!(client.transitions().is_empty());
+    assert_todo_transition(&client.transitions(), issue_id);
 }
 
 #[tokio::test]
@@ -1491,10 +1473,7 @@ async fn malformed_success_handoff_fails_fast_without_opencode_repair_or_owner_i
         .await
         .expect("orchestrate once");
 
-    assert!(
-        client.transitions().is_empty(),
-        "malformed success handoff must not return malformed to Linear Todo"
-    );
+    assert_todo_transition(&client.transitions(), "malformed");
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff"
             && evidence
@@ -1600,10 +1579,7 @@ async fn malformed_handoff_sidecar_fails_fast_kills_process_tree_and_does_not_re
         stale_terminated,
         "malformed handoff must terminate the previous active ACP process"
     );
-    assert!(
-        client.transitions().is_empty(),
-        "malformed sidecar must not return malformed-json to Linear Todo"
-    );
+    assert_todo_transition(&client.transitions(), "malformed-json");
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff" && evidence.body.contains("unknown field `status`")
     }));
@@ -1677,7 +1653,7 @@ async fn dead_in_progress_session_without_handoff_sidecar_fails_fast_instead_of_
         .await
         .expect("orchestrate once");
 
-    assert!(client.transitions().is_empty());
+    assert_todo_transition(&client.transitions(), "missing-sidecar");
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff"
             && evidence
@@ -1855,7 +1831,7 @@ async fn missing_handoff_after_local_commit_records_worktree_git_snapshot_and_pr
         .await
         .expect("orchestrate once");
 
-    assert!(client.transitions().is_empty());
+    assert_todo_transition(&client.transitions(), "missing-sidecar-commit");
     let evidence = client
         .evidence()
         .into_iter()
@@ -2004,7 +1980,7 @@ async fn missing_handoff_after_no_diff_records_explicit_no_change_salvage_snapsh
     assert!(evidence.contains("salvage_state: no_local_changes"));
     assert!(evidence.contains("base_changed_files:\nnone"));
     assert!(evidence.contains("explicit no-change handoff instead of a fake commit"));
-    assert!(client.transitions().is_empty());
+    assert_todo_transition(&client.transitions(), "missing-sidecar-no-diff");
     assert!(opencode.repairs().is_empty());
 }
 
@@ -2077,7 +2053,7 @@ async fn missing_handoff_after_unpushed_branch_records_unpushed_salvage_snapshot
     assert!(evidence.contains("unpushed_commits: 1"));
     assert!(evidence.contains(&head_sha));
     assert!(evidence.contains("artifact.txt"));
-    assert!(client.transitions().is_empty());
+    assert_todo_transition(&client.transitions(), "missing-sidecar-unpushed");
     assert!(opencode.repairs().is_empty());
 }
 

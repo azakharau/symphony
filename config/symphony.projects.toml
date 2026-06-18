@@ -108,7 +108,7 @@ default_suite = "mnemesh-refactor-validation"
 max_identical_failure_fingerprints = 2
 
 [projects.concurrency]
-max_sessions = 6
+max_sessions = 1
 
 [[projects]]
 id = "nervure"

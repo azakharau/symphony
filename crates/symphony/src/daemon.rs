@@ -364,6 +364,9 @@ async fn reconcile_project(
                 let existing = store.issue(&project.id, &issue.id).await?;
                 if retain_typed_non_owner_blocker(project, store, &issue, existing.as_ref()).await?
                 {
+                    linear
+                        .transition_issue(&issue.id, LinearTransition::Todo)
+                        .await?;
                     report.blocked.push(issue.identifier);
                     continue;
                 }
@@ -397,6 +400,9 @@ async fn reconcile_project(
                         fingerprint: Some("missing_active_session".into()),
                         occurrence_count: 1,
                     };
+                    linear
+                        .transition_issue(&issue.id, LinearTransition::Todo)
+                        .await?;
                     let mut record = issue_record(
                         project,
                         &issue,

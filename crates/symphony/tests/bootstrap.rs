@@ -687,6 +687,15 @@ impl RecordingLinearClient {
     }
 }
 
+fn assert_todo_transition(transitions: &[(String, LinearTransition)], issue_id: &str) {
+    assert!(
+        transitions
+            .iter()
+            .any(|(id, transition)| id == issue_id && *transition == LinearTransition::Todo),
+        "expected {issue_id} to leave Linear In Progress via Todo transition, got {transitions:?}"
+    );
+}
+
 #[async_trait::async_trait]
 impl LinearClient for RecordingLinearClient {
     async fn fetch_candidate_issues(

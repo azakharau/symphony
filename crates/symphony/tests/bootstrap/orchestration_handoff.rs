@@ -1581,8 +1581,19 @@ async fn provider_blocker_records_typed_evidence_without_owner_input_transition(
         .upsert_issue(test_issue("symphony", issue_id, identifier))
         .await
         .expect("running issue");
+    let mut provider_process = Command::new("bash")
+        .arg("-c")
+        .arg("exec -a opencode sleep 120")
+        .spawn()
+        .expect("spawn provider blocker opencode-shaped process");
+    thread::sleep(Duration::from_millis(100));
+    let provider_process_id = provider_process.id();
     store
-        .upsert_opencode_session(test_session("symphony", issue_id, "oc-provider", &worktree))
+        .upsert_opencode_session({
+            let mut session = test_session("symphony", issue_id, "oc-provider", &worktree);
+            session.process_id = Some(provider_process_id);
+            session
+        })
         .await
         .expect("running session");
     let client = RecordingLinearClient::new(vec![linear_issue(
@@ -1607,6 +1618,13 @@ async fn provider_blocker_records_typed_evidence_without_owner_input_transition(
     let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
         .expect("orchestrate once");
+    let provider_process_still_alive = test_process_is_alive(provider_process_id);
+    if provider_process_still_alive {
+        provider_process
+            .kill()
+            .expect("cleanup provider blocker process");
+    }
+    let _ = provider_process.wait();
 
     assert!(report.parked_owner_input.is_empty());
     assert!(client.transitions().is_empty());
@@ -1624,6 +1642,16 @@ async fn provider_blocker_records_typed_evidence_without_owner_input_transition(
     assert_eq!(
         issue.blocker.as_ref().expect("blocker").kind,
         "provider_blocker"
+    );
+    let parked_session = store
+        .opencode_session("symphony", issue_id, "oc-provider")
+        .await
+        .expect("query parked session")
+        .expect("parked session");
+    assert_eq!(parked_session.process_id, None);
+    assert!(
+        !provider_process_still_alive,
+        "provider blocker parking must terminate the active OpenCode process tree"
     );
 
     let client = RecordingLinearClient::new(vec![linear_issue(

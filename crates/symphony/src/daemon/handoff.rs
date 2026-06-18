@@ -1300,6 +1300,7 @@ pub(super) async fn park_need_owner_input(
     store.upsert_issue(&record).await?;
     if let Some(session) = session {
         let mut parked_session = session.clone();
+        terminate_current_session_process(project, issue, &mut parked_session).await?;
         parked_session.process_id = None;
         parked_session.lifecycle_stage = LifecycleStage::Blocked;
         parked_session.stage = crate::state::OpenCodeStage::Failed;
@@ -1351,6 +1352,7 @@ pub(super) async fn park_typed_blocker(
     store.upsert_issue(&record).await?;
     if let Some(session) = session {
         let mut parked_session = session.clone();
+        terminate_current_session_process(project, issue, &mut parked_session).await?;
         parked_session.process_id = None;
         parked_session.lifecycle_stage = LifecycleStage::Blocked;
         parked_session.stage = crate::state::OpenCodeStage::Failed;

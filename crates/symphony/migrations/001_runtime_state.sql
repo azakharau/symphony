@@ -120,4 +120,28 @@ WHERE resolution_state = 'open';
 CREATE INDEX IF NOT EXISTS idx_self_defect_registry_managed_issue
 ON self_defect_registry(managed_issue_id);
 
+CREATE TABLE IF NOT EXISTS self_defect_recommendations (
+    recommendation_id TEXT PRIMARY KEY,
+    evidence_fingerprint TEXT NOT NULL,
+    defect_kind TEXT NOT NULL,
+    defect_category TEXT NOT NULL,
+    confidence TEXT NOT NULL,
+    evidence_refs_json TEXT NOT NULL,
+    recommended_action TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    source_project_id TEXT NOT NULL,
+    source_issue_id TEXT NOT NULL,
+    source_issue_identifier TEXT NOT NULL,
+    source_session_id TEXT,
+    source_process_id INTEGER,
+    occurrence_count INTEGER NOT NULL,
+    first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    resolution_state TEXT NOT NULL DEFAULT 'open'
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_self_defect_recommendations_open_evidence
+ON self_defect_recommendations(evidence_fingerprint)
+WHERE resolution_state = 'open';
+
 INSERT OR IGNORE INTO schema_migrations (id) VALUES ('001_runtime_state');

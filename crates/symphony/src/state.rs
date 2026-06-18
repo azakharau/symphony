@@ -185,6 +185,44 @@ pub struct SelfDefectOccurrenceRecord {
     pub relation_mode: SelfDefectRelationMode,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SelfDefectRecommendationRecord {
+    pub recommendation_id: String,
+    pub evidence_fingerprint: String,
+    pub defect_kind: String,
+    pub defect_category: String,
+    pub confidence: SelfDefectRecommendationConfidence,
+    pub evidence_refs: Vec<String>,
+    pub recommended_action: String,
+    pub rationale: String,
+    pub source_project_id: String,
+    pub source_issue_id: String,
+    pub source_issue_identifier: String,
+    pub source_session_id: Option<String>,
+    pub source_process_id: Option<u32>,
+    pub occurrence_count: u32,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfDefectRecommendationConfidence {
+    Low,
+    Medium,
+    High,
+}
+
+impl SelfDefectRecommendationConfidence {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SelfDefectResolutionState {

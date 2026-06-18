@@ -33,23 +33,10 @@ pub(super) async fn record_runtime_self_defect(
     let policy = ManagedSelfDefectPolicy::for_failure(failure);
     let summary = runtime_self_defect_summary(message, failure, session, policy);
     let managed_issue = match store.open_self_defect_by_fingerprint(fingerprint).await? {
-        Some(record) => LinearIssue {
-            id: record.managed_issue_id,
-            identifier: record.managed_issue_identifier,
-            title: format!("Symphony self-defect: {fingerprint}"),
-            description: None,
-            state: "Todo".into(),
-            priority: Some(policy.priority),
-            branch_name: None,
-            url: None,
-            labels: Vec::new(),
-            project_milestone: None,
-            blocked_by: Vec::new(),
-            has_new_owner_answer: false,
-            owner_answer_created_at: None,
-            created_at: None,
-            updated_at: None,
-        },
+        Some(record) => {
+            open_registry_managed_issue(managed_project, linear, fingerprint, record, policy)
+                .await?
+        }
         None => match linear
             .find_managed_issue(managed_project, fingerprint)
             .await?
@@ -79,8 +66,12 @@ pub(super) async fn record_runtime_self_defect(
         },
     };
 
-    let relation = self_defect_relation(&issue.id, &managed_issue.id);
-    let evidence_summary = runtime_self_defect_evidence_summary(&summary, relation.mode);
+    let relation = self_defect_relation(project, managed_project, issue, &managed_issue);
+    let evidence_summary = runtime_self_defect_evidence_summary(
+        &summary,
+        relation.mode,
+        relation.skipped_blocker_reason,
+    );
     linear
         .create_issue_relation(
             &relation.issue_id,
@@ -116,6 +107,41 @@ pub(super) async fn record_runtime_self_defect(
             relation_mode: relation.mode,
         })
         .await?)
+}
+
+async fn open_registry_managed_issue(
+    managed_project: &ProjectConfig,
+    linear: &impl LinearClient,
+    fingerprint: &str,
+    record: SelfDefectRecord,
+    policy: ManagedSelfDefectPolicy,
+) -> anyhow::Result<LinearIssue> {
+    let live_issue = linear
+        .find_managed_issue(managed_project, fingerprint)
+        .await?;
+    if let Some(issue) = live_issue.filter(|issue| {
+        issue.id == record.managed_issue_id || issue.identifier == record.managed_issue_identifier
+    }) {
+        return Ok(issue);
+    }
+
+    Ok(LinearIssue {
+        id: record.managed_issue_id,
+        identifier: record.managed_issue_identifier,
+        title: format!("Symphony self-defect: {fingerprint}"),
+        description: None,
+        state: "Todo".into(),
+        priority: Some(policy.priority),
+        branch_name: None,
+        url: None,
+        labels: Vec::new(),
+        project_milestone: None,
+        blocked_by: Vec::new(),
+        has_new_owner_answer: false,
+        owner_answer_created_at: None,
+        created_at: None,
+        updated_at: None,
+    })
 }
 
 fn managed_issue_milestone_id(
@@ -171,11 +197,17 @@ fn runtime_self_defect_summary(
 fn runtime_self_defect_evidence_summary(
     summary: &str,
     relation_mode: SelfDefectRelationMode,
+    skipped_blocker_reason: Option<SkippedBlockerReason>,
 ) -> String {
-    format!(
+    let mut evidence = format!(
         "{summary}\nrelation_mode: {relation_mode}",
         relation_mode = relation_mode.as_str()
-    )
+    );
+    if let Some(reason) = skipped_blocker_reason {
+        evidence.push_str("\nskipped_blocker_reason: ");
+        evidence.push_str(reason.as_str());
+    }
+    evidence
 }
 
 fn bounded_line(input: &str) -> String {
@@ -268,24 +300,84 @@ struct SelfDefectRelation {
     related_issue_id: String,
     kind: ManagedLinearRelation,
     mode: SelfDefectRelationMode,
+    skipped_blocker_reason: Option<SkippedBlockerReason>,
 }
 
-fn self_defect_relation(source_issue_id: &str, managed_issue_id: &str) -> SelfDefectRelation {
-    if source_issue_id == managed_issue_id {
-        SelfDefectRelation {
-            issue_id: source_issue_id.to_owned(),
-            related_issue_id: managed_issue_id.to_owned(),
-            kind: ManagedLinearRelation::Related,
-            mode: SelfDefectRelationMode::RelatedOnly,
-        }
-    } else {
-        SelfDefectRelation {
-            issue_id: managed_issue_id.to_owned(),
-            related_issue_id: source_issue_id.to_owned(),
-            kind: ManagedLinearRelation::Blocks,
-            mode: SelfDefectRelationMode::Blocking,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SkippedBlockerReason {
+    SameIssue,
+    ActiveSymphonySelfDeadlock,
+    RelationCyclePrevention,
+}
+
+impl SkippedBlockerReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::SameIssue => "same_issue",
+            Self::ActiveSymphonySelfDeadlock => "active_symphony_self_deadlock_prevention",
+            Self::RelationCyclePrevention => "relation_cycle_prevention",
         }
     }
+}
+
+fn self_defect_relation(
+    project: &ProjectConfig,
+    managed_project: &ProjectConfig,
+    source_issue: &LinearIssue,
+    managed_issue: &LinearIssue,
+) -> SelfDefectRelation {
+    if source_issue.id == managed_issue.id {
+        return related_only_relation(
+            &source_issue.id,
+            &managed_issue.id,
+            SkippedBlockerReason::SameIssue,
+        );
+    }
+
+    if project.id == managed_project.id && source_issue.state == "In Progress" {
+        return related_only_relation(
+            &source_issue.id,
+            &managed_issue.id,
+            SkippedBlockerReason::ActiveSymphonySelfDeadlock,
+        );
+    }
+
+    if issue_is_blocked_by(managed_issue, source_issue) {
+        return related_only_relation(
+            &source_issue.id,
+            &managed_issue.id,
+            SkippedBlockerReason::RelationCyclePrevention,
+        );
+    }
+
+    SelfDefectRelation {
+        issue_id: managed_issue.id.clone(),
+        related_issue_id: source_issue.id.clone(),
+        kind: ManagedLinearRelation::Blocks,
+        mode: SelfDefectRelationMode::Blocking,
+        skipped_blocker_reason: None,
+    }
+}
+
+fn related_only_relation(
+    source_issue_id: &str,
+    managed_issue_id: &str,
+    reason: SkippedBlockerReason,
+) -> SelfDefectRelation {
+    SelfDefectRelation {
+        issue_id: source_issue_id.to_owned(),
+        related_issue_id: managed_issue_id.to_owned(),
+        kind: ManagedLinearRelation::Related,
+        mode: SelfDefectRelationMode::RelatedOnly,
+        skipped_blocker_reason: Some(reason),
+    }
+}
+
+fn issue_is_blocked_by(issue: &LinearIssue, blocker: &LinearIssue) -> bool {
+    issue.blocked_by.iter().any(|candidate| {
+        candidate.id.as_deref() == Some(blocker.id.as_str())
+            || candidate.identifier.as_deref() == Some(blocker.identifier.as_str())
+    })
 }
 
 #[cfg(test)]
@@ -378,6 +470,54 @@ mod tests {
                 .contains("fingerprint: fingerprint-related")
         );
         assert!(evidence[0].1.body.contains("relation_mode: related_only"));
+        assert!(
+            evidence[0]
+                .1
+                .body
+                .contains("skipped_blocker_reason: same_issue")
+        );
+    }
+
+    #[tokio::test]
+    async fn active_symphony_source_issue_gets_related_only_relation() {
+        let store = test_store().await;
+        let project = test_project();
+        let source = linear_issue_with_state("source-issue", "SYM-55", "In Progress");
+        let managed = linear_issue("managed-issue", "SYM-60");
+        let linear = SameIssueLinearClient::new(managed);
+        let failure = failure_record("active-sym-self-defect");
+        let session = session_record(&project, &source);
+
+        let record = record_runtime_self_defect(
+            &project,
+            &project,
+            &store,
+            &linear,
+            RuntimeSelfDefectInput {
+                issue: &source,
+                evidence_kind: "runtime_defect",
+                message: "active source should not be blocked by managed self-defect",
+                failure: &failure,
+                session: &session,
+            },
+        )
+        .await
+        .expect("record self-defect");
+
+        assert_eq!(record.relation_mode, SelfDefectRelationMode::RelatedOnly);
+        assert!(
+            record
+                .latest_evidence_summary
+                .contains("skipped_blocker_reason: active_symphony_self_deadlock_prevention")
+        );
+        assert_eq!(
+            linear.relations(),
+            vec![(
+                "source-issue".into(),
+                "managed-issue".into(),
+                ManagedLinearRelation::Related
+            )]
+        );
     }
 
     #[test]
@@ -385,6 +525,7 @@ mod tests {
         let summary = runtime_self_defect_evidence_summary(
             "fingerprint: launch_failed\nsource_project: symphony",
             SelfDefectRelationMode::Blocking,
+            None,
         );
 
         assert!(summary.contains("fingerprint: launch_failed"));
@@ -450,6 +591,161 @@ mod tests {
                 "managed-issue".into(),
                 "source-issue".into(),
                 ManagedLinearRelation::Blocks
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn non_symphony_source_issue_keeps_blocking_relation() {
+        let store = test_store().await;
+        let project = other_project("nerva");
+        let managed_project = test_project();
+        let source = linear_issue_with_state("source-issue", "NRV-10", "In Progress");
+        let managed = linear_issue("managed-issue", "SYM-60");
+        let linear = SameIssueLinearClient::new(managed);
+        let failure = failure_record("non-sym-self-defect");
+        let session = session_record(&project, &source);
+
+        let record = record_runtime_self_defect(
+            &project,
+            &managed_project,
+            &store,
+            &linear,
+            RuntimeSelfDefectInput {
+                issue: &source,
+                evidence_kind: "runtime_defect",
+                message: "non-symphony source may remain blocking",
+                failure: &failure,
+                session: &session,
+            },
+        )
+        .await
+        .expect("record self-defect");
+
+        assert_eq!(record.relation_mode, SelfDefectRelationMode::Blocking);
+        assert!(
+            !record
+                .latest_evidence_summary
+                .contains("skipped_blocker_reason")
+        );
+        assert_eq!(
+            linear.relations(),
+            vec![(
+                "managed-issue".into(),
+                "source-issue".into(),
+                ManagedLinearRelation::Blocks
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn relation_cycle_prevention_uses_related_only_relation() {
+        let store = test_store().await;
+        let project = test_project();
+        let source = linear_issue("source-issue", "SYM-55");
+        let managed = linear_issue("managed-issue", "SYM-60").blocked_by(vec![LinearBlocker {
+            id: Some(source.id.clone()),
+            identifier: Some(source.identifier.clone()),
+            state: Some(source.state.clone()),
+        }]);
+        let linear = SameIssueLinearClient::new(managed);
+        let failure = failure_record("cycle-self-defect");
+        let session = session_record(&project, &source);
+
+        let record = record_runtime_self_defect(
+            &project,
+            &project,
+            &store,
+            &linear,
+            RuntimeSelfDefectInput {
+                issue: &source,
+                evidence_kind: "runtime_defect",
+                message: "avoid visible blocker cycle",
+                failure: &failure,
+                session: &session,
+            },
+        )
+        .await
+        .expect("record self-defect");
+
+        assert_eq!(record.relation_mode, SelfDefectRelationMode::RelatedOnly);
+        assert!(
+            record
+                .latest_evidence_summary
+                .contains("skipped_blocker_reason: relation_cycle_prevention")
+        );
+        assert_eq!(
+            linear.relations(),
+            vec![(
+                "source-issue".into(),
+                "managed-issue".into(),
+                ManagedLinearRelation::Related
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_open_self_defect_reuse_keeps_cycle_prevention() {
+        let store = test_store().await;
+        let project = test_project();
+        let source = linear_issue("source-issue", "SYM-55");
+        let managed = linear_issue("managed-issue", "SYM-60").blocked_by(vec![LinearBlocker {
+            id: Some(source.id.clone()),
+            identifier: Some(source.identifier.clone()),
+            state: Some(source.state.clone()),
+        }]);
+        let linear = SameIssueLinearClient::new(managed);
+        let failure = failure_record("persisted-cycle-self-defect");
+        let session = session_record(&project, &source);
+
+        store
+            .record_self_defect_occurrence(&SelfDefectOccurrenceRecord {
+                fingerprint: "persisted-cycle-self-defect".into(),
+                defect_kind: "malformed_handoff".into(),
+                category: "handoff".into(),
+                severity: "p0".into(),
+                initial_routing_decision: "managed_self_defect".into(),
+                source_project_id: project.id.clone(),
+                source_issue_id: "previous-source".into(),
+                source_issue_identifier: "SYM-1".into(),
+                source_session_id: Some("previous-session".into()),
+                source_process_id: None,
+                managed_issue_id: "managed-issue".into(),
+                managed_issue_identifier: "SYM-60".into(),
+                latest_evidence_summary: "previous occurrence".into(),
+                relation_mode: SelfDefectRelationMode::Blocking,
+            })
+            .await
+            .expect("seed open self-defect");
+
+        let record = record_runtime_self_defect(
+            &project,
+            &project,
+            &store,
+            &linear,
+            RuntimeSelfDefectInput {
+                issue: &source,
+                evidence_kind: "runtime_defect",
+                message: "reused registry row must still inspect live blockers",
+                failure: &failure,
+                session: &session,
+            },
+        )
+        .await
+        .expect("record self-defect");
+
+        assert_eq!(record.relation_mode, SelfDefectRelationMode::RelatedOnly);
+        assert!(
+            record
+                .latest_evidence_summary
+                .contains("skipped_blocker_reason: relation_cycle_prevention")
+        );
+        assert_eq!(
+            linear.relations(),
+            vec![(
+                "source-issue".into(),
+                "managed-issue".into(),
+                ManagedLinearRelation::Related
             )]
         );
     }
@@ -621,8 +917,12 @@ mod tests {
     }
 
     fn test_project() -> ProjectConfig {
+        other_project("symphony")
+    }
+
+    fn other_project(id: &str) -> ProjectConfig {
         ProjectConfig {
-            id: "symphony".into(),
+            id: id.into(),
             name: "Symphony".into(),
             enabled: true,
             workflow_path: PathBuf::from("/tmp/workflow"),
@@ -653,12 +953,16 @@ mod tests {
     }
 
     fn linear_issue(id: &str, identifier: &str) -> LinearIssue {
+        linear_issue_with_state(id, identifier, "Todo")
+    }
+
+    fn linear_issue_with_state(id: &str, identifier: &str, state: &str) -> LinearIssue {
         LinearIssue {
             id: id.into(),
             identifier: identifier.into(),
             title: format!("{identifier} title"),
             description: Some("managed issue".into()),
-            state: "Todo".into(),
+            state: state.into(),
             priority: Some(1),
             branch_name: None,
             url: None,
@@ -672,6 +976,41 @@ mod tests {
             owner_answer_created_at: None,
             created_at: None,
             updated_at: None,
+        }
+    }
+
+    fn failure_record(fingerprint: &str) -> FailureRecord {
+        FailureRecord {
+            kind: "malformed_handoff".into(),
+            message: fingerprint.into(),
+            fingerprint: Some(fingerprint.into()),
+            occurrence_count: 1,
+        }
+    }
+
+    fn session_record(project: &ProjectConfig, issue: &LinearIssue) -> OpenCodeSessionRecord {
+        OpenCodeSessionRecord {
+            project_id: project.id.clone(),
+            issue_id: issue.id.clone(),
+            session_id: "oc-session".into(),
+            agent: "build".into(),
+            model: None,
+            worktree_path: "/tmp/worktree".into(),
+            process_id: None,
+            lifecycle_stage: LifecycleStage::Failed,
+            stage: OpenCodeStage::Failed,
+            active_agent: None,
+            active_model: None,
+            message_count: 0,
+            todo_count: 0,
+            part_count: 0,
+            token_count: 0,
+            cost_micros: 0,
+            subagent_count: 0,
+            eval_stage: None,
+            lifecycle_marker: None,
+            last_event: None,
+            silence_observed: false,
         }
     }
 }

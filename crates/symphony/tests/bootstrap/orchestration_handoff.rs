@@ -1831,7 +1831,7 @@ async fn malformed_handoff_sidecar_fails_fast_kills_process_tree_and_does_not_re
         Some(1),
     )]);
     let opencode = MalformedHandoffOpenCodeLauncher::new(
-        "opencode-handoff.json: unknown field `status`, expected `session_id`",
+        "opencode-handoff.json: unknown field `next_action`, expected `session_id`",
     );
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
@@ -1860,7 +1860,8 @@ async fn malformed_handoff_sidecar_fails_fast_kills_process_tree_and_does_not_re
     );
     assert_todo_transition(&client.transitions(), "malformed-json");
     assert!(client.evidence().iter().any(|(_, evidence)| {
-        evidence.kind == "malformed_handoff" && evidence.body.contains("unknown field `status`")
+        evidence.kind == "malformed_handoff"
+            && evidence.body.contains("unknown field `next_action`")
     }));
     let issue = store
         .issue("symphony", "malformed-json")
@@ -1878,7 +1879,7 @@ async fn malformed_handoff_sidecar_fails_fast_kills_process_tree_and_does_not_re
         failure.fingerprint.as_deref(),
         Some("malformed_handoff_sidecar")
     );
-    assert!(failure.message.contains("unknown field `status`"));
+    assert!(failure.message.contains("unknown field `next_action`"));
     assert!(opencode.repairs().is_empty());
     let session = store
         .opencode_session("symphony", "malformed-json", "oc-86")

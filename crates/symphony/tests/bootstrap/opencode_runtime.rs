@@ -670,7 +670,7 @@ async fn handoff_sidecar_accepts_eval_result_evidence_ref() {
 }
 
 #[tokio::test]
-async fn malformed_handoff_sidecar_rejects_markdown_acp_fields() {
+async fn handoff_sidecar_ignores_harmless_status_marker() {
     let dir = tempfile::tempdir().expect("tempdir");
     let worktree = dir.path().join("worktree");
     let sidecar_dir = worktree.join(".symphony");
@@ -678,6 +678,139 @@ async fn malformed_handoff_sidecar_rejects_markdown_acp_fields() {
     fs::write(
         sidecar_dir.join("opencode-handoff.json"),
         r#"{"status":"implemented","session_id":"ses-markdown-fields","lifecycle_stages":["running","handoff","completed"],"subagents":[],"eval_results":[],"changed_files":[],"git":null,"risks":[],"stop_reason":{"type":"success"}}"#,
+    )
+    .expect("handoff fixture");
+
+    let handoff = opencode::StdioOpenCodeLauncher
+        .latest_handoff(&test_session(
+            "symphony",
+            "issue-status-marker",
+            "ses-markdown-fields",
+            &worktree,
+        ))
+        .await
+        .expect("status marker should not make a valid handoff malformed")
+        .expect("handoff present");
+
+    assert_eq!(handoff.session_id, "ses-markdown-fields");
+    assert!(matches!(
+        handoff.stop_reason,
+        opencode::OpenCodeStopReason::Success
+    ));
+}
+
+#[tokio::test]
+async fn handoff_sidecar_normalizes_opencode_acp_shape() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let worktree = dir.path().join("worktree");
+    let sidecar_dir = worktree.join(".symphony");
+    fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
+    fs::write(
+        sidecar_dir.join("opencode-handoff.json"),
+        r#"{
+  "status": "completed",
+  "session_id": "ses_12805fdb5ffevWVN8GOADoEkPu",
+  "repair_fingerprint": "git_closure_unverified",
+  "lifecycle_stages": [
+    "repair_intake",
+    "base_fetch",
+    "merge_origin_master",
+    "conflict_resolution",
+    "verification",
+    "review",
+    "evaluation",
+    "push",
+    "handoff"
+  ],
+  "subagents_used": ["integrator", "rust-engineer", "evaluator"],
+  "eval_results": {
+    "outcome": "accept",
+    "details": "Final evaluator accepted after verification, review, clean pushed branch, and commit/push closure.",
+    "verification_ref": "2b8782b1-9705-4fab-adc9-873fd96cede3",
+    "evaluation_ref": "mne188-final-evaluation-accept-pushed"
+  },
+  "changed_files": [
+    "crates/mnemesh-storage/src/graph/revision.rs:160-257",
+    "crates/mnemesh-runtime/src/service/code_graph_reads/readiness.rs:16-104"
+  ],
+  "validation": [
+    {"command":"cargo fmt --all -- --check","status":"passed"},
+    {"command":"cargo nextest run -p mnemesh-runtime graph","status":"passed"}
+  ],
+  "git": {
+    "branch": "feature/mne-188-p1-graph-summary-and-bounded-graph-query-projections",
+    "worktree_path": "/home/agent/.symphony/workspaces/opencode/mnemesh/MNE-188",
+    "base_branch": "master",
+    "base_sha": "1723b3cad4d65607cb5b645350d0541897effb4e",
+    "remote": "origin",
+    "head_sha": "661f44082359591b3a820c55464ae32a3e62c1ce",
+    "previous_head_sha": "481fe2611342a90a7d7efeac159ad10f0ad28804",
+    "pushed": true,
+    "status": "clean_tracking_origin",
+    "evidence_ref": "506015a7-71cb-4a14-9f40-e792b1e312e4"
+  },
+  "risks": [],
+  "stop_reason": "accepted"
+}"#,
+    )
+    .expect("handoff fixture");
+
+    let handoff = opencode::StdioOpenCodeLauncher
+        .latest_handoff(&test_session(
+            "mnemesh",
+            "issue-mne-188",
+            "ses_12805fdb5ffevWVN8GOADoEkPu",
+            &worktree,
+        ))
+        .await
+        .expect("OpenCode ACP-shaped handoff should parse")
+        .expect("handoff present");
+
+    assert_eq!(handoff.session_id, "ses_12805fdb5ffevWVN8GOADoEkPu");
+    assert_eq!(
+        handoff.subagents,
+        vec!["integrator", "rust-engineer", "evaluator"]
+    );
+    assert_eq!(
+        handoff.lifecycle_stages,
+        vec![
+            OpenCodeStage::Running,
+            OpenCodeStage::Running,
+            OpenCodeStage::Running,
+            OpenCodeStage::Running,
+            OpenCodeStage::Eval,
+            OpenCodeStage::Review,
+            OpenCodeStage::Eval,
+            OpenCodeStage::Running,
+            OpenCodeStage::Handoff,
+        ]
+    );
+    assert_eq!(handoff.eval_results.len(), 1);
+    assert_eq!(handoff.eval_results[0].suite, "opencode-evaluation");
+    assert!(handoff.eval_results[0].passed);
+    assert_eq!(
+        handoff.eval_results[0].evidence_ref.as_deref(),
+        Some("mne188-final-evaluation-accept-pushed")
+    );
+    assert_eq!(
+        handoff.git.expect("git evidence").head_sha.as_deref(),
+        Some("661f44082359591b3a820c55464ae32a3e62c1ce")
+    );
+    assert!(matches!(
+        handoff.stop_reason,
+        opencode::OpenCodeStopReason::Success
+    ));
+}
+
+#[tokio::test]
+async fn malformed_handoff_sidecar_rejects_markdown_acp_fields() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let worktree = dir.path().join("worktree");
+    let sidecar_dir = worktree.join(".symphony");
+    fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
+    fs::write(
+        sidecar_dir.join("opencode-handoff.json"),
+        r#"{"session_id":"ses-markdown-fields","next_action":"continue","lifecycle_stages":["running","handoff","completed"],"subagents":[],"eval_results":[],"changed_files":[],"git":null,"risks":[],"stop_reason":{"type":"success"}}"#,
     )
     .expect("handoff fixture");
 
@@ -696,7 +829,7 @@ async fn malformed_handoff_sidecar_rejects_markdown_acp_fields() {
         "unexpected error: {error:?}"
     );
     assert!(
-        error.to_string().contains("unknown field `status`"),
+        error.to_string().contains("unknown field `next_action`"),
         "{error}"
     );
 }

@@ -6,7 +6,7 @@ mod session_metrics;
 mod types;
 mod worktree;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::{
     io::BufReader,
@@ -659,7 +659,10 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         }
 
         let input = tokio::fs::read_to_string(&path).await?;
-        let handoff = serde_json::from_str(&input)
+        let mut value: Value = serde_json::from_str(&input)
+            .map_err(|error| OpenCodeError::MalformedHandoff(format!("{path:?}: {error}")))?;
+        normalize_handoff_sidecar_value(&mut value);
+        let handoff = serde_json::from_value(value)
             .map_err(|error| OpenCodeError::MalformedHandoff(format!("{path:?}: {error}")))?;
         info!(
             session_id = %session.session_id,
@@ -667,6 +670,115 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             "OpenCode handoff sidecar loaded"
         );
         Ok(Some(handoff))
+    }
+}
+
+fn normalize_handoff_sidecar_value(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+
+    object.remove("status");
+    object.remove("repair_fingerprint");
+
+    if !object.contains_key("subagents") {
+        if let Some(subagents_used) = object.remove("subagents_used") {
+            object.insert("subagents".to_owned(), subagents_used);
+        }
+    } else {
+        object.remove("subagents_used");
+    }
+
+    if let Some(stages) = object
+        .get_mut("lifecycle_stages")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for stage in stages {
+            if let Some(stage_name) = stage.as_str().and_then(canonical_handoff_stage) {
+                *stage = Value::String(stage_name.to_owned());
+            }
+        }
+    }
+
+    if object.get("eval_results").is_some_and(Value::is_object) {
+        let eval = object.remove("eval_results").unwrap_or(Value::Null);
+        let passed = eval
+            .get("outcome")
+            .or_else(|| eval.get("recommendation"))
+            .and_then(Value::as_str)
+            .is_some_and(|value| matches!(value, "accept" | "accepted" | "pass" | "passed"));
+        let evidence_ref = eval
+            .get("evaluation_ref")
+            .or_else(|| eval.get("evidence_ref"))
+            .or_else(|| eval.get("verification_ref"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let failure_fingerprint = eval
+            .get("failure_fingerprint")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let details = eval
+            .get("details")
+            .or_else(|| eval.get("summary"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        object.insert(
+            "eval_results".to_owned(),
+            json!([{
+                "suite": "opencode-evaluation",
+                "passed": passed,
+                "failure_fingerprint": failure_fingerprint,
+                "details": details,
+                "evidence_ref": evidence_ref,
+            }]),
+        );
+    }
+
+    object.remove("validation");
+
+    if let Some(git) = object.get_mut("git").and_then(Value::as_object_mut) {
+        if !git.contains_key("head_sha") {
+            if let Some(commit) = git.remove("commit") {
+                git.insert("head_sha".to_owned(), commit);
+            }
+        } else {
+            git.remove("commit");
+        }
+        git.remove("remote");
+        git.remove("pushed");
+        git.remove("status");
+        git.remove("evidence_ref");
+        git.remove("base_branch");
+        git.remove("base_sha");
+        git.remove("previous_head_sha");
+    }
+
+    if let Some(stop_reason) = object.get_mut("stop_reason")
+        && let Some(reason) = stop_reason.as_str()
+    {
+        *stop_reason = match reason {
+            "accepted" | "completed" | "success" => json!({"type": "success"}),
+            other => json!({"type": other}),
+        };
+    }
+}
+
+fn canonical_handoff_stage(stage: &str) -> Option<&'static str> {
+    match stage {
+        "planning" | "implementation" | "repair" | "commit_push" => Some("running"),
+        "repair_intake" | "base_fetch" | "merge_origin_master" | "conflict_resolution" | "push" => {
+            Some("running")
+        }
+        "verification" | "evaluation" => Some("eval"),
+        "review" => Some("review"),
+        "handoff" => Some("handoff"),
+        "completed" => Some("completed"),
+        "failed" => Some("failed"),
+        "starting" => Some("starting"),
+        "running" => Some("running"),
+        "eval" => Some("eval"),
+        "silent" => Some("silent"),
+        _ => None,
     }
 }
 

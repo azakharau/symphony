@@ -66,10 +66,11 @@ pub(super) async fn process_in_progress_handoff(
                 return Ok(false);
             }
 
-            if session_has_active_opencode_tree(opencode_storage, store, project, issue, &session)
+            match session_opencode_tree_state(opencode_storage, store, project, issue, &session)
                 .await?
             {
-                return Ok(true);
+                OpenCodeTreeState::FreshActive => return Ok(false),
+                OpenCodeTreeState::StaleActive | OpenCodeTreeState::Inactive => {}
             }
 
             let message = ".symphony/opencode-handoff.json was not produced before the OpenCode ACP process ended".to_string();
@@ -244,23 +245,30 @@ pub(super) async fn process_in_progress_handoff(
     Ok(true)
 }
 
-async fn session_has_active_opencode_tree(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenCodeTreeState {
+    Inactive,
+    FreshActive,
+    StaleActive,
+}
+
+async fn session_opencode_tree_state(
     opencode_storage: Option<&OpenCodeStorageConfig>,
     store: &SqliteStore,
     project: &ProjectConfig,
     issue: &LinearIssue,
     session: &crate::state::OpenCodeSessionRecord,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<OpenCodeTreeState> {
     let Some(storage) = opencode_storage else {
-        return Ok(false);
+        return Ok(OpenCodeTreeState::Inactive);
     };
     let Some(activity) =
         read_session_tree_activity(&storage.database_path, &session.session_id, 40).await?
     else {
-        return Ok(false);
+        return Ok(OpenCodeTreeState::Inactive);
     };
     if !opencode_tree_has_active_work(&activity) {
-        return Ok(false);
+        return Ok(OpenCodeTreeState::Inactive);
     }
     if !opencode_tree_activity_is_fresh(activity.last_updated_ms) {
         warn!(
@@ -271,7 +279,7 @@ async fn session_has_active_opencode_tree(
             freshness_ms = OPENCODE_DB_ACTIVE_FRESHNESS_MS,
             "OpenCode persisted session tree is stale after ACP process exit"
         );
-        return Ok(false);
+        return Ok(OpenCodeTreeState::StaleActive);
     }
 
     let previous_last_event = session.last_event.clone();
@@ -306,7 +314,7 @@ async fn session_has_active_opencode_tree(
         pending_tools = activity.pending_tool_count,
         "OpenCode persisted session tree is still active after ACP process exit"
     );
-    Ok(true)
+    Ok(OpenCodeTreeState::FreshActive)
 }
 
 fn opencode_tree_activity_is_fresh(last_updated_ms: Option<u64>) -> bool {

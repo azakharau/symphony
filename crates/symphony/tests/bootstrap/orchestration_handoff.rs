@@ -1813,7 +1813,7 @@ async fn dead_in_progress_session_without_handoff_sidecar_fails_fast_instead_of_
 }
 
 #[tokio::test]
-async fn dead_acp_process_with_active_opencode_child_session_waits_for_real_handoff() {
+async fn dead_acp_process_with_active_opencode_child_session_resumes_session() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let opencode_db_path = dir.path().join("opencode.sqlite3");
@@ -1851,7 +1851,7 @@ async fn dead_acp_process_with_active_opencode_child_session_waits_for_real_hand
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(None);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -1859,9 +1859,13 @@ async fn dead_acp_process_with_active_opencode_child_session_waits_for_real_hand
 
     assert!(
         client.evidence().is_empty(),
-        "active OpenCode child session must not be reported as missing handoff"
+        "fresh OpenCode child activity must not be reported as missing handoff"
     );
     assert!(opencode.repairs().is_empty());
+    assert_eq!(
+        opencode.continuations(),
+        vec![("SYM-91".into(), "ses-root".into())]
+    );
     let issue = store
         .issue("symphony", "active-child")
         .await
@@ -1876,17 +1880,17 @@ async fn dead_acp_process_with_active_opencode_child_session_waits_for_real_hand
         .expect("session");
     assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
     assert_eq!(session.stage, OpenCodeStage::Running);
-    assert_eq!(session.process_id, None);
+    assert_eq!(session.process_id, Some(4242));
     assert_eq!(session.subagent_count, 1);
     assert_eq!(
         session.lifecycle_marker.as_deref(),
-        Some("opencode_db_active")
+        Some("opencode_db_activity")
     );
     assert!(
         session
             .last_event
             .as_deref()
-            .is_some_and(|event| event.starts_with("opencode_db_active_subtask")),
+            .is_some_and(|event| event.starts_with("opencode_db_updated")),
         "last_event={:?}",
         session.last_event
     );

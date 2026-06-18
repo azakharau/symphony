@@ -912,6 +912,12 @@ async fn retain_typed_non_owner_blocker(
     if !is_typed_non_owner_blocker_kind(&blocker.kind) {
         return Ok(false);
     }
+    if blocker.kind == "runtime_defect"
+        && issue.state == "Todo"
+        && unaccepted_blocker(&issue.blocked_by).is_none()
+    {
+        return Ok(false);
+    }
 
     let lifecycle_stage = if existing.lifecycle_stage == LifecycleStage::Failed {
         LifecycleStage::Failed

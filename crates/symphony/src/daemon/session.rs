@@ -66,6 +66,9 @@ pub(super) async fn unresolved_runtime_defect(
     project: &ProjectConfig,
     issue: &LinearIssue,
 ) -> anyhow::Result<Option<FailureRecord>> {
+    if !issue.blocked_by.iter().any(is_unaccepted_blocker) {
+        return Ok(None);
+    }
     let Some(record) = store.issue(&project.id, &issue.id).await? else {
         return Ok(None);
     };
@@ -82,6 +85,10 @@ pub(super) async fn unresolved_runtime_defect(
         return Ok(None);
     }
     Ok(Some(failure))
+}
+
+fn is_unaccepted_blocker(blocker: &crate::linear::LinearBlocker) -> bool {
+    !matches!(blocker.state.as_deref(), Some("Done"))
 }
 
 pub(super) async fn mark_existing_session_blocked(

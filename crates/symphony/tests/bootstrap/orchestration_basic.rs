@@ -1939,6 +1939,66 @@ async fn orchestration_does_not_reuse_failed_stage_session_for_todo_dispatch() {
 }
 
 #[tokio::test]
+async fn orchestration_releases_runtime_defect_after_linear_blocker_is_done() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let worktree = dir.path().join("SYM-206-worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let mut issue = test_issue("symphony", "runtime-released", "SYM-206");
+    issue.lifecycle_stage = LifecycleStage::Failed;
+    issue.blocker = Some(BlockerRecord {
+        kind: "runtime_defect".into(),
+        message: "unresolved runtime defect: missing_handoff_sidecar (managed by SYM-60)".into(),
+        observed_at: None,
+    });
+    issue.failure = Some(FailureRecord {
+        kind: "malformed_handoff".into(),
+        message: ".symphony/opencode-handoff.json was not produced".into(),
+        fingerprint: Some("missing_handoff_sidecar".into()),
+        occurrence_count: 1,
+    });
+    store.upsert_issue(issue).await.expect("issue");
+    let mut failed = test_session("symphony", "runtime-released", "ses-failed", &worktree);
+    failed.lifecycle_stage = LifecycleStage::Failed;
+    failed.stage = OpenCodeStage::Failed;
+    failed.lifecycle_marker = Some("failed:malformed_handoff".into());
+    failed.last_event = Some("failed:missing_handoff_sidecar".into());
+    store
+        .upsert_opencode_session(failed)
+        .await
+        .expect("failed session");
+
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "runtime-released",
+        "SYM-206",
+        "Todo",
+        Some(1),
+    )]);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(6206);
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("poll");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("runtime-released".into(), LinearTransition::InProgress)]
+    );
+    assert_eq!(opencode.launches(), vec!["SYM-206"]);
+    let record = store
+        .issue("symphony", "runtime-released")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    assert_eq!(record.lifecycle_stage, LifecycleStage::Running);
+    assert!(record.blocker.is_none());
+}
+
+#[tokio::test]
 async fn orchestration_blocker_does_not_reactivate_failed_session() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

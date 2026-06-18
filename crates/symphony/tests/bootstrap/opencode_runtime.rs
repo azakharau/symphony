@@ -439,6 +439,12 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         "{}",
         spec.prompt
     );
+    for fragment in [
+        "Use only the sidecar JSON contract below",
+        "reject any sidecar draft containing raw Markdown ACP keys",
+    ] {
+        assert!(spec.prompt.contains(fragment), "{}", spec.prompt);
+    }
     assert!(
         spec.prompt.contains("Top-level JSON keys must be exactly session_id, lifecycle_stages, subagents, eval_results, changed_files, git, risks, and stop_reason; unknown fields are invalid"),
         "{}",
@@ -660,6 +666,38 @@ async fn handoff_sidecar_accepts_eval_result_evidence_ref() {
     assert_eq!(
         handoff.eval_results[0].evidence_ref.as_deref(),
         Some("mnemesh:evidence:abc123")
+    );
+}
+
+#[tokio::test]
+async fn malformed_handoff_sidecar_rejects_markdown_acp_fields() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let worktree = dir.path().join("worktree");
+    let sidecar_dir = worktree.join(".symphony");
+    fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
+    fs::write(
+        sidecar_dir.join("opencode-handoff.json"),
+        r#"{"status":"implemented","session_id":"ses-markdown-fields","lifecycle_stages":["running","handoff","completed"],"subagents":[],"eval_results":[],"changed_files":[],"git":null,"risks":[],"stop_reason":{"type":"success"}}"#,
+    )
+    .expect("handoff fixture");
+
+    let error = opencode::StdioOpenCodeLauncher
+        .latest_handoff(&test_session(
+            "symphony",
+            "issue-markdown-fields",
+            "ses-markdown-fields",
+            &worktree,
+        ))
+        .await
+        .expect_err("Markdown ACP fields must not be accepted in the sidecar JSON");
+
+    assert!(
+        matches!(error, opencode::OpenCodeError::MalformedHandoff(_)),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        error.to_string().contains("unknown field `status`"),
+        "{error}"
     );
 }
 

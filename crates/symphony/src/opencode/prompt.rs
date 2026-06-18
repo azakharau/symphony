@@ -37,6 +37,7 @@ pub(super) fn build_issue_prompt(
          After validation, commit, and push are complete, write the structured Symphony handoff JSON to:\n\
          {handoff_path}\n\n\
          The handoff file must be valid JSON matching this exact shape, not the Markdown ACP result packet:\n\
+         Use only the sidecar JSON contract below for {handoff_path}; Markdown ACP result packet fields belong only in chat and must never appear in this file.\n\
          Top-level JSON keys must be exactly session_id, lifecycle_stages, subagents, eval_results, changed_files, git, risks, and stop_reason; unknown fields are invalid.\n\
          {{\n\
            \"session_id\": \"{session_id}\",\n\
@@ -50,7 +51,8 @@ pub(super) fn build_issue_prompt(
          }}\n\
          For eval failures use \"stop_reason\": {{\"type\":\"eval_failed\",\"failure_fingerprint\":\"stable-id\"}}.\n\
          For provider or owner blockers use \"provider_blocker\" or \"owner_question\" with \"message\"/\"question\".\n\
-         Do not copy Markdown ACP handoff fields into this JSON. Do not use status, subagents_used, object-shaped eval_results, or string stop_reason values.\n\n\
+         Do not copy Markdown ACP handoff fields into this JSON. Do not use status, subagents_used, object-shaped eval_results, or string stop_reason values.\n\
+         Before writing {handoff_path}, reject any sidecar draft containing raw Markdown ACP keys such as status, subagents_used, result, summary, tests_run, or next_action.\n\n\
          Full issue spec:\n{description}\n",
         identifier = issue.identifier,
         session_id = "the ACP session id",

@@ -50,7 +50,20 @@ pub(super) async fn verify_and_integrate_git_closure(
 }
 
 async fn ensure_clean_worktree(worktree_path: &Path) -> anyhow::Result<()> {
-    let status = git_output(
+    let status = worktree_status(worktree_path).await?;
+    if status.trim().is_empty() {
+        Ok(())
+    } else {
+        bail!("git closure worktree has uncommitted changes:\n{status}");
+    }
+}
+
+async fn worktree_is_clean(worktree_path: &Path) -> anyhow::Result<bool> {
+    Ok(worktree_status(worktree_path).await?.trim().is_empty())
+}
+
+async fn worktree_status(worktree_path: &Path) -> anyhow::Result<String> {
+    git_output(
         worktree_path,
         &[
             "status",
@@ -61,12 +74,7 @@ async fn ensure_clean_worktree(worktree_path: &Path) -> anyhow::Result<()> {
             ":(exclude).symphony",
         ],
     )
-    .await?;
-    if status.trim().is_empty() {
-        Ok(())
-    } else {
-        bail!("git closure worktree has uncommitted changes:\n{status}");
-    }
+    .await
 }
 
 async fn ensure_worktree_head(worktree_path: &Path, head_sha: &str) -> anyhow::Result<()> {
@@ -181,8 +189,9 @@ async fn integrate_base_branch(
 
     let current_branch = git_output(repo_path, &["branch", "--show-current"]).await?;
     if current_branch.trim() == base_branch {
-        ensure_clean_worktree(repo_path).await?;
-        git_status(repo_path, &["merge", "--ff-only", head_sha]).await?;
+        if worktree_is_clean(repo_path).await? {
+            git_status(repo_path, &["merge", "--ff-only", head_sha]).await?;
+        }
     } else {
         let local_base = format!("refs/heads/{base_branch}");
         git_status(repo_path, &["update-ref", &local_base, head_sha]).await?;

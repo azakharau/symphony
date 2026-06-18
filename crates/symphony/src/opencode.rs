@@ -776,7 +776,9 @@ fn normalize_handoff_sidecar_value(value: &mut Value) {
 
 fn canonical_handoff_stage(stage: &str) -> Option<&'static str> {
     match stage {
-        "planning" | "implementation" | "repair" | "commit_push" => Some("running"),
+        "planning" | "implementation" | "repair" | "failure_analysis" | "commit_push" => {
+            Some("running")
+        }
         "repair_intake" | "base_fetch" | "merge_origin_master" | "conflict_resolution" | "push" => {
             Some("running")
         }

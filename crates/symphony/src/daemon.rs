@@ -30,8 +30,8 @@ use crate::{
         read_session_tree_metrics,
     },
     state::{
-        BlockerRecord, CleanupStatus, FailureRecord, LifecycleStage, OpenCodeSessionRecord,
-        OpenCodeStage, RuntimeLivenessStatus, SelfDefectResolutionState,
+        BlockerRecord, CleanupStatus, FailureRecord, IssueStateRecord, LifecycleStage,
+        OpenCodeSessionRecord, OpenCodeStage, RuntimeLivenessStatus, SelfDefectResolutionState,
     },
     storage::SqliteStore,
 };
@@ -431,17 +431,24 @@ async fn reconcile_project(
                         issue = %issue.identifier,
                         "issue remains parked waiting for owner input"
                     );
+                    let blocker = existing
+                        .as_ref()
+                        .and_then(|record| record.blocker.clone())
+                        .filter(|blocker| preserves_need_owner_input_blocker_kind(&blocker.kind))
+                        .unwrap_or_else(|| BlockerRecord {
+                            kind: "owner_input".into(),
+                            message: "waiting for owner-visible answer".into(),
+                            observed_at: issue.updated_at.clone(),
+                        });
+                    let failure = existing.as_ref().and_then(|record| record.failure.clone());
                     let record = issue_record(
                         project,
                         &issue,
                         LifecycleStage::Blocked,
-                        Some(BlockerRecord {
-                            kind: "owner_input".into(),
-                            message: "waiting for owner-visible answer".into(),
-                            observed_at: issue.updated_at.clone(),
-                        }),
+                        Some(blocker),
                         CleanupStatus::Clean,
                     );
+                    let record = IssueStateRecord { failure, ..record };
                     store.upsert_issue(&record).await?;
                     report.parked_owner_input.push(issue.identifier);
                 }
@@ -1440,6 +1447,13 @@ fn lifecycle_stage_for_terminal_linear_state(state: &str) -> LifecycleStage {
         "Canceled" => LifecycleStage::Canceled,
         _ => LifecycleStage::Completed,
     }
+}
+
+fn preserves_need_owner_input_blocker_kind(kind: &str) -> bool {
+    !matches!(
+        kind,
+        "owner_input" | "project_owner_input" | "linear_blocker"
+    )
 }
 
 fn runnable_todo_milestone_count(issues: &[LinearIssue]) -> usize {

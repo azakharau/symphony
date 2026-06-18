@@ -1566,7 +1566,7 @@ async fn repeated_session_id_mismatch_hits_runtime_repair_threshold() {
 }
 
 #[tokio::test]
-async fn provider_blocker_records_typed_evidence_without_owner_input_transition() {
+async fn provider_blocker_transitions_to_need_owner_input_without_losing_typed_reason() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
@@ -1627,7 +1627,10 @@ async fn provider_blocker_records_typed_evidence_without_owner_input_transition(
     let _ = provider_process.wait();
 
     assert!(report.parked_owner_input.is_empty());
-    assert!(client.transitions().is_empty());
+    assert_eq!(
+        client.transitions(),
+        vec![(issue_id.into(), LinearTransition::NeedOwnerInput)]
+    );
     let evidence = client.evidence();
     assert_eq!(evidence.len(), 1);
     assert_eq!(evidence[0].1.kind, "provider_blocker");
@@ -1657,15 +1660,24 @@ async fn provider_blocker_records_typed_evidence_without_owner_input_transition(
     let client = RecordingLinearClient::new(vec![linear_issue(
         issue_id,
         identifier,
-        "In Progress",
+        "Need Owner Input",
         Some(1),
     )]);
     let opencode = ScriptedOpenCodeLauncher::new(None);
     let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
         .expect("orchestrate again");
-    assert_eq!(report.blocked, vec![identifier]);
-    assert_todo_transition(&client.transitions(), issue_id);
+    assert_eq!(report.parked_owner_input, vec![identifier]);
+    assert!(client.transitions().is_empty());
+    let issue = store
+        .issue("symphony", issue_id)
+        .await
+        .expect("query provider blocker after owner input poll")
+        .expect("provider blocker issue");
+    assert_eq!(
+        issue.blocker.as_ref().expect("blocker").kind,
+        "provider_blocker"
+    );
 }
 
 #[tokio::test]

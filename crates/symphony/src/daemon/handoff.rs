@@ -221,6 +221,7 @@ pub(super) async fn process_in_progress_handoff(
                 linear,
                 issue,
                 Some(&session),
+                true,
                 "provider_blocker",
                 message.clone(),
                 Some(FailureRecord {
@@ -652,6 +653,7 @@ async fn handle_eval_failure(
             linear,
             issue,
             Some(session),
+            false,
             "repeated_eval_failure",
             format!("OpenCode reported `{failure_fingerprint}` {occurrence_count} times"),
             Some(FailureRecord {
@@ -1321,6 +1323,7 @@ pub(super) async fn park_typed_blocker(
     linear: &impl LinearClient,
     issue: &LinearIssue,
     session: Option<&crate::state::OpenCodeSessionRecord>,
+    transition_to_need_owner_input: bool,
     blocker_kind: &str,
     message: String,
     failure: Option<FailureRecord>,
@@ -1334,6 +1337,11 @@ pub(super) async fn park_typed_blocker(
             },
         )
         .await?;
+    if transition_to_need_owner_input {
+        linear
+            .transition_issue(&issue.id, LinearTransition::NeedOwnerInput)
+            .await?;
+    }
     let record = IssueStateRecord {
         project_id: project.id.clone(),
         issue_id: issue.id.clone(),

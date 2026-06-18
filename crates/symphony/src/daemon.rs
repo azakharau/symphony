@@ -7,6 +7,7 @@ mod policy;
 mod records;
 mod self_defects;
 mod session;
+mod task_selection;
 
 use std::{error::Error as StdError, path::PathBuf};
 
@@ -44,6 +45,10 @@ use session::{
     mark_existing_session_failed_for_unresolved_runtime_defect, mark_existing_session_queued,
     mark_existing_session_waiting_for_project_owner_input, mark_historical_sessions_ignored,
     mark_issue_sessions_terminal, resume_stale_opencode_session, unresolved_runtime_defect,
+};
+use task_selection::{
+    DispatchSelection, TaskClass, compare_dispatch_selections, is_managed_self_defect_issue,
+    p0_self_bug_preemption_suppression, self_bug_default_suppression,
 };
 
 #[derive(Debug)]
@@ -89,14 +94,14 @@ pub struct OrchestrationReport {
     pub terminal_reconciled: Vec<String>,
 }
 
-#[derive(Debug)]
-enum DispatchCandidate {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum DispatchCandidate {
     New(LinearIssue),
     ExistingSession(LinearIssue),
 }
 
 impl DispatchCandidate {
-    const fn issue(&self) -> &LinearIssue {
+    pub(super) const fn issue(&self) -> &LinearIssue {
         match self {
             Self::New(issue) | Self::ExistingSession(issue) => issue,
         }
@@ -121,15 +126,31 @@ pub async fn run_once_with_clients(
 
     let mut report = OrchestrationReport::default();
     let self_defect_project = config.project("symphony");
-    for project in config.projects().iter().filter(|project| project.enabled) {
+    let self_defect_project = self_defect_project.unwrap_or_else(|| {
+        config
+            .projects()
+            .first()
+            .expect("at least one configured project")
+    });
+    let mut dispatch_queue = Vec::new();
+    for (project_index, project) in config
+        .projects()
+        .iter()
+        .enumerate()
+        .filter(|(_, project)| project.enabled)
+    {
         if let Err(error) = reconcile_project(
+            project_index,
             project,
-            self_defect_project.unwrap_or(project),
-            config.opencode_storage.as_ref(),
-            store,
-            linear,
-            opencode,
+            ReconcileContext {
+                self_defect_project,
+                opencode_storage: config.opencode_storage.as_ref(),
+                store,
+                linear,
+                opencode,
+            },
             &mut report,
+            &mut dispatch_queue,
         )
         .await
         {
@@ -137,7 +158,55 @@ pub async fn run_once_with_clients(
         }
     }
 
+    if dispatch_queue
+        .iter()
+        .any(|selection| selection.class() == TaskClass::P0SelfBug)
+    {
+        record_p0_preempted_candidates(config, store, &dispatch_queue).await?;
+        dispatch_queue.retain(|selection| selection.class() == TaskClass::P0SelfBug);
+    }
+    dispatch_queue.sort_by(compare_dispatch_selections);
+    for selection in dispatch_queue {
+        if let Some(project) = config.project(&selection.project_id) {
+            dispatch_candidate(
+                project,
+                self_defect_project,
+                store,
+                linear,
+                opencode,
+                selection.candidate,
+                &mut report,
+            )
+            .await?;
+        }
+    }
+
     Ok(report)
+}
+
+async fn record_p0_preempted_candidates(
+    config: &RootConfig,
+    store: &SqliteStore,
+    dispatch_queue: &[DispatchSelection],
+) -> anyhow::Result<()> {
+    for selection in dispatch_queue
+        .iter()
+        .filter(|selection| selection.class() != TaskClass::P0SelfBug)
+    {
+        let Some(project) = config.project(&selection.project_id) else {
+            continue;
+        };
+        let issue = selection.issue();
+        let record = issue_record(
+            project,
+            issue,
+            LifecycleStage::Queued,
+            Some(p0_self_bug_preemption_suppression(issue)),
+            CleanupStatus::Clean,
+        );
+        store.upsert_issue(&record).await?;
+    }
+    Ok(())
 }
 
 async fn record_project_orchestration_error(
@@ -175,15 +244,28 @@ async fn record_project_orchestration_error(
     Ok(())
 }
 
+struct ReconcileContext<'a, L, O> {
+    self_defect_project: &'a ProjectConfig,
+    opencode_storage: Option<&'a OpenCodeStorageConfig>,
+    store: &'a SqliteStore,
+    linear: &'a L,
+    opencode: &'a O,
+}
+
 async fn reconcile_project(
+    project_index: usize,
     project: &ProjectConfig,
-    self_defect_project: &ProjectConfig,
-    opencode_storage: Option<&OpenCodeStorageConfig>,
-    store: &SqliteStore,
-    linear: &impl LinearClient,
-    opencode: &impl OpenCodeLauncher,
+    context: ReconcileContext<'_, impl LinearClient, impl OpenCodeLauncher>,
     report: &mut OrchestrationReport,
+    dispatch_queue: &mut Vec<DispatchSelection>,
 ) -> anyhow::Result<()> {
+    let ReconcileContext {
+        self_defect_project,
+        opencode_storage,
+        store,
+        linear,
+        opencode,
+    } = context;
     let mut eligible = Vec::new();
     let mut issues = linear.fetch_candidate_issues(project).await?;
     issues.sort_by(compare_issues_for_dispatch);
@@ -485,6 +567,24 @@ async fn reconcile_project(
                         .await?;
                     continue;
                 }
+                if let Some(blocker) = self_bug_default_suppression(&issue) {
+                    info!(
+                        project_id = %project.id,
+                        issue = %issue.identifier,
+                        blocker_kind = %blocker.kind,
+                        "Todo managed self-bug suppressed by task-selection policy"
+                    );
+                    let record = issue_record(
+                        project,
+                        &issue,
+                        LifecycleStage::Blocked,
+                        Some(blocker),
+                        CleanupStatus::Clean,
+                    );
+                    store.upsert_issue(&record).await?;
+                    report.blocked.push(issue.identifier);
+                    continue;
+                }
                 let managed_self_defect = is_managed_self_defect_issue(&issue);
                 let issue_milestone = match issue.project_milestone.as_ref() {
                     Some(milestone) => Some(milestone),
@@ -673,69 +773,71 @@ async fn reconcile_project(
     );
 
     for candidate in eligible.into_iter().take(capacity) {
-        let issue = candidate.issue();
-        if let Some(reason) = missing_mnemesh_workspace_reason(project) {
-            warn!(
-                project_id = %project.id,
-                issue = %issue.identifier,
-                reason = %reason,
-                "parking issue because Mnemesh workspace is not configured"
-            );
-            park_missing_mnemesh_workspace(project, store, linear, issue, reason).await?;
-            report.blocked.push(issue.identifier.clone());
-            continue;
-        }
-        info!(
+        dispatch_queue.push(DispatchSelection::new(
+            project_index,
+            project,
+            &self_defect_project.id,
+            candidate,
+        ));
+    }
+
+    Ok(())
+}
+
+async fn dispatch_candidate(
+    project: &ProjectConfig,
+    self_defect_project: &ProjectConfig,
+    store: &SqliteStore,
+    linear: &impl LinearClient,
+    opencode: &impl OpenCodeLauncher,
+    candidate: DispatchCandidate,
+    report: &mut OrchestrationReport,
+) -> anyhow::Result<()> {
+    let issue = candidate.issue();
+    if let Some(reason) = missing_mnemesh_workspace_reason(project) {
+        warn!(
             project_id = %project.id,
             issue = %issue.identifier,
-            "dispatching issue to OpenCode"
+            reason = %reason,
+            "parking issue because Mnemesh workspace is not configured"
         );
-        linear
-            .transition_issue(&issue.id, LinearTransition::InProgress)
-            .await?;
-        let launch_spec = build_acp_launch_spec(project, issue);
-        let record = issue_record(
-            project,
-            issue,
-            LifecycleStage::Running,
-            None,
-            CleanupStatus::Clean,
-        );
-        store.upsert_issue(&record).await?;
-        match candidate {
-            DispatchCandidate::New(issue) => {
-                let observer = RuntimeLaunchObserver::new(project, &issue, &launch_spec, store);
-                match opencode.launch_observed(&launch_spec, &observer).await {
-                    Ok(started) => {
-                        let session = new_session_record(project, &issue, started, &launch_spec);
-                        info!(
-                            project_id = %project.id,
-                            issue = %issue.identifier,
-                            session_id = %session.session_id,
-                            worktree_path = %session.worktree_path,
-                            "OpenCode session recorded"
-                        );
-                        report.dispatched.push(issue.identifier);
-                    }
-                    Err(error) => {
-                        handle_launch_failure(
-                            project,
-                            self_defect_project,
-                            store,
-                            linear,
-                            &issue,
-                            &launch_spec,
-                            error,
-                        )
-                        .await?;
-                    }
+        park_missing_mnemesh_workspace(project, store, linear, issue, reason).await?;
+        report.blocked.push(issue.identifier.clone());
+        return Ok(());
+    }
+    info!(
+        project_id = %project.id,
+        issue = %issue.identifier,
+        "dispatching issue to OpenCode"
+    );
+    linear
+        .transition_issue(&issue.id, LinearTransition::InProgress)
+        .await?;
+    let launch_spec = build_acp_launch_spec(project, issue);
+    let record = issue_record(
+        project,
+        issue,
+        LifecycleStage::Running,
+        None,
+        CleanupStatus::Clean,
+    );
+    store.upsert_issue(&record).await?;
+    match candidate {
+        DispatchCandidate::New(issue) => {
+            let observer = RuntimeLaunchObserver::new(project, &issue, &launch_spec, store);
+            match opencode.launch_observed(&launch_spec, &observer).await {
+                Ok(started) => {
+                    let session = new_session_record(project, &issue, started, &launch_spec);
+                    info!(
+                        project_id = %project.id,
+                        issue = %issue.identifier,
+                        session_id = %session.session_id,
+                        worktree_path = %session.worktree_path,
+                        "OpenCode session recorded"
+                    );
+                    report.dispatched.push(issue.identifier);
                 }
-            }
-            DispatchCandidate::ExistingSession(issue) => {
-                if let Err(error) = resume_stale_opencode_session(project, store, opencode, &issue)
-                    .await
-                    .context("continue existing OpenCode session")
-                {
+                Err(error) => {
                     handle_launch_failure(
                         project,
                         self_defect_project,
@@ -743,20 +845,36 @@ async fn reconcile_project(
                         linear,
                         &issue,
                         &launch_spec,
-                        crate::opencode::OpenCodeError::InvalidWorktree(error.to_string()),
+                        error,
                     )
                     .await?;
-                } else {
-                    info!(
-                        project_id = %project.id,
-                        issue = %issue.identifier,
-                        "existing OpenCode session continued without duplicate launch"
-                    );
                 }
             }
         }
+        DispatchCandidate::ExistingSession(issue) => {
+            if let Err(error) = resume_stale_opencode_session(project, store, opencode, &issue)
+                .await
+                .context("continue existing OpenCode session")
+            {
+                handle_launch_failure(
+                    project,
+                    self_defect_project,
+                    store,
+                    linear,
+                    &issue,
+                    &launch_spec,
+                    crate::opencode::OpenCodeError::InvalidWorktree(error.to_string()),
+                )
+                .await?;
+            } else {
+                info!(
+                    project_id = %project.id,
+                    issue = %issue.identifier,
+                    "existing OpenCode session continued without duplicate launch"
+                );
+            }
+        }
     }
-
     Ok(())
 }
 
@@ -1005,14 +1123,6 @@ fn is_typed_non_owner_blocker_kind(kind: &str) -> bool {
             | "repeated_eval_failure"
             | "runtime_defect"
     )
-}
-
-fn is_managed_self_defect_issue(issue: &LinearIssue) -> bool {
-    issue.title.starts_with("Symphony self-defect:")
-        || issue
-            .description
-            .as_deref()
-            .is_some_and(|description| description.contains("symphony:managed-self-bug"))
 }
 
 async fn handle_launch_failure(

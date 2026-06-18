@@ -308,6 +308,214 @@ async fn orchestration_dispatches_one_eligible_todo_by_project_capacity_and_orde
 }
 
 #[tokio::test]
+async fn orchestration_p0_self_bug_preempts_product_work_without_killing_active_execution() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(two_project_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let client = ProjectAwareLinearClient::new([
+        (
+            "alpha",
+            vec![linear_issue("alpha-product", "ALPHA-1", "Todo", Some(1))],
+        ),
+        (
+            "symphony",
+            vec![managed_self_bug("p0-self", "SYM-900", Some(1))],
+        ),
+    ]);
+
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
+
+    assert_eq!(report.dispatched, vec!["SYM-900"]);
+    assert_eq!(
+        client.transitions(),
+        vec![("p0-self".into(), LinearTransition::InProgress)]
+    );
+    let api = RuntimeDashboardApi::from_store(&config, &store)
+        .await
+        .expect("dashboard api");
+    let symphony = api
+        .project_drilldown("symphony")
+        .expect("symphony endpoint")
+        .expect("symphony exists");
+    assert_eq!(
+        symphony
+            .selected_candidate
+            .as_ref()
+            .expect("running p0 selected")
+            .identifier,
+        "SYM-900"
+    );
+    let alpha = api
+        .project_drilldown("alpha")
+        .expect("alpha endpoint")
+        .expect("alpha exists");
+    assert!(alpha.selected_candidate.is_none());
+    assert_eq!(alpha.suppression_reasons.len(), 1);
+    assert_eq!(
+        alpha.suppression_reasons[0].reason_kind,
+        "p0_self_bug_preemption"
+    );
+    let suppressed = store
+        .issue("alpha", "alpha-product")
+        .await
+        .expect("query preempted product")
+        .expect("preempted product");
+    assert_eq!(suppressed.lifecycle_stage, LifecycleStage::Queued);
+
+    let product_only = ProjectAwareLinearClient::new([
+        (
+            "alpha",
+            vec![linear_issue("alpha-product", "ALPHA-1", "Todo", Some(1))],
+        ),
+        ("symphony", Vec::new()),
+    ]);
+    let report = daemon::run_once_with_linear_client(&config, &store, &product_only)
+        .await
+        .expect("orchestrate after p0 gone");
+    assert_eq!(report.dispatched, vec!["ALPHA-1"]);
+    assert_eq!(
+        product_only.transitions(),
+        vec![("alpha-product".into(), LinearTransition::InProgress)]
+    );
+
+    let mut active = test_issue("symphony", "running-self", "SYM-901");
+    active.lifecycle_stage = LifecycleStage::Running;
+    store.upsert_issue(active).await.expect("active self issue");
+    let client = ProjectAwareLinearClient::new([
+        (
+            "alpha",
+            vec![linear_issue("alpha-product", "ALPHA-1", "Todo", Some(1))],
+        ),
+        (
+            "symphony",
+            vec![managed_self_bug("p0-self", "SYM-900", Some(1))],
+        ),
+    ]);
+    daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate with active self execution");
+    let still_running = store
+        .issue("symphony", "running-self")
+        .await
+        .expect("query active self")
+        .expect("active self issue");
+    assert_eq!(still_running.lifecycle_stage, LifecycleStage::Running);
+}
+
+#[tokio::test]
+async fn orchestration_suppresses_p1_p2_self_bugs_unless_promoted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let mut promoted = managed_self_bug("promoted", "SYM-903", Some(3));
+    promoted.labels.push("symphony-self-bug-executable".into());
+    let client = RecordingLinearClient::new(vec![
+        managed_self_bug("p1-self", "SYM-902", Some(2)),
+        promoted,
+    ]);
+
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
+
+    assert_eq!(report.blocked, vec!["SYM-902"]);
+    assert_eq!(report.dispatched, vec!["SYM-903"]);
+    let blocked = store
+        .issue("symphony", "p1-self")
+        .await
+        .expect("query p1")
+        .expect("p1 issue");
+    assert_eq!(blocked.lifecycle_stage, LifecycleStage::Blocked);
+    assert_eq!(
+        blocked.blocker.expect("policy blocker").kind,
+        "managed_self_defect_policy"
+    );
+}
+
+#[tokio::test]
+async fn dashboard_exposes_selected_candidate_and_suppression_reasons() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let running = test_issue("symphony", "candidate", "SYM-910");
+    store
+        .upsert_issue(running)
+        .await
+        .expect("running candidate");
+    let mut blocked = test_issue("symphony", "provider-blocked", "SYM-911");
+    blocked.lifecycle_stage = LifecycleStage::Blocked;
+    blocked.blocker = Some(BlockerRecord {
+        kind: "provider_blocker".into(),
+        message: "provider is unavailable".into(),
+        observed_at: None,
+    });
+    store.upsert_issue(blocked).await.expect("blocked issue");
+
+    let api = RuntimeDashboardApi::from_store(&config, &store)
+        .await
+        .expect("dashboard api");
+    let project = api
+        .project_drilldown("symphony")
+        .expect("project endpoint")
+        .expect("project exists");
+
+    assert_eq!(
+        project
+            .selected_candidate
+            .as_ref()
+            .expect("selected candidate")
+            .identifier,
+        "SYM-910"
+    );
+    assert_eq!(project.suppression_reasons.len(), 1);
+    assert_eq!(
+        project.suppression_reasons[0].reason_kind,
+        "provider_blocker"
+    );
+}
+
+#[tokio::test]
+async fn dashboard_does_not_report_queued_candidate_as_selected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let running = test_issue("symphony", "running", "SYM-920");
+    store.upsert_issue(running).await.expect("running issue");
+    let mut queued = test_issue("symphony", "queued", "SYM-001");
+    queued.lifecycle_stage = LifecycleStage::Queued;
+    store.upsert_issue(queued).await.expect("queued issue");
+
+    let api = RuntimeDashboardApi::from_store(&config, &store)
+        .await
+        .expect("dashboard api");
+    let project = api
+        .project_drilldown("symphony")
+        .expect("project endpoint")
+        .expect("project exists");
+
+    let selected = project
+        .selected_candidate
+        .as_ref()
+        .expect("running selected");
+    assert_eq!(selected.identifier, "SYM-920");
+    assert_eq!(selected.lifecycle_stage, LifecycleStage::Running);
+}
+
+#[tokio::test]
 async fn orchestration_parks_todo_issue_when_mnemesh_workspace_root_is_missing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

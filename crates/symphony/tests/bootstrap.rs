@@ -182,6 +182,18 @@ fn linear_issue(
     }
 }
 
+fn managed_self_bug(
+    id: impl Into<String>,
+    identifier: impl Into<String>,
+    priority: Option<i64>,
+) -> LinearIssue {
+    let mut issue = linear_issue(id, identifier, "Todo", priority);
+    issue.title = "Symphony self-defect: test".into();
+    issue.description = Some("<!-- symphony:managed-self-bug fingerprint=test -->".into());
+    issue.project_milestone = None;
+    issue
+}
+
 fn test_issue(
     project_id: impl Into<String>,
     issue_id: impl Into<String>,

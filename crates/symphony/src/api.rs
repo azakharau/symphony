@@ -232,8 +232,26 @@ pub struct ProjectDashboardResponse {
     pub cleanup_status: CleanupStatus,
     pub capacity: ProjectCapacity,
     pub liveness: ProjectRuntimeLivenessResponse,
+    pub selected_candidate: Option<SelectedCandidateResponse>,
+    pub suppression_reasons: Vec<CandidateSuppressionResponse>,
     pub active_issues: Vec<IssueDetailResponse>,
     pub history_issues: Vec<IssueDetailResponse>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SelectedCandidateResponse {
+    pub issue_id: String,
+    pub identifier: String,
+    pub lifecycle_stage: LifecycleStage,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CandidateSuppressionResponse {
+    pub issue_id: String,
+    pub identifier: String,
+    pub reason_kind: String,
+    pub reason: String,
 }
 
 impl ProjectDashboardResponse {
@@ -358,6 +376,8 @@ async fn project_dashboard_response(
     );
     liveness.primary_reason_code = primary_reason_code.into();
     liveness.primary_reason_detail = primary_reason_detail;
+    let selected_candidate = selected_candidate_response(&active_issues);
+    let suppression_reasons = suppression_reason_responses(&active_issues);
 
     Ok(ProjectDashboardResponse {
         project_id: project.project_id,
@@ -367,9 +387,45 @@ async fn project_dashboard_response(
         cleanup_status: project.cleanup_status,
         capacity,
         liveness,
+        selected_candidate,
+        suppression_reasons,
         active_issues,
         history_issues,
     })
+}
+
+fn selected_candidate_response(
+    active_issues: &[IssueDetailResponse],
+) -> Option<SelectedCandidateResponse> {
+    active_issues
+        .iter()
+        .filter(|issue| issue.lifecycle_stage == LifecycleStage::Running && issue.blocker.is_none())
+        .min_by(|left, right| left.identifier.cmp(&right.identifier))
+        .map(|issue| SelectedCandidateResponse {
+            issue_id: issue.issue_id.clone(),
+            identifier: issue.identifier.clone(),
+            lifecycle_stage: issue.lifecycle_stage,
+            reason: "active execution".into(),
+        })
+}
+
+fn suppression_reason_responses(
+    active_issues: &[IssueDetailResponse],
+) -> Vec<CandidateSuppressionResponse> {
+    active_issues
+        .iter()
+        .filter_map(|issue| {
+            issue
+                .blocker
+                .as_ref()
+                .map(|blocker| CandidateSuppressionResponse {
+                    issue_id: issue.issue_id.clone(),
+                    identifier: issue.identifier.clone(),
+                    reason_kind: blocker.kind.clone(),
+                    reason: blocker.message.clone(),
+                })
+        })
+        .collect()
 }
 
 fn project_capacity(project: &ProjectReadModel, max_sessions: u32) -> ProjectCapacity {

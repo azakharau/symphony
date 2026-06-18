@@ -415,6 +415,16 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         spec.prompt
     );
     assert!(
+        spec.prompt.contains("not the Markdown ACP result packet"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains("Top-level JSON keys must be exactly session_id, lifecycle_stages, subagents, eval_results, changed_files, git, risks, and stop_reason; unknown fields are invalid"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
         spec.prompt.contains(
             "Write or rewrite the handoff sidecar only after validation, commit, and push are complete"
         ),

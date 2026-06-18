@@ -1178,7 +1178,8 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
           "available_sessions": 1
         }
       },
-      "cleanup_status": "clean"
+      "cleanup_status": "clean",
+      "self_defect_routes": []
     }
   ]
 }"#
@@ -1377,4 +1378,270 @@ async fn dashboard_html_surfaces_activity_error_fallback() {
     assert!(response.2.contains("activity_error:"));
     assert!(response.2.contains("No tree activity available"));
     assert!(response.2.contains("oc-activity"));
+}
+
+#[tokio::test]
+async fn dashboard_surfaces_managed_self_defect_routing_projection() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let mut issue = test_issue("symphony", "runtime-held", "SYM-208");
+    issue.lifecycle_stage = LifecycleStage::Failed;
+    issue.failure = Some(FailureRecord {
+        kind: "runtime_defect".into(),
+        message: "OpenCode launch failed after Linear transition".into(),
+        fingerprint: Some("launch_failed".into()),
+        occurrence_count: 2,
+    });
+    store.upsert_issue(issue).await.expect("issue");
+    store
+        .record_self_defect_occurrence(&SelfDefectOccurrenceRecord {
+            fingerprint: "launch_failed".into(),
+            defect_kind: "runtime_defect".into(),
+            category: "runtime".into(),
+            severity: "p0".into(),
+            initial_routing_decision: "managed_self_defect".into(),
+            source_project_id: "symphony".into(),
+            source_issue_id: "runtime-held".into(),
+            source_issue_identifier: "SYM-208".into(),
+            source_session_id: Some("ses-failed".into()),
+            source_process_id: Some(4242),
+            managed_issue_id: "managed-launch-failed".into(),
+            managed_issue_identifier: "SYM-62".into(),
+            latest_evidence_summary: "launch failure still open\nrelation_mode: blocking".into(),
+            relation_mode: SelfDefectRelationMode::Blocking,
+        })
+        .await
+        .expect("self defect");
+
+    let api = RuntimeDashboardApi::from_store(&config, &store)
+        .await
+        .expect("dashboard api");
+    let aggregate_json = serde_json::to_string(&api.aggregate()).expect("aggregate json");
+    let project_json = serde_json::to_string(
+        &api.project_drilldown("symphony")
+            .expect("project endpoint")
+            .expect("project exists"),
+    )
+    .expect("project json");
+    let issue = api
+        .issue_detail("symphony", "runtime-held")
+        .expect("issue endpoint")
+        .expect("issue exists");
+    let routing = issue.self_defect_routing.as_ref().expect("self routing");
+
+    assert_eq!(routing.managed_bug.issue_id, "managed-launch-failed");
+    assert_eq!(routing.managed_bug.identifier, "SYM-62");
+    assert_eq!(
+        routing.managed_bug.url.as_deref(),
+        Some("https://linear.app/issue/SYM-62")
+    );
+    assert_eq!(routing.source_context.issue_identifier, "SYM-208");
+    assert_eq!(
+        routing.source_context.session_id.as_deref(),
+        Some("ses-failed")
+    );
+    assert_eq!(routing.source_context.process_id, Some(4242));
+    assert_eq!(routing.fingerprint, "launch_failed");
+    assert_eq!(routing.severity, "p0");
+    assert_eq!(routing.defect_kind, "runtime_defect");
+    assert_eq!(routing.occurrence_count, 1);
+    assert_eq!(routing.relation_mode, SelfDefectRelationMode::Blocking);
+    assert_eq!(routing.next_action, "repair_managed_self_defect");
+    assert_eq!(
+        routing.suppression_reason.as_deref(),
+        Some("source_issue_blocked_by_managed_self_defect")
+    );
+    assert!(!routing.deadlock_skipped_blocker);
+    assert!(aggregate_json.contains(r#""managed_issue_identifier":"SYM-62""#));
+    assert!(project_json.contains(r#""self_defect_routing""#));
+    assert!(!project_json.contains("latest_evidence_summary"));
+}
+
+#[tokio::test]
+async fn dashboard_surfaces_related_only_self_defect_and_deadlock_skip() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "active-self", "SYM-209"))
+        .await
+        .expect("issue");
+    store
+        .record_self_defect_occurrence(&SelfDefectOccurrenceRecord {
+            fingerprint: "session_id_mismatch".into(),
+            defect_kind: "runtime_defect".into(),
+            category: "runtime".into(),
+            severity: "p0".into(),
+            initial_routing_decision: "managed_self_defect".into(),
+            source_project_id: "symphony".into(),
+            source_issue_id: "active-self".into(),
+            source_issue_identifier: "SYM-209".into(),
+            source_session_id: Some("ses-active".into()),
+            source_process_id: None,
+            managed_issue_id: "managed-session-mismatch".into(),
+            managed_issue_identifier: "SYM-209".into(),
+            latest_evidence_summary: "runtime mismatch\nrelation_mode: related_only\nskipped_blocker_reason: active_symphony_self_deadlock_prevention".into(),
+            relation_mode: SelfDefectRelationMode::RelatedOnly,
+        })
+        .await
+        .expect("self defect");
+
+    let api = RuntimeDashboardApi::from_store(&config, &store)
+        .await
+        .expect("dashboard api");
+    let issue = api
+        .issue_detail("symphony", "active-self")
+        .expect("issue endpoint")
+        .expect("issue exists");
+    let routing = issue.self_defect_routing.as_ref().expect("self routing");
+
+    assert_eq!(routing.relation_mode, SelfDefectRelationMode::RelatedOnly);
+    assert_eq!(routing.next_action, "monitor_related_self_defect");
+    assert_eq!(routing.suppression_reason, None);
+    assert_eq!(
+        routing.skipped_blocker_reason.as_deref(),
+        Some("active_symphony_self_deadlock_prevention")
+    );
+    assert!(routing.deadlock_skipped_blocker);
+
+    let html = symphony::dashboard::runtime_dashboard_response(
+        &config,
+        &store,
+        "/projects/symphony/issues/active-self",
+    )
+    .await
+    .expect("issue html");
+    assert!(html.2.contains("self-defect relation"));
+    assert!(html.2.contains("related_only"));
+    assert!(html.2.contains("deadlock skipped blocker"));
+}
+
+#[tokio::test]
+async fn dashboard_surfaces_classifier_recommendation_without_managed_bug() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "ambiguous", "SYM-210"))
+        .await
+        .expect("issue");
+    store
+        .record_self_defect_recommendation(&SelfDefectRecommendationRecord {
+            recommendation_id: "recommendation:ambiguous-fp".into(),
+            evidence_fingerprint: "ambiguous-fp".into(),
+            defect_kind: "runtime_defect".into(),
+            defect_category: "handoff".into(),
+            confidence: SelfDefectRecommendationConfidence::Medium,
+            evidence_refs: vec!["issue:SYM-210".into()],
+            recommended_action: "backlog_recommendation".into(),
+            rationale: "ambiguous handoff evidence should be reviewed".into(),
+            source_project_id: "symphony".into(),
+            source_issue_id: "ambiguous".into(),
+            source_issue_identifier: "SYM-210".into(),
+            source_session_id: Some("ses-ambiguous".into()),
+            source_process_id: None,
+            occurrence_count: 0,
+            first_seen_at: String::new(),
+            last_seen_at: String::new(),
+        })
+        .await
+        .expect("recommendation");
+
+    let api = RuntimeDashboardApi::from_store(&config, &store)
+        .await
+        .expect("dashboard api");
+    let issue = api
+        .issue_detail("symphony", "ambiguous")
+        .expect("issue endpoint")
+        .expect("issue exists");
+    let routing = issue.self_defect_routing.as_ref().expect("self routing");
+    let recommendation = routing
+        .classifier_recommendation
+        .as_ref()
+        .expect("recommendation");
+
+    assert_eq!(routing.managed_bug.identifier, "recommendation-only");
+    assert_eq!(routing.fingerprint, "ambiguous-fp");
+    assert_eq!(routing.severity, "medium");
+    assert_eq!(routing.next_action, "review_classifier_recommendation");
+    assert_eq!(recommendation.recommended_action, "backlog_recommendation");
+    assert_eq!(
+        recommendation.confidence,
+        SelfDefectRecommendationConfidence::Medium
+    );
+    let issue_json = serde_json::to_string(issue).expect("issue json");
+    assert!(!issue_json.contains("evidence_refs"));
+    assert!(!issue_json.contains("rationale"));
+}
+
+#[tokio::test]
+async fn dashboard_reuses_self_defect_fingerprint_after_second_occurrence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "first", "SYM-211"))
+        .await
+        .expect("first issue");
+    store
+        .upsert_issue(test_issue("symphony", "second", "SYM-212"))
+        .await
+        .expect("second issue");
+
+    for (issue_id, identifier) in [("first", "SYM-211"), ("second", "SYM-212")] {
+        store
+            .record_self_defect_occurrence(&SelfDefectOccurrenceRecord {
+                fingerprint: "reused-fingerprint".into(),
+                defect_kind: "runtime_defect".into(),
+                category: "runtime".into(),
+                severity: "p1".into(),
+                initial_routing_decision: "managed_self_defect".into(),
+                source_project_id: "symphony".into(),
+                source_issue_id: issue_id.into(),
+                source_issue_identifier: identifier.into(),
+                source_session_id: None,
+                source_process_id: None,
+                managed_issue_id: "managed-reused".into(),
+                managed_issue_identifier: "SYM-63".into(),
+                latest_evidence_summary: format!("{identifier} reused fingerprint"),
+                relation_mode: SelfDefectRelationMode::Blocking,
+            })
+            .await
+            .expect("self defect");
+    }
+
+    let api = RuntimeDashboardApi::from_store(&config, &store)
+        .await
+        .expect("dashboard api");
+    let first = api
+        .issue_detail("symphony", "first")
+        .expect("first endpoint")
+        .expect("first issue");
+    let second = api
+        .issue_detail("symphony", "second")
+        .expect("second endpoint")
+        .expect("second issue");
+
+    assert!(first.self_defect_routing.is_none());
+    let routing = second
+        .self_defect_routing
+        .as_ref()
+        .expect("latest source routing");
+    assert_eq!(routing.fingerprint, "reused-fingerprint");
+    assert_eq!(routing.occurrence_count, 2);
+    assert_eq!(routing.source_context.issue_identifier, "SYM-212");
 }

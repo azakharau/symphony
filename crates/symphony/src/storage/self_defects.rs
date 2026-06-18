@@ -121,6 +121,18 @@ impl SqliteStore {
         collect_rows(&mut rows, self_defect_from_row).await
     }
 
+    pub async fn open_self_defects_for_source_issue(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<Vec<SelfDefectRecord>, StorageError> {
+        let sql = self_defect_select_sql(
+            "WHERE source_project_id = ?1 AND source_issue_id = ?2 AND resolution_state = 'open' ORDER BY last_seen_at DESC",
+        );
+        let mut rows = self.conn.query(&sql, params![project_id, issue_id]).await?;
+        collect_rows(&mut rows, self_defect_from_row).await
+    }
+
     pub async fn mark_self_defect_managed_issue_resolved(
         &self,
         managed_issue_id: &str,
@@ -250,6 +262,18 @@ impl SqliteStore {
         );
         let mut rows = self.conn.query(&sql, params![evidence_fingerprint]).await?;
         optional_row(&mut rows, self_defect_recommendation_from_row).await
+    }
+
+    pub async fn open_self_defect_recommendations_for_source_issue(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<Vec<SelfDefectRecommendationRecord>, StorageError> {
+        let sql = self_defect_recommendation_select_sql(
+            "WHERE source_project_id = ?1 AND source_issue_id = ?2 ORDER BY last_seen_at DESC",
+        );
+        let mut rows = self.conn.query(&sql, params![project_id, issue_id]).await?;
+        collect_rows(&mut rows, self_defect_recommendation_from_row).await
     }
 
     async fn self_defect_by_registry_id(

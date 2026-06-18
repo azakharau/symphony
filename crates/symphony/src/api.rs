@@ -15,6 +15,14 @@ pub const AGGREGATE_DASHBOARD_ENDPOINT: &str = "/api/dashboard";
 pub const PROJECT_DRILLDOWN_ENDPOINT_TEMPLATE: &str = "/api/projects/{project_id}";
 pub const ISSUE_DETAIL_ENDPOINT_TEMPLATE: &str = "/api/projects/{project_id}/issues/{issue_id}";
 
+mod self_defect_routing;
+
+pub use self_defect_routing::{
+    ManagedSelfDefectProjection, SelfDefectRecommendationProjection, SelfDefectRouteSummary,
+    SelfDefectRoutingProjection, SelfDefectSourceContext,
+};
+use self_defect_routing::{self_defect_route_summaries, self_defect_routing_projection};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApiJsonResponse {
     pub status: u16,
@@ -203,6 +211,7 @@ pub struct ProjectDashboardCard {
     pub capacity: ProjectCapacity,
     pub liveness: ProjectRuntimeLivenessResponse,
     pub cleanup_status: CleanupStatus,
+    pub self_defect_routes: Vec<SelfDefectRouteSummary>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -276,6 +285,9 @@ impl ProjectDashboardResponse {
             capacity: self.capacity.clone(),
             liveness: self.liveness.clone(),
             cleanup_status: self.cleanup_status,
+            self_defect_routes: self_defect_route_summaries(
+                self.active_issues.iter().chain(self.history_issues.iter()),
+            ),
         }
     }
 }
@@ -291,6 +303,7 @@ pub struct IssueDetailResponse {
     pub blocker: Option<crate::state::BlockerRecord>,
     pub failure: Option<crate::state::FailureRecord>,
     pub runtime_defect: Option<RuntimeDefectProjection>,
+    pub self_defect_routing: Option<SelfDefectRoutingProjection>,
     pub git_ref: Option<GitRefRecord>,
     pub cleanup_status: CleanupStatus,
     pub stop_reason: Option<String>,
@@ -694,6 +707,7 @@ async fn issue_detail_response(
         });
     let display_status = issue_display_status(&issue.issue, sessions.last());
     let runtime_defect = runtime_defect_projection(&issue.issue);
+    let self_defect_routing = self_defect_routing_projection(store, &issue.issue).await?;
 
     Ok(IssueDetailResponse {
         project_id: issue.issue.project_id,
@@ -705,6 +719,7 @@ async fn issue_detail_response(
         blocker: issue.issue.blocker,
         failure: issue.issue.failure,
         runtime_defect,
+        self_defect_routing,
         git_ref: issue.issue.git_ref,
         cleanup_status: issue.issue.cleanup_status,
         stop_reason,

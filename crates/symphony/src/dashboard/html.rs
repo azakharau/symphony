@@ -45,6 +45,21 @@ pub(super) fn render_aggregate(aggregate: &AggregateDashboardResponse) -> String
             escape(&project.liveness.primary_reason_code),
             escape(&project.liveness.primary_reason_detail)
         ));
+        if !project.self_defect_routes.is_empty() {
+            body.push_str("<ul class=\"dense\">");
+            for route in &project.self_defect_routes {
+                body.push_str(&format!(
+                    "<li>self-defect <strong>{}</strong> {} {} count {} last {} · {}</li>",
+                    escape(&route.managed_issue_identifier),
+                    escape(route.relation_mode.as_str()),
+                    escape(&route.severity),
+                    route.occurrence_count,
+                    escape(&route.last_seen_at),
+                    escape(&route.next_action),
+                ));
+            }
+            body.push_str("</ul>");
+        }
         if !project.enabled {
             body.push_str("<p class=\"warning\">Project disabled</p>");
         }
@@ -120,6 +135,23 @@ fn issue_table(body: &mut String, title: &str, issues: &[IssueDetailResponse], a
         ordered.sort_by_key(|issue| issue_status_rank(issue.lifecycle_stage));
     }
     for issue in ordered {
+        let last = issue.self_defect_routing.as_ref().map_or_else(
+            || {
+                issue
+                    .last_runner_event
+                    .as_deref()
+                    .unwrap_or("no runner event")
+                    .to_string()
+            },
+            |routing| {
+                format!(
+                    "self-defect {} {} count {}",
+                    routing.managed_bug.identifier,
+                    routing.relation_mode.as_str(),
+                    routing.occurrence_count
+                )
+            },
+        );
         body.push_str(&format!(
             "<a class=\"issue-row\" href=\"/projects/{project_id}/issues/{issue_id}\"><strong>{identifier}</strong><span>{title}</span><span class=\"badge {status_class}\">{status}</span><span>{last}</span></a>",
             project_id = attr(&issue.project_id),
@@ -128,7 +160,7 @@ fn issue_table(body: &mut String, title: &str, issues: &[IssueDetailResponse], a
             title = escape(&issue.title),
             status_class = status_class(&issue.display_status),
             status = escape(&issue.display_status),
-            last = escape(issue.last_runner_event.as_deref().unwrap_or("no runner event")),
+            last = escape(&last),
         ));
     }
     body.push_str("</div></section>");
@@ -173,6 +205,68 @@ fn evidence_panel(body: &mut String, issue: &IssueDetailResponse) {
             &defect.repair_attempt_count.to_string(),
         );
         fact(body, "next action", &defect.next_action);
+    }
+    if let Some(routing) = &issue.self_defect_routing {
+        fact(body, "managed self bug", &routing.managed_bug.identifier);
+        fact(body, "managed self bug id", &routing.managed_bug.issue_id);
+        fact(
+            body,
+            "managed self bug url",
+            routing.managed_bug.url.as_deref().unwrap_or("none"),
+        );
+        fact(
+            body,
+            "source context",
+            &format!(
+                "{} {} session {} process {}",
+                routing.source_context.project_id,
+                routing.source_context.issue_identifier,
+                routing
+                    .source_context
+                    .session_id
+                    .as_deref()
+                    .unwrap_or("none"),
+                routing
+                    .source_context
+                    .process_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "none".into())
+            ),
+        );
+        fact(body, "self-defect fingerprint", &routing.fingerprint);
+        fact(body, "self-defect kind", &routing.defect_kind);
+        fact(body, "self-defect severity", &routing.severity);
+        fact(body, "self-defect relation", routing.relation_mode.as_str());
+        fact(
+            body,
+            "self-defect occurrences",
+            &routing.occurrence_count.to_string(),
+        );
+        fact(body, "self-defect first seen", &routing.first_seen_at);
+        fact(body, "self-defect last seen", &routing.last_seen_at);
+        fact(body, "self-defect next action", &routing.next_action);
+        fact(
+            body,
+            "self-defect suppression",
+            routing.suppression_reason.as_deref().unwrap_or("none"),
+        );
+        fact(
+            body,
+            "deadlock skipped blocker",
+            bool_label(routing.deadlock_skipped_blocker),
+        );
+        if let Some(recommendation) = &routing.classifier_recommendation {
+            fact(
+                body,
+                "classifier recommendation",
+                &recommendation.recommended_action,
+            );
+            fact(
+                body,
+                "classifier confidence",
+                recommendation.confidence.as_str(),
+            );
+        }
     }
     body.push_str(
         "</dl></article><article class=\"card\"><h2>Worktree / git</h2><dl class=\"facts\">",

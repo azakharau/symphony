@@ -1204,7 +1204,7 @@ async fn orchestration_reissues_repair_prompt_for_stale_malformed_handoff_sessio
 }
 
 #[tokio::test]
-async fn orchestration_keeps_requeued_provider_blocker_blocked_without_continuation() {
+async fn orchestration_retries_requeued_provider_blocker_when_todo_is_unblocked() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
@@ -1249,19 +1249,38 @@ async fn orchestration_keeps_requeued_provider_blocker_blocked_without_continuat
         .await
         .expect("orchestrate once");
 
-    assert_eq!(report.blocked, vec!["SYM-67"]);
-    assert!(opencode.launches().is_empty());
+    assert_eq!(report.dispatched, vec!["SYM-67"]);
+    assert_eq!(opencode.launches(), vec!["SYM-67"]);
     assert!(opencode.continuations().is_empty());
-    assert!(client.transitions().is_empty());
-    let parked = store
-        .opencode_session("symphony", "answered", "ses-owner-input")
+    assert_eq!(
+        client.transitions(),
+        vec![("answered".into(), LinearTransition::InProgress)]
+    );
+    let retried = store
+        .opencode_session("symphony", "answered", "new:SYM-67")
         .await
         .expect("query session")
         .expect("session");
-    assert_eq!(parked.lifecycle_stage, LifecycleStage::Blocked);
-    assert_eq!(parked.stage, OpenCodeStage::Failed);
-    assert_eq!(parked.process_id, None);
-    assert_eq!(parked.lifecycle_marker.as_deref(), Some("parked"));
+    assert_eq!(retried.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(retried.stage, OpenCodeStage::Starting);
+    assert_eq!(retried.process_id, Some(4243));
+    let retired = store
+        .opencode_session("symphony", "answered", "ses-owner-input")
+        .await
+        .expect("query retired provider blocker session")
+        .expect("retired session");
+    assert_eq!(retired.lifecycle_stage, LifecycleStage::Canceled);
+    assert_eq!(
+        retired.lifecycle_marker.as_deref(),
+        Some("retry_retired_provider_blocker")
+    );
+    let issue = store
+        .issue("symphony", "answered")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    assert!(issue.blocker.is_none());
 }
 
 #[tokio::test]

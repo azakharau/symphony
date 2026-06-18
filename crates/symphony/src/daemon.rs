@@ -51,7 +51,8 @@ use session::{
     has_reusable_existing_session, latest_running_session_for_issue, mark_existing_session_blocked,
     mark_existing_session_failed_for_unresolved_runtime_defect, mark_existing_session_queued,
     mark_existing_session_waiting_for_project_owner_input, mark_historical_sessions_ignored,
-    mark_issue_sessions_terminal, resume_stale_opencode_session, unresolved_runtime_defect,
+    mark_issue_sessions_terminal, resume_stale_opencode_session,
+    retire_parked_provider_blocker_sessions, unresolved_runtime_defect,
 };
 use task_selection::{
     DispatchSelection, TaskClass, compare_dispatch_selections, is_managed_self_defect_issue,
@@ -1128,6 +1129,15 @@ async fn retain_typed_non_owner_blocker(
         }
         return Ok(false);
     }
+    if issue.state == "Todo"
+        && unaccepted_blocker(&issue.blocked_by).is_none()
+        && retryable_todo_blocker_kind(&blocker.kind)
+    {
+        if blocker.kind == "provider_blocker" {
+            retire_parked_provider_blocker_sessions(store, project, issue).await?;
+        }
+        return Ok(false);
+    }
 
     let lifecycle_stage = if existing.lifecycle_stage == LifecycleStage::Failed {
         LifecycleStage::Failed
@@ -1180,6 +1190,10 @@ fn is_typed_non_owner_blocker_kind(kind: &str) -> bool {
             | "repeated_eval_failure"
             | "runtime_defect"
     )
+}
+
+fn retryable_todo_blocker_kind(kind: &str) -> bool {
+    matches!(kind, "provider_blocker" | "mnemesh_workspace_missing")
 }
 
 async fn handle_launch_failure(

@@ -1,3 +1,4 @@
+mod acceptance_self_defect;
 mod cleanup;
 mod git_closure;
 mod handoff;
@@ -17,7 +18,10 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     config::{OpenCodeStorageConfig, ProjectConfig, RootConfig},
-    linear::{EmptyLinearClient, LinearClient, LinearIssue, LinearIssueEvidence, LinearTransition},
+    linear::{
+        EmptyLinearClient, LinearClient, LinearIssue, LinearIssueEvidence, LinearSdkClient,
+        LinearTransition,
+    },
     opencode::{
         DeterministicOpenCodeLauncher, OpenCodeLaunchObserver, OpenCodeLauncher,
         OpenCodeProcessStarted, OpenCodeSessionCreated, OpenCodeStartedSession,
@@ -30,6 +34,9 @@ use crate::{
         OpenCodeStage, RuntimeLivenessStatus, SelfDefectResolutionState,
     },
     storage::SqliteStore,
+};
+use acceptance_self_defect::{
+    AcceptanceSelfDefectInput, record_acceptance_self_defect_with_linear_client,
 };
 use handoff::process_in_progress_handoff;
 use http::run_continuous;
@@ -58,6 +65,18 @@ pub struct DaemonOptions {
     pub once: bool,
 }
 
+#[derive(Debug)]
+pub struct AcceptanceSelfDefectOptions {
+    pub config_path: PathBuf,
+    pub database_path: PathBuf,
+    pub source_project_id: String,
+    pub source_issue_identifier: String,
+    pub session_id: String,
+    pub fingerprint: String,
+    pub message: String,
+    pub process_id: Option<u32>,
+}
+
 pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
     let input = tokio::fs::read_to_string(&options.config_path)
         .await
@@ -83,6 +102,37 @@ pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
 
     run_continuous(config, options.database_path).await?;
 
+    Ok(())
+}
+
+pub async fn record_acceptance_self_defect(
+    options: AcceptanceSelfDefectOptions,
+) -> anyhow::Result<()> {
+    let input = tokio::fs::read_to_string(&options.config_path)
+        .await
+        .with_context(|| format!("read config {}", options.config_path.display()))?;
+    let config = RootConfig::from_toml_str(&input)?;
+    let store = SqliteStore::open(&options.database_path)
+        .await
+        .with_context(|| format!("open sqlite database {}", options.database_path.display()))?;
+    store.migrate().await?;
+    store.reconcile_projects(&config).await?;
+
+    let linear = LinearSdkClient::from_env()?;
+    record_acceptance_self_defect_with_linear_client(
+        &config,
+        &store,
+        &linear,
+        AcceptanceSelfDefectInput {
+            source_project_id: &options.source_project_id,
+            source_issue_identifier: &options.source_issue_identifier,
+            session_id: &options.session_id,
+            fingerprint: &options.fingerprint,
+            message: &options.message,
+            process_id: options.process_id,
+        },
+    )
+    .await?;
     Ok(())
 }
 

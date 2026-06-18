@@ -30,6 +30,24 @@ enum Command {
         #[arg(long)]
         once: bool,
     },
+    RecordAcceptanceSelfDefect {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        database: PathBuf,
+        #[arg(long, default_value = "symphony")]
+        source_project: String,
+        #[arg(long)]
+        source_issue: String,
+        #[arg(long)]
+        session_id: String,
+        #[arg(long, default_value = "live_acceptance_related_only")]
+        fingerprint: String,
+        #[arg(long)]
+        message: String,
+        #[arg(long)]
+        process_id: Option<u32>,
+    },
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -69,6 +87,29 @@ where
                 once,
             })
             .await
+        }
+        Command::RecordAcceptanceSelfDefect {
+            config,
+            database,
+            source_project,
+            source_issue,
+            session_id,
+            fingerprint,
+            message,
+            process_id,
+        } => {
+            daemon::record_acceptance_self_defect(daemon::AcceptanceSelfDefectOptions {
+                config_path: config,
+                database_path: database,
+                source_project_id: source_project,
+                source_issue_identifier: source_issue,
+                session_id,
+                fingerprint,
+                message,
+                process_id,
+            })
+            .await?;
+            Ok(())
         }
     }
 }

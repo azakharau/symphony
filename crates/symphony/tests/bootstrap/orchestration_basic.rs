@@ -2018,6 +2018,73 @@ async fn orchestration_does_not_reuse_failed_stage_session_for_todo_dispatch() {
 }
 
 #[tokio::test]
+async fn orchestration_existing_session_continue_failure_does_not_leave_running_without_process() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let worktree = dir.path().join("SYM-209-worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let mut issue = test_issue("symphony", "existing-continue-fails", "SYM-209");
+    issue.lifecycle_stage = LifecycleStage::Queued;
+    store.upsert_issue(issue).await.expect("issue");
+    let mut session = test_session(
+        "symphony",
+        "existing-continue-fails",
+        "ses-existing",
+        &worktree,
+    );
+    session.lifecycle_stage = LifecycleStage::Queued;
+    session.stage = OpenCodeStage::Silent;
+    session.process_id = None;
+    store
+        .upsert_opencode_session(session)
+        .await
+        .expect("session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "existing-continue-fails",
+        "SYM-209",
+        "Todo",
+        Some(1),
+    )]);
+
+    daemon::run_once_with_clients(&config, &store, &client, &FailingContinueOpenCodeLauncher)
+        .await
+        .expect("poll");
+
+    assert_eq!(
+        client.transitions(),
+        vec![
+            (
+                "existing-continue-fails".into(),
+                LinearTransition::InProgress
+            ),
+            ("existing-continue-fails".into(), LinearTransition::Todo),
+        ]
+    );
+    let record = store
+        .issue("symphony", "existing-continue-fails")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    assert_eq!(record.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(
+        record.failure.expect("failure").fingerprint.as_deref(),
+        Some("launch_failed")
+    );
+    let session = store
+        .opencode_session("symphony", "existing-continue-fails", "ses-existing")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Queued);
+    assert_eq!(session.stage, OpenCodeStage::Silent);
+    assert_eq!(session.process_id, None);
+}
+
+#[tokio::test]
 async fn orchestration_releases_runtime_defect_after_linear_blocker_is_done() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

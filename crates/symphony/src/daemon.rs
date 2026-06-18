@@ -42,9 +42,8 @@ use self_defects::{RuntimeSelfDefectInput, record_runtime_self_defect};
 use session::{
     has_reusable_existing_session, latest_running_session_for_issue, mark_existing_session_blocked,
     mark_existing_session_failed_for_unresolved_runtime_defect, mark_existing_session_queued,
-    mark_existing_session_reactivated, mark_existing_session_waiting_for_project_owner_input,
-    mark_historical_sessions_ignored, mark_issue_sessions_terminal, resume_stale_opencode_session,
-    unresolved_runtime_defect,
+    mark_existing_session_waiting_for_project_owner_input, mark_historical_sessions_ignored,
+    mark_issue_sessions_terminal, resume_stale_opencode_session, unresolved_runtime_defect,
 };
 
 #[derive(Debug)]
@@ -733,15 +732,27 @@ async fn reconcile_project(
                 }
             }
             DispatchCandidate::ExistingSession(issue) => {
-                mark_existing_session_reactivated(store, project, &issue).await?;
-                resume_stale_opencode_session(project, store, opencode, &issue)
+                if let Err(error) = resume_stale_opencode_session(project, store, opencode, &issue)
                     .await
-                    .context("continue existing OpenCode session")?;
-                info!(
-                    project_id = %project.id,
-                    issue = %issue.identifier,
-                    "existing OpenCode session continued without duplicate launch"
-                );
+                    .context("continue existing OpenCode session")
+                {
+                    handle_launch_failure(
+                        project,
+                        self_defect_project,
+                        store,
+                        linear,
+                        &issue,
+                        &launch_spec,
+                        crate::opencode::OpenCodeError::InvalidWorktree(error.to_string()),
+                    )
+                    .await?;
+                } else {
+                    info!(
+                        project_id = %project.id,
+                        issue = %issue.identifier,
+                        "existing OpenCode session continued without duplicate launch"
+                    );
+                }
             }
         }
     }

@@ -207,31 +207,6 @@ fn terminal_reconciliation_event_is_stable(last_event: Option<&str>) -> bool {
     })
 }
 
-pub(super) async fn mark_existing_session_reactivated(
-    store: &SqliteStore,
-    project: &ProjectConfig,
-    issue: &LinearIssue,
-) -> anyhow::Result<()> {
-    let Some(mut session) = latest_session_for_issue(store, &project.id, &issue.id).await? else {
-        return Ok(());
-    };
-    terminate_current_session_process(project, issue, &mut session).await?;
-    session.process_id = None;
-    session.lifecycle_stage = LifecycleStage::Running;
-    session.stage = OpenCodeStage::Running;
-    session.lifecycle_marker = Some("existing_session_reactivated".into());
-    if !session
-        .last_event
-        .as_deref()
-        .is_some_and(|event| event.starts_with("stale_killed:"))
-    {
-        session.last_event = Some("existing_session_reactivated".into());
-    }
-    session.silence_observed = false;
-    store.upsert_opencode_session(&session).await?;
-    Ok(())
-}
-
 pub(super) async fn resume_stale_opencode_session(
     project: &ProjectConfig,
     store: &SqliteStore,
@@ -337,7 +312,10 @@ fn terminal_opencode_stage(session: &OpenCodeSessionRecord) -> bool {
 }
 
 pub(super) async fn session_requires_resume(session: &OpenCodeSessionRecord) -> bool {
-    if session.lifecycle_stage != LifecycleStage::Running {
+    if !matches!(
+        session.lifecycle_stage,
+        LifecycleStage::Running | LifecycleStage::Queued | LifecycleStage::Blocked
+    ) {
         return false;
     }
     let Some(process_id) = session.process_id else {

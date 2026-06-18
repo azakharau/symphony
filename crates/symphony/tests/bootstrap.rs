@@ -957,6 +957,32 @@ impl OpenCodeLauncher for SetupFailingOpenCodeLauncher {
 }
 
 #[derive(Debug)]
+struct FailingContinueOpenCodeLauncher;
+
+#[async_trait::async_trait]
+impl OpenCodeLauncher for FailingContinueOpenCodeLauncher {
+    async fn launch(
+        &self,
+        _spec: &opencode::OpenCodeLaunchSpec,
+    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+        Err(opencode::OpenCodeError::InvalidWorktree(
+            "unexpected launch".into(),
+        ))
+    }
+
+    async fn continue_session(
+        &self,
+        _spec: &opencode::OpenCodeLaunchSpec,
+        _session: &OpenCodeSessionRecord,
+        _continuation_message: &str,
+    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+        Err(opencode::OpenCodeError::InvalidWorktree(
+            "continue failed".into(),
+        ))
+    }
+}
+
+#[derive(Debug)]
 struct ResumeRecordingOpenCodeLauncher {
     resumed_process_id: u32,
     launches: std::sync::Mutex<Vec<String>>,

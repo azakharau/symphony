@@ -1,3 +1,5 @@
+mod recommendation;
+
 use crate::{
     config::ProjectConfig,
     linear::{
@@ -10,6 +12,8 @@ use crate::{
     },
     storage::SqliteStore,
 };
+
+use recommendation::record_ambiguous_self_defect_recommendation;
 
 pub(super) async fn record_runtime_self_defect(
     project: &ProjectConfig,
@@ -30,7 +34,18 @@ pub(super) async fn record_runtime_self_defect(
         .fingerprint
         .as_deref()
         .unwrap_or(failure.kind.as_str());
-    let policy = ManagedSelfDefectPolicy::for_failure(failure);
+    let Some(policy) = ManagedSelfDefectPolicy::for_failure(failure) else {
+        return record_ambiguous_self_defect_recommendation(
+            project,
+            store,
+            fingerprint,
+            message,
+            failure,
+            session,
+            issue,
+        )
+        .await;
+    };
     let summary = runtime_self_defect_summary(message, failure, session, policy);
     let managed_issue = match store.open_self_defect_by_fingerprint(fingerprint).await? {
         Some(record) => {
@@ -210,7 +225,7 @@ fn runtime_self_defect_evidence_summary(
     evidence
 }
 
-fn bounded_line(input: &str) -> String {
+pub(super) fn bounded_line(input: &str) -> String {
     const MAX_BYTES: usize = 512;
     let collapsed = input.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.len() <= MAX_BYTES {
@@ -232,12 +247,12 @@ struct ManagedSelfDefectPolicy {
 }
 
 impl ManagedSelfDefectPolicy {
-    fn for_failure(failure: &FailureRecord) -> Self {
+    fn for_failure(failure: &FailureRecord) -> Option<Self> {
         let fingerprint = failure
             .fingerprint
             .as_deref()
             .unwrap_or(failure.kind.as_str());
-        match fingerprint {
+        Some(match fingerprint {
             "missing_handoff_sidecar"
             | "malformed_handoff_sidecar"
             | "incomplete_success_handoff"
@@ -252,9 +267,8 @@ impl ManagedSelfDefectPolicy {
                 Self::p2(failure_kind_category(failure))
             }
             _ if failure.kind == "malformed_handoff" => Self::p0("handoff"),
-            _ if failure.kind == "runtime_defect" => Self::p1("runtime"),
-            _ => Self::p1("runtime"),
-        }
+            _ => return None,
+        })
     }
 
     const fn p0(category: &'static str) -> Self {
@@ -285,7 +299,7 @@ impl ManagedSelfDefectPolicy {
     }
 }
 
-fn failure_kind_category(failure: &FailureRecord) -> &'static str {
+pub(super) fn failure_kind_category(failure: &FailureRecord) -> &'static str {
     match failure.kind.as_str() {
         "malformed_handoff" => "handoff",
         "git_closure" => "git_closure",
@@ -388,7 +402,7 @@ mod tests {
         config::{BranchPolicy, ConcurrencyConfig, EvalDefaults},
         linear::{LinearBlocker, LinearClientError, LinearMilestone, LinearProjectConfig},
         opencode::{OpenCodeRuntimeConfig, PermissionPolicy},
-        state::{LifecycleStage, OpenCodeStage},
+        state::{LifecycleStage, OpenCodeStage, SelfDefectRecommendationConfidence},
     };
 
     use super::*;
@@ -824,11 +838,168 @@ mod tests {
                 message: fingerprint.into(),
                 fingerprint: Some(fingerprint.into()),
                 occurrence_count: 1,
-            });
+            })
+            .expect("known deterministic self-defect policy");
             assert_eq!(policy.severity, severity, "{fingerprint}");
             assert_eq!(policy.state, state, "{fingerprint}");
             assert_eq!(policy.priority, priority, "{fingerprint}");
         }
+    }
+
+    #[tokio::test]
+    async fn ambiguous_self_defect_records_recommendation_without_linear_writes() {
+        let store = test_store().await;
+        let project = test_project();
+        let source = linear_issue("source-issue", "SYM-55");
+        let linear = SameIssueLinearClient::new(linear_issue("managed-issue", "SYM-60"));
+        let failure = FailureRecord {
+            kind: "ambiguous_runtime_signal".into(),
+            message: "transient runtime warning without deterministic fingerprint".into(),
+            fingerprint: Some("ambiguous-runtime-warning".into()),
+            occurrence_count: 1,
+        };
+        let session = session_record(&project, &source);
+
+        let record = record_runtime_self_defect(
+            &project,
+            &project,
+            &store,
+            &linear,
+            RuntimeSelfDefectInput {
+                issue: &source,
+                evidence_kind: "runtime_defect",
+                message: "transient runtime warning without deterministic fingerprint",
+                failure: &failure,
+                session: &session,
+            },
+        )
+        .await
+        .expect("record recommendation");
+
+        assert_eq!(record.initial_routing_decision, "recommendation_only");
+        assert_eq!(record.managed_issue_identifier, "recommendation-only");
+        assert_eq!(record.severity, "low");
+        assert_eq!(record.relation_mode, SelfDefectRelationMode::RelatedOnly);
+        assert!(linear.relations().is_empty());
+        assert!(linear.evidence().is_empty());
+    }
+
+    #[tokio::test]
+    async fn high_confidence_ambiguous_self_defect_persists_typed_recommendation_only() {
+        let store = test_store().await;
+        let project = test_project();
+        let source = linear_issue("source-issue", "SYM-55");
+        let linear = SameIssueLinearClient::new(linear_issue("managed-issue", "SYM-60"));
+        let failure = FailureRecord {
+            kind: "ambiguous_runtime_signal".into(),
+            message: "high confidence reproducible runtime recommendation evidence".into(),
+            fingerprint: Some("ambiguous-high-confidence-runtime".into()),
+            occurrence_count: 1,
+        };
+        let session = session_record(&project, &source);
+
+        let record = record_runtime_self_defect(
+            &project,
+            &project,
+            &store,
+            &linear,
+            RuntimeSelfDefectInput {
+                issue: &source,
+                evidence_kind: "runtime_defect",
+                message: "high confidence reproducible runtime recommendation evidence",
+                failure: &failure,
+                session: &session,
+            },
+        )
+        .await
+        .expect("record high-confidence recommendation");
+        let recommendation = store
+            .open_self_defect_recommendation_by_evidence(&record.fingerprint)
+            .await
+            .expect("lookup recommendation")
+            .expect("persisted recommendation");
+
+        assert_eq!(record.initial_routing_decision, "recommendation_only");
+        assert_eq!(record.managed_issue_identifier, "recommendation-only");
+        assert_eq!(record.severity, "high");
+        assert_eq!(record.relation_mode, SelfDefectRelationMode::RelatedOnly);
+        assert_eq!(
+            recommendation.confidence,
+            SelfDefectRecommendationConfidence::High
+        );
+        assert!(
+            recommendation
+                .evidence_refs
+                .contains(&"project:symphony".into())
+        );
+        assert!(
+            recommendation
+                .evidence_refs
+                .contains(&"issue:SYM-55".into())
+        );
+        assert!(
+            recommendation
+                .evidence_refs
+                .contains(&"session:oc-session".into())
+        );
+        assert!(
+            recommendation
+                .evidence_refs
+                .contains(&"fingerprint:ambiguous-high-confidence-runtime".into())
+        );
+        assert!(linear.relations().is_empty());
+        assert!(linear.evidence().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ambiguous_self_defect_dedupes_identical_evidence() {
+        let store = test_store().await;
+        let project = test_project();
+        let source = linear_issue("source-issue", "SYM-55");
+        let linear = SameIssueLinearClient::new(linear_issue("managed-issue", "SYM-60"));
+        let failure = FailureRecord {
+            kind: "ambiguous_runtime_signal".into(),
+            message: "same ambiguous warning".into(),
+            fingerprint: Some("ambiguous-runtime-warning".into()),
+            occurrence_count: 1,
+        };
+        let session = session_record(&project, &source);
+
+        let first = record_runtime_self_defect(
+            &project,
+            &project,
+            &store,
+            &linear,
+            RuntimeSelfDefectInput {
+                issue: &source,
+                evidence_kind: "runtime_defect",
+                message: "same ambiguous warning",
+                failure: &failure,
+                session: &session,
+            },
+        )
+        .await
+        .expect("first recommendation");
+        let second = record_runtime_self_defect(
+            &project,
+            &project,
+            &store,
+            &linear,
+            RuntimeSelfDefectInput {
+                issue: &source,
+                evidence_kind: "runtime_defect",
+                message: "same ambiguous warning",
+                failure: &failure,
+                session: &session,
+            },
+        )
+        .await
+        .expect("second recommendation");
+
+        assert_eq!(second.registry_id, first.registry_id);
+        assert_eq!(second.occurrence_count, 2);
+        assert!(linear.relations().is_empty());
+        assert!(linear.evidence().is_empty());
     }
 
     struct SameIssueLinearClient {

@@ -46,7 +46,9 @@ pub use types::{
     OpenCodeStartedSession, OpenCodeStopReason, PermissionPolicy,
 };
 pub use worktree::worktree_path_allowed;
-use worktree::{ensure_worktree, handoff_sidecar_path, remove_stale_handoff_sidecar};
+use worktree::{
+    ensure_resumable_worktree, ensure_worktree, handoff_sidecar_path, remove_stale_handoff_sidecar,
+};
 
 #[async_trait::async_trait]
 pub trait OpenCodeLaunchObserver: Sync {
@@ -414,7 +416,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             command = %spec.command.display(),
             "resuming OpenCode ACP session"
         );
-        ensure_worktree(spec).await?;
+        ensure_resumable_worktree(spec).await?;
         let mut child = AcpChildLifecycle::spawn(spec).await?;
         let process_id = child.process_id();
 
@@ -468,7 +470,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             failure_fingerprint,
             "continuing OpenCode ACP repair"
         );
-        ensure_worktree(spec).await?;
+        ensure_resumable_worktree(spec).await?;
         remove_stale_handoff_sidecar(&spec.cwd).await?;
         let mut child = AcpChildLifecycle::spawn(spec).await?;
         let process_id = child.process_id();

@@ -38,6 +38,49 @@ pub(super) async fn ensure_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), Ope
     create_git_worktree(spec, repo_path, &base_ref).await
 }
 
+pub(super) async fn ensure_resumable_worktree(
+    spec: &OpenCodeLaunchSpec,
+) -> Result<(), OpenCodeError> {
+    validate_launch_worktree(spec)?;
+
+    let Some(repo_path) = &spec.repo_path else {
+        tokio::fs::create_dir_all(&spec.cwd).await?;
+        return Ok(());
+    };
+    let Some(base_ref) = &spec.base_ref else {
+        tokio::fs::create_dir_all(&spec.cwd).await?;
+        return Ok(());
+    };
+
+    let base_ref = effective_base_ref(repo_path, base_ref).await?;
+
+    if tokio::fs::try_exists(spec.cwd.join(".git")).await? {
+        return ensure_existing_resumable_git_worktree(spec).await;
+    }
+
+    ensure_worktree_with_effective_base(spec, repo_path, &base_ref).await
+}
+
+async fn ensure_worktree_with_effective_base(
+    spec: &OpenCodeLaunchSpec,
+    repo_path: &Path,
+    base_ref: &str,
+) -> Result<(), OpenCodeError> {
+    if tokio::fs::try_exists(&spec.cwd).await? && directory_has_entries(&spec.cwd).await? {
+        return Err(OpenCodeError::InvalidWorktree(format!(
+            "target worktree {} exists but is not a git worktree",
+            spec.cwd.display()
+        )));
+    }
+
+    if let Some(parent) = spec.cwd.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    prune_stale_worktree_entries(repo_path).await?;
+    create_git_worktree(spec, repo_path, base_ref).await
+}
+
 async fn ensure_existing_git_worktree(
     spec: &OpenCodeLaunchSpec,
     repo_path: &Path,
@@ -97,6 +140,56 @@ async fn ensure_existing_git_worktree(
         branch_name = %spec.branch_name,
         base_ref,
         "OpenCode worktree already exists on expected branch with clean status"
+    );
+    Ok(())
+}
+
+async fn ensure_existing_resumable_git_worktree(
+    spec: &OpenCodeLaunchSpec,
+) -> Result<(), OpenCodeError> {
+    let current_branch = git_output(
+        &spec.cwd,
+        ["branch", "--show-current"],
+        "git branch --show-current",
+    )
+    .await?;
+    let status = git_output(
+        &spec.cwd,
+        ["status", "--porcelain", "--untracked-files=all"],
+        "git status --porcelain --untracked-files=all",
+    )
+    .await?;
+
+    let observed_branch = current_branch.trim();
+    if observed_branch.is_empty() {
+        return Err(OpenCodeError::InvalidWorktree(format!(
+            "existing worktree {} has detached HEAD; expected branch {}",
+            spec.cwd.display(),
+            spec.branch_name
+        )));
+    }
+
+    if observed_branch != spec.branch_name {
+        let dirty_evidence = dirty_or_untracked_evidence(&status);
+        let mut message = format!(
+            "existing worktree {} is on branch {} but expected {}",
+            spec.cwd.display(),
+            observed_branch,
+            spec.branch_name
+        );
+        if !dirty_evidence.is_empty() {
+            message.push_str("; dirty or untracked files: ");
+            message.push_str(&dirty_evidence);
+        }
+        return Err(OpenCodeError::InvalidWorktree(message));
+    }
+
+    debug!(
+        issue = %spec.issue_identifier,
+        cwd = %spec.cwd.display(),
+        branch_name = %spec.branch_name,
+        dirty = !status.trim().is_empty(),
+        "OpenCode worktree is resumable on expected branch"
     );
     Ok(())
 }
@@ -441,6 +534,33 @@ mod tests {
 
         assert!(
             matches!(&error, OpenCodeError::InvalidWorktree(message) if message.contains("has dirty or untracked files")),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resumable_worktree_accepts_dirty_expected_branch() {
+        let fixture = GitFixture::new();
+        fixture.add_worktree("symphony/SYM-1", false);
+        fs::write(fixture.worktree.join("untracked.txt"), "dirty").expect("write dirty file");
+
+        ensure_resumable_worktree(&fixture.launch_spec())
+            .await
+            .expect("dirty expected branch must be resumable");
+    }
+
+    #[tokio::test]
+    async fn resumable_worktree_rejects_wrong_branch() {
+        let fixture = GitFixture::new();
+        fixture.add_worktree("other/SYM-1", false);
+        fs::write(fixture.worktree.join("untracked.txt"), "dirty").expect("write dirty file");
+
+        let error = ensure_resumable_worktree(&fixture.launch_spec())
+            .await
+            .expect_err("wrong branch must not be resumable");
+
+        assert!(
+            matches!(&error, OpenCodeError::InvalidWorktree(message) if message.contains("is on branch other/SYM-1 but expected symphony/SYM-1")),
             "{error}"
         );
     }

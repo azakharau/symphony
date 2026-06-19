@@ -147,11 +147,13 @@ impl RuntimeDashboardApi {
             );
         }
 
+        let project_cards = projects
+            .iter()
+            .map(ProjectDashboardResponse::card)
+            .collect::<Vec<_>>();
         let aggregate = AggregateDashboardResponse {
-            projects: projects
-                .iter()
-                .map(ProjectDashboardResponse::card)
-                .collect(),
+            totals: aggregate_dashboard_totals(&project_cards),
+            projects: project_cards,
         };
 
         Ok(Self {
@@ -195,7 +197,21 @@ impl RuntimeDashboardApi {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AggregateDashboardResponse {
+    pub totals: AggregateDashboardTotals,
     pub projects: Vec<ProjectDashboardCard>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AggregateDashboardTotals {
+    pub project_count: usize,
+    pub enabled_project_count: usize,
+    pub running_issue_count: usize,
+    pub available_sessions: u32,
+    pub max_sessions: u32,
+    pub running_tokens: u64,
+    pub recorded_tokens: u64,
+    pub running_cost_micros: u64,
+    pub recorded_cost_micros: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -211,7 +227,38 @@ pub struct ProjectDashboardCard {
     pub capacity: ProjectCapacity,
     pub liveness: ProjectRuntimeLivenessResponse,
     pub cleanup_status: CleanupStatus,
+    pub running_tokens: u64,
+    pub recorded_tokens: u64,
+    pub running_cost_micros: u64,
+    pub recorded_cost_micros: u64,
+    pub running_issues: Vec<RunningIssueSummary>,
     pub self_defect_routes: Vec<SelfDefectRouteSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RunningIssueSummary {
+    pub project_id: String,
+    pub project_name: String,
+    pub issue_id: String,
+    pub identifier: String,
+    pub title: String,
+    pub display_status: String,
+    pub session_id: Option<String>,
+    pub process_id: Option<u32>,
+    pub process_alive: Option<bool>,
+    pub stage: Option<OpenCodeStage>,
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub active_agent: Option<String>,
+    pub active_model: Option<String>,
+    pub token_count: u64,
+    pub cost_micros: u64,
+    pub subagents_used: u64,
+    pub running_tool_count: u64,
+    pub pending_tool_count: u64,
+    pub todo_count: u64,
+    pub last_event: Option<String>,
+    pub worktree_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -265,6 +312,18 @@ pub struct CandidateSuppressionResponse {
 
 impl ProjectDashboardResponse {
     fn card(&self) -> ProjectDashboardCard {
+        let running_issues = self.running_issue_summaries();
+        let running_tokens = running_issues
+            .iter()
+            .map(|issue| issue.token_count)
+            .sum::<u64>();
+        let running_cost_micros = running_issues
+            .iter()
+            .map(|issue| issue.cost_micros)
+            .sum::<u64>();
+        let recorded_tokens = self.recorded_tokens();
+        let recorded_cost_micros = self.recorded_cost_micros();
+
         ProjectDashboardCard {
             project_id: self.project_id.clone(),
             name: self.name.clone(),
@@ -285,11 +344,120 @@ impl ProjectDashboardResponse {
             capacity: self.capacity.clone(),
             liveness: self.liveness.clone(),
             cleanup_status: self.cleanup_status,
+            running_tokens,
+            recorded_tokens,
+            running_cost_micros,
+            recorded_cost_micros,
+            running_issues,
             self_defect_routes: self_defect_route_summaries(
                 self.active_issues.iter().chain(self.history_issues.iter()),
             ),
         }
     }
+
+    fn running_issue_summaries(&self) -> Vec<RunningIssueSummary> {
+        self.active_issues
+            .iter()
+            .filter(|issue| issue.lifecycle_stage == LifecycleStage::Running)
+            .map(|issue| running_issue_summary(self, issue))
+            .collect()
+    }
+
+    fn recorded_tokens(&self) -> u64 {
+        self.active_issues
+            .iter()
+            .chain(self.history_issues.iter())
+            .map(issue_recorded_tokens)
+            .sum()
+    }
+
+    fn recorded_cost_micros(&self) -> u64 {
+        self.active_issues
+            .iter()
+            .chain(self.history_issues.iter())
+            .map(issue_recorded_cost_micros)
+            .sum()
+    }
+}
+
+fn aggregate_dashboard_totals(projects: &[ProjectDashboardCard]) -> AggregateDashboardTotals {
+    AggregateDashboardTotals {
+        project_count: projects.len(),
+        enabled_project_count: projects.iter().filter(|project| project.enabled).count(),
+        running_issue_count: projects
+            .iter()
+            .map(|project| project.running_issues.len())
+            .sum(),
+        available_sessions: projects
+            .iter()
+            .map(|project| project.capacity.available_sessions)
+            .sum(),
+        max_sessions: projects
+            .iter()
+            .map(|project| project.capacity.max_sessions)
+            .sum(),
+        running_tokens: projects.iter().map(|project| project.running_tokens).sum(),
+        recorded_tokens: projects.iter().map(|project| project.recorded_tokens).sum(),
+        running_cost_micros: projects
+            .iter()
+            .map(|project| project.running_cost_micros)
+            .sum(),
+        recorded_cost_micros: projects
+            .iter()
+            .map(|project| project.recorded_cost_micros)
+            .sum(),
+    }
+}
+
+fn running_issue_summary(
+    project: &ProjectDashboardResponse,
+    issue: &IssueDetailResponse,
+) -> RunningIssueSummary {
+    let session = issue.opencode_sessions.last();
+    let activity = session.and_then(|session| session.activity.as_ref());
+
+    RunningIssueSummary {
+        project_id: project.project_id.clone(),
+        project_name: project.name.clone(),
+        issue_id: issue.issue_id.clone(),
+        identifier: issue.identifier.clone(),
+        title: issue.title.clone(),
+        display_status: issue.display_status.clone(),
+        session_id: session.map(|session| session.opencode_session_id.clone()),
+        process_id: session.and_then(|session| session.process_id),
+        process_alive: session.and_then(|session| session.process_alive),
+        stage: session.map(|session| session.current_stage),
+        agent: session.map(|session| session.agent.clone()),
+        model: session.and_then(|session| session.model.clone()),
+        active_agent: session.and_then(|session| session.active_agent.clone()),
+        active_model: session.and_then(|session| session.active_model.clone()),
+        token_count: session.map_or(0, |session| session.token_count),
+        cost_micros: session.map_or(0, |session| session.cost_micros),
+        subagents_used: session.map_or(0, |session| session.subagents_used),
+        running_tool_count: activity.map_or(0, |activity| activity.running_tool_count),
+        pending_tool_count: activity.map_or(0, |activity| activity.pending_tool_count),
+        todo_count: session.map_or(0, |session| session.todo_count),
+        last_event: session
+            .and_then(|session| session.last_event.clone())
+            .or_else(|| issue.last_runner_event.clone()),
+        worktree_path: session.map(|session| session.worktree_path.clone()),
+    }
+}
+
+fn issue_recorded_tokens(issue: &IssueDetailResponse) -> u64 {
+    issue
+        .opencode_sessions
+        .iter()
+        .map(|session| session.token_count)
+        .sum()
+}
+
+fn issue_recorded_cost_micros(issue: &IssueDetailResponse) -> u64 {
+    issue
+        .opencode_sessions
+        .iter()
+        .map(|session| session.cost_micros)
+        .sum()
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

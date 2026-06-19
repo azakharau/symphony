@@ -1150,6 +1150,17 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
     assert_eq!(
         aggregate_json,
         r#"{
+  "totals": {
+    "project_count": 1,
+    "enabled_project_count": 1,
+    "running_issue_count": 1,
+    "available_sessions": 1,
+    "max_sessions": 2,
+    "running_tokens": 4096,
+    "recorded_tokens": 4096,
+    "running_cost_micros": 123456,
+    "recorded_cost_micros": 123456
+  },
   "projects": [
     {
       "project_id": "symphony",
@@ -1179,6 +1190,36 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
         }
       },
       "cleanup_status": "clean",
+      "running_tokens": 4096,
+      "recorded_tokens": 4096,
+      "running_cost_micros": 123456,
+      "recorded_cost_micros": 123456,
+      "running_issues": [
+        {
+          "project_id": "symphony",
+          "project_name": "Symphony",
+          "issue_id": "repair",
+          "identifier": "SYM-91",
+          "title": "Test issue",
+          "display_status": "repair loop",
+          "session_id": "oc-repair",
+          "process_id": null,
+          "process_alive": null,
+          "stage": "eval",
+          "agent": "build",
+          "model": null,
+          "active_agent": "evaluator",
+          "active_model": "gpt-5",
+          "token_count": 4096,
+          "cost_micros": 123456,
+          "subagents_used": 2,
+          "running_tool_count": 0,
+          "pending_tool_count": 0,
+          "todo_count": 1,
+          "last_event": "eval_failed:clippy-needless-collect",
+          "worktree_path": "/home/agent/.symphony/workspaces/opencode/symphony/SYM-91"
+        }
+      ],
       "self_defect_routes": []
     }
   ]
@@ -1293,9 +1334,14 @@ async fn dashboard_html_routes_render_aggregate_project_issue_and_keep_json_api(
 
     assert_eq!(aggregate.0, 200);
     assert_eq!(aggregate.1, "text/html; charset=utf-8");
-    assert!(aggregate.2.contains("Operational dashboard"));
+    assert!(aggregate.2.contains("Running work, tokens, and blockers"));
+    assert!(aggregate.2.contains("Running now"));
+    assert!(aggregate.2.contains("Quota remaining"));
     assert!(aggregate.2.contains("/projects/symphony"));
+    assert!(aggregate.2.contains("SYM-101"));
+    assert!(aggregate.2.contains("100 tokens"));
     assert!(project.2.contains("Active issues"));
+    assert!(project.2.contains("Current execution"));
     assert!(project.2.contains("Recent history"));
     assert!(issue.2.contains("process_alive"));
     assert!(issue.2.contains("process: <strong>dead</strong>"));

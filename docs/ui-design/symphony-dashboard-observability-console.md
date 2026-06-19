@@ -162,7 +162,7 @@ Purpose: make OpenCode quota readable without exposing billing amounts.
 Data comes from Next BFF calling:
 
 ```bash
-ocu --localhost --plain
+ocu --plain --localhost
 ```
 
 Render quota buckets as usage bars:
@@ -205,7 +205,7 @@ by fingerprint and managed issue. Rows link back to issue drilldown evidence.
 | Projects table | `/api/dashboard` | normalize | no |
 | Project drilldown | `/api/projects/{project_id}` | proxy/normalize | no |
 | Issue inspector | `/api/projects/{project_id}/issues/{issue_id}` | proxy/normalize, optional bounded message view | no |
-| Quota page | no | route handler shells configured `OCU_COMMAND` | `ocu --localhost --plain` |
+| Quota page | no | route handler shells configured `OCU_COMMAND` | `ocu --plain --localhost` |
 | Defects page | aggregate/project/issue defect projections | dedupe and normalize | no |
 
 ## Baseline Evidence
@@ -248,6 +248,6 @@ The shell should prove that:
 
 - `apps/dashboard` can run independently from the Rust runtime.
 - BFF routes can fetch/normalize Rust JSON.
-- BFF quota route can parse `ocu --localhost --plain`.
+- BFF quota route can parse `ocu --plain --localhost`.
 - Dashboard-targeted responses and UI omit billing fields.
 - Rust HTML remains in place until the final cutover task.

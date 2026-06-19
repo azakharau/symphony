@@ -25,7 +25,7 @@ Dashboard service:
 
 - `PORT=4120`
 - `SYMPHONY_API_BASE=http://127.0.0.1:4115`
-- `OCU_COMMAND=ocu --plain`
+- `OCU_COMMAND=ocu --plain --localhost`
 - `OCU_TIMEOUT_MS=5000`
 - optional overrides: `/home/agent/.symphony/env/dashboard.env`
 
@@ -43,7 +43,7 @@ install -Dm0644 config/symphony.projects.toml /home/agent/.symphony/symphony/pro
 
 cd /home/agent/proj/symphony/apps/dashboard
 bun install --frozen-lockfile
-SYMPHONY_API_BASE=http://127.0.0.1:4115 OCU_COMMAND="ocu --plain" bun run build
+SYMPHONY_API_BASE=http://127.0.0.1:4115 OCU_COMMAND="ocu --plain --localhost" bun run build
 
 cd /home/agent/proj/symphony
 install -Dm0644 deploy/systemd/symphony.service /home/agent/.config/systemd/user/symphony.service

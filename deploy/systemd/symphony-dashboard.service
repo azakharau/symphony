@@ -10,7 +10,7 @@ Environment=PATH=/home/agent/.bun/bin:/home/agent/.cargo/bin:/home/agent/.local/
 Environment=NODE_ENV=production
 Environment=PORT=4120
 Environment=SYMPHONY_API_BASE=http://127.0.0.1:4115
-Environment="OCU_COMMAND=ocu --plain"
+Environment="OCU_COMMAND=ocu --plain --localhost"
 Environment=OCU_TIMEOUT_MS=5000
 EnvironmentFile=-/home/agent/.symphony/env/dashboard.env
 WorkingDirectory=/home/agent/proj/symphony/apps/dashboard

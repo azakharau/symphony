@@ -14,12 +14,12 @@ describe("quota parsing", () => {
           model: "local",
         },
       }),
-      "ocu --localhost --plain",
+      "ocu --plain --localhost",
     );
 
     expect(result).toEqual({
       status: "available",
-      command: "ocu --localhost --plain",
+      command: "ocu --plain --localhost",
       quota: {
         raw: {
           quota: {
@@ -102,7 +102,7 @@ describe("quota parsing", () => {
   });
 
   test("returns unavailable state on malformed JSON", () => {
-    const result = parseQuotaJson("not json", "ocu --localhost --plain");
+    const result = parseQuotaJson("not json", "ocu --plain --localhost");
 
     expect(result.status).toBe("unavailable");
     if (result.status === "unavailable") {

@@ -1235,6 +1235,54 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
     assert!(issue_json.contains(r#""subagents_used": 2"#));
     assert!(issue_json.contains(r#""eval_results""#));
     assert!(issue_json.contains(r#""pr_url": "https://example.test/pr/91""#));
+    assert!(aggregate_json.contains(r#""running_cost_micros": 123456"#));
+    assert!(issue_json.contains(r#""cost_micros": 123456"#));
+
+    let ui_aggregate =
+        symphony::api::runtime_api_json_response(&config, &store, "/api/dashboard/ui")
+            .await
+            .expect("ui aggregate response");
+    let ui_project =
+        symphony::api::runtime_api_json_response(&config, &store, "/api/projects/symphony/ui")
+            .await
+            .expect("ui project response");
+    let ui_issue = symphony::api::runtime_api_json_response(
+        &config,
+        &store,
+        "/api/projects/symphony/issues/repair/ui",
+    )
+    .await
+    .expect("ui issue response");
+    let events = symphony::api::runtime_api_json_response(&config, &store, "/api/dashboard/events")
+        .await
+        .expect("dashboard event stream");
+
+    assert_eq!(ui_aggregate.status, 200);
+    assert_eq!(ui_project.status, 200);
+    assert_eq!(ui_issue.status, 200);
+    assert_eq!(events.status, 200);
+    assert_eq!(events.content_type, "text/event-stream; charset=utf-8");
+    assert!(
+        ui_aggregate
+            .body
+            .contains(r#""polling_fallback_endpoint":"/api/dashboard/ui""#)
+    );
+    assert!(
+        ui_aggregate
+            .body
+            .contains(r#""live_events_endpoint":"/api/dashboard/events""#)
+    );
+    assert!(ui_project.body.contains(r#""active_issues""#));
+    assert!(
+        ui_issue
+            .body
+            .contains(r#""opencode_session_id":"oc-repair""#)
+    );
+    assert!(events.body.starts_with("event: dashboard.snapshot\ndata: "));
+    assert!(!ui_aggregate.body.contains("cost_micros"));
+    assert!(!ui_project.body.contains("cost_micros"));
+    assert!(!ui_issue.body.contains("cost_micros"));
+    assert!(!events.body.contains("cost_micros"));
 }
 
 #[tokio::test]

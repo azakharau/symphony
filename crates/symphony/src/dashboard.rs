@@ -45,7 +45,7 @@ pub async fn runtime_dashboard_response(
     }
 
     let response = runtime_api_json_response(config, store, path).await?;
-    Ok((response.status, "application/json", response.body))
+    Ok((response.status, response.content_type, response.body))
 }
 
 fn project_or_issue_response(

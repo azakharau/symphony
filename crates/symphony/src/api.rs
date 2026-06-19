@@ -12,11 +12,19 @@ use crate::{
 };
 
 pub const AGGREGATE_DASHBOARD_ENDPOINT: &str = "/api/dashboard";
+pub const UI_AGGREGATE_DASHBOARD_ENDPOINT: &str = "/api/dashboard/ui";
+pub const DASHBOARD_EVENTS_ENDPOINT: &str = "/api/dashboard/events";
 pub const PROJECT_DRILLDOWN_ENDPOINT_TEMPLATE: &str = "/api/projects/{project_id}";
 pub const ISSUE_DETAIL_ENDPOINT_TEMPLATE: &str = "/api/projects/{project_id}/issues/{issue_id}";
 
+mod dashboard_contract;
 mod self_defect_routing;
 
+pub use dashboard_contract::{
+    DashboardEventStreamResponse, UiAggregateDashboardResponse, UiIssueDetailResponse,
+    UiProjectDashboardResponse,
+};
+use dashboard_contract::{dashboard_event_stream_response, ui_aggregate_response};
 pub use self_defect_routing::{
     ManagedSelfDefectProjection, SelfDefectRecommendationProjection, SelfDefectRouteSummary,
     SelfDefectRoutingProjection, SelfDefectSourceContext,
@@ -26,6 +34,7 @@ use self_defect_routing::{self_defect_route_summaries, self_defect_routing_proje
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApiJsonResponse {
     pub status: u16,
+    pub content_type: &'static str,
     pub body: String,
 }
 
@@ -39,6 +48,12 @@ pub async fn runtime_api_json_response(
     if path == AGGREGATE_DASHBOARD_ENDPOINT {
         return json_response(200, api.aggregate());
     }
+    if path == UI_AGGREGATE_DASHBOARD_ENDPOINT {
+        return json_response(200, &ui_aggregate_response(&api));
+    }
+    if path == DASHBOARD_EVENTS_ENDPOINT {
+        return event_stream_response(200, &dashboard_event_stream_response(&api));
+    }
 
     let Some(rest) = path.strip_prefix("/api/projects/") else {
         return json_response(404, &serde_json::json!({ "error": "not_found" }));
@@ -50,10 +65,20 @@ pub async fn runtime_api_json_response(
             || json_response(404, &serde_json::json!({ "error": "project_not_found" })),
             |project| json_response(200, project),
         ),
+        [project_id, "ui"] => api.project_drilldown(project_id)?.map_or_else(
+            || json_response(404, &serde_json::json!({ "error": "project_not_found" })),
+            |project| json_response(200, &UiProjectDashboardResponse::from(project)),
+        ),
         [project_id, "issues", issue_id] => api.issue_detail(project_id, issue_id)?.map_or_else(
             || json_response(404, &serde_json::json!({ "error": "issue_not_found" })),
             |issue| json_response(200, issue),
         ),
+        [project_id, "issues", issue_id, "ui"] => {
+            api.issue_detail(project_id, issue_id)?.map_or_else(
+                || json_response(404, &serde_json::json!({ "error": "issue_not_found" })),
+                |issue| json_response(200, &UiIssueDetailResponse::from(issue)),
+            )
+        }
         _ => json_response(404, &serde_json::json!({ "error": "not_found" })),
     }
 }
@@ -61,7 +86,20 @@ pub async fn runtime_api_json_response(
 fn json_response<T: Serialize>(status: u16, value: &T) -> Result<ApiJsonResponse, StorageError> {
     Ok(ApiJsonResponse {
         status,
+        content_type: "application/json",
         body: serde_json::to_string(value).map_err(StorageError::from)?,
+    })
+}
+
+fn event_stream_response<T: Serialize>(
+    status: u16,
+    value: &T,
+) -> Result<ApiJsonResponse, StorageError> {
+    let data = serde_json::to_string(value).map_err(StorageError::from)?;
+    Ok(ApiJsonResponse {
+        status,
+        content_type: "text/event-stream; charset=utf-8",
+        body: format!("event: dashboard.snapshot\ndata: {data}\n\n"),
     })
 }
 

@@ -34,18 +34,22 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
             <h2 className="mt-1 text-2xl font-semibold">{issue.title}</h2>
             <div className="mt-3 flex flex-wrap gap-2">
               <Badge tone={issue.lifecycle_stage === "failed" ? "bad" : issue.lifecycle_stage === "blocked" ? "warn" : "good"}>{issue.display_status}</Badge>
-              <a className="rounded-full border border-slate-200 bg-white px-3 py-1 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-700" href={linearUrl} target="_blank" rel="noreferrer">
+            </div>
+          </div>
+          <div className="flex flex-col gap-3 lg:min-w-[520px]">
+            <div className="flex justify-start lg:justify-end">
+              <a className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700" href={linearUrl} target="_blank" rel="noreferrer">
                 Open in Linear
               </a>
             </div>
+            <dl className="grid gap-2 text-sm sm:grid-cols-2">
+              <KeyValue label="active agent" value={session?.active_agent ?? session?.agent ?? "unavailable"} />
+              <KeyValue label="model" value={session?.active_model ?? session?.model ?? "unavailable"} />
+              <KeyValue label="tokens" value={formatCompactNumber(sessionTokens.net)} detail={`${formatCompactNumber(sessionTokens.cached)} cached`} />
+              <KeyValue label="worktree" value={session?.worktree_path ?? issue.git_ref?.worktree_path ?? "unavailable"} mono />
+              <KeyValue label="git" value={issue.git_ref ? `${issue.git_ref.branch} ${issue.git_ref.head_sha ?? ""}` : "unavailable"} mono />
+            </dl>
           </div>
-          <dl className="grid gap-2 text-sm sm:grid-cols-2 lg:min-w-[520px]">
-            <KeyValue label="active agent" value={session?.active_agent ?? session?.agent ?? "unavailable"} />
-            <KeyValue label="model" value={session?.active_model ?? session?.model ?? "unavailable"} />
-            <KeyValue label="tokens" value={formatCompactNumber(sessionTokens.net)} detail={`${formatCompactNumber(sessionTokens.cached)} cached`} />
-            <KeyValue label="worktree" value={session?.worktree_path ?? issue.git_ref?.worktree_path ?? "unavailable"} mono />
-            <KeyValue label="git" value={issue.git_ref ? `${issue.git_ref.branch} ${issue.git_ref.head_sha ?? ""}` : "unavailable"} mono />
-          </dl>
         </div>
       </section>
 

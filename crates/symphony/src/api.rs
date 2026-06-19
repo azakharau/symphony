@@ -1031,6 +1031,7 @@ async fn session_detail(
         None => (None, None),
     };
     let cached_token_count = activity.as_ref().map_or(0, session_tree_cached_token_count);
+    let token_count = session.token_count.saturating_add(cached_token_count);
 
     Ok(OpenCodeSessionDetail {
         opencode_session_id: session.session_id,
@@ -1049,7 +1050,7 @@ async fn session_detail(
         message_count: session.message_count,
         todo_count: session.todo_count,
         part_count: session.part_count,
-        token_count: session.token_count,
+        token_count,
         cached_token_count,
         cost_micros: session.cost_micros,
         lifecycle_marker: session.lifecycle_marker,

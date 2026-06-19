@@ -440,7 +440,18 @@ function processState(alive?: boolean | null): string {
 
 function shortTime(value?: string | null): string {
   if (!value) return "unknown";
-  return value.replace("T", " ").replace(/\.\d{3}Z$/, "Z");
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    month: "short",
+    day: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+  }).format(date);
 }
 
 function formatNumber(value: number): string {

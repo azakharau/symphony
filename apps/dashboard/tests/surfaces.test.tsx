@@ -67,6 +67,8 @@ describe("dashboard surfaces", () => {
     expect(normal).toContain("weekly window");
     expect(normal).toContain("76% remaining");
     expect(normal).toContain("76% remaining · 24% used");
+    expect(normal).toContain("Jun 19, 2026");
+    expect(normal).not.toContain("2026-06-19");
     expect(normal).not.toContain("ocu --plain --localhost");
     expect(unavailable).not.toContain("ocu --plain");
   });

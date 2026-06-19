@@ -749,6 +749,7 @@ async fn handoff_sidecar_normalizes_opencode_acp_shape() {
     "evaluation",
     "failure_analysis",
     "git_closure_repair",
+    "commit",
     "push",
     "handoff"
   ],
@@ -816,6 +817,7 @@ async fn handoff_sidecar_normalizes_opencode_acp_shape() {
             OpenCodeStage::Eval,
             OpenCodeStage::Review,
             OpenCodeStage::Eval,
+            OpenCodeStage::Running,
             OpenCodeStage::Running,
             OpenCodeStage::Running,
             OpenCodeStage::Running,

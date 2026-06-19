@@ -67,6 +67,8 @@ describe("dashboard surfaces", () => {
     expect(normal).toContain("weekly window");
     expect(normal).toContain("76% remaining");
     expect(normal).toContain("76% remaining · 24% used");
+    expect(normal).not.toContain("ocu --plain --localhost");
+    expect(unavailable).not.toContain("ocu --plain");
   });
 
   test("defects surface renders deduped defect table and empty state", () => {

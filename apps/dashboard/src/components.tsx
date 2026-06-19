@@ -119,7 +119,7 @@ export function QuotaSurface({ quota }: { quota: QuotaResult }) {
       <Panel title="Quota">
         <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
           <p className="font-semibold">Quota unavailable</p>
-          <p className="mt-2">The quota command did not return usable data. Command source: <code>{quota.command}</code></p>
+          <p className="mt-2">Quota data is temporarily unavailable.</p>
           <p className="mt-1">Reason: {quota.reason}</p>
         </div>
       </Panel>
@@ -129,7 +129,7 @@ export function QuotaSurface({ quota }: { quota: QuotaResult }) {
   const windows = quota.quota.buckets.flatMap((bucket) => bucket.windows.map((window) => ({ ...window, bucket: bucket.title })));
 
   return (
-    <Panel title="Quota windows" action={<span>{quota.command}</span>}>
+    <Panel title="Quota windows">
       {windows.length ? (
         <div className="grid gap-3">
           {windows.map((window) => <QuotaWindowBar key={`${window.bucket}-${window.label}`} window={window} bucket={window.bucket} />)}
@@ -333,7 +333,7 @@ function DefectIssueList({ issues, projectId }: { issues: IssueDetail[]; project
 
 function QuotaCompact({ quota }: { quota: QuotaResult }) {
   if (quota.status === "unavailable") {
-    return <MetricCard title="5h quota" value="unavailable" detail="command did not return data" tone="warn" />;
+    return <MetricCard title="5h quota" value="unavailable" detail="quota data temporarily unavailable" tone="warn" />;
   }
   const window = quota.quota.buckets.flatMap((bucket) => bucket.windows).find((entry) => entry.label.toLowerCase() === "5h");
   const remaining = quotaRemainingPercent(window);

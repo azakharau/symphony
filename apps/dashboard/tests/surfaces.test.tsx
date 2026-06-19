@@ -61,6 +61,11 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("Timeline");
     expect(html).toContain("Evidence");
     expect(html).toContain("Capture smoke screenshots");
+    expect(html).toContain("line-through");
+    expect(html).toContain("animate-spin");
+    expect(html).toContain("aria-label=\"pending\"");
+    expect(html).not.toContain("updated 178");
+    expect(html).not.toContain(">medium<");
   });
 
   test("quota surface renders unavailable and normal windows", () => {

@@ -3,7 +3,7 @@
 import { useState } from "react";
 
 import { Badge, Panel } from "@/src/components";
-import type { IssueDetail } from "@/src/types";
+import type { IssueDetail, TodoActivity } from "@/src/types";
 
 const tabs = ["Todos", "Timeline", "Agents", "Tools", "Messages", "Evidence"] as const;
 type Tab = (typeof tabs)[number];
@@ -85,15 +85,54 @@ function TodosTab({ issue }: { issue: IssueDetail }) {
   const todos = session?.activity?.todos ?? [];
   if (!todos.length) return <Limited message={session?.activity_error ?? "Todo details are unavailable; only aggregate todo counts are exposed."} />;
   return (
-    <div className="grid gap-2">
+    <ol className="grid gap-1.5">
       {todos.map((todo) => (
-        <div key={`${todo.session_id}-${todo.position}`} className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm">
-          <div className="flex flex-wrap items-center gap-2"><Badge>{todo.status}</Badge><Badge>{todo.priority}</Badge><span className="font-semibold">{todo.content}</span></div>
-          <p className="mt-1 text-xs text-slate-500">session {todo.session_id} · updated {todo.time_updated_ms}</p>
-        </div>
+        <TodoPlanItem key={`${todo.session_id}-${todo.position}`} todo={todo} />
       ))}
-    </div>
+    </ol>
   );
+}
+
+function TodoPlanItem({ todo }: { todo: TodoActivity }) {
+  const state = todoState(todo.status);
+  return (
+    <li className={`grid grid-cols-[1.5rem_1fr] gap-3 rounded-lg px-2 py-2 text-sm ${state.rowClass}`}>
+      <span className="mt-0.5 flex h-5 w-5 items-center justify-center" aria-label={state.label}>
+        {state.kind === "completed" ? <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-100 text-xs font-bold text-emerald-700">✓</span> : null}
+        {state.kind === "active" ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-blue-200 border-t-blue-700" /> : null}
+        {state.kind === "pending" ? <span className="h-3 w-3 rounded-full border border-slate-300 bg-white" /> : null}
+      </span>
+      <div className="min-w-0">
+        <span className={state.contentClass}>{todo.content}</span>
+      </div>
+    </li>
+  );
+}
+
+function todoState(status: string): { kind: "completed" | "active" | "pending"; label: string; rowClass: string; contentClass: string } {
+  const normalized = status.toLowerCase();
+  if (["completed", "complete", "done"].includes(normalized)) {
+    return {
+      kind: "completed",
+      label: "completed",
+      rowClass: "text-slate-500",
+      contentClass: "font-medium text-slate-500 line-through decoration-slate-400 decoration-2",
+    };
+  }
+  if (["in_progress", "in-progress", "active", "running"].includes(normalized)) {
+    return {
+      kind: "active",
+      label: "in progress",
+      rowClass: "bg-blue-50/60",
+      contentClass: "font-semibold text-slate-950",
+    };
+  }
+  return {
+    kind: "pending",
+    label: "pending",
+    rowClass: "text-slate-600",
+    contentClass: "font-medium text-slate-700",
+  };
 }
 
 function TimelineTab({ events, empty = "No timeline activity is available." }: { events: NonNullable<IssueDetail["opencode_sessions"][number]["activity"]>["timeline"]; empty?: string }) {

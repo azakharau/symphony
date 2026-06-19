@@ -1554,6 +1554,30 @@ async fn dashboard_surfaces_managed_self_defect_routing_projection() {
     assert!(aggregate_json.contains(r#""managed_issue_identifier":"SYM-62""#));
     assert!(project_json.contains(r#""self_defect_routing""#));
     assert!(!project_json.contains("latest_evidence_summary"));
+
+    let ui_aggregate =
+        symphony::api::runtime_api_json_response(&config, &store, "/api/dashboard/ui")
+            .await
+            .expect("ui aggregate response");
+    let ui_issue = symphony::api::runtime_api_json_response(
+        &config,
+        &store,
+        "/api/projects/symphony/issues/runtime-held/ui",
+    )
+    .await
+    .expect("ui issue response");
+    assert!(ui_aggregate.body.contains(r#""self_defect_routes""#));
+    assert!(
+        ui_aggregate
+            .body
+            .contains(r#""managed_issue_identifier":"SYM-62""#)
+    );
+    assert!(ui_issue.body.contains(r#""self_defect_routing""#));
+    assert!(
+        ui_issue
+            .body
+            .contains(r#""next_action":"repair_managed_self_defect""#)
+    );
 }
 
 #[tokio::test]

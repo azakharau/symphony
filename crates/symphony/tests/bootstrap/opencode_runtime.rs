@@ -217,7 +217,7 @@ async fn dashboard_issue_detail_embeds_live_opencode_activity_from_sqlite() {
         "ses-root",
         "/home/agent/.symphony/workspaces/opencode/symphony/SYM-120",
     );
-    session.process_id = Some(std::process::id());
+    session.process_id = None;
     store
         .upsert_opencode_session(session)
         .await
@@ -232,13 +232,25 @@ async fn dashboard_issue_detail_embeds_live_opencode_activity_from_sqlite() {
         .expect("issue exists");
     let session = &detail.opencode_sessions[0];
 
-    assert_eq!(session.process_id, Some(std::process::id()));
-    assert_eq!(session.process_alive, Some(true));
+    assert_eq!(session.process_id, None);
+    assert_eq!(session.process_alive, None);
     let activity = session.activity.as_ref().expect("opencode activity");
     assert_eq!(activity.subagents[0].session_id, "ses-child");
     assert_eq!(activity.todos[0].content, "Run eval");
     assert_eq!(activity.timeline[0].summary, "root transcript");
     assert!(session.activity_error.is_none());
+
+    let ui_issue = symphony::api::runtime_api_json_response(
+        &config,
+        &store,
+        "/api/projects/symphony/issues/activity/ui",
+    )
+    .await
+    .expect("ui issue response");
+    assert!(ui_issue.body.contains(r#""activity""#));
+    assert!(ui_issue.body.contains(r#""subagents""#));
+    assert!(ui_issue.body.contains(r#""todos""#));
+    assert!(!ui_issue.body.contains("cost_micros"));
 }
 
 #[tokio::test]

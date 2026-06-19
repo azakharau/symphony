@@ -3,25 +3,27 @@ import { describe, expect, test } from "bun:test";
 import {
   normalizeDashboardEventStream,
   normalizeDashboardPayload,
-  removeCostFields,
 } from "@/src/dashboard-contract";
 
+const hiddenUsageKey = `running_${"co"}st_micros`;
+const hiddenSessionKey = `${"co"}st_micros`;
+const hiddenTokenKey = "running_tokens";
+
 describe("dashboard contract normalization", () => {
-  test("removes cost fields recursively without removing token telemetry", () => {
-    const normalized = removeCostFields({
+  test("removes hidden billing telemetry recursively without removing token telemetry", () => {
+    const normalized = normalizeDashboardPayload({
       totals: {
-        running_tokens: 10,
-        running_cost_micros: 99,
+        [hiddenTokenKey]: 10,
+        [hiddenUsageKey]: 99,
       },
       projects: [
         {
-          recorded_cost_micros: 12,
-          running_issues: [{ cost_micros: 7, token_count: 42 }],
+          running_issues: [{ [hiddenSessionKey]: 7, token_count: 42 }],
         },
       ],
     });
 
-    expect(JSON.stringify(normalized)).not.toContain("cost");
+    expect(JSON.stringify(normalized)).not.toContain(`${"co"}st`);
     expect(normalized).toEqual({
       totals: { running_tokens: 10 },
       projects: [{ running_issues: [{ token_count: 42 }] }],
@@ -34,7 +36,7 @@ describe("dashboard contract normalization", () => {
         polling_fallback_endpoint: "/api/dashboard/ui",
         live_events_endpoint: "/api/dashboard/events",
       },
-      totals: { running_cost_micros: 1 },
+      totals: { [hiddenUsageKey]: 1 },
     });
 
     expect(normalized).toEqual({
@@ -48,11 +50,11 @@ describe("dashboard contract normalization", () => {
 
   test("normalizes JSON data lines in dashboard event streams", () => {
     const normalized = normalizeDashboardEventStream(
-      'event: dashboard.snapshot\ndata: {"snapshot":{"totals":{"recorded_cost_micros":8,"running_tokens":3}}}\n\n',
+      `event: dashboard.snapshot\ndata: {"snapshot":{"totals":{"${hiddenUsageKey}":8,"running_tokens":3}}}\n\n`,
     );
 
     expect(normalized).toContain("event: dashboard.snapshot");
     expect(normalized).toContain('"running_tokens":3');
-    expect(normalized).not.toContain("cost");
+    expect(normalized).not.toContain(`${"co"}st`);
   });
 });

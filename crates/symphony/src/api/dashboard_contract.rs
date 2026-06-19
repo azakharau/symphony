@@ -6,8 +6,10 @@ use crate::{
         DASHBOARD_EVENTS_ENDPOINT, IssueDetailResponse, OpenCodeSessionDetail, ProjectCapacity,
         ProjectDashboardCard, ProjectDashboardResponse, ProjectRuntimeLivenessResponse,
         RunningIssueSummary, RuntimeDashboardApi, RuntimeDefectProjection,
-        SelectedCandidateResponse, UI_AGGREGATE_DASHBOARD_ENDPOINT,
+        SelectedCandidateResponse, SelfDefectRouteSummary, SelfDefectRoutingProjection,
+        UI_AGGREGATE_DASHBOARD_ENDPOINT,
     },
+    opencode::{OpenCodeSessionActivity, OpenCodeSessionTreeActivity},
     state::{CleanupStatus, EvalRunRecord, GitRefRecord, LifecycleStage, OpenCodeStage},
 };
 
@@ -51,6 +53,7 @@ pub struct UiProjectDashboardCard {
     pub running_tokens: u64,
     pub recorded_tokens: u64,
     pub running_issues: Vec<UiRunningIssueSummary>,
+    pub self_defect_routes: Vec<SelfDefectRouteSummary>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -106,6 +109,7 @@ pub struct UiIssueDetailResponse {
     pub blocker: Option<crate::state::BlockerRecord>,
     pub failure: Option<crate::state::FailureRecord>,
     pub runtime_defect: Option<RuntimeDefectProjection>,
+    pub self_defect_routing: Option<SelfDefectRoutingProjection>,
     pub git_ref: Option<GitRefRecord>,
     pub cleanup_status: CleanupStatus,
     pub stop_reason: Option<String>,
@@ -135,6 +139,38 @@ pub struct UiOpenCodeSessionDetail {
     pub token_count: u64,
     pub last_event: Option<String>,
     pub silence_observed: bool,
+    pub activity: Option<UiOpenCodeSessionTreeActivity>,
+    pub activity_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct UiOpenCodeSessionTreeActivity {
+    pub root_session_id: String,
+    pub sessions: Vec<UiOpenCodeSessionActivity>,
+    pub subagents: Vec<UiOpenCodeSessionActivity>,
+    pub todos: Vec<crate::opencode::OpenCodeTodoActivity>,
+    pub timeline: Vec<crate::opencode::OpenCodeTimelineEvent>,
+    pub running_tool_count: u64,
+    pub pending_tool_count: u64,
+    pub last_updated_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct UiOpenCodeSessionActivity {
+    pub session_id: String,
+    pub parent_session_id: Option<String>,
+    pub title: String,
+    pub directory: String,
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub is_subagent: bool,
+    pub tokens_input: u64,
+    pub tokens_output: u64,
+    pub tokens_reasoning: u64,
+    pub tokens_cache_read: u64,
+    pub tokens_cache_write: u64,
+    pub time_created_ms: u64,
+    pub time_updated_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -212,6 +248,7 @@ impl From<&ProjectDashboardCard> for UiProjectDashboardCard {
                 .iter()
                 .map(UiRunningIssueSummary::from)
                 .collect(),
+            self_defect_routes: card.self_defect_routes.clone(),
         }
     }
 }
@@ -284,6 +321,7 @@ impl From<&IssueDetailResponse> for UiIssueDetailResponse {
             blocker: issue.blocker.clone(),
             failure: issue.failure.clone(),
             runtime_defect: issue.runtime_defect.clone(),
+            self_defect_routing: issue.self_defect_routing.clone(),
             git_ref: issue.git_ref.clone(),
             cleanup_status: issue.cleanup_status,
             stop_reason: issue.stop_reason.clone(),
@@ -320,6 +358,55 @@ impl From<&OpenCodeSessionDetail> for UiOpenCodeSessionDetail {
             token_count: session.token_count,
             last_event: session.last_event.clone(),
             silence_observed: session.silence_observed,
+            activity: session
+                .activity
+                .as_ref()
+                .map(UiOpenCodeSessionTreeActivity::from),
+            activity_error: session.activity_error.clone(),
+        }
+    }
+}
+
+impl From<&OpenCodeSessionTreeActivity> for UiOpenCodeSessionTreeActivity {
+    fn from(activity: &OpenCodeSessionTreeActivity) -> Self {
+        Self {
+            root_session_id: activity.root_session_id.clone(),
+            sessions: activity
+                .sessions
+                .iter()
+                .map(UiOpenCodeSessionActivity::from)
+                .collect(),
+            subagents: activity
+                .subagents
+                .iter()
+                .map(UiOpenCodeSessionActivity::from)
+                .collect(),
+            todos: activity.todos.clone(),
+            timeline: activity.timeline.clone(),
+            running_tool_count: activity.running_tool_count,
+            pending_tool_count: activity.pending_tool_count,
+            last_updated_ms: activity.last_updated_ms,
+        }
+    }
+}
+
+impl From<&OpenCodeSessionActivity> for UiOpenCodeSessionActivity {
+    fn from(activity: &OpenCodeSessionActivity) -> Self {
+        Self {
+            session_id: activity.session_id.clone(),
+            parent_session_id: activity.parent_session_id.clone(),
+            title: activity.title.clone(),
+            directory: activity.directory.clone(),
+            agent: activity.agent.clone(),
+            model: activity.model.clone(),
+            is_subagent: activity.is_subagent,
+            tokens_input: activity.tokens_input,
+            tokens_output: activity.tokens_output,
+            tokens_reasoning: activity.tokens_reasoning,
+            tokens_cache_read: activity.tokens_cache_read,
+            tokens_cache_write: activity.tokens_cache_write,
+            time_created_ms: activity.time_created_ms,
+            time_updated_ms: activity.time_updated_ms,
         }
     }
 }

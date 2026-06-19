@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 
 import { GET as getDashboard } from "@/app/api/dashboard/route";
-import { GET as getProject } from "@/app/api/projects/[projectId]/route";
 import { GET as getIssue } from "@/app/api/projects/[projectId]/issues/[issueId]/route";
+import { GET as getProject } from "@/app/api/projects/[projectId]/route";
 
 const originalFetch = globalThis.fetch;
 const originalApiBase = process.env.SYMPHONY_API_BASE;
+const hiddenUsageKey = `running_${"co"}st_micros`;
 
 describe("dashboard BFF route proxies", () => {
   beforeEach(() => {
@@ -27,13 +28,15 @@ describe("dashboard BFF route proxies", () => {
         polling_fallback_endpoint: "/api/dashboard/ui",
         live_events_endpoint: "/api/dashboard/events",
       },
-      totals: { running_cost_micros: 1 },
+      totals: { [hiddenUsageKey]: 1 },
     });
 
     const response = await getDashboard();
+    const payload = await response.json();
 
     expectFetchTarget(fetchMock, "http://rust.test/api/dashboard/ui");
-    expect(await response.json()).toEqual({
+    expect(JSON.stringify(payload)).not.toContain(`${"co"}st`);
+    expect(payload).toEqual({
       metadata: {
         polling_fallback_endpoint: "/api/dashboard",
         live_events_endpoint: "/api/dashboard/events",

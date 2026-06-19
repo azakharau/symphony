@@ -3,7 +3,7 @@ import type React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { DefectsSurface, OverviewSurface, ProjectSurface, ProjectsSurface, QuotaSurface } from "@/src/components";
-import { IssueInspector } from "@/src/issue-inspector";
+import { ActivityTimeline, AgentsTree, IssueInspector, ToolsByAgent } from "@/src/issue-inspector";
 import {
   acceptanceDashboard,
   acceptanceProject,
@@ -29,17 +29,31 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("Running now");
     expect(html).toContain("Sessions");
     expect(html).toContain("4 slots available");
+    expect(html).toContain("55,130 tokens");
+    expect(html).toContain("3,110 cached");
     expect(html).not.toContain(">Capacity</p>");
     expect(html).toContain("SYM-97");
     expect(html).toContain("component tests passed");
     expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain(">tools<");
     expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain("running /");
+    expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain("worktree");
+    expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain("/home/agent/.symphony/workspaces");
     expect(sectionText(html, "Blockers and idle reasons", "Project health")).toContain("No blockers reported");
     expect(sectionText(html, "Blockers and idle reasons", "Project health")).not.toContain("two OpenCode sessions are executing");
     expect(sectionText(html, "Blockers and idle reasons", "Project health")).not.toContain("running/slots");
     expect(sectionText(html, "Blockers and idle reasons", "Project health")).not.toContain(">active<");
     expect(sectionText(html, "Blockers and idle reasons", "Project health")).not.toContain(">blocked<");
     expect(html).not.toContain(`${"co"}st`);
+  });
+
+  test("overview adapts raw OpenCode database update events", () => {
+    const dashboard = JSON.parse(JSON.stringify(acceptanceDashboard)) as typeof acceptanceDashboard;
+    dashboard.projects[0].running_issues[0].last_event = "opencode_db_updated:1781882984000";
+    const html = render(<OverviewSurface dashboard={dashboard} quota={quotaNormal} />);
+
+    expect(html).toContain("OpenCode activity updated");
+    expect(html).toContain("Jun 19, 2026");
+    expect(html).not.toContain("opencode_db_updated");
   });
 
   test("projects surface renders table-first comparison", () => {
@@ -53,6 +67,8 @@ describe("dashboard surfaces", () => {
     const blocked = render(<ProjectSurface project={acceptanceProject} />);
     const failed = render(<ProjectSurface project={failedProject} />);
 
+    expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).toContain("SYM-97");
+    expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).not.toContain("SYM-91");
     expect(blocked).toContain("provider quota exhausted");
     expect(failed).toContain("runtime_process_exit");
     expect(failed).toContain("restart supervised runner");
@@ -62,6 +78,8 @@ describe("dashboard surfaces", () => {
     const html = render(<IssueInspector issue={acceptanceProject.active_issues[0]} />);
 
     expect(html).toContain("OpenCode session inspector");
+    expect(html).toContain("Open in Linear");
+    expect(html).toContain("https://linear.app/alexey-zakharov/issue/SYM-97");
     expect(html).toContain("Todos");
     expect(html).toContain("Timeline");
     expect(html).toContain("Evidence");
@@ -71,8 +89,53 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("line-through");
     expect(html).toContain("animate-spin");
     expect(html).toContain("aria-label=\"pending\"");
+    expect(html).toContain(">35,100</dd>");
+    expect(html).toContain(">3,110 cached</dd>");
+    expect(html).not.toContain(">cached</dt>");
+    expect(html).not.toContain(">last event</dt>");
+    expect(html).not.toContain(">process</dt>");
+    expect(html).not.toContain("OpenCode activity updated</dd>");
     expect(html).not.toContain("updated 178");
     expect(html).not.toContain(">medium<");
+  });
+
+  test("agent inspector renders a tree with active spinner", () => {
+    const html = render(<AgentsTree issue={acceptanceProject.active_issues[0]} />);
+
+    expect(html).toContain("Dashboard pages");
+    expect(html).toContain("border-l border-slate-200");
+    expect(html).toContain("aria-label=\"active agent\"");
+    expect(html).toContain("animate-spin");
+    expect(html).toContain("36,000 tokens · 2,210 cached");
+    expect(html).toContain("14,000 tokens · 900 cached");
+    expect(html).toContain(">root</span>");
+    expect(html).toContain(">subagent</span>");
+    expect(html).not.toContain("parent oc-sym-97");
+  });
+
+  test("timeline renders as a compact event stream", () => {
+    const events = acceptanceProject.active_issues[0].opencode_sessions[0].activity?.timeline ?? [];
+    const html = render(<ActivityTimeline events={events} />);
+
+    expect(html).toContain("border-l border-slate-200");
+    expect(html).toContain("Desktop and mobile route coverage in progress.");
+    expect(html).toContain("aria-label=\"running event\"");
+    expect(html).toContain("animate-spin");
+    expect(html).toContain("Jun 19, 2026");
+    expect(html).not.toContain("<details");
+    expect(html).not.toContain("status unknown");
+  });
+
+  test("tools render grouped by agent", () => {
+    const issue = acceptanceProject.active_issues[0];
+    const events = issue.opencode_sessions[0].activity?.timeline.filter((event) => event.kind === "tool" || event.tool) ?? [];
+    const html = render(<ToolsByAgent issue={issue} events={events} />);
+
+    expect(html).toContain("Build dashboard surfaces");
+    expect(html).toContain("Dashboard pages");
+    expect(html).toContain("build · 1 tool events");
+    expect(html).toContain("typescript-engineer · 1 tool events");
+    expect(html).not.toContain("No running, pending, or recent tool events");
   });
 
   test("quota surface renders unavailable and normal windows", () => {

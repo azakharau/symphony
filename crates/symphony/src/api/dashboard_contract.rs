@@ -34,6 +34,7 @@ pub struct UiAggregateDashboardTotals {
     pub available_sessions: u32,
     pub max_sessions: u32,
     pub running_tokens: u64,
+    pub running_cached_tokens: u64,
     pub recorded_tokens: u64,
 }
 
@@ -51,6 +52,7 @@ pub struct UiProjectDashboardCard {
     pub liveness: ProjectRuntimeLivenessResponse,
     pub cleanup_status: CleanupStatus,
     pub running_tokens: u64,
+    pub running_cached_tokens: u64,
     pub recorded_tokens: u64,
     pub running_issues: Vec<UiRunningIssueSummary>,
     pub self_defect_routes: Vec<SelfDefectRouteSummary>,
@@ -73,6 +75,7 @@ pub struct UiRunningIssueSummary {
     pub active_agent: Option<String>,
     pub active_model: Option<String>,
     pub token_count: u64,
+    pub cached_token_count: u64,
     pub subagents_used: u64,
     pub running_tool_count: u64,
     pub pending_tool_count: u64,
@@ -137,6 +140,7 @@ pub struct UiOpenCodeSessionDetail {
     pub todo_count: u64,
     pub part_count: u64,
     pub token_count: u64,
+    pub cached_token_count: u64,
     pub last_event: Option<String>,
     pub silence_observed: bool,
     pub activity: Option<UiOpenCodeSessionTreeActivity>,
@@ -222,6 +226,7 @@ impl From<&AggregateDashboardTotals> for UiAggregateDashboardTotals {
             available_sessions: totals.available_sessions,
             max_sessions: totals.max_sessions,
             running_tokens: totals.running_tokens,
+            running_cached_tokens: totals.running_cached_tokens,
             recorded_tokens: totals.recorded_tokens,
         }
     }
@@ -242,6 +247,7 @@ impl From<&ProjectDashboardCard> for UiProjectDashboardCard {
             liveness: card.liveness.clone(),
             cleanup_status: card.cleanup_status,
             running_tokens: card.running_tokens,
+            running_cached_tokens: card.running_cached_tokens,
             recorded_tokens: card.recorded_tokens,
             running_issues: card
                 .running_issues
@@ -271,6 +277,7 @@ impl From<&RunningIssueSummary> for UiRunningIssueSummary {
             active_agent: issue.active_agent.clone(),
             active_model: issue.active_model.clone(),
             token_count: issue.token_count,
+            cached_token_count: issue.cached_token_count,
             subagents_used: issue.subagents_used,
             running_tool_count: issue.running_tool_count,
             pending_tool_count: issue.pending_tool_count,
@@ -356,6 +363,7 @@ impl From<&OpenCodeSessionDetail> for UiOpenCodeSessionDetail {
             todo_count: session.todo_count,
             part_count: session.part_count,
             token_count: session.token_count,
+            cached_token_count: session.cached_token_count,
             last_event: session.last_event.clone(),
             silence_observed: session.silence_observed,
             activity: session

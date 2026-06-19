@@ -14,6 +14,7 @@ export const acceptanceDashboard: AggregateDashboard = {
     available_sessions: 4,
     max_sessions: 7,
     running_tokens: 58240,
+    running_cached_tokens: 3110,
     recorded_tokens: 184320,
   },
   projects: [
@@ -38,6 +39,7 @@ export const acceptanceDashboard: AggregateDashboard = {
       },
       cleanup_status: "clean",
       running_tokens: 43210,
+      running_cached_tokens: 3110,
       recorded_tokens: 155000,
       running_issues: [
         {
@@ -56,6 +58,7 @@ export const acceptanceDashboard: AggregateDashboard = {
           active_agent: "typescript-engineer",
           active_model: "gpt-5.5",
           token_count: 38210,
+          cached_token_count: 3110,
           subagents_used: 3,
           running_tool_count: 1,
           pending_tool_count: 2,
@@ -102,6 +105,7 @@ export const acceptanceDashboard: AggregateDashboard = {
       },
       cleanup_status: "clean",
       running_tokens: 0,
+      running_cached_tokens: 0,
       recorded_tokens: 24000,
       running_issues: [],
       self_defect_routes: [],
@@ -127,6 +131,7 @@ export const acceptanceDashboard: AggregateDashboard = {
       },
       cleanup_status: "pending",
       running_tokens: 15030,
+      running_cached_tokens: 0,
       recorded_tokens: 5320,
       running_issues: [
         {
@@ -145,6 +150,7 @@ export const acceptanceDashboard: AggregateDashboard = {
           active_agent: "failure-analyst",
           active_model: "gpt-5.5",
           token_count: 15030,
+          cached_token_count: 0,
           subagents_used: 1,
           running_tool_count: 0,
           pending_tool_count: 0,
@@ -197,6 +203,7 @@ const sym97Issue: IssueDetail = {
       todo_count: 5,
       part_count: 64,
       token_count: 38210,
+      cached_token_count: 3110,
       last_event: "component tests passed",
       silence_observed: false,
       activity: {
@@ -374,6 +381,7 @@ export const emptyDashboard: AggregateDashboard = {
     available_sessions: 2,
     max_sessions: 2,
     running_tokens: 0,
+    running_cached_tokens: 0,
     recorded_tokens: 0,
   },
   projects: [
@@ -398,6 +406,7 @@ export const emptyDashboard: AggregateDashboard = {
       },
       cleanup_status: "clean",
       running_tokens: 0,
+      running_cached_tokens: 0,
       recorded_tokens: 0,
       running_issues: [],
       self_defect_routes: [],

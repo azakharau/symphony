@@ -37,6 +37,7 @@ export type RunningIssueSummary = {
   active_agent?: string | null;
   active_model?: string | null;
   token_count: number;
+  cached_token_count?: number;
   subagents_used: number;
   running_tool_count: number;
   pending_tool_count: number;
@@ -75,6 +76,7 @@ export type DashboardProjectCard = {
   liveness: RuntimeLiveness;
   cleanup_status: string;
   running_tokens: number;
+  running_cached_tokens?: number;
   recorded_tokens: number;
   running_issues: RunningIssueSummary[];
   self_defect_routes?: SelfDefectRouteSummary[];
@@ -87,6 +89,7 @@ export type DashboardTotals = {
   available_sessions: number;
   max_sessions: number;
   running_tokens: number;
+  running_cached_tokens?: number;
   recorded_tokens: number;
 };
 
@@ -211,6 +214,7 @@ export type OpenCodeSession = {
   todo_count: number;
   part_count: number;
   token_count: number;
+  cached_token_count?: number;
   last_event?: string | null;
   silence_observed: boolean;
   activity?: SessionTreeActivity | null;

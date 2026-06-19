@@ -44,6 +44,7 @@ export function OverviewSurface({ dashboard, quota }: { dashboard: AggregateDash
   const running = dashboard.projects.flatMap((project) => project.running_issues ?? []);
   const blockers = dashboard.projects.filter((project) => project.active_count === 0 && (project.parked_count > 0 || isProblemStatus(project.runner_health)));
   const defectCount = dashboard.projects.reduce((total, project) => total + (project.self_defect_routes?.length ?? 0), 0);
+  const runningTokens = tokenBreakdown(dashboard.totals.running_tokens, dashboard.totals.running_cached_tokens);
 
   return (
     <div className="flex flex-col gap-5">
@@ -51,7 +52,7 @@ export function OverviewSurface({ dashboard, quota }: { dashboard: AggregateDash
         <MetricCard
           title="Sessions"
           value={`${dashboard.totals.running_issue_count}/${dashboard.totals.max_sessions}`}
-          detail={`${dashboard.totals.available_sessions} slots available · ${formatNumber(dashboard.totals.running_tokens)} tokens`}
+          detail={`${dashboard.totals.available_sessions} slots available · ${formatNumber(runningTokens.net)} tokens · ${formatNumber(runningTokens.cached)} cached`}
           tone={running.length ? "good" : dashboard.totals.available_sessions > 0 ? "idle" : "warn"}
         />
         <QuotaCompact quota={quota} />
@@ -89,7 +90,9 @@ export function ProjectsSurface({ dashboard }: { dashboard: AggregateDashboard }
 
 export function ProjectSurface({ project }: { project: ProjectDetail }) {
   const allIssues = project.active_issues.concat(project.history_issues);
-  const blockers = allIssues.filter((issue) => issue.blocker || issue.lifecycle_stage === "blocked");
+  const runningIssues = project.active_issues.filter(isLiveIssue);
+  const queueIssues = project.active_issues.filter((issue) => !isLiveIssue(issue));
+  const blockers = queueIssues.concat(project.history_issues).filter((issue) => issue.blocker || issue.lifecycle_stage === "blocked");
   const defects = allIssues.filter((issue) => issue.runtime_defect || issue.self_defect_routing || issue.failure);
 
   return (
@@ -102,7 +105,7 @@ export function ProjectSurface({ project }: { project: ProjectDetail }) {
       </section>
 
       <Panel title={`${project.name} current execution`}>
-        {project.active_issues.length ? <IssueTable issues={project.active_issues} projectId={project.project_id} /> : <EmptyState message="No active issues for this project." />}
+        {runningIssues.length ? <IssueTable issues={runningIssues} projectId={project.project_id} /> : <EmptyState message="No live execution is currently reported for this project." />}
       </Panel>
       <Panel title="Queue and blockers">
         {blockers.length || project.suppression_reasons.length ? <BlockerTable issues={blockers} suppressions={project.suppression_reasons} projectId={project.project_id} /> : <EmptyState message="No blockers or suppression reasons are currently reported." />}
@@ -200,7 +203,6 @@ function RunningTable({ issues }: { issues: RunningIssueSummary[] }) {
             <th className="px-3 py-2">agent/model</th>
             <th className="px-3 py-2">tokens</th>
             <th className="px-3 py-2">last event</th>
-            <th className="px-3 py-2">worktree</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
@@ -210,9 +212,8 @@ function RunningTable({ issues }: { issues: RunningIssueSummary[] }) {
               <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${issue.project_id}/issues/${issue.issue_id}`}>{issue.identifier}</Link><div className="text-xs text-slate-500">{issue.title}</div></td>
               <td className="px-3 py-3"><Badge tone={statusTone(issue.stage)}>{issue.stage ?? issue.display_status}</Badge></td>
               <td className="px-3 py-3">{issue.active_agent ?? issue.agent ?? "—"}<div className="text-xs text-slate-500">{issue.active_model ?? issue.model ?? "model unknown"}</div></td>
-              <td className="px-3 py-3">{formatNumber(issue.token_count)}</td>
-              <td className="px-3 py-3">{issue.last_event ?? "—"}</td>
-              <td className="max-w-[220px] truncate px-3 py-3 font-mono text-xs">{issue.worktree_path ?? "—"}</td>
+              <td className="px-3 py-3"><TokenCell total={issue.token_count} cached={issue.cached_token_count} /></td>
+              <td className="px-3 py-3"><LastEvent value={issue.last_event} /></td>
             </tr>
           ))}
         </tbody>
@@ -317,10 +318,10 @@ function IssueTable({ issues, projectId }: { issues: IssueDetail[]; projectId: s
                 <td className="px-3 py-3"><Badge tone={statusTone(issue.lifecycle_stage)}>{issue.display_status}</Badge></td>
                 <td className="px-3 py-3">{session?.active_agent ?? session?.agent ?? "—"}<div className="text-xs text-slate-500">{session?.active_model ?? session?.model ?? "model unknown"}</div></td>
                 <td className="px-3 py-3">{session ? processState(session.process_alive) : "—"}</td>
-                <td className="px-3 py-3">{formatNumber(session?.token_count ?? 0)}</td>
+                <td className="px-3 py-3"><TokenCell total={session?.token_count ?? 0} cached={session?.cached_token_count} /></td>
                 <td className="px-3 py-3">{session?.activity?.running_tool_count ?? 0}/{session?.activity?.pending_tool_count ?? 0}</td>
                 <td className="px-3 py-3">{session?.todo_count ?? 0}</td>
-                <td className="px-3 py-3">{session?.last_event ?? issue.last_runner_event ?? "—"}</td>
+                <td className="px-3 py-3"><LastEvent value={session?.last_event ?? issue.last_runner_event} /></td>
                 <td className="max-w-[220px] truncate px-3 py-3 font-mono text-xs">{session?.worktree_path ?? issue.git_ref?.worktree_path ?? "—"}</td>
               </tr>
             );
@@ -400,6 +401,27 @@ function MetricCard({ title, value, detail, tone = "idle" }: { title: string; va
   );
 }
 
+function TokenCell({ total, cached }: { total: number; cached?: number | null }) {
+  const tokens = tokenBreakdown(total, cached);
+  return (
+    <div>
+      <div>{formatNumber(tokens.net)}</div>
+      <div className="text-xs text-slate-500">{formatNumber(tokens.cached)} cached</div>
+    </div>
+  );
+}
+
+function LastEvent({ value }: { value?: string | null }) {
+  const event = formatLastEvent(value);
+  if (!event.detail) return <span>{event.label}</span>;
+  return (
+    <div>
+      <div>{event.label}</div>
+      <div className="text-xs text-slate-500">{event.detail}</div>
+    </div>
+  );
+}
+
 export function Panel({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
   return (
     <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -467,6 +489,11 @@ function processState(alive?: boolean | null): string {
   return "unknown";
 }
 
+function isLiveIssue(issue: IssueDetail): boolean {
+  const session = issue.opencode_sessions.at(-1);
+  return issue.lifecycle_stage === "running" || session?.process_alive === true;
+}
+
 function shortTime(value?: string | null): string {
   if (!value) return "unknown";
   const date = new Date(value);
@@ -485,4 +512,37 @@ function shortTime(value?: string | null): string {
 
 function formatNumber(value: number): string {
   return new Intl.NumberFormat("en-US").format(value);
+}
+
+function tokenBreakdown(total: number, cached?: number | null): { net: number; cached: number } {
+  const safeCached = Math.max(0, cached ?? 0);
+  return {
+    net: Math.max(0, total - safeCached),
+    cached: safeCached,
+  };
+}
+
+function formatLastEvent(value?: string | null): { label: string; detail?: string } {
+  if (!value) return { label: "—" };
+  const match = /^opencode_db_updated:(\d+)$/.exec(value);
+  if (!match) return { label: value };
+  return {
+    label: "OpenCode activity updated",
+    detail: formatTimestampMs(Number(match[1])),
+  };
+}
+
+function formatTimestampMs(value: number): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    month: "short",
+    day: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+  }).format(date);
 }

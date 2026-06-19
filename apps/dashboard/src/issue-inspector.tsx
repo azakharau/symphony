@@ -33,8 +33,6 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
             <h2 className="mt-1 text-2xl font-semibold">{issue.title}</h2>
             <div className="mt-3 flex flex-wrap gap-2">
               <Badge tone={issue.lifecycle_stage === "failed" ? "bad" : issue.lifecycle_stage === "blocked" ? "warn" : "good"}>{issue.display_status}</Badge>
-              <Badge>{issue.lifecycle_stage}</Badge>
-              <Badge>{session?.current_stage ?? "no session"}</Badge>
             </div>
           </div>
           <dl className="grid gap-2 text-sm sm:grid-cols-2 lg:min-w-[520px]">

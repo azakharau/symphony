@@ -27,8 +27,13 @@ describe("dashboard surfaces", () => {
     const html = render(<OverviewSurface dashboard={acceptanceDashboard} quota={quotaNormal} />);
 
     expect(html).toContain("Running now");
+    expect(html).toContain("Sessions");
+    expect(html).toContain("4 slots available");
+    expect(html).not.toContain(">Capacity</p>");
     expect(html).toContain("SYM-97");
     expect(html).toContain("component tests passed");
+    expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain(">tools<");
+    expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain("running /");
     expect(sectionText(html, "Blockers and idle reasons", "Project health")).toContain("No blockers reported");
     expect(sectionText(html, "Blockers and idle reasons", "Project health")).not.toContain("two OpenCode sessions are executing");
     expect(sectionText(html, "Blockers and idle reasons", "Project health")).not.toContain("running/slots");
@@ -60,6 +65,8 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("Todos");
     expect(html).toContain("Timeline");
     expect(html).toContain("Evidence");
+    expect(countOccurrences(html, ">running</span>")).toBe(1);
+    expect(html).not.toContain(">review</span>");
     expect(html).toContain("Capture smoke screenshots");
     expect(html).toContain("line-through");
     expect(html).toContain("animate-spin");
@@ -101,4 +108,8 @@ function sectionText(html: string, start: string, end: string): string {
   const startIndex = html.indexOf(start);
   const endIndex = html.indexOf(end, startIndex);
   return html.slice(startIndex, endIndex < 0 ? undefined : endIndex);
+}
+
+function countOccurrences(value: string, needle: string): number {
+  return value.split(needle).length - 1;
 }

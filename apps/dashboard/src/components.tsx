@@ -47,9 +47,13 @@ export function OverviewSurface({ dashboard, quota }: { dashboard: AggregateDash
 
   return (
     <div className="flex flex-col gap-5">
-      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-        <MetricCard title="Running" value={String(dashboard.totals.running_issue_count)} detail={`${formatNumber(dashboard.totals.running_tokens)} tokens`} tone={running.length ? "good" : "idle"} />
-        <MetricCard title="Capacity" value={`${dashboard.totals.available_sessions}/${dashboard.totals.max_sessions}`} detail="slots available" tone={dashboard.totals.available_sessions > 0 ? "good" : "warn"} />
+      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <MetricCard
+          title="Sessions"
+          value={`${dashboard.totals.running_issue_count}/${dashboard.totals.max_sessions}`}
+          detail={`${dashboard.totals.available_sessions} slots available · ${formatNumber(dashboard.totals.running_tokens)} tokens`}
+          tone={running.length ? "good" : dashboard.totals.available_sessions > 0 ? "idle" : "warn"}
+        />
         <QuotaCompact quota={quota} />
         <MetricCard title="Blockers" value={String(blockers.length)} detail="blocked or unhealthy projects" tone={blockers.length ? "warn" : "good"} />
         <MetricCard title="Defects" value={String(defectCount)} detail="deduped runtime signals" tone={defectCount ? "bad" : "good"} />
@@ -187,7 +191,7 @@ export function DefectsSurface({ defects }: { defects: SelfDefectRouteSummary[] 
 function RunningTable({ issues }: { issues: RunningIssueSummary[] }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[840px] text-left text-sm">
+      <table className="w-full min-w-[760px] text-left text-sm">
         <thead className="text-xs uppercase tracking-wide text-slate-500">
           <tr>
             <th className="px-3 py-2">project</th>
@@ -195,7 +199,6 @@ function RunningTable({ issues }: { issues: RunningIssueSummary[] }) {
             <th className="px-3 py-2">stage</th>
             <th className="px-3 py-2">agent/model</th>
             <th className="px-3 py-2">tokens</th>
-            <th className="px-3 py-2">tools</th>
             <th className="px-3 py-2">last event</th>
             <th className="px-3 py-2">worktree</th>
           </tr>
@@ -208,7 +211,6 @@ function RunningTable({ issues }: { issues: RunningIssueSummary[] }) {
               <td className="px-3 py-3"><Badge tone={statusTone(issue.stage)}>{issue.stage ?? issue.display_status}</Badge></td>
               <td className="px-3 py-3">{issue.active_agent ?? issue.agent ?? "—"}<div className="text-xs text-slate-500">{issue.active_model ?? issue.model ?? "model unknown"}</div></td>
               <td className="px-3 py-3">{formatNumber(issue.token_count)}</td>
-              <td className="px-3 py-3">{issue.running_tool_count} running / {issue.pending_tool_count} pending</td>
               <td className="px-3 py-3">{issue.last_event ?? "—"}</td>
               <td className="max-w-[220px] truncate px-3 py-3 font-mono text-xs">{issue.worktree_path ?? "—"}</td>
             </tr>

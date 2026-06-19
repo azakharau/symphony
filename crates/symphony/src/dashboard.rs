@@ -5,6 +5,7 @@ use crate::{
 };
 
 mod html;
+mod quota;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DashboardHtmlResponse {
@@ -25,8 +26,11 @@ pub async fn runtime_dashboard_html_response(
     };
     let api = RuntimeDashboardApi::from_store(config, store).await?;
 
+    let quota = quota::OpenCodeQuotaSnapshot::load_localhost().await.ok();
+
     let response = match normalized {
-        "/" => html_response(200, html::render_aggregate(api.aggregate())),
+        "/" => html_response(200, html::render_aggregate(api.aggregate(), quota.as_ref())),
+        "/quota" => html_response(200, html::render_quota(quota.as_ref())),
         path if path.starts_with("/projects/") => project_or_issue_response(&api, path)?,
         path if path.starts_with("/api/") => return Ok(None),
         _ => html_response(404, html::render_not_found(normalized)),

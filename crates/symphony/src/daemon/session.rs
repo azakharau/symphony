@@ -66,16 +66,16 @@ pub(super) async fn unresolved_runtime_defect(
     project: &ProjectConfig,
     issue: &LinearIssue,
 ) -> anyhow::Result<Option<FailureRecord>> {
-    if !issue.blocked_by.iter().any(is_unaccepted_blocker) {
-        return Ok(None);
-    }
     let Some(record) = store.issue(&project.id, &issue.id).await? else {
         return Ok(None);
     };
     let Some(failure) = record.failure else {
         return Ok(None);
     };
-    if recoverable_opencode_failure(&failure) {
+    let has_unaccepted_blocker = issue.blocked_by.iter().any(is_unaccepted_blocker);
+    let reached_recoverable_failure_threshold = recoverable_opencode_failure(&failure)
+        && failure.occurrence_count >= project.eval.max_identical_failure_fingerprints.max(1);
+    if !has_unaccepted_blocker && !reached_recoverable_failure_threshold {
         return Ok(None);
     }
     if !matches!(
@@ -149,6 +149,27 @@ pub(super) async fn mark_existing_session_failed_for_unresolved_runtime_defect(
     session
         .last_event
         .get_or_insert_with(|| "failed:unresolved_runtime_defect".into());
+    session.silence_observed = false;
+    store.upsert_opencode_session(&session).await?;
+    Ok(())
+}
+
+pub(super) async fn mark_existing_session_resume_failed(
+    store: &SqliteStore,
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+    reason: &str,
+) -> anyhow::Result<()> {
+    let Some(mut session) = latest_active_session_for_issue(store, &project.id, &issue.id).await?
+    else {
+        return Ok(());
+    };
+    terminate_current_session_process(project, issue, &mut session).await?;
+    session.process_id = None;
+    session.lifecycle_stage = LifecycleStage::Failed;
+    session.stage = OpenCodeStage::Failed;
+    session.lifecycle_marker = Some("failed:resume_launch_failed".into());
+    session.last_event = Some(format!("failed:resume_launch_failed:{reason}"));
     session.silence_observed = false;
     store.upsert_opencode_session(&session).await?;
     Ok(())
@@ -309,10 +330,19 @@ fn reusable_session_record(session: &OpenCodeSessionRecord) -> bool {
             | LifecycleStage::Failed
     ) || retired_provider_blocker_retry_session(session))
         && !terminal_completed_stage(session)
+        && !non_reusable_failed_launch_session(session)
 }
 
 fn terminal_completed_stage(session: &OpenCodeSessionRecord) -> bool {
     matches!(session.stage, OpenCodeStage::Completed)
+}
+
+fn non_reusable_failed_launch_session(session: &OpenCodeSessionRecord) -> bool {
+    if session.stage != OpenCodeStage::Failed {
+        return false;
+    }
+    let marker = session.lifecycle_marker.as_deref().unwrap_or_default();
+    marker == "failed:launch_failed" || marker == "failed:resume_launch_failed"
 }
 
 fn retired_provider_blocker_retry_session(session: &OpenCodeSessionRecord) -> bool {

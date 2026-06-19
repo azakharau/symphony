@@ -887,6 +887,55 @@ async fn handoff_sidecar_fills_missing_git_worktree_path_from_session() {
 }
 
 #[tokio::test]
+async fn handoff_sidecar_normalizes_final_review_lifecycle_alias() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let worktree = dir.path().join("worktree");
+    let sidecar_dir = worktree.join(".symphony");
+    fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
+    fs::write(
+        sidecar_dir.join("opencode-handoff.json"),
+        r#"{
+  "session_id":"ses-final-review",
+  "lifecycle_stages":["running","final_review","final_evaluation","final_handoff","completed"],
+  "subagents_used":["code-reviewer","evaluator"],
+  "eval_results":{"outcome":"accept","details":"review and evaluation passed"},
+  "changed_files":["crates/nervure-types/src/runtime_connector.rs:1-20"],
+  "git":{"branch":"feature/nrv-12","head_sha":"9cb9bb9d79e3e7cb4d4c6dd9a7d5a6edd7bc5168","worktree_path":"/tmp/worktree","pushed":true},
+  "risks":[],
+  "stop_reason":"accepted"
+}"#,
+    )
+    .expect("handoff fixture");
+
+    let handoff = opencode::StdioOpenCodeLauncher
+        .latest_handoff(&test_session(
+            "nervure",
+            "issue-nrv-12",
+            "ses-final-review",
+            &worktree,
+        ))
+        .await
+        .expect("final review alias should be normalized")
+        .expect("handoff present");
+
+    assert_eq!(
+        handoff.lifecycle_stages,
+        vec![
+            OpenCodeStage::Running,
+            OpenCodeStage::Review,
+            OpenCodeStage::Eval,
+            OpenCodeStage::Handoff,
+            OpenCodeStage::Completed,
+        ]
+    );
+    assert!(handoff.eval_results[0].passed);
+    assert!(matches!(
+        handoff.stop_reason,
+        opencode::OpenCodeStopReason::Success
+    ));
+}
+
+#[tokio::test]
 async fn malformed_handoff_sidecar_rejects_markdown_acp_fields() {
     let dir = tempfile::tempdir().expect("tempdir");
     let worktree = dir.path().join("worktree");
@@ -1121,6 +1170,85 @@ async fn stdio_launcher_continues_existing_session_from_dirty_resumable_worktree
             assert!(
                 !transcript.contains("Original prompt must not be replayed"),
                 "{transcript}"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    panic!(
+        "ACP continuation prompt was not observed; transcript={:?}",
+        fs::read_to_string(transcript_path)
+    );
+}
+
+#[tokio::test]
+async fn stdio_launcher_continues_dirty_same_issue_worktree_after_branch_title_drift() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transcript_path = dir.path().join("acp-transcript.jsonl");
+    let script_path = write_fake_acp_resume_script(dir.path(), &transcript_path);
+    let repo = dir.path().join("repo");
+    let worktree_root = dir.path().join("worktrees");
+    let worktree = worktree_root.join("NRV-48");
+    fs::create_dir_all(&repo).expect("repo dir");
+    run_git(&repo, ["init", "-b", "main"]);
+    fs::write(repo.join("README.md"), "base\n").expect("readme");
+    run_git(&repo, ["add", "README.md"]);
+    run_git(&repo, ["commit", "-m", "initial"]);
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "-b",
+            "feature/nrv-48-define-runtime-context-quarantine-policy-profile",
+            worktree.to_str().expect("worktree path utf8"),
+            "main",
+        ],
+    );
+    fs::write(worktree.join("in-flight.txt"), "uncommitted work\n").expect("dirty file");
+    let spec = opencode::OpenCodeLaunchSpec {
+        command: script_path,
+        args: Vec::new(),
+        cwd: worktree.clone(),
+        worktree_root: Some(worktree_root),
+        issue_identifier: "NRV-48".into(),
+        branch_name: "feature/nrv-48-implement-runtime-context-efficiency-attestation-and".into(),
+        repo_path: Some(repo),
+        mnemesh_workspace_root: Some(dir.path().to_path_buf()),
+        base_ref: Some("main".into()),
+        agent: "build".into(),
+        model: Some("openai/gpt-5.5".into()),
+        effort: Some("high".into()),
+        prompt: "Original prompt must not be replayed on continue".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+    let mut session = test_session("nervure", "issue-48", "ses-existing", &worktree);
+    session.process_id = None;
+    let launcher = opencode::StdioOpenCodeLauncher;
+
+    let continued = launcher
+        .continue_session(&spec, &session, "continue after issue title changed")
+        .await
+        .expect("continue existing session from dirty same-issue worktree");
+
+    assert_eq!(continued.session_id, "ses-existing");
+    assert!(continued.process_id.is_some());
+    for _ in 0..50 {
+        if let Ok(transcript) = fs::read_to_string(&transcript_path)
+            && transcript.contains(r#""method": "session/prompt""#)
+        {
+            assert!(
+                transcript.contains(r#""method": "session/resume""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(r#""method": "session/prompt""#),
+                "{transcript}"
+            );
+            assert_eq!(
+                git_output(&worktree, ["branch", "--show-current"]).trim(),
+                "feature/nrv-48-define-runtime-context-quarantine-policy-profile"
             );
             return;
         }

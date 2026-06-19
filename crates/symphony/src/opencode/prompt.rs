@@ -41,7 +41,7 @@ pub(super) fn build_issue_prompt(
          Symphony accepts OpenCode orchestrator field names such as status, schema_version, subagents_used, object eval_results, and git.pushed, then normalizes them before strict validation.\n\
          {{\n\
            \"session_id\": \"{session_id}\",\n\
-           \"lifecycle_stages\": [\"planning\", \"implementation\", \"verification\", \"review\", \"commit\", \"push\", \"handoff\"],\n\
+           \"lifecycle_stages\": [\"starting\", \"running\", \"eval\", \"review\", \"handoff\", \"completed\"],\n\
            \"subagents_used\": [\"agent-name:session-id\"],\n\
            \"eval_results\": {{\"outcome\": \"accept\", \"details\": \"command outcomes\", \"commands\": [{{\"command\": \"git diff --check\", \"status\": \"pass\"}}]}},\n\
            \"changed_files\": [\"path:start-end\"],\n\

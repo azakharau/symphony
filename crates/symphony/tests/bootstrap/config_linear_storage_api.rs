@@ -1331,15 +1331,23 @@ async fn dashboard_html_routes_render_aggregate_project_issue_and_keep_json_api(
     let json = symphony::dashboard::runtime_dashboard_response(&config, &store, "/api/dashboard")
         .await
         .expect("json api");
+    let quota = symphony::dashboard::runtime_dashboard_response(&config, &store, "/quota")
+        .await
+        .expect("quota html");
 
     assert_eq!(aggregate.0, 200);
     assert_eq!(aggregate.1, "text/html; charset=utf-8");
     assert!(aggregate.2.contains("Running work, tokens, and blockers"));
     assert!(aggregate.2.contains("Running now"));
-    assert!(aggregate.2.contains("Quota remaining"));
+    assert!(aggregate.2.contains("Current work"));
+    assert!(aggregate.2.contains("Capacity"));
+    assert!(aggregate.2.contains("5h quota"));
+    assert!(aggregate.2.contains("href=\"/quota\""));
+    assert!(!aggregate.2.contains("OpenCode cost"));
     assert!(aggregate.2.contains("/projects/symphony"));
     assert!(aggregate.2.contains("SYM-101"));
     assert!(aggregate.2.contains("100 tokens"));
+    assert!(!aggregate.2.contains(">cost<"));
     assert!(project.2.contains("Active issues"));
     assert!(project.2.contains("Current execution"));
     assert!(project.2.contains("Recent history"));
@@ -1353,6 +1361,10 @@ async fn dashboard_html_routes_render_aggregate_project_issue_and_keep_json_api(
     assert!(issue.2.contains("title: Child engineer"));
     assert!(issue.2.contains("updated: 2000"));
     assert!(issue.2.contains("time: 1000"));
+    assert_eq!(quota.0, 200);
+    assert_eq!(quota.1, "text/html; charset=utf-8");
+    assert!(quota.2.contains("Usage limits"));
+    assert!(!quota.2.contains("OpenCode cost"));
     assert_eq!(json.1, "application/json");
     assert!(json.2.contains(r#""project_id":"symphony""#));
 }

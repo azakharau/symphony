@@ -13,7 +13,7 @@ impl SqliteStore {
         occurrence: &SelfDefectOccurrenceRecord,
     ) -> Result<SelfDefectRecord, StorageError> {
         if let Some(existing) = self
-            .open_self_defect_by_fingerprint(&occurrence.fingerprint)
+            .latest_self_defect_by_fingerprint(&occurrence.fingerprint)
             .await?
         {
             self.conn
@@ -119,6 +119,16 @@ impl SqliteStore {
         let sql = self_defect_select_sql("WHERE fingerprint = ?1 ORDER BY first_seen_at ASC");
         let mut rows = self.conn.query(&sql, params![fingerprint]).await?;
         collect_rows(&mut rows, self_defect_from_row).await
+    }
+
+    pub async fn latest_self_defect_by_fingerprint(
+        &self,
+        fingerprint: &str,
+    ) -> Result<Option<SelfDefectRecord>, StorageError> {
+        let sql =
+            self_defect_select_sql("WHERE fingerprint = ?1 ORDER BY last_seen_at DESC LIMIT 1");
+        let mut rows = self.conn.query(&sql, params![fingerprint]).await?;
+        optional_row(&mut rows, self_defect_from_row).await
     }
 
     pub async fn open_self_defects_for_source_issue(
@@ -505,7 +515,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolved_self_defect_reopened_occurrence_gets_fresh_active_row() {
+    async fn resolved_self_defect_recurrence_updates_existing_row() {
         let store = test_store().await;
         let first = store
             .record_self_defect_occurrence(&occurrence(
@@ -531,7 +541,7 @@ mod tests {
                 .is_none()
         );
 
-        let reopened = store
+        let recurrence = store
             .record_self_defect_occurrence(&occurrence(
                 "fingerprint-b",
                 "source-c",
@@ -540,18 +550,19 @@ mod tests {
                 "SYM-DEFECT-NEW",
             ))
             .await
-            .expect("reopened occurrence");
+            .expect("recurrence");
 
-        assert_ne!(reopened.registry_id, first.registry_id);
-        assert_eq!(reopened.occurrence_count, 1);
-        assert_eq!(reopened.resolution_state, SelfDefectResolutionState::Open);
+        assert_eq!(recurrence.registry_id, first.registry_id);
+        assert_eq!(recurrence.occurrence_count, 2);
+        assert_eq!(recurrence.resolution_state, SelfDefectResolutionState::Done);
+        assert_eq!(recurrence.source_issue_id, "source-c");
         assert_eq!(
             store
                 .self_defects_by_fingerprint("fingerprint-b")
                 .await
                 .expect("query")
                 .len(),
-            2
+            1
         );
     }
 

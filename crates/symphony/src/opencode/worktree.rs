@@ -169,7 +169,9 @@ async fn ensure_existing_resumable_git_worktree(
         )));
     }
 
-    if observed_branch != spec.branch_name {
+    if observed_branch != spec.branch_name
+        && !same_issue_generated_branch(observed_branch, &spec.issue_identifier)
+    {
         let dirty_evidence = dirty_or_untracked_evidence(&status);
         let mut message = format!(
             "existing worktree {} is on branch {} but expected {}",
@@ -182,6 +184,17 @@ async fn ensure_existing_resumable_git_worktree(
             message.push_str(&dirty_evidence);
         }
         return Err(OpenCodeError::InvalidWorktree(message));
+    }
+
+    if observed_branch != spec.branch_name {
+        info!(
+            issue = %spec.issue_identifier,
+            cwd = %spec.cwd.display(),
+            observed_branch,
+            expected_branch = %spec.branch_name,
+            dirty = !status.trim().is_empty(),
+            "OpenCode resumable worktree accepted same-issue branch-name drift"
+        );
     }
 
     debug!(
@@ -455,6 +468,14 @@ fn safe_branch_name(branch: &str) -> bool {
         && branch.chars().all(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '/')
         })
+}
+
+fn same_issue_generated_branch(branch: &str, issue_identifier: &str) -> bool {
+    let issue_prefix = format!(
+        "feature/{}-",
+        issue_identifier.to_ascii_lowercase().replace('/', "-")
+    );
+    branch.starts_with(&issue_prefix)
 }
 
 pub(super) fn handoff_sidecar_path(path: impl AsRef<Path>) -> PathBuf {

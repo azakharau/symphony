@@ -52,33 +52,42 @@ pub(super) async fn record_runtime_self_defect(
             open_registry_managed_issue(managed_project, linear, fingerprint, record, policy)
                 .await?
         }
-        None => match linear
-            .find_managed_issue(managed_project, fingerprint)
-            .await?
-        {
-            Some(issue) => issue,
-            None => {
-                linear
-                    .create_managed_issue(
-                        managed_project,
-                        ManagedLinearIssueCreate {
-                            source_issue_id: issue.id.clone(),
-                            fingerprint: fingerprint.to_string(),
-                            title: format!("Symphony self-defect: {fingerprint}"),
-                            description: summary.clone(),
-                            priority: policy.priority,
-                            state: policy.state,
-                            project_milestone_id: managed_issue_milestone_id(
-                                project,
-                                managed_project,
-                                issue,
-                            ),
-                            label_ids: Vec::new(),
-                        },
-                    )
-                    .await?
+        None => {
+            if let Some(record) = store.latest_self_defect_by_fingerprint(fingerprint).await? {
+                return record_suppressed_duplicate_self_defect(
+                    project, store, issue, failure, session, &summary, record,
+                )
+                .await;
             }
-        },
+
+            match linear
+                .find_managed_issue(managed_project, fingerprint)
+                .await?
+            {
+                Some(issue) => issue,
+                None => {
+                    linear
+                        .create_managed_issue(
+                            managed_project,
+                            ManagedLinearIssueCreate {
+                                source_issue_id: issue.id.clone(),
+                                fingerprint: fingerprint.to_string(),
+                                title: format!("Symphony self-defect: {fingerprint}"),
+                                description: summary.clone(),
+                                priority: policy.priority,
+                                state: policy.state,
+                                project_milestone_id: managed_issue_milestone_id(
+                                    project,
+                                    managed_project,
+                                    issue,
+                                ),
+                                label_ids: Vec::new(),
+                            },
+                        )
+                        .await?
+                }
+            }
+        }
     };
 
     let relation = self_defect_relation(project, managed_project, issue, &managed_issue);
@@ -122,6 +131,39 @@ pub(super) async fn record_runtime_self_defect(
             managed_issue_identifier: managed_issue.identifier,
             latest_evidence_summary: evidence_summary,
             relation_mode: relation.mode,
+        })
+        .await?)
+}
+
+async fn record_suppressed_duplicate_self_defect(
+    project: &ProjectConfig,
+    store: &SqliteStore,
+    issue: &LinearIssue,
+    failure: &FailureRecord,
+    session: &OpenCodeSessionRecord,
+    summary: &str,
+    existing: SelfDefectRecord,
+) -> anyhow::Result<SelfDefectRecord> {
+    let evidence_summary = format!(
+        "{summary}\nrelation_mode: {relation_mode}\nduplicate_policy: existing_self_defect_fingerprint_suppressed",
+        relation_mode = existing.relation_mode.as_str()
+    );
+    Ok(store
+        .record_self_defect_occurrence(&SelfDefectOccurrenceRecord {
+            fingerprint: existing.fingerprint,
+            defect_kind: failure.kind.clone(),
+            category: existing.category,
+            severity: existing.severity,
+            initial_routing_decision: existing.initial_routing_decision,
+            source_project_id: project.id.clone(),
+            source_issue_id: issue.id.clone(),
+            source_issue_identifier: issue.identifier.clone(),
+            source_session_id: Some(session.session_id.clone()),
+            source_process_id: session.process_id,
+            managed_issue_id: existing.managed_issue_id,
+            managed_issue_identifier: existing.managed_issue_identifier,
+            latest_evidence_summary: evidence_summary,
+            relation_mode: existing.relation_mode,
         })
         .await?)
 }
@@ -760,6 +802,74 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn resolved_self_defect_recurrence_suppresses_new_linear_bug() {
+        let store = test_store().await;
+        let project = test_project();
+        let source = linear_issue("source-issue", "MNE-202");
+        let failure = failure_record("launch_failed");
+        let session = session_record(&project, &source);
+        let first = store
+            .record_self_defect_occurrence(&SelfDefectOccurrenceRecord {
+                fingerprint: "launch_failed".into(),
+                defect_kind: failure.kind.clone(),
+                category: "runtime".into(),
+                severity: "p0".into(),
+                initial_routing_decision: "managed_self_defect".into(),
+                source_project_id: project.id.clone(),
+                source_issue_id: "previous-source".into(),
+                source_issue_identifier: "MNE-1".into(),
+                source_session_id: Some("previous-session".into()),
+                source_process_id: None,
+                managed_issue_id: "deleted-managed-issue".into(),
+                managed_issue_identifier: "SYM-90".into(),
+                latest_evidence_summary: "previous occurrence".into(),
+                relation_mode: SelfDefectRelationMode::Blocking,
+            })
+            .await
+            .expect("seed self-defect");
+        store
+            .mark_self_defect_managed_issue_resolved(
+                "deleted-managed-issue",
+                crate::state::SelfDefectResolutionState::Done,
+            )
+            .await
+            .expect("resolve self-defect");
+
+        let record = record_runtime_self_defect(
+            &project,
+            &project,
+            &store,
+            &NoLinearWritesClient,
+            RuntimeSelfDefectInput {
+                issue: &source,
+                evidence_kind: "runtime_defect",
+                message: "OpenCode launch failed after Linear transition",
+                failure: &failure,
+                session: &session,
+            },
+        )
+        .await
+        .expect("record duplicate");
+
+        assert_eq!(record.registry_id, first.registry_id);
+        assert_eq!(record.managed_issue_identifier, "SYM-90");
+        assert_eq!(record.occurrence_count, 2);
+        assert!(
+            record
+                .latest_evidence_summary
+                .contains("duplicate_policy: existing_self_defect_fingerprint_suppressed")
+        );
+        assert_eq!(
+            store
+                .self_defects_by_fingerprint("launch_failed")
+                .await
+                .expect("query")
+                .len(),
+            1
+        );
+    }
+
     #[test]
     fn deterministic_policy_routes_known_self_defects_by_severity() {
         let cases = [
@@ -1026,6 +1136,61 @@ mod tests {
 
         fn evidence(&self) -> Vec<(String, LinearIssueEvidence)> {
             self.evidence.lock().expect("evidence lock").clone()
+        }
+    }
+
+    struct NoLinearWritesClient;
+
+    #[async_trait::async_trait]
+    impl LinearClient for NoLinearWritesClient {
+        async fn fetch_candidate_issues(
+            &self,
+            _project: &ProjectConfig,
+        ) -> Result<Vec<LinearIssue>, LinearClientError> {
+            Err(LinearClientError::Message(
+                "terminal duplicate must not query Linear".into(),
+            ))
+        }
+
+        async fn transition_issue(
+            &self,
+            _issue_id: &str,
+            _transition: crate::linear::LinearTransition,
+        ) -> Result<(), LinearClientError> {
+            Err(LinearClientError::Message(
+                "terminal duplicate must not transition Linear".into(),
+            ))
+        }
+
+        async fn record_issue_evidence(
+            &self,
+            _issue_id: &str,
+            _evidence: LinearIssueEvidence,
+        ) -> Result<(), LinearClientError> {
+            Err(LinearClientError::Message(
+                "terminal duplicate must not write Linear evidence".into(),
+            ))
+        }
+
+        async fn create_managed_issue(
+            &self,
+            _project: &ProjectConfig,
+            _request: ManagedLinearIssueCreate,
+        ) -> Result<LinearIssue, LinearClientError> {
+            Err(LinearClientError::Message(
+                "terminal duplicate must not create Linear issue".into(),
+            ))
+        }
+
+        async fn create_issue_relation(
+            &self,
+            _source_issue_id: &str,
+            _managed_issue_id: &str,
+            _relation: ManagedLinearRelation,
+        ) -> Result<(), LinearClientError> {
+            Err(LinearClientError::Message(
+                "terminal duplicate must not create Linear relation".into(),
+            ))
         }
     }
 

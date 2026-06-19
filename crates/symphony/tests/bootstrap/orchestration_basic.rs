@@ -2294,6 +2294,57 @@ async fn orchestration_records_launch_failure_without_aborting_poll_or_owner_inp
 }
 
 #[tokio::test]
+async fn orchestration_suppresses_repeated_launch_failure_and_dispatches_next_candidate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue({
+            let mut issue = test_issue("symphony", "launch-fails", "SYM-201");
+            issue.lifecycle_stage = LifecycleStage::Failed;
+            issue.failure = Some(FailureRecord {
+                kind: "runtime_defect".into(),
+                message: "invalid opencode worktree".into(),
+                fingerprint: Some("launch_failed".into()),
+                occurrence_count: config.projects()[0].eval.max_identical_failure_fingerprints,
+            });
+            issue
+        })
+        .await
+        .expect("failed issue");
+    let client = RecordingLinearClient::new(vec![
+        linear_issue("launch-fails", "SYM-201", "Todo", Some(1)),
+        linear_issue("still-runs", "SYM-202", "Todo", Some(2)),
+    ]);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(6202);
+
+    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("poll");
+
+    assert_eq!(report.blocked, vec!["SYM-201"]);
+    assert_eq!(report.dispatched, vec!["SYM-202"]);
+    assert_eq!(
+        client.transitions(),
+        vec![("still-runs".into(), LinearTransition::InProgress)]
+    );
+    assert_eq!(opencode.launches(), vec!["SYM-202"]);
+    let failed = store
+        .issue("symphony", "launch-fails")
+        .await
+        .expect("query failed issue")
+        .expect("failed issue");
+    assert_eq!(failed.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(
+        failed.blocker.expect("blocker").message,
+        "unresolved runtime defect: launch_failed"
+    );
+}
+
+#[tokio::test]
 async fn orchestration_persists_setup_failure_session_for_liveness_projection() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
@@ -2482,7 +2533,7 @@ async fn orchestration_ignores_historical_failed_session_for_in_progress_reconci
 }
 
 #[tokio::test]
-async fn orchestration_reuses_failed_stage_session_for_todo_dispatch() {
+async fn orchestration_does_not_reuse_failed_launch_session_for_todo_dispatch() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let worktree = dir.path().join("SYM-204-worktree");
@@ -2515,23 +2566,19 @@ async fn orchestration_reuses_failed_stage_session_for_todo_dispatch() {
         .await
         .expect("poll");
 
-    assert!(opencode.launches().is_empty());
-    assert_eq!(
-        opencode.continuations(),
-        vec![("SYM-204".into(), "ses-failed".into())]
-    );
+    assert_eq!(opencode.launches(), vec!["SYM-204"]);
+    assert!(opencode.continuations().is_empty());
     let sessions = store
         .opencode_sessions_for_issue("symphony", "failed-requeue")
         .await
         .expect("sessions");
-    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions.len(), 2);
     assert_eq!(sessions[0].session_id, "ses-failed");
-    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(sessions[0].stage, OpenCodeStage::Running);
-    assert_eq!(
-        sessions[0].lifecycle_marker.as_deref(),
-        Some("continuation_prompted")
-    );
+    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Queued);
+    assert_eq!(sessions[0].stage, OpenCodeStage::Failed);
+    assert_eq!(sessions[1].session_id, "new:SYM-204");
+    assert_eq!(sessions[1].lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(sessions[1].stage, OpenCodeStage::Starting);
 }
 
 #[tokio::test]
@@ -2567,38 +2614,51 @@ async fn orchestration_existing_session_continue_failure_does_not_leave_running_
         Some(1),
     )]);
 
-    daemon::run_once_with_clients(&config, &store, &client, &FailingContinueOpenCodeLauncher)
-        .await
-        .expect("poll");
+    let report =
+        daemon::run_once_with_clients(&config, &store, &client, &FailingContinueOpenCodeLauncher)
+            .await
+            .expect("poll");
 
     assert_eq!(
         client.transitions(),
-        vec![
-            (
-                "existing-continue-fails".into(),
-                LinearTransition::InProgress
-            ),
-            ("existing-continue-fails".into(), LinearTransition::Todo),
-        ]
+        vec![(
+            "existing-continue-fails".into(),
+            LinearTransition::InProgress
+        )]
     );
+    assert_eq!(report.dispatched, vec!["SYM-209"]);
     let record = store
         .issue("symphony", "existing-continue-fails")
         .await
         .expect("query issue")
         .expect("issue");
-    assert_eq!(record.lifecycle_stage, LifecycleStage::Failed);
-    assert_eq!(
-        record.failure.expect("failure").fingerprint.as_deref(),
-        Some("launch_failed")
-    );
+    assert_eq!(record.lifecycle_stage, LifecycleStage::Running);
     let session = store
         .opencode_session("symphony", "existing-continue-fails", "ses-existing")
         .await
         .expect("query session")
         .expect("session");
-    assert_eq!(session.lifecycle_stage, LifecycleStage::Queued);
-    assert_eq!(session.stage, OpenCodeStage::Silent);
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(session.stage, OpenCodeStage::Failed);
     assert_eq!(session.process_id, None);
+    assert_eq!(
+        session.lifecycle_marker.as_deref(),
+        Some("failed:resume_launch_failed")
+    );
+    assert!(
+        session
+            .last_event
+            .as_deref()
+            .expect("last event")
+            .contains("continue failed")
+    );
+    let fresh = store
+        .opencode_session("symphony", "existing-continue-fails", "new:SYM-209")
+        .await
+        .expect("query fresh session")
+        .expect("fresh session");
+    assert_eq!(fresh.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(fresh.stage, OpenCodeStage::Starting);
 }
 
 #[tokio::test]

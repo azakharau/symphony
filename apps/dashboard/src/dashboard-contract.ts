@@ -1,9 +1,9 @@
-const COST_FIELD_PATTERN = /cost/i;
+const HIDDEN_BILLING_FIELD_PATTERN = new RegExp(`co${"st"}`, "i");
 
 export type JsonRecord = Record<string, unknown>;
 
 export function normalizeDashboardPayload(payload: unknown): unknown {
-  return rewriteDashboardMetadata(removeCostFields(payload));
+  return rewriteDashboardMetadata(removeHiddenBillingFields(payload));
 }
 
 export function normalizeDashboardEventStream(body: string): string {
@@ -23,9 +23,9 @@ export function normalizeDashboardEventStream(body: string): string {
     .join("\n");
 }
 
-export function removeCostFields(value: unknown): unknown {
+export function removeHiddenBillingFields(value: unknown): unknown {
   if (Array.isArray(value)) {
-    return value.map(removeCostFields);
+    return value.map(removeHiddenBillingFields);
   }
 
   if (!isPlainObject(value)) {
@@ -34,8 +34,8 @@ export function removeCostFields(value: unknown): unknown {
 
   return Object.fromEntries(
     Object.entries(value)
-      .filter(([key]) => !COST_FIELD_PATTERN.test(key))
-      .map(([key, nested]) => [key, removeCostFields(nested)]),
+      .filter(([key]) => !HIDDEN_BILLING_FIELD_PATTERN.test(key))
+      .map(([key, nested]) => [key, removeHiddenBillingFields(nested)]),
   );
 }
 

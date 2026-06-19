@@ -8,8 +8,8 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 
 use crate::{
+    api::runtime_api_json_response,
     config::{OpenCodeStorageConfig, RootConfig},
-    dashboard::runtime_dashboard_response,
     linear::LinearSdkClient,
     opencode::{
         OpenCodeSessionArchiveRequest, StdioOpenCodeLauncher, archive_and_delete_session_tree,
@@ -217,8 +217,14 @@ async fn handle_http_stream(
 
     let store = SqliteStore::open(database_path).await?;
     store.migrate().await?;
-    let (status, content_type, body) = runtime_dashboard_response(config, &store, path).await?;
-    write_http_response(&mut stream, status, content_type, &body).await?;
+    let response = runtime_api_json_response(config, &store, path).await?;
+    write_http_response(
+        &mut stream,
+        response.status,
+        response.content_type,
+        &response.body,
+    )
+    .await?;
     Ok(())
 }
 

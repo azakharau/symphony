@@ -787,14 +787,14 @@ fn normalize_handoff_sidecar_value(value: &mut Value, worktree_path: &str) {
 fn canonical_handoff_stage(stage: &str) -> Option<&'static str> {
     match stage {
         "planning" | "implementation" | "repair" | "failure_analysis" | "commit"
-        | "commit_push" => Some("running"),
+        | "commit_push" | "final_commit" | "final_push" => Some("running"),
         "repair_intake" | "base_fetch" | "merge_origin_master" | "conflict_resolution" | "push" => {
             Some("running")
         }
         "git_closure_repair" => Some("running"),
-        "verification" | "evaluation" => Some("eval"),
-        "review" => Some("review"),
-        "handoff" => Some("handoff"),
+        "verification" | "evaluation" | "final_verification" | "final_evaluation" => Some("eval"),
+        "review" | "code_review" | "final_review" => Some("review"),
+        "handoff" | "final_handoff" => Some("handoff"),
         "completed" => Some("completed"),
         "failed" => Some("failed"),
         "starting" => Some("starting"),

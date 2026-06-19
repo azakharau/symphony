@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn dashboard_api_and_html_surface_primary_execution_reason_codes() {
+async fn dashboard_api_surfaces_primary_execution_reason_codes_and_root_is_json_404() {
     async fn project_for(
         configure: impl FnOnce(&mut IssueStateRecord, &mut Option<OpenCodeSessionRecord>),
         liveness: Option<(RuntimeLivenessStatus, &'static str, u32, u32)>,
@@ -440,9 +440,9 @@ async fn dashboard_api_and_html_surface_primary_execution_reason_codes() {
     let json = symphony::api::runtime_api_json_response(&config, &store, "/api/dashboard")
         .await
         .expect("json response");
-    let html = symphony::dashboard::runtime_dashboard_response(&config, &store, "/")
+    let root = symphony::api::runtime_api_json_response(&config, &store, "/")
         .await
-        .expect("html response");
+        .expect("root response");
     assert!(
         json.body
             .contains(r#""primary_reason_code":"inactive_runtime""#)
@@ -451,5 +451,7 @@ async fn dashboard_api_and_html_surface_primary_execution_reason_codes() {
         json.body
             .contains(r#""primary_reason_detail":"runtime has not reported"#)
     );
-    assert!(html.2.contains("inactive_runtime"));
+    assert_eq!(root.status, 404);
+    assert_eq!(root.content_type, "application/json");
+    assert!(!root.body.contains("<html"));
 }

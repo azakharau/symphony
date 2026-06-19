@@ -975,11 +975,12 @@ struct FailingContinueOpenCodeLauncher;
 impl OpenCodeLauncher for FailingContinueOpenCodeLauncher {
     async fn launch(
         &self,
-        _spec: &opencode::OpenCodeLaunchSpec,
+        spec: &opencode::OpenCodeLaunchSpec,
     ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
-        Err(opencode::OpenCodeError::InvalidWorktree(
-            "unexpected launch".into(),
-        ))
+        Ok(opencode::OpenCodeStartedSession {
+            session_id: format!("new:{}", spec.issue_identifier),
+            process_id: Some(6210),
+        })
     }
 
     async fn continue_session(

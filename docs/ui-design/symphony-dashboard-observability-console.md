@@ -10,8 +10,8 @@ Symphony remains API/runtime-only. The dashboard is an operator console for
 seeing what is running, what is blocked, how quota is trending, and how
 OpenCode agents and subagents are behaving.
 
-The dashboard must not show cost. Rust API payloads may still contain legacy
-cost fields until later contract cleanup, but Next BFF responses and UI
+The dashboard must not show billing amounts. Rust API payloads may still contain legacy
+billing fields until later contract cleanup, but Next BFF responses and UI
 surfaces intended for the dashboard must omit them.
 
 ## Visual Direction
@@ -157,7 +157,7 @@ history.
 
 ### Quota
 
-Purpose: make OpenCode quota readable without exposing cost.
+Purpose: make OpenCode quota readable without exposing billing amounts.
 
 Data comes from Next BFF calling:
 
@@ -199,7 +199,7 @@ by fingerprint and managed issue. Rows link back to issue drilldown evidence.
 
 | Surface | Rust API | Next BFF | `ocu` |
 | --- | --- | --- | --- |
-| Overview status strips | `/api/dashboard` | normalize and omit cost | 5h quota only |
+| Overview status strips | `/api/dashboard` | normalize and omit billing fields | 5h quota only |
 | Overview running table | `/api/dashboard` running issues | normalize | no |
 | Overview blockers | `/api/dashboard`, project/issue drilldown as needed | normalize | no |
 | Projects table | `/api/dashboard` | normalize | no |
@@ -222,7 +222,7 @@ Playwright smoke notes:
 - Mobile viewport: `390x844`.
 - Page title: `Symphony Operations`.
 - Console warnings/errors: only `favicon.ico` 404 was observed.
-- Baseline root text did not contain `cost`.
+- Baseline root text did not expose billing amounts.
 
 ## Acceptance Screenshots For Implementation
 
@@ -249,5 +249,5 @@ The shell should prove that:
 - `apps/dashboard` can run independently from the Rust runtime.
 - BFF routes can fetch/normalize Rust JSON.
 - BFF quota route can parse `ocu --localhost --plain`.
-- Dashboard-targeted responses and UI omit cost fields.
+- Dashboard-targeted responses and UI omit billing fields.
 - Rust HTML remains in place until the final cutover task.

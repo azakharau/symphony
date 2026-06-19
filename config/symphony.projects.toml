@@ -14,7 +14,7 @@ archive_root = "/home/agent/mnemesh-benchmark-runs/symphony-opencode-session-arc
 [[projects]]
 id = "symphony"
 name = "Symphony"
-enabled = true
+enabled = false
 workflow_path = "/home/agent/proj/symphony/SPEC.md"
 repo_path = "/home/agent/proj/symphony"
 

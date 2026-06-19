@@ -50,9 +50,9 @@ use self_defects::{RuntimeSelfDefectInput, record_runtime_self_defect};
 use session::{
     has_reusable_existing_session, latest_running_session_for_issue, mark_existing_session_blocked,
     mark_existing_session_failed_for_unresolved_runtime_defect, mark_existing_session_queued,
-    mark_existing_session_waiting_for_project_owner_input, mark_historical_sessions_ignored,
-    mark_issue_sessions_terminal, resume_stale_opencode_session, session_has_live_process,
-    unresolved_runtime_defect,
+    mark_existing_session_resume_failed, mark_existing_session_waiting_for_project_owner_input,
+    mark_historical_sessions_ignored, mark_issue_sessions_terminal, resume_stale_opencode_session,
+    session_has_live_process, unresolved_runtime_defect,
 };
 use task_selection::{
     DispatchSelection, compare_dispatch_selections, is_managed_self_defect_issue,
@@ -985,16 +985,38 @@ async fn dispatch_candidate(
                 .await
                 .context("continue existing OpenCode session")
             {
-                handle_launch_failure(
-                    project,
-                    self_defect_project,
-                    store,
-                    linear,
-                    &issue,
-                    &launch_spec,
-                    crate::opencode::OpenCodeError::InvalidWorktree(error.to_string()),
-                )
-                .await?;
+                let failure_reason = error_chain(error.as_ref());
+                mark_existing_session_resume_failed(store, project, &issue, &failure_reason)
+                    .await?;
+                let observer = RuntimeLaunchObserver::new(project, &issue, &launch_spec, store);
+                match opencode.launch_observed(&launch_spec, &observer).await {
+                    Ok(started) => {
+                        let session = new_session_record(project, &issue, started, &launch_spec);
+                        info!(
+                            project_id = %project.id,
+                            issue = %issue.identifier,
+                            session_id = %session.session_id,
+                            worktree_path = %session.worktree_path,
+                            previous_failure_reason = %failure_reason,
+                            "fresh OpenCode session recorded after failed resume"
+                        );
+                        report.dispatched.push(issue.identifier);
+                    }
+                    Err(error) => {
+                        handle_launch_failure(
+                            project,
+                            self_defect_project,
+                            store,
+                            linear,
+                            &issue,
+                            &launch_spec,
+                            crate::opencode::OpenCodeError::InvalidWorktree(format!(
+                                "{failure_reason}; fresh launch also failed: {error}"
+                            )),
+                        )
+                        .await?;
+                    }
+                }
             } else {
                 info!(
                     project_id = %project.id,
@@ -1277,6 +1299,7 @@ async fn handle_launch_failure(
     error: crate::opencode::OpenCodeError,
 ) -> anyhow::Result<()> {
     let failure_reason = error_chain(&error);
+    let occurrence_count = launch_failure_occurrence_count(store, project, issue).await?;
     warn!(
         project_id = %project.id,
         issue_id = %issue.id,
@@ -1300,7 +1323,7 @@ async fn handle_launch_failure(
         kind: "runtime_defect".into(),
         message: failure_reason,
         fingerprint: Some("launch_failed".into()),
-        occurrence_count: 1,
+        occurrence_count,
     };
     let mut record = issue_record(
         project,
@@ -1337,6 +1360,21 @@ async fn handle_launch_failure(
         store.upsert_opencode_session(&session).await?;
     }
     Ok(())
+}
+
+async fn launch_failure_occurrence_count(
+    store: &SqliteStore,
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+) -> anyhow::Result<u32> {
+    let previous_count = store
+        .issue(&project.id, &issue.id)
+        .await?
+        .and_then(|record| record.failure)
+        .filter(|failure| failure.fingerprint.as_deref() == Some("launch_failed"))
+        .map(|failure| failure.occurrence_count.max(1))
+        .unwrap_or(0);
+    Ok(previous_count.saturating_add(1))
 }
 
 fn launch_failure_session(

@@ -661,7 +661,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         let input = tokio::fs::read_to_string(&path).await?;
         let mut value: Value = serde_json::from_str(&input)
             .map_err(|error| OpenCodeError::MalformedHandoff(format!("{path:?}: {error}")))?;
-        normalize_handoff_sidecar_value(&mut value);
+        normalize_handoff_sidecar_value(&mut value, &session.worktree_path);
         let handoff = serde_json::from_value(value)
             .map_err(|error| OpenCodeError::MalformedHandoff(format!("{path:?}: {error}")))?;
         info!(
@@ -673,7 +673,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
     }
 }
 
-fn normalize_handoff_sidecar_value(value: &mut Value) {
+fn normalize_handoff_sidecar_value(value: &mut Value, worktree_path: &str) {
     let Some(object) = value.as_object_mut() else {
         return;
     };
@@ -752,6 +752,9 @@ fn normalize_handoff_sidecar_value(value: &mut Value) {
             }
         } else {
             git.remove("commit");
+        }
+        if !git.contains_key("worktree_path") {
+            git.insert("worktree_path".to_owned(), json!(worktree_path));
         }
         git.remove("remote");
         git.remove("pushed");

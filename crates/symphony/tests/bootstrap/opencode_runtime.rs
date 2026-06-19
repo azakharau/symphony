@@ -845,6 +845,44 @@ async fn handoff_sidecar_normalizes_opencode_acp_shape() {
 }
 
 #[tokio::test]
+async fn handoff_sidecar_fills_missing_git_worktree_path_from_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let worktree = dir.path().join("worktree");
+    let sidecar_dir = worktree.join(".symphony");
+    fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
+    fs::write(
+        sidecar_dir.join("opencode-handoff.json"),
+        r#"{
+  "session_id":"ses-missing-worktree",
+  "lifecycle_stages":["running","handoff"],
+  "subagents_used":["rust-engineer"],
+  "eval_results":[],
+  "changed_files":[],
+  "git":{"branch":"feature/sym-77","head_sha":"abc123","pr_url":"https://example.test/pr/77"},
+  "risks":[],
+  "stop_reason":"completed"
+}"#,
+    )
+    .expect("handoff fixture");
+
+    let handoff = opencode::StdioOpenCodeLauncher
+        .latest_handoff(&test_session(
+            "symphony",
+            "issue-missing-worktree",
+            "ses-missing-worktree",
+            &worktree,
+        ))
+        .await
+        .expect("missing git worktree_path should be normalized")
+        .expect("handoff present");
+
+    assert_eq!(
+        handoff.git.expect("git evidence").worktree_path,
+        worktree.display().to_string()
+    );
+}
+
+#[tokio::test]
 async fn malformed_handoff_sidecar_rejects_markdown_acp_fields() {
     let dir = tempfile::tempdir().expect("tempdir");
     let worktree = dir.path().join("worktree");

@@ -87,13 +87,15 @@ pub(super) async fn record_runtime_self_defect(
         relation.mode,
         relation.skipped_blocker_reason,
     );
-    linear
-        .create_issue_relation(
-            &relation.issue_id,
-            &relation.related_issue_id,
-            relation.kind,
-        )
-        .await?;
+    if relation.issue_id != relation.related_issue_id {
+        linear
+            .create_issue_relation(
+                &relation.issue_id,
+                &relation.related_issue_id,
+                relation.kind,
+            )
+            .await?;
+    }
     linear
         .record_issue_evidence(
             &managed_issue.id,
@@ -464,14 +466,7 @@ mod tests {
                 .latest_evidence_summary
                 .contains("relation_mode: related_only")
         );
-        assert_eq!(
-            linear.relations(),
-            vec![(
-                "issue-1".into(),
-                "issue-1".into(),
-                ManagedLinearRelation::Related
-            )]
-        );
+        assert!(linear.relations().is_empty());
         let evidence = linear.evidence();
         assert_eq!(evidence.len(), 1);
         assert!(evidence[0].1.body.contains("source_project: symphony"));

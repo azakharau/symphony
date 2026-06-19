@@ -660,6 +660,7 @@ async fn reconcile_project(
                         CleanupStatus::Clean,
                     );
                     store.upsert_issue(&record).await?;
+                    mark_existing_session_blocked(store, project, &issue).await?;
                     report.blocked.push(issue.identifier);
                 } else if let Some(failure) =
                     unresolved_runtime_defect(store, project, &issue).await?

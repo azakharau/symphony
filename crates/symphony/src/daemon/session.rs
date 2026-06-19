@@ -102,9 +102,11 @@ pub(super) async fn mark_existing_session_blocked(
     terminate_current_session_process(project, issue, &mut session).await?;
     session.process_id = None;
     session.lifecycle_stage = LifecycleStage::Queued;
-    session.stage = OpenCodeStage::Silent;
-    session.lifecycle_marker = Some("waiting_for_blocker".into());
-    session.last_event = Some("existing_session_waiting_for_blocker".into());
+    if session.stage != OpenCodeStage::Failed {
+        session.stage = OpenCodeStage::Silent;
+        session.lifecycle_marker = Some("waiting_for_blocker".into());
+        session.last_event = Some("existing_session_waiting_for_blocker".into());
+    }
     session.silence_observed = false;
     store.upsert_opencode_session(&session).await?;
     Ok(())

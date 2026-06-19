@@ -29,6 +29,11 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("Running now");
     expect(html).toContain("SYM-97");
     expect(html).toContain("component tests passed");
+    expect(sectionText(html, "Blockers and idle reasons", "Project health")).toContain("No blockers reported");
+    expect(sectionText(html, "Blockers and idle reasons", "Project health")).not.toContain("two OpenCode sessions are executing");
+    expect(sectionText(html, "Blockers and idle reasons", "Project health")).not.toContain("running/slots");
+    expect(sectionText(html, "Blockers and idle reasons", "Project health")).not.toContain(">active<");
+    expect(sectionText(html, "Blockers and idle reasons", "Project health")).not.toContain(">blocked<");
     expect(html).not.toContain(`${"co"}st`);
   });
 
@@ -85,4 +90,10 @@ describe("dashboard surfaces", () => {
 
 function render(node: React.ReactElement): string {
   return renderToStaticMarkup(node);
+}
+
+function sectionText(html: string, start: string, end: string): string {
+  const startIndex = html.indexOf(start);
+  const endIndex = html.indexOf(end, startIndex);
+  return html.slice(startIndex, endIndex < 0 ? undefined : endIndex);
 }

@@ -42,7 +42,7 @@ export function UnavailablePanel({ title, message }: { title: string; message: s
 
 export function OverviewSurface({ dashboard, quota }: { dashboard: AggregateDashboard; quota: QuotaResult }) {
   const running = dashboard.projects.flatMap((project) => project.running_issues ?? []);
-  const blockers = dashboard.projects.filter((project) => project.parked_count > 0 || isProblemStatus(project.runner_health));
+  const blockers = dashboard.projects.filter((project) => project.active_count === 0 && (project.parked_count > 0 || isProblemStatus(project.runner_health)));
   const defectCount = dashboard.projects.reduce((total, project) => total + (project.self_defect_routes?.length ?? 0), 0);
 
   return (
@@ -259,7 +259,34 @@ function ProjectTable({ projects, detailed = false }: { projects: DashboardProje
 }
 
 function ProjectReasonTable({ projects }: { projects: DashboardProjectCard[] }) {
-  return <ProjectTable projects={projects} />;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[680px] text-left text-sm">
+        <thead className="text-xs uppercase tracking-wide text-slate-500">
+          <tr>
+            <th className="px-3 py-2">project</th>
+            <th className="px-3 py-2">health</th>
+            <th className="px-3 py-2">enabled</th>
+            <th className="px-3 py-2">primary reason</th>
+            <th className="px-3 py-2">last event</th>
+            <th className="px-3 py-2">cleanup</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {projects.map((project) => (
+            <tr key={project.project_id}>
+              <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${project.project_id}`}>{project.name}</Link></td>
+              <td className="px-3 py-3"><Badge tone={statusTone(project.runner_health)}>{project.runner_health}</Badge></td>
+              <td className="px-3 py-3">{project.enabled ? "yes" : "no"}</td>
+              <td className="px-3 py-3">{project.liveness.primary_reason_detail || project.liveness.reason}</td>
+              <td className="px-3 py-3">{project.last_event}</td>
+              <td className="px-3 py-3">{project.cleanup_status}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function IssueTable({ issues, projectId }: { issues: IssueDetail[]; projectId: string }) {

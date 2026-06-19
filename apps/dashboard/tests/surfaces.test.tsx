@@ -104,6 +104,16 @@ describe("dashboard surfaces", () => {
     expect(html).not.toContain(">medium<");
   });
 
+  test("issue inspector links OpenCode sessions by persisted session directory", () => {
+    const issue = JSON.parse(JSON.stringify(acceptanceProject.active_issues[0])) as typeof acceptanceProject.active_issues[number];
+    issue.opencode_sessions[0].worktree_path = "/runtime/stale/worktree";
+    issue.opencode_sessions[0].activity!.sessions[0].directory = "/actual/opencode/session";
+    const html = render(<IssueInspector issue={issue} />);
+
+    expect(html).toContain("https://opencode.vestalink.net/L2FjdHVhbC9vcGVuY29kZS9zZXNzaW9u/session/oc-sym-97");
+    expect(html).not.toContain("L3J1bnRpbWUvc3RhbGUvd29ya3RyZWU");
+  });
+
   test("agent inspector renders a tree with active spinner", () => {
     const html = render(<AgentsTree issue={acceptanceProject.active_issues[0]} />);
 

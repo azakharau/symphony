@@ -25,7 +25,8 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
   };
   const sessionTokens = tokenBreakdown(session?.token_count ?? 0, session?.cached_token_count);
   const linearUrl = linearIssueUrl(issue.identifier);
-  const opencodeUrl = session ? opencodeSessionUrl(session.opencode_session_id, session.worktree_path) : undefined;
+  const opencodeDirectory = session ? opencodeSessionDirectory(session) : undefined;
+  const opencodeUrl = session && opencodeDirectory ? opencodeSessionUrl(session.opencode_session_id, opencodeDirectory) : undefined;
 
   return (
     <div className="flex flex-col gap-5">
@@ -313,6 +314,13 @@ function linearIssueUrl(identifier: string): string {
 function opencodeSessionUrl(sessionId: string, directory: string): string {
   const base = process.env.NEXT_PUBLIC_OPENCODE_WEB_BASE || DEFAULT_OPENCODE_WEB_BASE;
   return `${base.replace(/\/+$/, "")}/${base64UrlEncodeUtf8(directory)}/session/${encodeURIComponent(sessionId)}`;
+}
+
+function opencodeSessionDirectory(session: NonNullable<IssueDetail["opencode_sessions"][number]>): string | undefined {
+  const activity = session.activity;
+  const rootSession = activity?.sessions.find((item) => item.session_id === activity.root_session_id);
+  const currentSession = activity?.sessions.find((item) => item.session_id === session.opencode_session_id);
+  return currentSession?.directory || rootSession?.directory || session.worktree_path || undefined;
 }
 
 function base64UrlEncodeUtf8(value: string): string {

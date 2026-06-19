@@ -308,7 +308,7 @@ async fn orchestration_dispatches_one_eligible_todo_by_project_capacity_and_orde
 }
 
 #[tokio::test]
-async fn orchestration_p0_self_bug_preempts_product_work_without_killing_active_execution() {
+async fn orchestration_p0_self_bug_does_not_preempt_unrelated_product_work() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(two_project_config_toml()).expect("config");
@@ -330,10 +330,13 @@ async fn orchestration_p0_self_bug_preempts_product_work_without_killing_active_
         .await
         .expect("orchestrate once");
 
-    assert_eq!(report.dispatched, vec!["SYM-900"]);
+    assert_eq!(report.dispatched, vec!["SYM-900", "ALPHA-1"]);
     assert_eq!(
         client.transitions(),
-        vec![("p0-self".into(), LinearTransition::InProgress)]
+        vec![
+            ("p0-self".into(), LinearTransition::InProgress),
+            ("alpha-product".into(), LinearTransition::InProgress),
+        ]
     );
     let api = RuntimeDashboardApi::from_store(&config, &store)
         .await
@@ -354,34 +357,21 @@ async fn orchestration_p0_self_bug_preempts_product_work_without_killing_active_
         .project_drilldown("alpha")
         .expect("alpha endpoint")
         .expect("alpha exists");
-    assert!(alpha.selected_candidate.is_none());
-    assert_eq!(alpha.suppression_reasons.len(), 1);
     assert_eq!(
-        alpha.suppression_reasons[0].reason_kind,
-        "p0_self_bug_preemption"
+        alpha
+            .selected_candidate
+            .as_ref()
+            .expect("running product selected")
+            .identifier,
+        "ALPHA-1"
     );
+    assert!(alpha.suppression_reasons.is_empty());
     let suppressed = store
         .issue("alpha", "alpha-product")
         .await
-        .expect("query preempted product")
-        .expect("preempted product");
-    assert_eq!(suppressed.lifecycle_stage, LifecycleStage::Queued);
-
-    let product_only = ProjectAwareLinearClient::new([
-        (
-            "alpha",
-            vec![linear_issue("alpha-product", "ALPHA-1", "Todo", Some(1))],
-        ),
-        ("symphony", Vec::new()),
-    ]);
-    let report = daemon::run_once_with_linear_client(&config, &store, &product_only)
-        .await
-        .expect("orchestrate after p0 gone");
-    assert_eq!(report.dispatched, vec!["ALPHA-1"]);
-    assert_eq!(
-        product_only.transitions(),
-        vec![("alpha-product".into(), LinearTransition::InProgress)]
-    );
+        .expect("query product")
+        .expect("product");
+    assert_eq!(suppressed.lifecycle_stage, LifecycleStage::Running);
 
     let mut active = test_issue("symphony", "running-self", "SYM-901");
     active.lifecycle_stage = LifecycleStage::Running;
@@ -2017,6 +2007,50 @@ async fn orchestration_blocks_in_progress_issue_without_session_as_runtime_defec
 }
 
 #[tokio::test]
+async fn orchestration_cancels_runtime_issue_missing_from_linear_candidates() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let mut stale = test_issue("symphony", "trashed-runtime", "SYM-999");
+    stale.lifecycle_stage = LifecycleStage::Running;
+    store.upsert_issue(stale).await.expect("issue");
+    let mut session = test_session(
+        "symphony",
+        "trashed-runtime",
+        "ses-trashed",
+        "/home/agent/.symphony/workspaces/opencode/symphony/SYM-999",
+    );
+    session.process_id = None;
+    store
+        .upsert_opencode_session(session)
+        .await
+        .expect("session");
+    let client = RecordingLinearClient::new(Vec::new());
+
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
+
+    assert_eq!(report.terminal_reconciled, vec!["SYM-999"]);
+    let issue = store
+        .issue("symphony", "trashed-runtime")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Canceled);
+    let session = store
+        .opencode_session("symphony", "trashed-runtime", "ses-trashed")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Canceled);
+    assert_eq!(session.stage, OpenCodeStage::Completed);
+}
+
+#[tokio::test]
 async fn orchestration_records_launch_failure_without_aborting_poll_or_owner_input() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
@@ -2039,7 +2073,9 @@ async fn orchestration_records_launch_failure_without_aborting_poll_or_owner_inp
         client.transitions(),
         vec![
             ("launch-fails".into(), LinearTransition::InProgress),
+            ("launch-fails".into(), LinearTransition::Todo),
             ("still-runs".into(), LinearTransition::InProgress),
+            ("still-runs".into(), LinearTransition::Todo),
         ]
     );
     let evidence = client.evidence();

@@ -38,10 +38,6 @@ impl DispatchSelection {
     pub(super) const fn issue(&self) -> &LinearIssue {
         self.candidate.issue()
     }
-
-    pub(super) const fn class(&self) -> TaskClass {
-        self.class
-    }
 }
 
 pub(super) fn compare_dispatch_selections(
@@ -71,14 +67,6 @@ pub(super) fn self_bug_default_suppression(issue: &LinearIssue) -> Option<Blocke
             .into(),
         observed_at: issue.updated_at.clone(),
     })
-}
-
-pub(super) fn p0_self_bug_preemption_suppression(issue: &LinearIssue) -> BlockerRecord {
-    BlockerRecord {
-        kind: "p0_self_bug_preemption".into(),
-        message: "P0 Symphony self-bug preempted otherwise-runnable product work".into(),
-        observed_at: issue.updated_at.clone(),
-    }
 }
 
 pub(super) fn is_managed_self_defect_issue(issue: &LinearIssue) -> bool {
@@ -162,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn p0_preemption_suppression_is_not_default_self_bug_policy() {
+    fn product_issue_is_not_suppressed_by_self_bug_policy() {
         let product = LinearIssue {
             title: "Product work".into(),
             project_milestone: Some(crate::linear::LinearMilestone {
@@ -172,9 +160,6 @@ mod tests {
             ..issue("ALPHA-1", Some(1))
         };
 
-        let blocker = p0_self_bug_preemption_suppression(&product);
-
-        assert_eq!(blocker.kind, "p0_self_bug_preemption");
         assert!(self_bug_default_suppression(&product).is_none());
     }
 }

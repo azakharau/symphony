@@ -36,23 +36,22 @@ pub(super) fn build_issue_prompt(
          {commit_policy}\n\n\
          After validation, commit, and push are complete, write the structured Symphony handoff JSON to:\n\
          {handoff_path}\n\n\
-         The handoff file must be valid JSON matching this exact shape, not the Markdown ACP result packet:\n\
-         Use only the sidecar JSON contract below for {handoff_path}; Markdown ACP result packet fields belong only in chat and must never appear in this file.\n\
-         Top-level JSON keys must be exactly session_id, lifecycle_stages, subagents, eval_results, changed_files, git, risks, and stop_reason; unknown fields are invalid.\n\
+         The handoff file must be valid JSON with durable execution evidence, not a Markdown result packet:\n\
+         Use the sidecar JSON contract below for {handoff_path}; keep chat summaries separate from this file.\n\
+         Symphony accepts OpenCode orchestrator field names such as status, schema_version, subagents_used, object eval_results, and git.pushed, then normalizes them before strict validation.\n\
          {{\n\
            \"session_id\": \"{session_id}\",\n\
-           \"lifecycle_stages\": [\"starting\", \"running\", \"eval\", \"handoff\", \"completed\"],\n\
-           \"subagents\": [\"agent-name:session-id\"],\n\
-           \"eval_results\": [{{\"suite\": \"suite-name\", \"passed\": true, \"failure_fingerprint\": null, \"details\": \"command outcomes\", \"evidence_ref\": null}}],\n\
+           \"lifecycle_stages\": [\"planning\", \"implementation\", \"verification\", \"review\", \"commit\", \"push\", \"handoff\"],\n\
+           \"subagents_used\": [\"agent-name:session-id\"],\n\
+           \"eval_results\": {{\"outcome\": \"accept\", \"details\": \"command outcomes\", \"commands\": [{{\"command\": \"git diff --check\", \"status\": \"pass\"}}]}},\n\
            \"changed_files\": [\"path:start-end\"],\n\
-           \"git\": {{\"branch\": \"{branch_name}\", \"head_sha\": \"commit-sha\", \"pr_url\": null, \"worktree_path\": \"{worktree}\"}},\n\
+           \"git\": {{\"branch\": \"{branch_name}\", \"head_sha\": \"commit-sha\", \"worktree_path\": \"{worktree}\", \"pushed\": true}},\n\
            \"risks\": [\"remaining risk or omitted validation\"],\n\
-           \"stop_reason\": {{\"type\": \"success\"}}\n\
+           \"stop_reason\": \"accepted\"\n\
          }}\n\
          For eval failures use \"stop_reason\": {{\"type\":\"eval_failed\",\"failure_fingerprint\":\"stable-id\"}}.\n\
-         For provider or owner blockers use \"provider_blocker\" or \"owner_question\" with \"message\"/\"question\".\n\
-         Do not copy Markdown ACP handoff fields into this JSON. Do not use status, subagents_used, object-shaped eval_results, or string stop_reason values.\n\
-         Before writing {handoff_path}, reject any sidecar draft containing raw Markdown ACP keys such as status, subagents_used, result, summary, tests_run, or next_action.\n\n\
+         For provider or owner blockers use {{\"type\":\"provider_blocker\",\"message\":\"...\"}} or {{\"type\":\"owner_question\",\"question\":\"...\"}}.\n\
+         Do not write only prose fields such as result, summary, tests_run, or next_action without the structured git/eval/stop_reason fields above.\n\n\
          Full issue spec:\n{description}\n",
         identifier = issue.identifier,
         session_id = "the ACP session id",

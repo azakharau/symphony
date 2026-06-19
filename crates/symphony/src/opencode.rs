@@ -678,10 +678,17 @@ fn normalize_handoff_sidecar_value(value: &mut Value, worktree_path: &str) {
         return;
     };
 
+    if !object.contains_key("stop_reason")
+        && let Some(status) = object.get("status").and_then(Value::as_str)
+    {
+        object.insert("stop_reason".to_owned(), Value::String(status.to_owned()));
+    }
+    object.remove("schema_version");
     object.remove("status");
     object.remove("repair_fingerprint");
     object.remove("task_id");
     object.remove("subtask_id");
+    object.remove("mnemesh");
 
     if !object.contains_key("subagents") {
         if let Some(subagents_used) = object.remove("subagents_used") {
@@ -863,6 +870,111 @@ pub fn new_session_record(
 
 fn deterministic_session_id(input: &str) -> String {
     format!("opencode:{input}")
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn normalizes_opencode_orchestrator_handoff_dialect() {
+        let mut value = json!({
+            "schema_version": "symphony-opencode-handoff/v1",
+            "status": "completed",
+            "session_id": "ses_test",
+            "task_id": "task-1",
+            "lifecycle_stages": [
+                "planning",
+                "implementation",
+                "verification",
+                "review",
+                "repair",
+                "evaluation",
+                "commit",
+                "push",
+                "handoff"
+            ],
+            "subagents_used": ["rust-engineer", "code-reviewer", "evaluator"],
+            "eval_results": {
+                "outcome": "accept",
+                "review_verdict": "pass",
+                "evaluator_recommendation": "accept",
+                "details": "review and evaluator passed",
+                "commands": [
+                    {"command": "cargo test", "status": "pass"}
+                ]
+            },
+            "changed_files": ["src/lib.rs:1-10"],
+            "git": {
+                "branch": "feature/test",
+                "head_sha": "0123456789abcdef",
+                "worktree_path": "/tmp/worktree",
+                "remote": "origin",
+                "remote_ref": "refs/heads/feature/test",
+                "pushed": true
+            },
+            "mnemesh": {
+                "canonical_evidence_workspace": "/home/agent/proj/mnemesh"
+            },
+            "risks": [],
+            "stop_reason": "accepted"
+        });
+
+        normalize_handoff_sidecar_value(&mut value, "/tmp/worktree");
+        let handoff: OpenCodeHandoff =
+            serde_json::from_value(value).expect("normalized handoff should parse");
+
+        assert_eq!(handoff.session_id, "ses_test");
+        assert_eq!(
+            handoff.lifecycle_stages,
+            vec![
+                OpenCodeStage::Running,
+                OpenCodeStage::Running,
+                OpenCodeStage::Eval,
+                OpenCodeStage::Review,
+                OpenCodeStage::Running,
+                OpenCodeStage::Eval,
+                OpenCodeStage::Running,
+                OpenCodeStage::Running,
+                OpenCodeStage::Handoff,
+            ]
+        );
+        assert_eq!(
+            handoff.subagents,
+            ["rust-engineer", "code-reviewer", "evaluator"]
+        );
+        assert!(handoff.eval_results[0].passed);
+        assert_eq!(handoff.stop_reason, OpenCodeStopReason::Success);
+        let git = handoff.git.expect("git evidence");
+        assert_eq!(git.branch, "feature/test");
+        assert_eq!(git.head_sha.as_deref(), Some("0123456789abcdef"));
+    }
+
+    #[test]
+    fn derives_success_stop_reason_from_status_when_stop_reason_is_absent() {
+        let mut value = json!({
+            "status": "completed",
+            "session_id": "ses_test",
+            "lifecycle_stages": ["completed"],
+            "subagents": [],
+            "eval_results": [],
+            "changed_files": [],
+            "git": {
+                "branch": "feature/test",
+                "head_sha": null,
+                "worktree_path": "/tmp/worktree"
+            },
+            "risks": []
+        });
+
+        normalize_handoff_sidecar_value(&mut value, "/tmp/worktree");
+        let handoff: OpenCodeHandoff =
+            serde_json::from_value(value).expect("status-derived handoff should parse");
+
+        assert_eq!(handoff.stop_reason, OpenCodeStopReason::Success);
+    }
 }
 
 #[derive(Debug, Error)]

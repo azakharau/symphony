@@ -10,7 +10,7 @@ mod self_defects;
 mod session;
 mod task_selection;
 
-use std::{error::Error as StdError, path::PathBuf};
+use std::{collections::HashSet, error::Error as StdError, path::PathBuf};
 
 use anyhow::Context;
 use tokio::sync::Mutex;
@@ -51,11 +51,12 @@ use session::{
     has_reusable_existing_session, latest_running_session_for_issue, mark_existing_session_blocked,
     mark_existing_session_failed_for_unresolved_runtime_defect, mark_existing_session_queued,
     mark_existing_session_waiting_for_project_owner_input, mark_historical_sessions_ignored,
-    mark_issue_sessions_terminal, resume_stale_opencode_session, unresolved_runtime_defect,
+    mark_issue_sessions_terminal, resume_stale_opencode_session, session_has_live_process,
+    unresolved_runtime_defect,
 };
 use task_selection::{
-    DispatchSelection, TaskClass, compare_dispatch_selections, is_managed_self_defect_issue,
-    p0_self_bug_preemption_suppression, self_bug_default_suppression,
+    DispatchSelection, compare_dispatch_selections, is_managed_self_defect_issue,
+    self_bug_default_suppression,
 };
 
 #[derive(Debug)]
@@ -208,13 +209,6 @@ pub async fn run_once_with_clients(
         }
     }
 
-    if dispatch_queue
-        .iter()
-        .any(|selection| selection.class() == TaskClass::P0SelfBug)
-    {
-        record_p0_preempted_candidates(config, store, &dispatch_queue).await?;
-        dispatch_queue.retain(|selection| selection.class() == TaskClass::P0SelfBug);
-    }
     dispatch_queue.sort_by(compare_dispatch_selections);
     for selection in dispatch_queue {
         if let Some(project) = config.project(&selection.project_id) {
@@ -232,31 +226,6 @@ pub async fn run_once_with_clients(
     }
 
     Ok(report)
-}
-
-async fn record_p0_preempted_candidates(
-    config: &RootConfig,
-    store: &SqliteStore,
-    dispatch_queue: &[DispatchSelection],
-) -> anyhow::Result<()> {
-    for selection in dispatch_queue
-        .iter()
-        .filter(|selection| selection.class() != TaskClass::P0SelfBug)
-    {
-        let Some(project) = config.project(&selection.project_id) else {
-            continue;
-        };
-        let issue = selection.issue();
-        let record = issue_record(
-            project,
-            issue,
-            LifecycleStage::Queued,
-            Some(p0_self_bug_preemption_suppression(issue)),
-            CleanupStatus::Clean,
-        );
-        store.upsert_issue(&record).await?;
-    }
-    Ok(())
 }
 
 async fn record_project_orchestration_error(
@@ -319,6 +288,7 @@ async fn reconcile_project(
     let mut eligible = Vec::new();
     let mut issues = linear.fetch_candidate_issues(project).await?;
     issues.sort_by(compare_issues_for_dispatch);
+    reconcile_missing_candidate_issues(project, store, &issues, report).await?;
     let has_unanswered_owner_input = issues
         .iter()
         .any(|issue| issue.state == "Need Owner Input" && !issue.has_new_owner_answer);
@@ -851,6 +821,82 @@ async fn reconcile_project(
     Ok(())
 }
 
+async fn reconcile_missing_candidate_issues(
+    project: &ProjectConfig,
+    store: &SqliteStore,
+    fetched_issues: &[LinearIssue],
+    report: &mut OrchestrationReport,
+) -> anyhow::Result<()> {
+    let fetched_ids = fetched_issues
+        .iter()
+        .map(|issue| issue.id.as_str())
+        .collect::<HashSet<_>>();
+    for existing in store.issues_for_project(&project.id).await? {
+        if fetched_ids.contains(existing.issue_id.as_str())
+            || !missing_candidate_runtime_is_stale(project, store, &existing).await?
+        {
+            continue;
+        }
+        let issue = LinearIssue {
+            id: existing.issue_id.clone(),
+            identifier: existing.identifier.clone(),
+            title: existing.title.clone(),
+            description: None,
+            state: "Canceled".into(),
+            priority: None,
+            branch_name: None,
+            url: None,
+            labels: Vec::new(),
+            project_milestone: None,
+            blocked_by: Vec::new(),
+            has_new_owner_answer: false,
+            owner_answer_created_at: None,
+            created_at: None,
+            updated_at: None,
+        };
+        mark_issue_sessions_terminal(store, project, &issue, LifecycleStage::Canceled).await?;
+        let record = IssueStateRecord {
+            lifecycle_stage: LifecycleStage::Canceled,
+            blocker: None,
+            failure: existing.failure,
+            git_ref: existing.git_ref,
+            cleanup_status: existing.cleanup_status,
+            ..existing
+        };
+        store.upsert_issue(&record).await?;
+        info!(
+            project_id = %project.id,
+            issue = %record.identifier,
+            "runtime issue is absent from Linear candidate query; local execution state canceled"
+        );
+        report.terminal_reconciled.push(record.identifier);
+    }
+    Ok(())
+}
+
+async fn missing_candidate_runtime_is_stale(
+    project: &ProjectConfig,
+    store: &SqliteStore,
+    existing: &IssueStateRecord,
+) -> anyhow::Result<bool> {
+    if existing.lifecycle_stage != LifecycleStage::Running {
+        return Ok(false);
+    }
+    let Some(session) =
+        latest_running_session_for_issue(store, &project.id, &existing.issue_id).await?
+    else {
+        return Ok(false);
+    };
+    if session
+        .last_event
+        .as_deref()
+        .is_some_and(|event| event.starts_with("stale_killed:"))
+    {
+        return Ok(false);
+    }
+    Ok(!session_has_live_process(&session).await)
+}
+
 async fn dispatch_candidate(
     project: &ProjectConfig,
     self_defect_project: &ProjectConfig,
@@ -1270,6 +1316,9 @@ async fn handle_launch_failure(
         },
     )
     .await?;
+    linear
+        .transition_issue(&issue.id, LinearTransition::Todo)
+        .await?;
     if matches!(error, crate::opencode::OpenCodeError::AcpSetupFailed { .. }) {
         store.upsert_opencode_session(&session).await?;
     }

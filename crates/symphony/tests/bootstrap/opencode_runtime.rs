@@ -461,18 +461,20 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         spec.prompt
     );
     assert!(
-        spec.prompt.contains("not the Markdown ACP result packet"),
+        spec.prompt
+            .contains("valid JSON with durable execution evidence"),
         "{}",
         spec.prompt
     );
     for fragment in [
-        "Use only the sidecar JSON contract below",
-        "reject any sidecar draft containing raw Markdown ACP keys",
+        "Symphony accepts OpenCode orchestrator field names",
+        "subagents_used",
+        "\"stop_reason\": \"accepted\"",
     ] {
         assert!(spec.prompt.contains(fragment), "{}", spec.prompt);
     }
     assert!(
-        spec.prompt.contains("Top-level JSON keys must be exactly session_id, lifecycle_stages, subagents, eval_results, changed_files, git, risks, and stop_reason; unknown fields are invalid"),
+        spec.prompt.contains("Do not write only prose fields such as result, summary, tests_run, or next_action without the structured git/eval/stop_reason fields above"),
         "{}",
         spec.prompt
     );

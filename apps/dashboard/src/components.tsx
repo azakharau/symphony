@@ -231,7 +231,7 @@ function ProjectTable({ projects, detailed = false }: { projects: DashboardProje
             <th className="px-3 py-2">project</th>
             <th className="px-3 py-2">health</th>
             <th className="px-3 py-2">enabled</th>
-            <th className="px-3 py-2">running/slots</th>
+            <th className="w-16 whitespace-nowrap px-2 py-2 text-center tabular-nums" title="running/slots">slots</th>
             <th className="px-3 py-2">active</th>
             <th className="px-3 py-2">blocked</th>
             {detailed ? <th className="px-3 py-2">terminal</th> : null}
@@ -246,7 +246,7 @@ function ProjectTable({ projects, detailed = false }: { projects: DashboardProje
               <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${project.project_id}`}>{project.name}</Link></td>
               <td className="px-3 py-3"><Badge tone={statusTone(project.runner_health)}>{project.runner_health}</Badge></td>
               <td className="px-3 py-3">{project.enabled ? "yes" : "no"}</td>
-              <td className="px-3 py-3">{project.capacity.running_sessions}/{project.capacity.max_sessions}</td>
+              <td className="w-16 whitespace-nowrap px-2 py-3 text-center tabular-nums" aria-label="running sessions / max slots">{project.capacity.running_sessions}/{project.capacity.max_sessions}</td>
               <td className="px-3 py-3">{project.active_count}</td>
               <td className="px-3 py-3">{project.parked_count}</td>
               {detailed ? <td className="px-3 py-3">{project.terminal_count}</td> : null}

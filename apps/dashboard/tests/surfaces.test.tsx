@@ -59,7 +59,9 @@ describe("dashboard surfaces", () => {
   test("projects surface renders table-first comparison", () => {
     const html = render(<ProjectsSurface dashboard={acceptanceDashboard} />);
 
-    expect(html).toContain("running/slots");
+    expect(html).toContain(">slots</th>");
+    expect(html).toContain("title=\"running/slots\"");
+    expect(html).not.toContain(">running/slots</th>");
     expect(html).toContain("provider quota exhausted");
   });
 
@@ -81,7 +83,8 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("Open in Linear");
     expect(html).toContain("https://linear.app/alexey-zakharov/issue/SYM-97");
     expect(html).toContain("Open in OpenCode");
-    expect(html).toContain("https://opencode.vestalink.net/session/oc-sym-97");
+    expect(html).toContain("https://opencode.vestalink.net/L3dvcmtzcGFjZXMvc3ltcGhvbnkvU1lNLTk3/session/oc-sym-97");
+    expect(html).not.toContain("https://opencode.vestalink.net/session/oc-sym-97");
     expect(html).toContain("Todos");
     expect(html).toContain("Timeline");
     expect(html).toContain("Evidence");

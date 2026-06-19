@@ -25,7 +25,7 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
   };
   const sessionTokens = tokenBreakdown(session?.token_count ?? 0, session?.cached_token_count);
   const linearUrl = linearIssueUrl(issue.identifier);
-  const opencodeUrl = session ? opencodeSessionUrl(session.opencode_session_id) : undefined;
+  const opencodeUrl = session ? opencodeSessionUrl(session.opencode_session_id, session.worktree_path) : undefined;
 
   return (
     <div className="flex flex-col gap-5">
@@ -310,9 +310,14 @@ function linearIssueUrl(identifier: string): string {
   return `https://linear.app/${encodeURIComponent(workspace)}/issue/${encodeURIComponent(identifier)}`;
 }
 
-function opencodeSessionUrl(sessionId: string): string {
+function opencodeSessionUrl(sessionId: string, directory: string): string {
   const base = process.env.NEXT_PUBLIC_OPENCODE_WEB_BASE || DEFAULT_OPENCODE_WEB_BASE;
-  return `${base.replace(/\/+$/, "")}/session/${encodeURIComponent(sessionId)}`;
+  return `${base.replace(/\/+$/, "")}/${base64UrlEncodeUtf8(directory)}/session/${encodeURIComponent(sessionId)}`;
+}
+
+function base64UrlEncodeUtf8(value: string): string {
+  const binary = String.fromCodePoint(...new TextEncoder().encode(value));
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 function tokenBreakdown(total: number, cached?: number | null): { net: number; cached: number } {

@@ -7,6 +7,7 @@ import type { IssueDetail, SessionActivity, TimelineEvent, TodoActivity } from "
 
 const tabs = ["Todos", "Timeline", "Agents", "Tools", "Evidence"] as const;
 const DEFAULT_LINEAR_WORKSPACE_SLUG = "alexey-zakharov";
+const DEFAULT_OPENCODE_WEB_BASE = "https://opencode.vestalink.net";
 type Tab = (typeof tabs)[number];
 
 export function IssueInspector({ issue }: { issue: IssueDetail }) {
@@ -24,6 +25,7 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
   };
   const sessionTokens = tokenBreakdown(session?.token_count ?? 0, session?.cached_token_count);
   const linearUrl = linearIssueUrl(issue.identifier);
+  const opencodeUrl = session ? opencodeSessionUrl(session.opencode_session_id) : undefined;
 
   return (
     <div className="flex flex-col gap-5">
@@ -37,10 +39,15 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
             </div>
           </div>
           <div className="flex flex-col gap-3 lg:min-w-[520px]">
-            <div className="flex justify-start lg:justify-end">
+            <div className="flex flex-wrap justify-start gap-2 lg:justify-end">
               <a className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700" href={linearUrl} target="_blank" rel="noreferrer">
                 Open in Linear
               </a>
+              {opencodeUrl ? (
+                <a className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 shadow-sm hover:border-blue-300 hover:text-blue-700" href={opencodeUrl} target="_blank" rel="noreferrer">
+                  Open in OpenCode
+                </a>
+              ) : null}
             </div>
             <dl className="grid gap-2 text-sm sm:grid-cols-2">
               <KeyValue label="active agent" value={session?.active_agent ?? session?.agent ?? "unavailable"} />
@@ -301,6 +308,11 @@ function formatCompactNumber(value: number): string {
 function linearIssueUrl(identifier: string): string {
   const workspace = process.env.NEXT_PUBLIC_LINEAR_WORKSPACE_SLUG || DEFAULT_LINEAR_WORKSPACE_SLUG;
   return `https://linear.app/${encodeURIComponent(workspace)}/issue/${encodeURIComponent(identifier)}`;
+}
+
+function opencodeSessionUrl(sessionId: string): string {
+  const base = process.env.NEXT_PUBLIC_OPENCODE_WEB_BASE || DEFAULT_OPENCODE_WEB_BASE;
+  return `${base.replace(/\/+$/, "")}/session/${encodeURIComponent(sessionId)}`;
 }
 
 function tokenBreakdown(total: number, cached?: number | null): { net: number; cached: number } {

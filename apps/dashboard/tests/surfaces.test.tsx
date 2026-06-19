@@ -80,6 +80,8 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("OpenCode session inspector");
     expect(html).toContain("Open in Linear");
     expect(html).toContain("https://linear.app/alexey-zakharov/issue/SYM-97");
+    expect(html).toContain("Open in OpenCode");
+    expect(html).toContain("https://opencode.vestalink.net/session/oc-sym-97");
     expect(html).toContain("Todos");
     expect(html).toContain("Timeline");
     expect(html).toContain("Evidence");

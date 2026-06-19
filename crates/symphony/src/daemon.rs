@@ -27,7 +27,7 @@ use crate::{
         OpenCodeProcessStarted, OpenCodeSessionCreated, OpenCodeStartedSession,
         ProcessTreeTerminationEvidence, StdioOpenCodeLauncher,
         apply_session_tree_metrics_preserving_marker, build_acp_launch_spec, new_session_record,
-        read_session_tree_metrics,
+        read_latest_session_tree_error, read_session_tree_metrics,
     },
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, IssueStateRecord, LifecycleStage,
@@ -38,7 +38,7 @@ use crate::{
 use acceptance_self_defect::{
     AcceptanceSelfDefectInput, record_acceptance_self_defect_with_linear_client,
 };
-use handoff::process_in_progress_handoff;
+use handoff::{park_typed_blocker, process_in_progress_handoff};
 use http::run_continuous;
 use liveness::project_liveness_projection;
 use policy::{
@@ -541,6 +541,15 @@ async fn reconcile_project(
                     record.failure = Some(failure);
                     store.upsert_issue(&record).await?;
                     mark_historical_sessions_ignored(store, project, &issue).await?;
+                    continue;
+                }
+                if let Some(storage) = opencode_storage
+                    && park_opencode_provider_error_if_present(
+                        storage, project, store, linear, &issue,
+                    )
+                    .await?
+                {
+                    report.blocked.push(issue.identifier);
                     continue;
                 }
                 if process_in_progress_handoff(
@@ -1230,6 +1239,10 @@ async fn open_managed_runtime_defect_blocker(
     let Some(managed) = store.open_self_defect_by_fingerprint(fingerprint).await? else {
         return Ok(None);
     };
+    if managed.managed_issue_id == issue.id || managed.managed_issue_identifier == issue.identifier
+    {
+        return Ok(None);
+    }
     Ok(Some(BlockerRecord {
         kind: "runtime_defect".into(),
         message: format!(
@@ -1492,6 +1505,89 @@ async fn refresh_opencode_session_metrics(
     }
     store.upsert_opencode_session(&session).await?;
     Ok(())
+}
+
+async fn park_opencode_provider_error_if_present(
+    storage: &OpenCodeStorageConfig,
+    project: &ProjectConfig,
+    store: &SqliteStore,
+    linear: &impl LinearClient,
+    issue: &LinearIssue,
+) -> anyhow::Result<bool> {
+    let Some(session) = store
+        .opencode_sessions_for_issue(&project.id, &issue.id)
+        .await?
+        .pop()
+    else {
+        return Ok(false);
+    };
+    if session.lifecycle_stage != LifecycleStage::Running {
+        return Ok(false);
+    }
+    let Some(error) =
+        read_latest_session_tree_error(&storage.database_path, &session.session_id).await?
+    else {
+        return Ok(false);
+    };
+    if !opencode_error_is_provider_blocker(&error.name, &error.message) {
+        return Ok(false);
+    }
+
+    let provider = error.provider_id.as_deref().unwrap_or("unknown");
+    let message = format!(
+        "OpenCode provider error `{name}` from provider `{provider}`: {detail}",
+        name = error.name,
+        detail = error.message
+    );
+    warn!(
+        project_id = %project.id,
+        issue = %issue.identifier,
+        session_id = %session.session_id,
+        message_id = %error.message_id,
+        error_name = %error.name,
+        provider = provider,
+        "OpenCode provider error parked issue"
+    );
+    park_typed_blocker(
+        project,
+        store,
+        linear,
+        issue,
+        Some(&session),
+        true,
+        "provider_blocker",
+        format!(
+            "{message}\n\nsession_id: {session_id}\nmessage_id: {message_id}\ntime_updated_ms: {time_updated_ms}\n\nThis is a provider/runtime configuration blocker, not active implementation work. Symphony killed the OpenCode ACP process tree and freed project capacity.",
+            session_id = session.session_id,
+            message_id = error.message_id,
+            time_updated_ms = error.time_updated_ms,
+        ),
+        Some(FailureRecord {
+            kind: "provider_blocker".into(),
+            message,
+            fingerprint: Some(opencode_provider_error_fingerprint(&error.name, &error.message)),
+            occurrence_count: 1,
+        }),
+    )
+    .await?;
+    Ok(true)
+}
+
+fn opencode_error_is_provider_blocker(name: &str, message: &str) -> bool {
+    matches!(name, "ProviderAuthError" | "ProviderError")
+        || message.contains("API key is missing")
+        || message.contains("Rate limit exceeded")
+}
+
+fn opencode_provider_error_fingerprint(name: &str, message: &str) -> String {
+    let detail = if message.contains("API key is missing") {
+        "api_key_missing"
+    } else if message.contains("Rate limit exceeded") {
+        "rate_limit_exceeded"
+    } else {
+        "provider_error"
+    };
+    format!("opencode_{}_{}", name.to_ascii_lowercase(), detail)
 }
 
 fn active_runnable_todo_milestone(issues: &[LinearIssue]) -> Option<String> {

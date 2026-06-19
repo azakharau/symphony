@@ -26,9 +26,9 @@ use acp::{
 };
 pub use archive::{
     OpenCodeSessionActivity, OpenCodeSessionArchiveReport, OpenCodeSessionArchiveRequest,
-    OpenCodeSessionTreeActivity, OpenCodeSessionTreeMetrics, OpenCodeTimelineEvent,
-    OpenCodeTodoActivity, archive_and_delete_session_tree, read_session_tree_activity,
-    read_session_tree_metrics,
+    OpenCodeSessionMessageError, OpenCodeSessionTreeActivity, OpenCodeSessionTreeMetrics,
+    OpenCodeTimelineEvent, OpenCodeTodoActivity, archive_and_delete_session_tree,
+    read_latest_session_tree_error, read_session_tree_activity, read_session_tree_metrics,
 };
 use lifecycle::AcpChildLifecycle;
 pub use lifecycle::ProcessTreeTerminationEvidence;

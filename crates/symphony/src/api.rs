@@ -539,10 +539,15 @@ fn primary_execution_reason(
                 .unwrap_or_else(|| "OpenCode git closure validation failed".into()),
         );
     }
-    if let Some(issue) = active_issues
-        .iter()
-        .find(|issue| issue.runtime_defect.is_some())
-    {
+    if let Some(issue) = active_issues.iter().find(|issue| {
+        issue.runtime_defect.is_some() && issue.lifecycle_stage != LifecycleStage::Running
+    }) {
+        if active_issues.iter().any(issue_has_provider_blocker) {
+            return (
+                "provider_blocker",
+                "provider/runtime configuration blocks active execution".into(),
+            );
+        }
         return (
             "runtime_defect_blocked",
             issue
@@ -579,6 +584,12 @@ fn primary_execution_reason(
         return (
             "owner_input_parked",
             "an issue is parked for owner input".into(),
+        );
+    }
+    if active_issues.iter().any(issue_has_provider_blocker) {
+        return (
+            "provider_blocker",
+            "provider/runtime configuration blocks active execution".into(),
         );
     }
     if active_issues.iter().any(issue_has_linear_blocker) {
@@ -667,6 +678,14 @@ fn issue_has_owner_input_blocker(issue: &IssueDetailResponse) -> bool {
         && issue.blocker.as_ref().is_some_and(|blocker| {
             matches!(blocker.kind.as_str(), "owner_input" | "owner_question")
         })
+}
+
+fn issue_has_provider_blocker(issue: &IssueDetailResponse) -> bool {
+    issue.lifecycle_stage == LifecycleStage::Blocked
+        && issue
+            .blocker
+            .as_ref()
+            .is_some_and(|blocker| blocker.kind == "provider_blocker")
 }
 
 fn issue_has_linear_blocker(issue: &IssueDetailResponse) -> bool {

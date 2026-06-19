@@ -1050,6 +1050,89 @@ async fn orchestration_refreshes_active_opencode_session_metrics_from_persisted_
 }
 
 #[tokio::test]
+async fn orchestration_parks_opencode_provider_auth_error_without_false_running() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let opencode_db_path = dir.path().join("opencode.db");
+    opencode_runtime::seed_opencode_provider_auth_error_session(&opencode_db_path).await;
+    let config_toml = valid_config_toml().replace(
+        "[[projects]]\n",
+        &format!(
+            "[opencode_storage]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]\n",
+            opencode_db_path.display(),
+            dir.path().join("archives").display()
+        ),
+    );
+    let config = RootConfig::from_toml_str(&config_toml).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "work", "SYM-64"))
+        .await
+        .expect("issue");
+    let mut active_process = Command::new("bash")
+        .arg("-c")
+        .arg("exec -a opencode sleep 120")
+        .spawn()
+        .expect("spawn active opencode-shaped process");
+    thread::sleep(Duration::from_millis(100));
+    store
+        .upsert_opencode_session({
+            let mut session = test_session(
+                "symphony",
+                "work",
+                "ses-root",
+                "/home/agent/.symphony/workspaces/opencode/symphony/SYM-64",
+            );
+            session.process_id = Some(active_process.id());
+            session
+        })
+        .await
+        .expect("session");
+    let client =
+        RecordingLinearClient::new(vec![linear_issue("work", "SYM-64", "In Progress", Some(1))]);
+
+    daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("work".into(), LinearTransition::NeedOwnerInput)]
+    );
+    assert!(client.evidence().iter().any(|(_, evidence)| {
+        evidence.kind == "provider_blocker"
+            && evidence.body.contains("ProviderAuthError")
+            && evidence.body.contains("OPENAI_API_KEY")
+            && evidence.body.contains("freed project capacity")
+    }));
+    let record = store
+        .issue("symphony", "work")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    assert_eq!(record.lifecycle_stage, LifecycleStage::Blocked);
+    assert_eq!(
+        record.blocker.as_ref().map(|blocker| blocker.kind.as_str()),
+        Some("provider_blocker")
+    );
+    let session = store
+        .opencode_session("symphony", "work", "ses-root")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Blocked);
+    assert_eq!(session.process_id, None);
+    assert_eq!(
+        session.last_event.as_deref(),
+        Some("parked:provider_blocker")
+    );
+    thread::sleep(Duration::from_millis(100));
+    assert!(active_process.try_wait().expect("process wait").is_some());
+}
+
+#[tokio::test]
 async fn orchestration_repairs_stale_in_progress_session_without_handoff_sidecar() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
@@ -2586,6 +2669,89 @@ async fn orchestration_retains_runtime_defect_while_managed_self_defect_is_open(
         record.blocker.expect("blocker").message,
         "unresolved runtime defect: launch_failed (managed by SYM-62)"
     );
+}
+
+#[tokio::test]
+async fn orchestration_does_not_self_block_managed_runtime_defect_issue() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let worktree = dir.path().join("SYM-210-worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let mut issue = test_issue("symphony", "managed-self", "SYM-210");
+    issue.lifecycle_stage = LifecycleStage::Failed;
+    issue.blocker = Some(BlockerRecord {
+        kind: "runtime_defect".into(),
+        message: "unresolved runtime defect: missing_handoff_sidecar (managed by SYM-210)".into(),
+        observed_at: None,
+    });
+    issue.failure = Some(FailureRecord {
+        kind: "malformed_handoff".into(),
+        message: ".symphony/opencode-handoff.json was not produced".into(),
+        fingerprint: Some("missing_handoff_sidecar".into()),
+        occurrence_count: 1,
+    });
+    store.upsert_issue(issue).await.expect("issue");
+    let mut failed = test_session("symphony", "managed-self", "ses-failed", &worktree);
+    failed.lifecycle_stage = LifecycleStage::Failed;
+    failed.stage = OpenCodeStage::Failed;
+    failed.lifecycle_marker = Some("failed:malformed_handoff".into());
+    failed.last_event = Some("failed:missing_handoff_sidecar".into());
+    store
+        .upsert_opencode_session(failed)
+        .await
+        .expect("failed session");
+    store
+        .record_self_defect_occurrence(&SelfDefectOccurrenceRecord {
+            fingerprint: "missing_handoff_sidecar".into(),
+            defect_kind: "malformed_handoff".into(),
+            category: "handoff".into(),
+            severity: "p0".into(),
+            initial_routing_decision: "managed_self_defect".into(),
+            source_project_id: "symphony".into(),
+            source_issue_id: "managed-self".into(),
+            source_issue_identifier: "SYM-210".into(),
+            source_session_id: Some("ses-failed".into()),
+            source_process_id: None,
+            managed_issue_id: "managed-self".into(),
+            managed_issue_identifier: "SYM-210".into(),
+            latest_evidence_summary: "self-defect same issue".into(),
+            relation_mode: SelfDefectRelationMode::RelatedOnly,
+        })
+        .await
+        .expect("self defect");
+
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "managed-self",
+        "SYM-210",
+        "Todo",
+        Some(1),
+    )]);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(6210);
+
+    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("poll");
+
+    assert!(report.blocked.is_empty());
+    assert_eq!(
+        client.transitions(),
+        vec![("managed-self".into(), LinearTransition::InProgress)]
+    );
+    assert_eq!(
+        opencode.continuations(),
+        vec![("SYM-210".into(), "ses-failed".into())]
+    );
+    let record = store
+        .issue("symphony", "managed-self")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    assert_eq!(record.lifecycle_stage, LifecycleStage::Running);
+    assert!(record.blocker.is_none());
 }
 
 #[tokio::test]

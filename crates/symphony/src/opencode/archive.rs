@@ -102,6 +102,16 @@ pub struct OpenCodeTimelineEvent {
     pub summary: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OpenCodeSessionMessageError {
+    pub session_id: String,
+    pub message_id: String,
+    pub name: String,
+    pub provider_id: Option<String>,
+    pub message: String,
+    pub time_updated_ms: u64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct SessionRow {
     id: String,
@@ -238,6 +248,22 @@ pub async fn read_session_tree_activity(
         pending_tool_count,
         last_updated_ms,
     }))
+}
+
+pub async fn read_latest_session_tree_error(
+    opencode_database_path: impl Into<PathBuf>,
+    root_session_id: &str,
+) -> Result<Option<OpenCodeSessionMessageError>, OpenCodeError> {
+    let conn = open_opencode_database(opencode_database_path.into()).await?;
+    let messages = message_rows(&conn, root_session_id).await?;
+    Ok(messages
+        .into_iter()
+        .filter_map(message_error_from_row)
+        .max_by(|left, right| {
+            left.time_updated_ms
+                .cmp(&right.time_updated_ms)
+                .then_with(|| left.message_id.cmp(&right.message_id))
+        }))
 }
 
 pub async fn archive_and_delete_session_tree(
@@ -640,6 +666,27 @@ fn todo_activity_from_row(todo: TodoRow) -> OpenCodeTodoActivity {
         position: todo.position,
         time_updated_ms: todo.time_updated,
     }
+}
+
+fn message_error_from_row(row: MessageRow) -> Option<OpenCodeSessionMessageError> {
+    let error = row.data.get("error")?;
+    let name = json_string(error, "name")?;
+    let data = error.get("data");
+    let provider_id = data
+        .and_then(|data| json_string(data, "providerID"))
+        .or_else(|| data.and_then(|data| json_string(data, "provider_id")));
+    let message = data
+        .and_then(|data| json_string(data, "message"))
+        .or_else(|| json_string(error, "message"))
+        .unwrap_or_else(|| name.clone());
+    Some(OpenCodeSessionMessageError {
+        session_id: row.session_id,
+        message_id: row.id,
+        name,
+        provider_id,
+        message,
+        time_updated_ms: row.time_updated,
+    })
 }
 
 fn timeline_event_from_part(

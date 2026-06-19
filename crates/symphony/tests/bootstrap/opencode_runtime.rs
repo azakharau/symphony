@@ -1615,7 +1615,42 @@ pub(super) async fn seed_opencode_session_tree(path: &std::path::Path) {
         (),
     )
     .await
-    .expect("insert todo");
+        .expect("insert todo");
+}
+
+pub(super) async fn seed_opencode_provider_auth_error_session(path: &std::path::Path) {
+    seed_opencode_session_tree(path).await;
+    let database = libsql::Builder::new_local(path.display().to_string())
+        .build()
+        .await
+        .expect("build opencode db");
+    let conn = database.connect().expect("connect opencode db");
+    conn.execute("DELETE FROM message WHERE session_id = 'ses-root'", ())
+        .await
+        .expect("clear messages");
+    conn.execute("DELETE FROM part WHERE session_id = 'ses-root'", ())
+        .await
+        .expect("clear parts");
+    conn.execute(
+        r#"
+        INSERT INTO message (id, session_id, time_created, time_updated, data)
+        VALUES ('msg-provider-auth', 'ses-root', 3000, 3001, ?1)
+        "#,
+        libsql::params![serde_json::json!({
+            "role": "assistant",
+            "time": {"created": 3000, "completed": 3001},
+            "error": {
+                "name": "ProviderAuthError",
+                "data": {
+                    "providerID": "openai",
+                    "message": "OpenAI API key is missing. Pass it using the 'apiKey' parameter or the OPENAI_API_KEY environment variable."
+                }
+            }
+        })
+        .to_string()],
+    )
+    .await
+    .expect("insert provider auth error");
 }
 
 async fn opencode_row_count(path: &std::path::Path, table: &str) -> u64 {

@@ -142,6 +142,34 @@ async fn dashboard_api_and_html_surface_primary_execution_reason_codes() {
         "owner_input_parked"
     );
 
+    let provider_blocker = project_for(
+        |issue, _| {
+            issue.lifecycle_stage = LifecycleStage::Blocked;
+            issue.blocker = Some(BlockerRecord {
+                kind: "provider_blocker".into(),
+                message: "OpenCode ProviderAuthError".into(),
+                observed_at: None,
+            });
+            issue.failure = Some(FailureRecord {
+                kind: "provider_blocker".into(),
+                message: "OpenCode provider auth failed".into(),
+                fingerprint: Some("opencode_providerautherror_api_key_missing".into()),
+                occurrence_count: 1,
+            });
+        },
+        Some((
+            RuntimeLivenessStatus::BlockedIssues,
+            "candidate issues exist but are blocked or parked",
+            2,
+            0,
+        )),
+    )
+    .await;
+    assert_eq!(
+        provider_blocker.liveness.primary_reason_code,
+        "provider_blocker"
+    );
+
     let capacity_full = project_for(
         |_, _| {},
         Some((
@@ -366,7 +394,7 @@ async fn dashboard_api_and_html_surface_primary_execution_reason_codes() {
     .await;
     assert_eq!(
         active_runtime_repair.liveness.primary_reason_code,
-        "runtime_defect_blocked"
+        "active_opencode_session"
     );
     assert_eq!(
         active_runtime_repair.active_issues[0]

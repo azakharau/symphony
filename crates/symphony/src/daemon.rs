@@ -1532,6 +1532,22 @@ async fn park_opencode_provider_error_if_present(
     if !opencode_error_is_provider_blocker(&error.name, &error.message) {
         return Ok(false);
     }
+    if let Some(metrics) =
+        read_session_tree_metrics(&storage.database_path, &session.session_id).await?
+        && opencode_provider_error_is_stale(&error, &metrics)
+    {
+        debug!(
+            project_id = %project.id,
+            issue = %issue.identifier,
+            session_id = %session.session_id,
+            message_id = %error.message_id,
+            error_updated_ms = error.time_updated_ms,
+            last_updated_ms = metrics.last_updated_ms,
+            tokens = metrics.tokens_total,
+            "ignoring stale OpenCode provider error after newer session activity"
+        );
+        return Ok(false);
+    }
 
     let provider = error.provider_id.as_deref().unwrap_or("unknown");
     let message = format!(
@@ -1588,6 +1604,16 @@ fn opencode_provider_error_fingerprint(name: &str, message: &str) -> String {
         "provider_error"
     };
     format!("opencode_{}_{}", name.to_ascii_lowercase(), detail)
+}
+
+fn opencode_provider_error_is_stale(
+    error: &crate::opencode::OpenCodeSessionMessageError,
+    metrics: &crate::opencode::OpenCodeSessionTreeMetrics,
+) -> bool {
+    metrics
+        .last_updated_ms
+        .is_some_and(|last_updated| last_updated > error.time_updated_ms)
+        && metrics.tokens_total > 0
 }
 
 fn active_runnable_todo_milestone(issues: &[LinearIssue]) -> Option<String> {

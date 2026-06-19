@@ -1525,6 +1525,38 @@ async fn dashboard_surfaces_related_only_self_defect_and_deadlock_skip() {
 }
 
 #[tokio::test]
+async fn dashboard_does_not_surface_stale_stop_reason_for_running_issue() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let mut issue = test_issue("symphony", "running-recovered", "SYM-211");
+    issue.lifecycle_stage = LifecycleStage::Running;
+    issue.failure = Some(FailureRecord {
+        kind: "provider_blocker".into(),
+        message: "stale OpenCode provider auth failure".into(),
+        fingerprint: Some("opencode_providerautherror_api_key_missing".into()),
+        occurrence_count: 1,
+    });
+    store.upsert_issue(issue).await.expect("issue");
+
+    let api = RuntimeDashboardApi::from_store(&config, &store)
+        .await
+        .expect("dashboard api");
+    let issue = api
+        .issue_detail("symphony", "running-recovered")
+        .expect("issue endpoint")
+        .expect("issue exists");
+
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(issue.stop_reason, None);
+    assert_eq!(issue.display_status, "running");
+}
+
+#[tokio::test]
 async fn dashboard_surfaces_classifier_recommendation_without_managed_bug() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

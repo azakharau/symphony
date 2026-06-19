@@ -712,18 +712,22 @@ async fn issue_detail_response(
         .iter()
         .rev()
         .find_map(|session| session.last_event.clone());
-    let stop_reason = issue
-        .issue
-        .failure
-        .as_ref()
-        .map(|failure| failure.kind.clone())
-        .or_else(|| {
-            issue
-                .issue
-                .blocker
-                .as_ref()
-                .map(|blocker| blocker.kind.clone())
-        });
+    let stop_reason = if issue.issue.lifecycle_stage == LifecycleStage::Running {
+        None
+    } else {
+        issue
+            .issue
+            .failure
+            .as_ref()
+            .map(|failure| failure.kind.clone())
+            .or_else(|| {
+                issue
+                    .issue
+                    .blocker
+                    .as_ref()
+                    .map(|blocker| blocker.kind.clone())
+            })
+    };
     let display_status = issue_display_status(&issue.issue, sessions.last());
     let runtime_defect = runtime_defect_projection(&issue.issue);
     let self_defect_routing = self_defect_routing_projection(store, &issue.issue).await?;

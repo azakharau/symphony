@@ -1653,6 +1653,69 @@ pub(super) async fn seed_opencode_provider_auth_error_session(path: &std::path::
     .expect("insert provider auth error");
 }
 
+pub(super) async fn seed_opencode_recovered_provider_auth_session(path: &std::path::Path) {
+    seed_opencode_provider_auth_error_session(path).await;
+    let database = libsql::Builder::new_local(path.display().to_string())
+        .build()
+        .await
+        .expect("build opencode db");
+    let conn = database.connect().expect("connect opencode db");
+    conn.execute(
+        r#"
+        UPDATE session
+        SET tokens_input = 972,
+            tokens_output = 249,
+            tokens_reasoning = 0,
+            tokens_cache_read = 31232,
+            time_updated = 4001
+        WHERE id = 'ses-root'
+        "#,
+        (),
+    )
+    .await
+    .expect("update recovered session");
+    conn.execute(
+        r#"
+        INSERT INTO message (id, session_id, time_created, time_updated, data)
+        VALUES ('msg-recovered', 'ses-root', 4000, 4001, ?1)
+        "#,
+        libsql::params![
+            serde_json::json!({
+                "role": "assistant",
+                "time": {"created": 4000, "completed": 4001},
+                "tokens": {
+                    "total": 32453,
+                    "input": 972,
+                    "output": 249,
+                    "reasoning": 0,
+                    "cache": {"read": 31232, "write": 0}
+                },
+                "finish": "tool-calls"
+            })
+            .to_string()
+        ],
+    )
+    .await
+    .expect("insert recovered message");
+    conn.execute(
+        r#"
+        INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)
+        VALUES ('part-recovered', 'msg-recovered', 'ses-root', 4000, 4001, ?1)
+        "#,
+        libsql::params![
+            serde_json::json!({
+                "type": "tool",
+                "tool": "oc_bash",
+                "state": {"status": "completed"},
+                "title": "git status"
+            })
+            .to_string()
+        ],
+    )
+    .await
+    .expect("insert recovered part");
+}
+
 async fn opencode_row_count(path: &std::path::Path, table: &str) -> u64 {
     assert!(matches!(table, "session" | "message" | "part" | "todo"));
     let database = libsql::Builder::new_local(path.display().to_string())

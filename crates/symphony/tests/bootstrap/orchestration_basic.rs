@@ -1133,6 +1133,80 @@ async fn orchestration_parks_opencode_provider_auth_error_without_false_running(
 }
 
 #[tokio::test]
+async fn orchestration_ignores_stale_provider_auth_error_after_new_tokens() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let opencode_db_path = dir.path().join("opencode.db");
+    opencode_runtime::seed_opencode_recovered_provider_auth_session(&opencode_db_path).await;
+    let config_toml = valid_config_toml().replace(
+        "[[projects]]\n",
+        &format!(
+            "[opencode_storage]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]\n",
+            opencode_db_path.display(),
+            dir.path().join("archives").display()
+        ),
+    );
+    let config = RootConfig::from_toml_str(&config_toml).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "work", "SYM-64"))
+        .await
+        .expect("issue");
+    let mut active_process = Command::new("bash")
+        .arg("-c")
+        .arg("exec -a opencode sleep 120")
+        .spawn()
+        .expect("spawn active opencode-shaped process");
+    thread::sleep(Duration::from_millis(100));
+    store
+        .upsert_opencode_session({
+            let mut session = test_session(
+                "symphony",
+                "work",
+                "ses-root",
+                "/home/agent/.symphony/workspaces/opencode/symphony/SYM-64",
+            );
+            session.process_id = Some(active_process.id());
+            session
+        })
+        .await
+        .expect("session");
+    let client =
+        RecordingLinearClient::new(vec![linear_issue("work", "SYM-64", "In Progress", Some(1))]);
+
+    daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
+
+    assert!(client.transitions().is_empty());
+    assert!(client.evidence().is_empty());
+    let record = store
+        .issue("symphony", "work")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    assert_eq!(record.lifecycle_stage, LifecycleStage::Running);
+    assert!(record.blocker.is_none());
+    let session = store
+        .opencode_session("symphony", "work", "ses-root")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(session.process_id, Some(active_process.id()));
+    assert!(session.token_count > 0);
+    assert_eq!(
+        session.last_event.as_deref(),
+        Some("opencode_db_updated:4001")
+    );
+    assert!(active_process.try_wait().expect("process wait").is_none());
+    let _ = active_process.kill();
+    let _ = active_process.wait();
+}
+
+#[tokio::test]
 async fn orchestration_repairs_stale_in_progress_session_without_handoff_sidecar() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

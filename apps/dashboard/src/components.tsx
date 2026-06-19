@@ -336,25 +336,27 @@ function QuotaCompact({ quota }: { quota: QuotaResult }) {
     return <MetricCard title="5h quota" value="unavailable" detail="command did not return data" tone="warn" />;
   }
   const window = quota.quota.buckets.flatMap((bucket) => bucket.windows).find((entry) => entry.label.toLowerCase() === "5h");
+  const remaining = quotaRemainingPercent(window);
   return (
     <article className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
       <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">5h quota</div>
-      <div className="mt-2 text-2xl font-semibold">{window?.usedPercent ?? 0}% used</div>
-      <Progress value={window?.usedPercent ?? 0} />
+      <div className="mt-2 text-2xl font-semibold">{remaining}% remaining</div>
+      <Progress value={remaining} />
       <p className="mt-2 text-xs text-slate-500">reset {shortTime(window?.resetAt)}</p>
     </article>
   );
 }
 
 function QuotaWindowBar({ window, bucket }: { window: QuotaWindow; bucket: string }) {
+  const remaining = quotaRemainingPercent(window);
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-4">
       <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
         <div><div className="font-semibold">{bucket}</div><div className="text-sm text-slate-500">{window.label} window</div></div>
         <div className="text-sm text-slate-600">reset {shortTime(window.resetAt)}</div>
       </div>
-      <Progress value={window.usedPercent ?? 0} />
-      <div className="mt-2 text-sm text-slate-600">{window.usedPercent ?? 0}% used · {window.remainingPercent ?? 0}% remaining</div>
+      <Progress value={remaining} />
+      <div className="mt-2 text-sm text-slate-600">{remaining}% remaining · {window.usedPercent ?? 0}% used</div>
     </div>
   );
 }
@@ -388,6 +390,10 @@ function EmptyState({ message }: { message: string }) {
 function Progress({ value }: { value: number }) {
   const safe = Math.max(0, Math.min(100, value));
   return <div className="mt-3 h-2 rounded-full bg-slate-100"><div className="h-2 rounded-full bg-blue-600" style={{ width: `${safe}%` }} /></div>;
+}
+
+function quotaRemainingPercent(window?: QuotaWindow): number {
+  return window?.remainingPercent ?? (window?.usedPercent === undefined ? 0 : 100 - window.usedPercent);
 }
 
 type Tone = "good" | "warn" | "bad" | "idle";

@@ -65,6 +65,8 @@ describe("dashboard surfaces", () => {
     expect(unavailable).toContain("Quota unavailable");
     expect(normal).toContain("5h window");
     expect(normal).toContain("weekly window");
+    expect(normal).toContain("76% remaining");
+    expect(normal).toContain("76% remaining · 24% used");
   });
 
   test("defects surface renders deduped defect table and empty state", () => {

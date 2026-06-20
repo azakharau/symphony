@@ -758,7 +758,10 @@ fn normalize_handoff_sidecar_value(value: &mut Value, worktree_path: &str) {
         } else {
             git.remove("commit");
         }
-        if !git.contains_key("worktree_path") {
+        if git
+            .get("worktree_path")
+            .is_none_or(|value| value.is_null() || value.as_str().is_some_and(str::is_empty))
+        {
             git.insert("worktree_path".to_owned(), json!(worktree_path));
         }
         git.remove("remote");
@@ -776,6 +779,7 @@ fn normalize_handoff_sidecar_value(value: &mut Value, worktree_path: &str) {
         normalize_object_string_field(git, "head_sha", structured_summary_label);
         normalize_object_string_field(git, "pr_url", structured_summary_label);
         normalize_object_string_field(git, "worktree_path", structured_summary_label);
+        remove_null_object_fields(git, &["head_sha", "pr_url"]);
     }
 
     if let Some(stop_reason) = object.get_mut("stop_reason")
@@ -800,6 +804,15 @@ fn normalize_eval_results(object: &mut serde_json::Map<String, Value>) {
         let Some(result_object) = result.as_object_mut() else {
             continue;
         };
+        if result_object
+            .get("suite")
+            .is_none_or(|value| value.is_null() || value.as_str().is_some_and(str::is_empty))
+        {
+            result_object.insert(
+                "suite".to_owned(),
+                Value::String("opencode-evaluation".to_owned()),
+            );
+        }
         normalize_object_string_field(result_object, "suite", structured_summary_label);
         normalize_object_string_field(
             result_object,
@@ -808,6 +821,18 @@ fn normalize_eval_results(object: &mut serde_json::Map<String, Value>) {
         );
         normalize_object_string_field(result_object, "details", structured_summary_label);
         normalize_object_string_field(result_object, "evidence_ref", structured_summary_label);
+        remove_null_object_fields(
+            result_object,
+            &["failure_fingerprint", "details", "evidence_ref"],
+        );
+    }
+}
+
+fn remove_null_object_fields(object: &mut serde_json::Map<String, Value>, fields: &[&str]) {
+    for field in fields {
+        if object.get(*field).is_some_and(Value::is_null) {
+            object.remove(*field);
+        }
     }
 }
 

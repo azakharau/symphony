@@ -747,6 +747,47 @@ async fn handoff_sidecar_accepts_eval_result_evidence_ref() {
 }
 
 #[tokio::test]
+async fn handoff_sidecar_normalizes_null_string_fields_from_opencode() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let worktree = dir.path().join("worktree");
+    let sidecar_dir = worktree.join(".symphony");
+    fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
+    fs::write(
+        sidecar_dir.join("opencode-handoff.json"),
+        r#"{
+  "session_id": "ses-null-fields",
+  "lifecycle_stages": ["running", "eval", "handoff", "completed"],
+  "subagents": ["build"],
+  "eval_results": [{"suite": null, "passed": true, "failure_fingerprint": null, "details": null, "evidence_ref": null}],
+  "changed_files": ["crates/mnemesh-storage/src/migration.rs:1-20"],
+  "git": {"branch": "feature/mne-226", "head_sha": "2da52e40f3a0e75e4d4fdf28dc79d06c6ad49979", "pr_url": null, "worktree_path": null},
+  "risks": [],
+  "stop_reason": "accepted"
+}"#,
+    )
+    .expect("handoff fixture");
+
+    let handoff = opencode::StdioOpenCodeLauncher
+        .latest_handoff(&test_session(
+            "mnemesh",
+            "issue-mne-226",
+            "ses-null-fields",
+            &worktree,
+        ))
+        .await
+        .expect("OpenCode null string fields should be normalized")
+        .expect("handoff present");
+
+    assert_eq!(handoff.eval_results[0].suite, "opencode-evaluation");
+    assert!(handoff.eval_results[0].failure_fingerprint.is_none());
+    assert!(handoff.eval_results[0].details.is_none());
+    assert!(handoff.eval_results[0].evidence_ref.is_none());
+    let git = handoff.git.expect("git evidence");
+    assert_eq!(git.worktree_path, worktree.display().to_string());
+    assert!(git.pr_url.is_none());
+}
+
+#[tokio::test]
 async fn handoff_sidecar_ignores_harmless_status_marker() {
     let dir = tempfile::tempdir().expect("tempdir");
     let worktree = dir.path().join("worktree");

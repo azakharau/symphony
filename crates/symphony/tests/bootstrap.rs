@@ -901,6 +901,7 @@ impl LinearClient for PartiallyFailingProjectLinearClient {
 #[derive(Debug, Default)]
 struct ScriptedOpenCodeLauncher {
     handoff: Option<OpenCodeHandoff>,
+    launches: std::sync::Mutex<Vec<String>>,
     repairs: std::sync::Mutex<Vec<(String, String)>>,
 }
 
@@ -908,8 +909,13 @@ impl ScriptedOpenCodeLauncher {
     const fn new(handoff: Option<OpenCodeHandoff>) -> Self {
         Self {
             handoff,
+            launches: std::sync::Mutex::new(Vec::new()),
             repairs: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    fn launches(&self) -> Vec<String> {
+        self.launches.lock().expect("launches lock").clone()
     }
 
     fn repairs(&self) -> Vec<(String, String)> {
@@ -1161,6 +1167,10 @@ impl OpenCodeLauncher for ScriptedOpenCodeLauncher {
         &self,
         spec: &opencode::OpenCodeLaunchSpec,
     ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+        self.launches
+            .lock()
+            .expect("launches lock")
+            .push(spec.issue_identifier.clone());
         Ok(opencode::OpenCodeStartedSession {
             session_id: format!("scripted:{}", spec.cwd.display()),
             process_id: None,

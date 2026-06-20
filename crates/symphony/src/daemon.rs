@@ -38,7 +38,9 @@ use crate::{
 use acceptance_self_defect::{
     AcceptanceSelfDefectInput, record_acceptance_self_defect_with_linear_client,
 };
-use handoff::{park_typed_blocker, process_in_progress_handoff};
+use handoff::{
+    park_typed_blocker, process_in_progress_handoff, process_recoverable_failed_handoff,
+};
 use http::run_continuous;
 use liveness::project_liveness_projection;
 use policy::{
@@ -714,6 +716,18 @@ async fn reconcile_project(
                         CleanupStatus::Clean,
                     );
                     store.upsert_issue(&record).await?;
+                } else if process_recoverable_failed_handoff(
+                    project,
+                    self_defect_project,
+                    store,
+                    linear,
+                    opencode,
+                    &issue,
+                    existing.clone(),
+                )
+                .await?
+                {
+                    continue;
                 } else if has_reusable_existing_session(store, &project.id, &issue.id).await? {
                     info!(
                         project_id = %project.id,

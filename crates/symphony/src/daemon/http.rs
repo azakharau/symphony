@@ -21,7 +21,7 @@ use crate::{
 
 use super::run_once_with_clients;
 
-const OPENCODE_METRICS_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const OPENCODE_METRICS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(super) async fn run_continuous(
     config: RootConfig,

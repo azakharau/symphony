@@ -9,7 +9,7 @@ export type DashboardConfig = {
 const DEFAULT_API_BASE = "http://127.0.0.1:4115";
 const DEFAULT_OCU_COMMAND = "ocu --localhost --plain";
 const DEFAULT_QUOTA_TIMEOUT_MS = 5_000;
-const DEFAULT_REFRESH_MS = 200;
+const DEFAULT_REFRESH_MS = 1_000;
 
 export function readDashboardConfig(env: NodeJS.ProcessEnv = process.env): DashboardConfig {
   return {

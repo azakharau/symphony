@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useRef } from "react";
 
-const DEFAULT_REFRESH_MS = 200;
+const DEFAULT_REFRESH_MS = 1_000;
 const REFRESH_COALESCE_MS = 50;
 
 export function LiveRefresh({ eventsPath = "/api/dashboard/events", refreshMs = DEFAULT_REFRESH_MS }: { eventsPath?: string; refreshMs?: number }) {

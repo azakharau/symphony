@@ -16,7 +16,7 @@ Keep the two processes and user units separate.
 
 Rust service:
 
-- `RUST_LOG=info`
+- `RUST_LOG=symphony=warn`
 - `LINEAR_API_KEY` from `/home/agent/.symphony/env/linear.env`
 - config: `/home/agent/.symphony/symphony/projects.toml`
 - database: `/home/agent/.symphony/symphony/runtime.sqlite3`

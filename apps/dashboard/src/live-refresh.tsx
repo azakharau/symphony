@@ -3,7 +3,10 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useRef } from "react";
 
-export function LiveRefresh({ eventsPath = "/api/dashboard/events", refreshMs = 5_000 }: { eventsPath?: string; refreshMs?: number }) {
+const DEFAULT_REFRESH_MS = 200;
+const REFRESH_COALESCE_MS = 50;
+
+export function LiveRefresh({ eventsPath = "/api/dashboard/events", refreshMs = DEFAULT_REFRESH_MS }: { eventsPath?: string; refreshMs?: number }) {
   const router = useRouter();
   const pendingRefresh = useRef<number | null>(null);
 
@@ -13,7 +16,7 @@ export function LiveRefresh({ eventsPath = "/api/dashboard/events", refreshMs = 
       pendingRefresh.current = window.setTimeout(() => {
         pendingRefresh.current = null;
         router.refresh();
-      }, 250);
+      }, REFRESH_COALESCE_MS);
     };
 
     const interval = window.setInterval(refresh, refreshMs);

@@ -39,6 +39,8 @@ fn systemd_user_unit_declares_restart_and_default_target_autostart() {
     assert!(unit.starts_with("[Unit]\n"));
     assert_eq!(unit.matches("[Unit]").count(), 1);
     assert!(unit.contains("\n[Service]\n"));
+    assert!(unit.contains("\nEnvironment=RUST_LOG=symphony=warn\n"));
+    assert!(!unit.contains("\nEnvironment=RUST_LOG=info\n"));
     assert!(unit.contains("\nRestart=on-failure\n"));
     assert!(unit.contains("\nRestartSec=10\n"));
     assert!(unit.contains("\n[Install]\n"));

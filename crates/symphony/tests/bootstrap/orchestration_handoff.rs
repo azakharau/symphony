@@ -224,12 +224,27 @@ async fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_wo
         client.transitions(),
         vec![("completed".into(), LinearTransition::Done)]
     );
-    assert!(client.evidence().iter().any(|(_, evidence)| {
-        evidence.body.contains(&head_sha)
-            && evidence
-                .body
-                .contains("agent-server/opencode-runner-extension")
-    }));
+    let handoff_comment = client
+        .evidence()
+        .into_iter()
+        .find_map(|(_, evidence)| {
+            (evidence.kind == "opencode_git_closure").then_some(evidence.body)
+        })
+        .expect("accepted handoff comment");
+    assert!(handoff_comment.contains("## OpenCode Handoff Accepted"));
+    assert!(handoff_comment.contains("### Validation"));
+    assert!(handoff_comment.contains("### Changed Files"));
+    assert!(handoff_comment.contains(&head_sha));
+    assert!(handoff_comment.contains("agent-server/opencode-runner-extension"));
+    assert!(handoff_comment.contains("`cargo test` passed - ok"));
+    assert!(
+        !handoff_comment.contains("session_id:"),
+        "{handoff_comment}"
+    );
+    assert!(
+        !handoff_comment.contains("changed_files:"),
+        "{handoff_comment}"
+    );
     let completed = store
         .issue("symphony", "completed")
         .await

@@ -441,6 +441,23 @@ async fn todo_issue_with_recoverable_failed_success_handoff_closes_without_new_l
         !worktree.exists(),
         "accepted recovered handoff must remove worktree"
     );
+    assert!(
+        store
+            .open_self_defect_by_fingerprint("incomplete_success_handoff")
+            .await
+            .expect("query open self-defect")
+            .is_none(),
+        "accepted recovered handoff must resolve the stale managed self-defect blocker"
+    );
+    let resolved = store
+        .latest_self_defect_by_fingerprint("incomplete_success_handoff")
+        .await
+        .expect("query resolved self-defect")
+        .expect("resolved self-defect row");
+    assert_eq!(
+        resolved.resolution_state,
+        symphony::state::SelfDefectResolutionState::Done
+    );
 }
 
 #[tokio::test]

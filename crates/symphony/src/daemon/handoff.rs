@@ -20,7 +20,7 @@ use crate::{
     },
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, GitRefRecord, IssueStateRecord,
-        LifecycleStage, OpenCodeStage,
+        LifecycleStage, OpenCodeStage, SelfDefectResolutionState,
     },
     storage::SqliteStore,
 };
@@ -305,6 +305,19 @@ pub(super) async fn process_recoverable_failed_handoff(
         &handoff,
     )
     .await?;
+    if let Some(fingerprint) = existing_issue
+        .as_ref()
+        .and_then(|record| record.failure.as_ref())
+        .and_then(|failure| failure.fingerprint.as_deref())
+        && let Some(defect) = store.open_self_defect_by_fingerprint(fingerprint).await?
+    {
+        store
+            .mark_self_defect_managed_issue_resolved(
+                &defect.managed_issue_id,
+                SelfDefectResolutionState::Done,
+            )
+            .await?;
+    }
     Ok(true)
 }
 

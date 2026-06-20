@@ -80,6 +80,7 @@ pub struct UiRunningIssueSummary {
     pub running_tool_count: u64,
     pub pending_tool_count: u64,
     pub todo_count: u64,
+    pub duration_ms: Option<u64>,
     pub last_event: Option<String>,
     pub worktree_path: Option<String>,
 }
@@ -141,6 +142,7 @@ pub struct UiOpenCodeSessionDetail {
     pub part_count: u64,
     pub token_count: u64,
     pub cached_token_count: u64,
+    pub duration_ms: Option<u64>,
     pub last_event: Option<String>,
     pub silence_observed: bool,
     pub activity: Option<UiOpenCodeSessionTreeActivity>,
@@ -282,6 +284,7 @@ impl From<&RunningIssueSummary> for UiRunningIssueSummary {
             running_tool_count: issue.running_tool_count,
             pending_tool_count: issue.pending_tool_count,
             todo_count: issue.todo_count,
+            duration_ms: issue.duration_ms,
             last_event: issue.last_event.clone(),
             worktree_path: issue.worktree_path.clone(),
         }
@@ -364,6 +367,7 @@ impl From<&OpenCodeSessionDetail> for UiOpenCodeSessionDetail {
             part_count: session.part_count,
             token_count: session.token_count,
             cached_token_count: session.cached_token_count,
+            duration_ms: session.duration_ms,
             last_event: session.last_event.clone(),
             silence_observed: session.silence_observed,
             activity: session

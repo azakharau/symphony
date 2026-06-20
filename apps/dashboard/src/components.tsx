@@ -202,7 +202,7 @@ function RunningTable({ issues }: { issues: RunningIssueSummary[] }) {
             <th className="px-3 py-2">stage</th>
             <th className="px-3 py-2">agent/model</th>
             <th className="px-3 py-2">tokens</th>
-            <th className="px-3 py-2">last event</th>
+            <th className="px-3 py-2">duration</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
@@ -213,7 +213,7 @@ function RunningTable({ issues }: { issues: RunningIssueSummary[] }) {
               <td className="px-3 py-3"><Badge tone={statusTone(issue.stage)}>{issue.stage ?? issue.display_status}</Badge></td>
               <td className="px-3 py-3">{issue.active_agent ?? issue.agent ?? "—"}<div className="text-xs text-slate-500">{issue.active_model ?? issue.model ?? "model unknown"}</div></td>
               <td className="px-3 py-3"><TokenCell total={issue.token_count} cached={issue.cached_token_count} /></td>
-              <td className="px-3 py-3"><LastEvent value={issue.last_event} /></td>
+              <td className="px-3 py-3"><Duration value={issue.duration_ms} /></td>
             </tr>
           ))}
         </tbody>
@@ -305,7 +305,7 @@ function IssueTable({ issues, projectId }: { issues: IssueDetail[]; projectId: s
             <th className="px-3 py-2">tokens</th>
             <th className="px-3 py-2">tools</th>
             <th className="px-3 py-2">todos</th>
-            <th className="px-3 py-2">last event</th>
+            <th className="px-3 py-2">duration</th>
             <th className="px-3 py-2">worktree</th>
           </tr>
         </thead>
@@ -321,7 +321,7 @@ function IssueTable({ issues, projectId }: { issues: IssueDetail[]; projectId: s
                 <td className="px-3 py-3"><TokenCell total={session?.token_count ?? 0} cached={session?.cached_token_count} /></td>
                 <td className="px-3 py-3">{session?.activity?.running_tool_count ?? 0}/{session?.activity?.pending_tool_count ?? 0}</td>
                 <td className="px-3 py-3">{session?.todo_count ?? 0}</td>
-                <td className="px-3 py-3"><LastEvent value={session?.last_event ?? issue.last_runner_event} /></td>
+                <td className="px-3 py-3"><Duration value={session?.duration_ms} /></td>
                 <td className="max-w-[220px] truncate px-3 py-3 font-mono text-xs">{session?.worktree_path ?? issue.git_ref?.worktree_path ?? "—"}</td>
               </tr>
             );
@@ -411,15 +411,8 @@ function TokenCell({ total, cached }: { total: number; cached?: number | null })
   );
 }
 
-function LastEvent({ value }: { value?: string | null }) {
-  const event = formatLastEvent(value);
-  if (!event.detail) return <span>{event.label}</span>;
-  return (
-    <div>
-      <div>{event.label}</div>
-      <div className="text-xs text-slate-500">{event.detail}</div>
-    </div>
-  );
+function Duration({ value }: { value?: number | null }) {
+  return <span className="tabular-nums">{formatDuration(value)}</span>;
 }
 
 export function Panel({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
@@ -522,27 +515,14 @@ function tokenBreakdown(total: number, cached?: number | null): { net: number; c
   };
 }
 
-function formatLastEvent(value?: string | null): { label: string; detail?: string } {
-  if (!value) return { label: "—" };
-  const match = /^opencode_db_updated:(\d+)$/.exec(value);
-  if (!match) return { label: value };
-  return {
-    label: "OpenCode activity updated",
-    detail: formatTimestampMs(Number(match[1])),
-  };
-}
+function formatDuration(value?: number | null): string {
+  if (value == null || value < 0) return "—";
+  const totalSeconds = Math.floor(value / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
 
-function formatTimestampMs(value: number): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: "UTC",
-    month: "short",
-    day: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZoneName: "short",
-  }).format(date);
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
 }

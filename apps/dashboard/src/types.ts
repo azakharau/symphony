@@ -42,6 +42,7 @@ export type RunningIssueSummary = {
   running_tool_count: number;
   pending_tool_count: number;
   todo_count: number;
+  duration_ms?: number | null;
   last_event?: string | null;
   worktree_path?: string | null;
 };
@@ -215,6 +216,7 @@ export type OpenCodeSession = {
   part_count: number;
   token_count: number;
   cached_token_count?: number;
+  duration_ms?: number | null;
   last_event?: string | null;
   silence_observed: boolean;
   activity?: SessionTreeActivity | null;

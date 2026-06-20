@@ -1219,6 +1219,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
           "running_tool_count": 0,
           "pending_tool_count": 0,
           "todo_count": 1,
+          "duration_ms": null,
           "last_event": "eval_failed:clippy-needless-collect",
           "worktree_path": "/home/agent/.symphony/workspaces/opencode/symphony/SYM-91"
         }
@@ -1277,12 +1278,14 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
     );
     assert!(ui_project.body.contains(r#""active_issues""#));
     assert!(ui_aggregate.body.contains(r#""running_cached_tokens":0"#));
+    assert!(ui_aggregate.body.contains(r#""duration_ms":null"#));
     assert!(
         ui_issue
             .body
             .contains(r#""opencode_session_id":"oc-repair""#)
     );
     assert!(ui_issue.body.contains(r#""cached_token_count":0"#));
+    assert!(ui_issue.body.contains(r#""duration_ms":null"#));
     assert!(events.body.starts_with("event: dashboard.snapshot\ndata: "));
     assert!(events.body.contains(r#""running_cached_tokens":0"#));
     assert!(!ui_aggregate.body.contains("cost_micros"));

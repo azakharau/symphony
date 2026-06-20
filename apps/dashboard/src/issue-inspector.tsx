@@ -27,6 +27,7 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
   const linearUrl = linearIssueUrl(issue.identifier);
   const opencodeDirectory = session ? opencodeSessionDirectory(session) : undefined;
   const opencodeUrl = session && opencodeDirectory ? opencodeSessionUrl(session.opencode_session_id, opencodeDirectory) : undefined;
+  const sessionDuration = formatDuration(session?.duration_ms);
 
   return (
     <div className="flex flex-col gap-5">
@@ -54,6 +55,7 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
               <KeyValue label="active agent" value={session?.active_agent ?? session?.agent ?? "unavailable"} />
               <KeyValue label="model" value={session?.active_model ?? session?.model ?? "unavailable"} />
               <KeyValue label="tokens" value={formatCompactNumber(sessionTokens.net)} detail={`${formatCompactNumber(sessionTokens.cached)} cached`} />
+              <KeyValue label="duration" value={sessionDuration} />
               <KeyValue label="worktree" value={session?.worktree_path ?? issue.git_ref?.worktree_path ?? "unavailable"} mono />
               <KeyValue label="git" value={issue.git_ref ? `${issue.git_ref.branch} ${issue.git_ref.head_sha ?? ""}` : "unavailable"} mono />
             </dl>
@@ -334,6 +336,18 @@ function tokenBreakdown(total: number, cached?: number | null): { net: number; c
     net: Math.max(0, total - safeCached),
     cached: safeCached,
   };
+}
+
+function formatDuration(value?: number | null): string {
+  if (value == null || value < 0) return "—";
+  const totalSeconds = Math.floor(value / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
 }
 
 function formatEpochMs(value: number): string {

@@ -298,6 +298,7 @@ pub struct RunningIssueSummary {
     pub running_tool_count: u64,
     pub pending_tool_count: u64,
     pub todo_count: u64,
+    pub duration_ms: Option<u64>,
     pub last_event: Option<String>,
     pub worktree_path: Option<String>,
 }
@@ -488,6 +489,7 @@ fn running_issue_summary(
         running_tool_count: activity.map_or(0, |activity| activity.running_tool_count),
         pending_tool_count: activity.map_or(0, |activity| activity.pending_tool_count),
         todo_count: session.map_or(0, |session| session.todo_count),
+        duration_ms: session.and_then(|session| session.duration_ms),
         last_event: session
             .and_then(|session| session.last_event.clone())
             .or_else(|| issue.last_runner_event.clone()),
@@ -560,6 +562,7 @@ pub struct OpenCodeSessionDetail {
     pub token_count: u64,
     pub cached_token_count: u64,
     pub cost_micros: u64,
+    pub duration_ms: Option<u64>,
     pub lifecycle_marker: Option<String>,
     pub last_event: Option<String>,
     pub silence_observed: bool,
@@ -1032,6 +1035,7 @@ async fn session_detail(
     };
     let cached_token_count = activity.as_ref().map_or(0, session_tree_cached_token_count);
     let token_count = session.token_count.saturating_add(cached_token_count);
+    let duration_ms = session_activity_duration_ms(&session.session_id, activity.as_ref());
 
     Ok(OpenCodeSessionDetail {
         opencode_session_id: session.session_id,
@@ -1053,6 +1057,7 @@ async fn session_detail(
         token_count,
         cached_token_count,
         cost_micros: session.cost_micros,
+        duration_ms,
         lifecycle_marker: session.lifecycle_marker,
         last_event: session.last_event,
         silence_observed: session.silence_observed,
@@ -1081,6 +1086,36 @@ fn session_tree_cached_token_count(activity: &OpenCodeSessionTreeActivity) -> u6
                 .saturating_add(session.tokens_cache_write)
         })
         .sum()
+}
+
+fn session_activity_duration_ms(
+    session_id: &str,
+    activity: Option<&OpenCodeSessionTreeActivity>,
+) -> Option<u64> {
+    let activity = activity?;
+    let root = activity
+        .sessions
+        .iter()
+        .find(|session| session.session_id == session_id)
+        .or_else(|| {
+            activity
+                .sessions
+                .iter()
+                .find(|session| session.session_id == activity.root_session_id)
+        })?;
+    let last_updated_ms = activity
+        .last_updated_ms
+        .or_else(|| {
+            activity
+                .sessions
+                .iter()
+                .chain(activity.subagents.iter())
+                .map(|session| session.time_updated_ms)
+                .max()
+        })
+        .unwrap_or(root.time_updated_ms);
+
+    Some(last_updated_ms.saturating_sub(root.time_created_ms))
 }
 
 fn issue_display_status(

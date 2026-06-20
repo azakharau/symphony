@@ -63,6 +63,7 @@ export const acceptanceDashboard: AggregateDashboard = {
           running_tool_count: 1,
           pending_tool_count: 2,
           todo_count: 5,
+          duration_ms: 3_600_000,
           last_event: "component tests passed",
           worktree_path: "/workspaces/symphony/SYM-97",
         },
@@ -155,6 +156,7 @@ export const acceptanceDashboard: AggregateDashboard = {
           running_tool_count: 0,
           pending_tool_count: 0,
           todo_count: 2,
+          duration_ms: null,
           last_event: "runtime process exited",
           worktree_path: "/workspaces/atlas/ATL-42",
         },
@@ -204,6 +206,7 @@ const sym97Issue: IssueDetail = {
       part_count: 64,
       token_count: 38210,
       cached_token_count: 3110,
+      duration_ms: 3_600_000,
       last_event: "component tests passed",
       silence_observed: false,
       activity: {

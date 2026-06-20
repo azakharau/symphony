@@ -33,7 +33,10 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("3,110 cached");
     expect(html).not.toContain(">Capacity</p>");
     expect(html).toContain("SYM-97");
-    expect(html).toContain("component tests passed");
+    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain(">duration</th>");
+    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("1h 0m");
+    expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain("component tests passed");
+    expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain(">last event</th>");
     expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain(">tools<");
     expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain("running /");
     expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain("worktree");
@@ -46,14 +49,15 @@ describe("dashboard surfaces", () => {
     expect(html).not.toContain(`${"co"}st`);
   });
 
-  test("overview adapts raw OpenCode database update events", () => {
+  test("overview renders live session duration instead of raw events", () => {
     const dashboard = JSON.parse(JSON.stringify(acceptanceDashboard)) as typeof acceptanceDashboard;
     dashboard.projects[0].running_issues[0].last_event = "opencode_db_updated:1781882984000";
     const html = render(<OverviewSurface dashboard={dashboard} quota={quotaNormal} />);
 
-    expect(html).toContain("OpenCode activity updated");
-    expect(html).toContain("Jun 19, 2026");
-    expect(html).not.toContain("opencode_db_updated");
+    const running = sectionText(html, "Running now", "Blockers and idle reasons");
+    expect(running).toContain("1h 0m");
+    expect(running).not.toContain("OpenCode activity updated");
+    expect(running).not.toContain("opencode_db_updated");
   });
 
   test("projects surface renders table-first comparison", () => {
@@ -70,6 +74,9 @@ describe("dashboard surfaces", () => {
     const failed = render(<ProjectSurface project={failedProject} />);
 
     expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).toContain("SYM-97");
+    expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).toContain(">duration</th>");
+    expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).toContain("1h 0m");
+    expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).not.toContain(">last event</th>");
     expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).not.toContain("SYM-91");
     expect(blocked).toContain("provider quota exhausted");
     expect(failed).toContain("runtime_process_exit");
@@ -96,6 +103,8 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("aria-label=\"pending\"");
     expect(html).toContain(">35,100</dd>");
     expect(html).toContain(">3,110 cached</dd>");
+    expect(html).toContain(">duration</dt>");
+    expect(html).toContain(">1h 0m</dd>");
     expect(html).not.toContain(">cached</dt>");
     expect(html).not.toContain(">last event</dt>");
     expect(html).not.toContain(">process</dt>");

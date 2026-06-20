@@ -38,7 +38,9 @@ use crate::{
 use acceptance_self_defect::{
     AcceptanceSelfDefectInput, record_acceptance_self_defect_with_linear_client,
 };
-use handoff::{park_typed_blocker, process_in_progress_handoff};
+use handoff::{
+    park_typed_blocker, process_in_progress_handoff, process_recoverable_failed_handoff,
+};
 use http::run_continuous;
 use liveness::project_liveness_projection;
 use policy::{
@@ -566,11 +568,6 @@ async fn reconcile_project(
             }
             "Todo" => {
                 let existing = store.issue(&project.id, &issue.id).await?;
-                if retain_typed_non_owner_blocker(project, store, &issue, existing.as_ref()).await?
-                {
-                    report.blocked.push(issue.identifier);
-                    continue;
-                }
                 if has_unanswered_owner_input {
                     debug!(
                         project_id = %project.id,
@@ -655,6 +652,18 @@ async fn reconcile_project(
                     store.upsert_issue(&record).await?;
                     mark_existing_session_blocked(store, project, &issue).await?;
                     report.blocked.push(issue.identifier);
+                } else if process_recoverable_failed_handoff(
+                    project,
+                    self_defect_project,
+                    store,
+                    linear,
+                    opencode,
+                    &issue,
+                    existing.clone(),
+                )
+                .await?
+                {
+                    continue;
                 } else if let Some(failure) =
                     unresolved_runtime_defect(store, project, &issue).await?
                 {
@@ -685,6 +694,10 @@ async fn reconcile_project(
                         store, project, &issue,
                     )
                     .await?;
+                    report.blocked.push(issue.identifier);
+                } else if retain_typed_non_owner_blocker(project, store, &issue, existing.as_ref())
+                    .await?
+                {
                     report.blocked.push(issue.identifier);
                 } else if issue_milestone.is_some() && runnable_todo_milestone_count > 1 {
                     let record = issue_record(

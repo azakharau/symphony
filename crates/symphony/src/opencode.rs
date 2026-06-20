@@ -717,11 +717,7 @@ fn normalize_handoff_sidecar_value(value: &mut Value, worktree_path: &str) {
 
     if object.get("eval_results").is_some_and(Value::is_object) {
         let eval = object.remove("eval_results").unwrap_or(Value::Null);
-        let passed = eval
-            .get("outcome")
-            .or_else(|| eval.get("recommendation"))
-            .and_then(Value::as_str)
-            .is_some_and(|value| matches!(value, "accept" | "accepted" | "pass" | "passed"));
+        let passed = compact_eval_object_passed(&eval);
         let evidence_ref = eval
             .get("evaluation_ref")
             .or_else(|| eval.get("evidence_ref"))
@@ -732,18 +728,19 @@ fn normalize_handoff_sidecar_value(value: &mut Value, worktree_path: &str) {
             .get("failure_fingerprint")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let details =
-            eval.get("details")
-                .or_else(|| eval.get("summary"))
-                .map(|value| match value {
-                    Value::String(details) => details.clone(),
-                    Value::Array(items) => items
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                    other => other.to_string(),
-                });
+        let details = eval
+            .get("details")
+            .or_else(|| eval.get("summary"))
+            .or_else(|| eval.get("verification"))
+            .map(|value| match value {
+                Value::String(details) => details.clone(),
+                Value::Array(items) => items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                other => other.to_string(),
+            });
         object.insert(
             "eval_results".to_owned(),
             json!([{
@@ -818,6 +815,60 @@ fn normalize_eval_results(object: &mut serde_json::Map<String, Value>) {
         normalize_object_string_field(result_object, "details", structured_summary_label);
         normalize_object_string_field(result_object, "evidence_ref", structured_summary_label);
     }
+}
+
+fn compact_eval_object_passed(eval: &Value) -> bool {
+    if eval
+        .get("failure_fingerprint")
+        .and_then(Value::as_str)
+        .is_some_and(|fingerprint| !fingerprint.trim().is_empty())
+    {
+        return false;
+    }
+
+    if let Some(passed) = eval.get("passed").and_then(Value::as_bool) {
+        return passed;
+    }
+
+    let mut saw_positive = false;
+    for key in [
+        "outcome",
+        "recommendation",
+        "status",
+        "result",
+        "verdict",
+        "review",
+        "review_verdict",
+        "evaluator",
+        "evaluator_recommendation",
+    ] {
+        let Some(value) = eval.get(key).and_then(Value::as_str) else {
+            continue;
+        };
+        let normalized = value.trim().to_ascii_lowercase();
+        if matches!(
+            normalized.as_str(),
+            "fail"
+                | "failed"
+                | "failure"
+                | "reject"
+                | "rejected"
+                | "needs_repair"
+                | "needs-repair"
+                | "blocked"
+                | "blocker"
+        ) {
+            return false;
+        }
+        if matches!(
+            normalized.as_str(),
+            "accept" | "accepted" | "pass" | "passed" | "success" | "succeeded"
+        ) {
+            saw_positive = true;
+        }
+    }
+
+    saw_positive
 }
 
 fn normalize_string_array_field(
@@ -1114,6 +1165,79 @@ mod tests {
         let git = handoff.git.expect("git evidence");
         assert_eq!(git.branch, "feature/test");
         assert_eq!(git.head_sha.as_deref(), Some("0123456789abcdef"));
+    }
+
+    #[test]
+    fn normalizes_compact_review_and_evaluator_eval_object_as_passed() {
+        let mut value = json!({
+            "status": "completed",
+            "session_id": "ses_nrv_30",
+            "lifecycle_stages": [
+                "planning",
+                "implementation",
+                "verification",
+                "review",
+                "repair",
+                "verification",
+                "review",
+                "evaluation",
+                "commit",
+                "push"
+            ],
+            "subagents_used": [
+                "rust-engineer",
+                "code-reviewer",
+                "evaluator"
+            ],
+            "eval_results": {
+                "verification": [
+                    "cargo fmt --all -- --check",
+                    "cargo check -p nervure-types",
+                    "cargo nextest run -p nervure-types (348 passed)",
+                    "cargo run -p nervure-cli -- generate-schemas --out schemas",
+                    "git diff --check"
+                ],
+                "review": "pass",
+                "evaluator": "accept"
+            },
+            "changed_files": [
+                "crates/nervure-types/src/lib.rs:16-17",
+                "schemas/pi-companion-profile.schema.json:1-379"
+            ],
+            "git": {
+                "branch": "feature/nrv-30-define-pi-oh-my-pi-companion-integration-profile",
+                "commit": "dcc20c501b62fe3a7b5f368287b33985040a58da",
+                "pushed": true,
+                "remote": "origin"
+            },
+            "mnemesh": {
+                "task_id": "3d0058f5-49bf-45df-a63f-2e3c779a7f6f"
+            },
+            "risks": [],
+            "stop_reason": "accepted"
+        });
+
+        normalize_handoff_sidecar_value(&mut value, "/tmp/nrv-30");
+        let handoff: OpenCodeHandoff =
+            serde_json::from_value(value).expect("compact eval handoff should parse");
+
+        assert_eq!(handoff.session_id, "ses_nrv_30");
+        assert_eq!(handoff.stop_reason, OpenCodeStopReason::Success);
+        assert_eq!(handoff.eval_results.len(), 1);
+        assert!(handoff.eval_results[0].passed);
+        assert_eq!(handoff.eval_results[0].suite, "opencode-evaluation");
+        assert_eq!(
+            handoff.eval_results[0].details.as_deref(),
+            Some(
+                "cargo fmt --all -- --check\ncargo check -p nervure-types\ncargo nextest run -p nervure-types (348 passed)\ncargo run -p nervure-cli -- generate-schemas --out schemas\ngit diff --check"
+            )
+        );
+        let git = handoff.git.expect("git evidence");
+        assert_eq!(
+            git.head_sha.as_deref(),
+            Some("dcc20c501b62fe3a7b5f368287b33985040a58da")
+        );
+        assert_eq!(git.worktree_path, "/tmp/nrv-30");
     }
 
     #[test]

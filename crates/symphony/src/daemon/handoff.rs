@@ -20,7 +20,7 @@ use crate::{
     },
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, GitRefRecord, IssueStateRecord,
-        LifecycleStage, OpenCodeStage,
+        LifecycleStage, OpenCodeStage, SelfDefectResolutionState,
     },
     storage::SqliteStore,
 };
@@ -257,6 +257,67 @@ pub(super) async fn process_in_progress_handoff(
         }
     }
 
+    Ok(true)
+}
+
+pub(super) async fn process_recoverable_failed_handoff(
+    project: &ProjectConfig,
+    self_defect_project: &ProjectConfig,
+    store: &SqliteStore,
+    linear: &impl LinearClient,
+    opencode: &impl OpenCodeLauncher,
+    issue: &LinearIssue,
+    existing_issue: Option<IssueStateRecord>,
+) -> anyhow::Result<bool> {
+    let Some(session) =
+        latest_recoverable_failed_handoff_session(store, &project.id, &issue.id).await?
+    else {
+        return Ok(false);
+    };
+
+    let handoff = match opencode.latest_handoff(&session).await {
+        Ok(Some(handoff)) => handoff,
+        Ok(None) | Err(OpenCodeError::MalformedHandoff(_)) => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+
+    if !matches!(handoff.stop_reason, OpenCodeStopReason::Success) {
+        return Ok(false);
+    }
+
+    info!(
+        project_id = %project.id,
+        issue = %issue.identifier,
+        session_id = %session.session_id,
+        "recovering previously failed OpenCode handoff sidecar"
+    );
+    close_successful_handoff(
+        SuccessfulHandoffContext {
+            project,
+            self_defect_project,
+            store,
+            opencode,
+            linear,
+            issue,
+            existing_issue: existing_issue.as_ref(),
+            session: &session,
+        },
+        &handoff,
+    )
+    .await?;
+    if let Some(fingerprint) = existing_issue
+        .as_ref()
+        .and_then(|record| record.failure.as_ref())
+        .and_then(|failure| failure.fingerprint.as_deref())
+        && let Some(defect) = store.open_self_defect_by_fingerprint(fingerprint).await?
+    {
+        store
+            .mark_self_defect_managed_issue_resolved(
+                &defect.managed_issue_id,
+                SelfDefectResolutionState::Done,
+            )
+            .await?;
+    }
     Ok(true)
 }
 
@@ -1212,6 +1273,31 @@ async fn latest_session(
         })
         .collect();
     Ok(sessions.pop())
+}
+
+async fn latest_recoverable_failed_handoff_session(
+    store: &SqliteStore,
+    project_id: &str,
+    issue_id: &str,
+) -> anyhow::Result<Option<crate::state::OpenCodeSessionRecord>> {
+    let mut sessions: Vec<_> = store
+        .opencode_sessions_for_issue(project_id, issue_id)
+        .await?
+        .into_iter()
+        .filter(recoverable_failed_handoff_session)
+        .collect();
+    Ok(sessions.pop())
+}
+
+fn recoverable_failed_handoff_session(session: &crate::state::OpenCodeSessionRecord) -> bool {
+    session.lifecycle_stage == LifecycleStage::Failed
+        && session.stage == OpenCodeStage::Failed
+        && session.lifecycle_marker.as_deref() == Some("failed:malformed_handoff")
+        && session.last_event.as_deref().is_some_and(|event| {
+            event.starts_with("failed:incomplete_success_handoff")
+                || event.starts_with("failed:malformed_handoff_sidecar")
+                || event.starts_with("failed:missing_git_closure")
+        })
 }
 
 fn successful_handoff_error(handoff: &OpenCodeHandoff) -> Option<String> {

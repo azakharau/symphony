@@ -37,7 +37,17 @@ query CandidateIssues($teamKey: String!, $projectId: ID!, $states: [String!], $a
           relatedIssue {
             id
             identifier
+            title
+            description
             state { name }
+            branchName
+            url
+            comments(last: 20, orderBy: createdAt) {
+              nodes {
+                body
+                createdAt
+              }
+            }
           }
         }
       }
@@ -47,7 +57,17 @@ query CandidateIssues($teamKey: String!, $projectId: ID!, $states: [String!], $a
           issue {
             id
             identifier
+            title
+            description
             state { name }
+            branchName
+            url
+            comments(last: 20, orderBy: createdAt) {
+              nodes {
+                body
+                createdAt
+              }
+            }
           }
         }
       }
@@ -133,7 +153,17 @@ mutation CreateManagedIssue($input: IssueCreateInput!) {
           relatedIssue {
             id
             identifier
+            title
+            description
             state { name }
+            branchName
+            url
+            comments(last: 20, orderBy: createdAt) {
+              nodes {
+                body
+                createdAt
+              }
+            }
           }
         }
       }
@@ -143,7 +173,17 @@ mutation CreateManagedIssue($input: IssueCreateInput!) {
           issue {
             id
             identifier
+            title
+            description
             state { name }
+            branchName
+            url
+            comments(last: 20, orderBy: createdAt) {
+              nodes {
+                body
+                createdAt
+              }
+            }
           }
         }
       }

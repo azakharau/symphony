@@ -22,6 +22,8 @@ pub struct LinearIssue {
     pub labels: Vec<String>,
     pub project_milestone: Option<LinearMilestone>,
     pub blocked_by: Vec<LinearBlocker>,
+    #[serde(default)]
+    pub upstream_context: Vec<LinearUpstreamContext>,
     pub has_new_owner_answer: bool,
     pub owner_answer_created_at: Option<String>,
     pub created_at: Option<String>,
@@ -64,6 +66,21 @@ pub struct LinearBlocker {
     pub id: Option<String>,
     pub identifier: Option<String>,
     pub state: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinearUpstreamContext {
+    pub id: String,
+    pub identifier: String,
+    pub title: String,
+    pub state: String,
+    pub url: Option<String>,
+    pub branch_name: Option<String>,
+    pub mnemesh_workspace_ids: Vec<String>,
+    pub mnemesh_task_ids: Vec<String>,
+    pub accepted_artifacts: Vec<String>,
+    pub handoff_summary: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

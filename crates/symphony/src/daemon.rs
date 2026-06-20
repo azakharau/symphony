@@ -856,6 +856,7 @@ async fn reconcile_missing_candidate_issues(
             labels: Vec::new(),
             project_milestone: None,
             blocked_by: Vec::new(),
+            upstream_context: Vec::new(),
             has_new_owner_answer: false,
             owner_answer_created_at: None,
             created_at: None,

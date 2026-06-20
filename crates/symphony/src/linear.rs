@@ -14,8 +14,8 @@ use queries::{
 };
 pub use types::{
     LinearBlocker, LinearClientError, LinearIssue, LinearIssueEvidence, LinearMilestone,
-    LinearProjectConfig, LinearTransition, ManagedLinearIssueCreate, ManagedLinearIssueState,
-    ManagedLinearRelation,
+    LinearProjectConfig, LinearTransition, LinearUpstreamContext, ManagedLinearIssueCreate,
+    ManagedLinearIssueState, ManagedLinearRelation,
 };
 
 const CANDIDATE_STATES: &[&str] = &[

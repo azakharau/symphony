@@ -411,6 +411,7 @@ max_sessions = 1
                 name: "Milestone".into(),
             }),
             blocked_by: Vec::new(),
+            upstream_context: Vec::new(),
             has_new_owner_answer: false,
             owner_answer_created_at: None,
             created_at: None,

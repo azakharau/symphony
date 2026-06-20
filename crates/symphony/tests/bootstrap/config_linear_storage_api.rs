@@ -132,7 +132,19 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
                                         "relatedIssue": {
                                             "id": "blocker-1",
                                             "identifier": "SYM-99",
-                                            "state": { "name": "Done" }
+                                            "title": "Accepted upstream implementation",
+                                            "description": "Mnemesh workspace_id: `workspace-upstream`\nAccepted artifact: `docs/upstream.md`",
+                                            "state": { "name": "Done" },
+                                            "branchName": "feature/sym-99-upstream",
+                                            "url": "https://linear.example/SYM-99",
+                                            "comments": {
+                                                "nodes": [
+                                                    {
+                                                        "body": "## OpenCode Handoff Accepted\nMnemesh task_id: `task-upstream`\n### Changed Files\n- `src/upstream.rs:1-10`",
+                                                        "createdAt": "2026-06-10T00:02:00Z"
+                                                    }
+                                                ]
+                                            }
                                         }
                                     }
                                 ]
@@ -144,7 +156,12 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
                                         "issue": {
                                             "id": "inverse-blocker-1",
                                             "identifier": "SYM-98",
-                                            "state": { "name": "In Progress" }
+                                            "title": "Open upstream implementation",
+                                            "description": null,
+                                            "state": { "name": "In Progress" },
+                                            "branchName": null,
+                                            "url": "https://linear.example/SYM-98",
+                                            "comments": { "nodes": [] }
                                         }
                                     }
                                 ]
@@ -254,6 +271,29 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
         issues[0].blocked_by[1].identifier.as_deref(),
         Some("SYM-98")
     );
+    assert_eq!(issues[0].upstream_context.len(), 1);
+    let upstream = &issues[0].upstream_context[0];
+    assert_eq!(upstream.identifier, "SYM-99");
+    assert_eq!(upstream.title, "Accepted upstream implementation");
+    assert_eq!(upstream.state, "Done");
+    assert_eq!(
+        upstream.mnemesh_workspace_ids,
+        vec!["workspace-upstream".to_string()]
+    );
+    assert_eq!(upstream.mnemesh_task_ids, vec!["task-upstream".to_string()]);
+    assert_eq!(
+        upstream.accepted_artifacts,
+        vec![
+            "docs/upstream.md".to_string(),
+            "src/upstream.rs:1-10".to_string(),
+        ]
+    );
+    assert!(
+        upstream
+            .handoff_summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("OpenCode Handoff Accepted"))
+    );
     assert!(!issues[0].has_new_owner_answer);
     assert_eq!(issues[1].identifier, "SYM-101");
     assert!(issues[1].has_new_owner_answer);
@@ -295,6 +335,12 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
             .as_str()
             .expect("candidate query")
             .contains("comments(last: 50, orderBy: createdAt)")
+    );
+    assert!(
+        requests[0]["query"]
+            .as_str()
+            .expect("candidate query")
+            .contains("comments(last: 20, orderBy: createdAt)")
     );
     assert_eq!(requests[2]["variables"]["stateId"], "state-in-progress");
     assert!(

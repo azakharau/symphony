@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use super::{LinearBlocker, LinearIssue, LinearMilestone};
+use super::{LinearBlocker, LinearIssue, LinearMilestone, LinearUpstreamContext};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct LinearIssueConnection {
@@ -45,9 +45,21 @@ impl LinearIssueNode {
     pub(super) fn into_issue(self) -> LinearIssue {
         let owner_answer_created_at = latest_owner_answer_comment(&self.comments.nodes)
             .and_then(|comment| comment.created_at.clone());
-        let mut blocked_by: Vec<_> = self
-            .relations
-            .nodes
+        let relation_nodes = self.relations.nodes;
+        let inverse_relation_nodes = self.inverse_relations.nodes;
+        let mut upstream_context: Vec<_> = relation_nodes
+            .iter()
+            .filter(|relation| relation.relation_type == "blocked_by")
+            .filter_map(|relation| relation.related_issue.accepted_context())
+            .collect();
+        upstream_context.extend(
+            inverse_relation_nodes
+                .iter()
+                .filter(|relation| relation.relation_type == "blocks")
+                .filter_map(|relation| relation.issue.accepted_context()),
+        );
+
+        let mut blocked_by: Vec<_> = relation_nodes
             .into_iter()
             .filter(|relation| relation.relation_type == "blocked_by")
             .map(|relation| LinearBlocker {
@@ -57,8 +69,7 @@ impl LinearIssueNode {
             })
             .collect();
         blocked_by.extend(
-            self.inverse_relations
-                .nodes
+            inverse_relation_nodes
                 .into_iter()
                 .filter(|relation| relation.relation_type == "blocks")
                 .map(|relation| LinearBlocker {
@@ -87,6 +98,7 @@ impl LinearIssueNode {
                 .map(|label| label.name)
                 .collect(),
             blocked_by,
+            upstream_context: dedupe_upstream_contexts(upstream_context),
             has_new_owner_answer: owner_answer_created_at.is_some(),
             owner_answer_created_at,
             created_at: self.created_at,
@@ -156,7 +168,7 @@ struct LinearInverseRelationNode {
     issue: RelatedIssueNode,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct LinearCommentConnection {
     nodes: Vec<LinearCommentNode>,
 }
@@ -172,7 +184,152 @@ struct LinearCommentNode {
 struct RelatedIssueNode {
     id: String,
     identifier: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
     state: WorkflowStateName,
+    #[serde(default, rename = "branchName")]
+    branch_name: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    comments: LinearCommentConnection,
+}
+
+impl RelatedIssueNode {
+    fn accepted_context(&self) -> Option<LinearUpstreamContext> {
+        if !matches!(self.state.name.as_str(), "Done" | "completed" | "Completed") {
+            return None;
+        }
+
+        let mut workspace_ids = Vec::new();
+        let mut task_ids = Vec::new();
+        let mut artifacts = Vec::new();
+        if let Some(description) = self.description.as_deref() {
+            extract_context_refs(description, &mut workspace_ids, &mut task_ids);
+            extract_artifacts(description, &mut artifacts);
+        }
+        let handoff_summary = latest_handoff_comment(&self.comments.nodes).map(|comment| {
+            let body = comment.body.as_deref().unwrap_or_default();
+            extract_context_refs(body, &mut workspace_ids, &mut task_ids);
+            extract_artifacts(body, &mut artifacts);
+            compact_handoff_summary(body)
+        });
+
+        Some(LinearUpstreamContext {
+            id: self.id.clone(),
+            identifier: self.identifier.clone(),
+            title: self.title.clone().unwrap_or_default(),
+            state: self.state.name.clone(),
+            url: self.url.clone(),
+            branch_name: self.branch_name.clone(),
+            mnemesh_workspace_ids: dedupe_preserve_order(workspace_ids),
+            mnemesh_task_ids: dedupe_preserve_order(task_ids),
+            accepted_artifacts: dedupe_preserve_order(artifacts),
+            handoff_summary,
+        })
+    }
+}
+
+fn latest_handoff_comment(comments: &[LinearCommentNode]) -> Option<&LinearCommentNode> {
+    comments
+        .iter()
+        .filter(|comment| {
+            comment
+                .body
+                .as_deref()
+                .is_some_and(|body| body.to_lowercase().contains("opencode handoff accepted"))
+        })
+        .max_by_key(|comment| comment.created_at.as_deref().unwrap_or_default())
+}
+
+fn extract_context_refs(text: &str, workspace_ids: &mut Vec<String>, task_ids: &mut Vec<String>) {
+    for line in text.lines() {
+        let lower = line.to_lowercase();
+        if lower.contains("mnemesh workspace_id") || lower.contains("workspace_id") {
+            workspace_ids.extend(extract_backtick_or_colon_values(line));
+        }
+        if lower.contains("mnemesh task_id") || lower.contains("task_id") {
+            task_ids.extend(extract_backtick_or_colon_values(line));
+        }
+    }
+}
+
+fn extract_artifacts(text: &str, artifacts: &mut Vec<String>) {
+    let mut in_changed_files = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("### ") {
+            in_changed_files = trimmed.eq_ignore_ascii_case("### changed files");
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+        if in_changed_files
+            || lower.contains("accepted artifact")
+            || lower.contains("artifact:")
+            || lower.contains("changed file")
+        {
+            artifacts.extend(extract_backtick_values(trimmed));
+        }
+    }
+}
+
+fn extract_backtick_or_colon_values(line: &str) -> Vec<String> {
+    let backtick_values = extract_backtick_values(line);
+    if !backtick_values.is_empty() {
+        return backtick_values;
+    }
+    line.split_once(':')
+        .map(|(_, value)| vec![value.trim().trim_matches(['`', '*', '-']).to_string()])
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn extract_backtick_values(line: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut rest = line;
+    while let Some(start) = rest.find('`') {
+        let after_start = &rest[start + 1..];
+        let Some(end) = after_start.find('`') else {
+            break;
+        };
+        let value = after_start[..end].trim();
+        if !value.is_empty() {
+            values.push(value.to_string());
+        }
+        rest = &after_start[end + 1..];
+    }
+    values
+}
+
+fn compact_handoff_summary(body: &str) -> String {
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(18)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn dedupe_preserve_order(values: Vec<String>) -> Vec<String> {
+    values.into_iter().fold(Vec::new(), |mut acc, value| {
+        if !acc.contains(&value) {
+            acc.push(value);
+        }
+        acc
+    })
+}
+
+fn dedupe_upstream_contexts(values: Vec<LinearUpstreamContext>) -> Vec<LinearUpstreamContext> {
+    values.into_iter().fold(Vec::new(), |mut acc, value| {
+        if !acc.iter().any(|existing| existing.id == value.id) {
+            acc.push(value);
+        }
+        acc
+    })
 }
 
 fn latest_owner_answer_comment(comments: &[LinearCommentNode]) -> Option<&LinearCommentNode> {

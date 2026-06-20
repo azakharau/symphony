@@ -24,6 +24,8 @@ pub(super) fn build_issue_prompt(
          URL: {url}\n\n\
          Mnemesh evidence workspace contract:\n\
          {mnemesh_workspace_contract}\n\n\
+         Upstream accepted context:\n\
+         {upstream_context}\n\n\
          MCP tool-schema loop guard:\n\
          {mcp_tool_loop_guard}\n\n\
          Delegated review/evaluator subagent contract:\n\
@@ -81,12 +83,115 @@ pub(super) fn build_issue_prompt(
                 .map(|mnemesh| mnemesh.workspace_root.as_path()),
             &project.branch.worktree_root.join(&issue.identifier),
         ),
+        upstream_context = upstream_context_text(issue),
         validation_policy = validation_policy_text(),
         mcp_tool_loop_guard = mcp_tool_loop_guard_text(),
         delegated_subagent_contract = delegated_subagent_contract_text(),
         triage_policy = triage_policy_text(),
         commit_policy = commit_policy_text(),
     )
+}
+
+fn upstream_context_text(issue: &LinearIssue) -> String {
+    if issue.upstream_context.is_empty() {
+        return "- No accepted upstream Linear blocker context is available for this issue."
+            .to_owned();
+    }
+
+    let mut lines = Vec::new();
+    for context in issue.upstream_context.iter().take(8) {
+        lines.push(format!(
+            "- {} (`{}`): {}",
+            context.identifier,
+            context.state,
+            empty_as("untitled upstream issue", &context.title)
+        ));
+        if let Some(url) = context.url.as_deref().filter(|url| !url.is_empty()) {
+            lines.push(format!("  URL: {url}"));
+        }
+        if let Some(branch) = context
+            .branch_name
+            .as_deref()
+            .filter(|branch| !branch.is_empty())
+        {
+            lines.push(format!("  Branch: {branch}"));
+        }
+        push_limited_values(
+            &mut lines,
+            "  Mnemesh workspace ids",
+            &context.mnemesh_workspace_ids,
+            6,
+        );
+        push_limited_values(
+            &mut lines,
+            "  Mnemesh task ids",
+            &context.mnemesh_task_ids,
+            6,
+        );
+        push_limited_values(
+            &mut lines,
+            "  Accepted artifacts",
+            &context.accepted_artifacts,
+            12,
+        );
+        if let Some(summary) = context
+            .handoff_summary
+            .as_deref()
+            .filter(|summary| !summary.trim().is_empty())
+        {
+            lines.push("  Latest handoff excerpt:".to_owned());
+            lines.extend(
+                summary
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .take(12)
+                    .map(|line| format!("    {line}")),
+            );
+        }
+        lines.push(
+            "  Required use: treat this as accepted upstream input; inspect the Mnemesh refs/artifacts before rediscovering or replanning this surface."
+                .to_owned(),
+        );
+    }
+
+    if issue.upstream_context.len() > 8 {
+        lines.push(format!(
+            "- {} additional accepted upstream issues omitted from the launch prompt; inspect Linear relations if needed.",
+            issue.upstream_context.len() - 8
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn empty_as<'a>(fallback: &'a str, value: &'a str) -> &'a str {
+    if value.trim().is_empty() {
+        fallback
+    } else {
+        value
+    }
+}
+
+fn push_limited_values(lines: &mut Vec<String>, label: &str, values: &[String], limit: usize) {
+    if values.is_empty() {
+        return;
+    }
+
+    let visible = values
+        .iter()
+        .take(limit)
+        .map(|value| format!("`{value}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if values.len() > limit {
+        lines.push(format!(
+            "{label}: {visible} (+{} more)",
+            values.len() - limit
+        ));
+    } else {
+        lines.push(format!("{label}: {visible}"));
+    }
 }
 
 pub(super) fn mnemesh_workspace_contract_text(

@@ -257,8 +257,23 @@ async fn dashboard_issue_detail_embeds_live_opencode_activity_from_sqlite() {
 async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_issue_prompt() {
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
-    let issue = linear_issue("issue-27", "SYM-27", "Todo", Some(1))
+    let mut issue = linear_issue("issue-27", "SYM-27", "Todo", Some(1))
         .with_description("Implement the OpenCode ACP lifecycle runner with stage telemetry.");
+    issue.upstream_context.push(LinearUpstreamContext {
+        id: "upstream-55".into(),
+        identifier: "NER-55".into(),
+        title: "Canon source authority map".into(),
+        state: "Done".into(),
+        url: Some("https://linear.example/NER-55".into()),
+        branch_name: Some("feature/ner-55-canon-source-authority-map".into()),
+        mnemesh_workspace_ids: vec!["workspace-54f6c799-4258-4b40-80ec-f0606bff3ce9".into()],
+        mnemesh_task_ids: vec!["task-ner-55".into()],
+        accepted_artifacts: vec!["docs/canon-source-authority-map.md".into()],
+        handoff_summary: Some(
+            "## OpenCode Handoff Accepted\nCommitted 61f216d docs: add canon source authority map"
+                .into(),
+        ),
+    });
 
     let spec = opencode::build_acp_launch_spec(project, &issue);
 
@@ -337,6 +352,21 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         "{}",
         spec.prompt
     );
+    assert!(
+        spec.prompt.contains("Upstream accepted context"),
+        "{}",
+        spec.prompt
+    );
+    for fragment in [
+        "NER-55 (`Done`): Canon source authority map",
+        "workspace-54f6c799-4258-4b40-80ec-f0606bff3ce9",
+        "task-ner-55",
+        "docs/canon-source-authority-map.md",
+        "Committed 61f216d docs: add canon source authority map",
+        "treat this as accepted upstream input; inspect the Mnemesh refs/artifacts before rediscovering or replanning this surface",
+    ] {
+        assert!(spec.prompt.contains(fragment), "{}", spec.prompt);
+    }
     assert!(
         spec.prompt.contains(
             "After two failed calls to the same MCP method for schema/validation reasons, stop retrying that method in this session"

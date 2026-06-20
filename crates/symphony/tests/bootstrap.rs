@@ -16,7 +16,8 @@ use symphony::{
     linear::{
         LinearBlocker, LinearClient, LinearClientError, LinearGraphqlClient,
         LinearGraphqlTransport, LinearIssue, LinearIssueEvidence, LinearTransition,
-        ManagedLinearIssueCreate, ManagedLinearIssueState, ManagedLinearRelation,
+        LinearUpstreamContext, ManagedLinearIssueCreate, ManagedLinearIssueState,
+        ManagedLinearRelation,
     },
     opencode::{
         self, GitClosureEvidence, OpenCodeEvalResult, OpenCodeHandoff, OpenCodeLauncher,
@@ -175,6 +176,7 @@ fn linear_issue(
             name: "Test Milestone".into(),
         }),
         blocked_by: Vec::new(),
+        upstream_context: Vec::new(),
         has_new_owner_answer: false,
         owner_answer_created_at: None,
         created_at: None,
@@ -764,6 +766,7 @@ impl LinearClient for RecordingLinearClient {
             labels: Vec::new(),
             project_milestone: None,
             blocked_by: Vec::new(),
+            upstream_context: Vec::new(),
             has_new_owner_answer: false,
             owner_answer_created_at: None,
             created_at: None,

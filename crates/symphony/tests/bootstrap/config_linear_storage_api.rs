@@ -1110,6 +1110,52 @@ async fn sqlite_store_reads_canceled_terminal_issue_state() {
 }
 
 #[tokio::test]
+async fn dashboard_treats_canceled_issues_as_terminal_history_not_parked_work() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let mut canceled = test_issue("symphony", "canceled", "SYM-8");
+    canceled.lifecycle_stage = LifecycleStage::Canceled;
+    canceled.cleanup_status = CleanupStatus::Complete;
+    store.upsert_issue(canceled).await.expect("canceled issue");
+    store
+        .mark_project_liveness_poll(
+            "symphony",
+            RuntimeLivenessStatus::NoEligibleIssues,
+            "candidate scan found no eligible issues",
+            2,
+            0,
+            true,
+        )
+        .await
+        .expect("liveness");
+
+    let api = RuntimeDashboardApi::from_store(&config, &store)
+        .await
+        .expect("dashboard api");
+    let project = api
+        .project_drilldown("symphony")
+        .expect("project endpoint")
+        .expect("project");
+
+    assert!(project.active_issues.is_empty());
+    assert_eq!(project.history_issues.len(), 1);
+    let card = api
+        .aggregate()
+        .projects
+        .iter()
+        .find(|card| card.project_id == "symphony")
+        .expect("project card");
+    assert_eq!(card.active_count, 0);
+    assert_eq!(card.parked_count, 0);
+    assert_eq!(card.runner_health, "idle");
+}
+
+#[tokio::test]
 async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

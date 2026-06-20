@@ -599,7 +599,10 @@ async fn project_dashboard_response(
     let mut history_issues = Vec::new();
     for issue in project.issues {
         let detail = issue_detail_response(store, issue, opencode_database_path.as_ref()).await?;
-        if detail.lifecycle_stage == LifecycleStage::Completed {
+        if matches!(
+            detail.lifecycle_stage,
+            LifecycleStage::Completed | LifecycleStage::Canceled
+        ) {
             history_issues.push(detail);
         } else {
             active_issues.push(detail);

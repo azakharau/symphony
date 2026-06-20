@@ -273,6 +273,12 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         Some(PathBuf::from("/home/agent/proj/symphony"))
     );
     assert!(spec.prompt.contains("SYM-27"), "{}", spec.prompt);
+    assert!(!spec.prompt.contains("Run OpenCode ACP"), "{}", spec.prompt);
+    assert!(
+        !spec.prompt.contains("OpenCode ACP session id"),
+        "{}",
+        spec.prompt
+    );
     assert!(
         spec.prompt
             .contains("Mnemesh workspace root: /home/agent/proj/symphony"),
@@ -581,9 +587,10 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
                 "{transcript}"
             );
             assert!(
-                transcript.contains("OpenCode ACP session id: ses-test"),
+                !transcript.contains("OpenCode ACP session id"),
                 "{transcript}"
             );
+            assert!(!transcript.contains("Run OpenCode ACP"), "{transcript}");
             assert!(
                 transcript.contains(&format!(
                     r#""SYMPHONY_MNEMESH_WORKSPACE_ROOT": "{}""#,

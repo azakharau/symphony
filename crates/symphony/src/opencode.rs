@@ -369,10 +369,6 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             }
         };
         let prompt_request_id = next_id;
-        let prompt = format!(
-            "OpenCode ACP session id: {session_id}\n\n{task_prompt}",
-            task_prompt = spec.prompt.as_str()
-        );
         write_acp_request(
             child.stdin(),
             prompt_request_id,
@@ -382,7 +378,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
                 "prompt": [
                     {
                         "type": "text",
-                        "text": prompt.as_str(),
+                        "text": spec.prompt.as_str(),
                     }
                 ],
             }),
@@ -498,7 +494,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
 
         let prompt_request_id = next_id;
         let prompt = format!(
-            "Symphony repair required for existing ACP session `{}`.\n\n\
+            "Symphony repair required for the current ACP session.\n\n\
              Failure fingerprint: `{}`\n\n\
              Repair details:\n{}\n\n\
              Mnemesh evidence workspace contract:\n{}\n\n\
@@ -509,7 +505,6 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
              Continue the same implementation session. Do not start a new task. \
              Fix the implementation or handoff, rerun the required validation, \
              and rewrite the structured Symphony handoff JSON at the configured sidecar path.",
-            session.session_id,
             failure_fingerprint,
             repair_message,
             mnemesh_workspace_contract_text(
@@ -593,7 +588,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
 
         let prompt_request_id = next_id;
         let prompt = format!(
-            "Symphony continuation required for existing ACP session `{}`.\n\n\
+            "Symphony continuation required for the current ACP session.\n\n\
              Continue the same implementation session. Do not start a new task. \
              Do not repeat already completed work unless validation requires it.\n\n\
              Mnemesh evidence workspace contract:\n{}\n\n\
@@ -601,7 +596,6 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
              Delegated review/evaluator subagent contract:\n{}\n\n\
              Validation policy:\n{}\n\n\
              Commit policy for successful handoff:\n{}\n\n{}",
-            session.session_id,
             mnemesh_workspace_contract_text(
                 spec.mnemesh_workspace_root.as_deref(),
                 spec.cwd.as_path()

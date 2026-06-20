@@ -14,7 +14,7 @@ pub(super) fn build_issue_prompt(
         .as_deref()
         .unwrap_or("No description provided.");
     format!(
-        "Run OpenCode ACP for {identifier}: {title}\n\n\
+        "Issue {identifier}: {title}\n\n\
          Project: {project_id}\n\
          Repository: {repo_path}\n\
          Isolated worktree: {worktree}\n\

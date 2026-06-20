@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import { Badge, Panel } from "@/src/components";
+import { LiveDuration } from "@/src/live-duration";
 import type { IssueDetail, SessionActivity, TimelineEvent, TodoActivity } from "@/src/types";
 
 const tabs = ["Todos", "Timeline", "Agents", "Tools", "Evidence"] as const;
@@ -27,7 +28,6 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
   const linearUrl = linearIssueUrl(issue.identifier);
   const opencodeDirectory = session ? opencodeSessionDirectory(session) : undefined;
   const opencodeUrl = session && opencodeDirectory ? opencodeSessionUrl(session.opencode_session_id, opencodeDirectory) : undefined;
-  const sessionDuration = formatDuration(session?.duration_ms);
 
   return (
     <div className="flex flex-col gap-5">
@@ -55,7 +55,7 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
               <KeyValue label="active agent" value={session?.active_agent ?? session?.agent ?? "unavailable"} />
               <KeyValue label="model" value={session?.active_model ?? session?.model ?? "unavailable"} />
               <KeyValue label="tokens" value={formatCompactNumber(sessionTokens.net)} detail={`${formatCompactNumber(sessionTokens.cached)} cached`} />
-              <KeyValue label="duration" value={sessionDuration} />
+              <KeyValue label="duration" value={<LiveDuration startedAtMs={session?.started_at_ms} fallbackMs={session?.duration_ms} />} />
               <KeyValue label="worktree" value={session?.worktree_path ?? issue.git_ref?.worktree_path ?? "unavailable"} mono />
               <KeyValue label="git" value={issue.git_ref ? `${issue.git_ref.branch} ${issue.git_ref.head_sha ?? ""}` : "unavailable"} mono />
             </dl>
@@ -338,18 +338,6 @@ function tokenBreakdown(total: number, cached?: number | null): { net: number; c
   };
 }
 
-function formatDuration(value?: number | null): string {
-  if (value == null || value < 0) return "—";
-  const totalSeconds = Math.floor(value / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m ${seconds}s`;
-  return `${seconds}s`;
-}
-
 function formatEpochMs(value: number): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
@@ -382,7 +370,7 @@ function Evidence({ label, value }: { label: string; value: string }) {
   return <div className="rounded-xl border border-slate-200 bg-slate-50 p-3"><span className="font-semibold">{label}</span><p className="mt-1 text-slate-600">{value}</p></div>;
 }
 
-function KeyValue({ label, value, detail, mono = false }: { label: string; value: string; detail?: string; mono?: boolean }) {
+function KeyValue({ label, value, detail, mono = false }: { label: string; value: React.ReactNode; detail?: string; mono?: boolean }) {
   return <div className="rounded-xl border border-slate-200 bg-slate-50 p-3"><dt className="text-xs uppercase tracking-wide text-slate-500">{label}</dt><dd className={`mt-1 break-all ${mono ? "font-mono text-xs" : "font-medium"}`}>{value}</dd>{detail ? <dd className="mt-1 text-xs text-slate-500">{detail}</dd> : null}</div>;
 }
 

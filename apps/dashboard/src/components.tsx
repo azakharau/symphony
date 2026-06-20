@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { LiveDuration } from "@/src/live-duration";
 import type { AggregateDashboard, DashboardProjectCard, IssueDetail, ProjectDetail, RunningIssueSummary, SelfDefectRouteSummary } from "@/src/types";
 import type { QuotaResult, QuotaWindow } from "@/src/quota";
 
@@ -213,7 +214,7 @@ function RunningTable({ issues }: { issues: RunningIssueSummary[] }) {
               <td className="px-3 py-3"><Badge tone={statusTone(issue.stage)}>{issue.stage ?? issue.display_status}</Badge></td>
               <td className="px-3 py-3">{issue.active_agent ?? issue.agent ?? "—"}<div className="text-xs text-slate-500">{issue.active_model ?? issue.model ?? "model unknown"}</div></td>
               <td className="px-3 py-3"><TokenCell total={issue.token_count} cached={issue.cached_token_count} /></td>
-              <td className="px-3 py-3"><Duration value={issue.duration_ms} /></td>
+              <td className="px-3 py-3"><LiveDuration startedAtMs={issue.started_at_ms} fallbackMs={issue.duration_ms} /></td>
             </tr>
           ))}
         </tbody>
@@ -321,7 +322,7 @@ function IssueTable({ issues, projectId }: { issues: IssueDetail[]; projectId: s
                 <td className="px-3 py-3"><TokenCell total={session?.token_count ?? 0} cached={session?.cached_token_count} /></td>
                 <td className="px-3 py-3">{session?.activity?.running_tool_count ?? 0}/{session?.activity?.pending_tool_count ?? 0}</td>
                 <td className="px-3 py-3">{session?.todo_count ?? 0}</td>
-                <td className="px-3 py-3"><Duration value={session?.duration_ms} /></td>
+                <td className="px-3 py-3"><LiveDuration startedAtMs={session?.started_at_ms} fallbackMs={session?.duration_ms} /></td>
                 <td className="max-w-[220px] truncate px-3 py-3 font-mono text-xs">{session?.worktree_path ?? issue.git_ref?.worktree_path ?? "—"}</td>
               </tr>
             );
@@ -409,10 +410,6 @@ function TokenCell({ total, cached }: { total: number; cached?: number | null })
       <div className="text-xs text-slate-500">{formatNumber(tokens.cached)} cached</div>
     </div>
   );
-}
-
-function Duration({ value }: { value?: number | null }) {
-  return <span className="tabular-nums">{formatDuration(value)}</span>;
 }
 
 export function Panel({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
@@ -513,16 +510,4 @@ function tokenBreakdown(total: number, cached?: number | null): { net: number; c
     net: Math.max(0, total - safeCached),
     cached: safeCached,
   };
-}
-
-function formatDuration(value?: number | null): string {
-  if (value == null || value < 0) return "—";
-  const totalSeconds = Math.floor(value / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m ${seconds}s`;
-  return `${seconds}s`;
 }

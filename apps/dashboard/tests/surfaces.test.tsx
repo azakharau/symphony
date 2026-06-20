@@ -104,7 +104,7 @@ describe("dashboard surfaces", () => {
     expect(html).toContain(">35,100</dd>");
     expect(html).toContain(">3,110 cached</dd>");
     expect(html).toContain(">duration</dt>");
-    expect(html).toContain(">1h 0m</dd>");
+    expect(html).toContain("<span class=\"tabular-nums\">1h 0m</span>");
     expect(html).not.toContain(">cached</dt>");
     expect(html).not.toContain(">last event</dt>");
     expect(html).not.toContain(">process</dt>");
@@ -173,7 +173,7 @@ describe("dashboard surfaces", () => {
     expect(normal).toContain("76% remaining · 24% used");
     expect(normal).toContain("Jun 19, 2026");
     expect(normal).not.toContain("2026-06-19");
-    expect(normal).not.toContain("ocu --plain --localhost");
+    expect(normal).not.toContain("ocu --localhost --plain");
     expect(unavailable).not.toContain("ocu --plain");
   });
 

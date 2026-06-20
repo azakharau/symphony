@@ -894,6 +894,78 @@ async fn opencode_sessions_for_issue_orders_by_runtime_update_not_session_id() {
 }
 
 #[tokio::test]
+async fn active_opencode_sessions_excludes_terminal_sessions_for_metrics_polling() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store
+        .upsert_project(ProjectStateRecord {
+            project_id: "symphony".into(),
+            name: "Symphony".into(),
+            enabled: true,
+            lifecycle_stage: LifecycleStage::Running,
+            cleanup_status: CleanupStatus::Clean,
+        })
+        .await
+        .expect("project");
+    for issue_id in ["done", "running", "starting"] {
+        store
+            .upsert_issue(test_issue("symphony", issue_id, format!("SYM-{issue_id}")))
+            .await
+            .expect("issue");
+    }
+
+    let mut completed = test_session(
+        "symphony",
+        "done",
+        "completed-session",
+        dir.path().join("done"),
+    );
+    completed.lifecycle_stage = LifecycleStage::Completed;
+    completed.stage = OpenCodeStage::Completed;
+    store
+        .upsert_opencode_session(completed)
+        .await
+        .expect("completed session");
+
+    let running = test_session(
+        "symphony",
+        "running",
+        "running-session",
+        dir.path().join("running"),
+    );
+    store
+        .upsert_opencode_session(running)
+        .await
+        .expect("running session");
+
+    let mut starting = test_session(
+        "symphony",
+        "starting",
+        "starting-session",
+        dir.path().join("starting"),
+    );
+    starting.lifecycle_stage = LifecycleStage::Blocked;
+    starting.stage = OpenCodeStage::Starting;
+    store
+        .upsert_opencode_session(starting)
+        .await
+        .expect("starting session");
+
+    let sessions = store
+        .active_opencode_sessions()
+        .await
+        .expect("active sessions");
+    let session_ids = sessions
+        .iter()
+        .map(|session| session.session_id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(session_ids, vec!["running-session", "starting-session"]);
+}
+
+#[tokio::test]
 async fn runtime_cleanup_removes_stale_completed_rows_and_keeps_active_state() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
@@ -1219,6 +1291,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
           "running_tool_count": 0,
           "pending_tool_count": 0,
           "todo_count": 1,
+          "started_at_ms": null,
           "duration_ms": null,
           "last_event": "eval_failed:clippy-needless-collect",
           "worktree_path": "/home/agent/.symphony/workspaces/opencode/symphony/SYM-91"

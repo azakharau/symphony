@@ -597,6 +597,28 @@ impl SqliteStore {
         collect_rows(&mut rows, session_from_row).await
     }
 
+    pub async fn active_opencode_sessions(
+        &self,
+    ) -> Result<Vec<OpenCodeSessionRecord>, StorageError> {
+        let mut rows = self
+            .conn
+            .query(
+                r#"
+                SELECT project_id, issue_id, session_id, agent, model, worktree_path,
+                       process_id, lifecycle_stage, stage, active_agent, active_model, message_count,
+                       todo_count, part_count, token_count, cost_micros, subagent_count,
+                       eval_stage, lifecycle_marker, last_event, silence_observed
+                FROM opencode_sessions
+                WHERE lifecycle_stage = 'running'
+                   OR stage IN ('starting', 'running', 'eval', 'review', 'handoff', 'silent')
+                ORDER BY updated_at ASC, rowid ASC, session_id ASC
+                "#,
+                (),
+            )
+            .await?;
+        collect_rows(&mut rows, session_from_row).await
+    }
+
     pub async fn upsert_opencode_stage_event<E>(&self, event: E) -> Result<(), StorageError>
     where
         E: Borrow<OpenCodeStageEventRecord> + Send + Sync,

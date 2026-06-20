@@ -63,7 +63,7 @@ export async function readQuota(config: DashboardConfig): Promise<QuotaResult> {
   }
 }
 
-export function parseQuotaJson(stdout: string, command = "ocu --plain --localhost"): QuotaResult {
+export function parseQuotaJson(stdout: string, command = "ocu --localhost --plain"): QuotaResult {
   let raw: unknown;
   try {
     raw = JSON.parse(stdout);

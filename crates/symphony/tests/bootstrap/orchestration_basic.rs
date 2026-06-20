@@ -2212,6 +2212,54 @@ async fn orchestration_cancels_runtime_issue_missing_from_linear_candidates() {
 }
 
 #[tokio::test]
+async fn orchestration_cancels_stale_queued_and_blocked_issues_missing_from_linear_candidates() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let mut blocked = test_issue("symphony", "stale-blocked", "SYM-998");
+    blocked.lifecycle_stage = LifecycleStage::Blocked;
+    blocked.blocker = Some(BlockerRecord {
+        kind: "linear_blocker".into(),
+        message: "SYM-997 is Todo".into(),
+        observed_at: None,
+    });
+    store.upsert_issue(blocked).await.expect("blocked issue");
+
+    let mut queued = test_issue("symphony", "stale-queued", "SYM-996");
+    queued.lifecycle_stage = LifecycleStage::Queued;
+    store.upsert_issue(queued).await.expect("queued issue");
+
+    let client = RecordingLinearClient::new(Vec::new());
+
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("orchestrate once");
+
+    let mut terminal_reconciled = report.terminal_reconciled;
+    terminal_reconciled.sort();
+    assert_eq!(terminal_reconciled, vec!["SYM-996", "SYM-998"]);
+    for issue_id in ["stale-blocked", "stale-queued"] {
+        let issue = store
+            .issue("symphony", issue_id)
+            .await
+            .expect("query issue")
+            .expect("issue");
+        assert_eq!(issue.lifecycle_stage, LifecycleStage::Canceled);
+        assert!(issue.blocker.is_none());
+    }
+    let liveness = store
+        .project_liveness("symphony")
+        .await
+        .expect("query liveness")
+        .expect("liveness");
+    assert_eq!(liveness.status, RuntimeLivenessStatus::NoEligibleIssues);
+}
+
+#[tokio::test]
 async fn orchestration_records_launch_failure_without_aborting_poll_or_owner_input() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

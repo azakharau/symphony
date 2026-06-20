@@ -886,6 +886,12 @@ async fn missing_candidate_runtime_is_stale(
     store: &SqliteStore,
     existing: &IssueStateRecord,
 ) -> anyhow::Result<bool> {
+    if matches!(
+        existing.lifecycle_stage,
+        LifecycleStage::Queued | LifecycleStage::Blocked
+    ) {
+        return Ok(true);
+    }
     if existing.lifecycle_stage != LifecycleStage::Running {
         return Ok(false);
     }

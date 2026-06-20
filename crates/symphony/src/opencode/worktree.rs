@@ -1,4 +1,8 @@
-use std::path::{Component, Path, PathBuf};
+use std::{
+    fs,
+    path::{Component, Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use tokio::process::Command;
 use tracing::{debug, info};
@@ -20,7 +24,10 @@ pub(super) async fn ensure_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), Ope
     let base_ref = effective_base_ref(repo_path, base_ref).await?;
 
     if tokio::fs::try_exists(spec.cwd.join(".git")).await? {
-        return ensure_existing_git_worktree(spec, repo_path, &base_ref).await;
+        if worktree_git_metadata_usable(&spec.cwd).await? {
+            return ensure_existing_git_worktree(spec, repo_path, &base_ref).await;
+        }
+        archive_broken_git_worktree(spec, repo_path).await?;
     }
 
     if tokio::fs::try_exists(&spec.cwd).await? && directory_has_entries(&spec.cwd).await? {
@@ -55,7 +62,10 @@ pub(super) async fn ensure_resumable_worktree(
     let base_ref = effective_base_ref(repo_path, base_ref).await?;
 
     if tokio::fs::try_exists(spec.cwd.join(".git")).await? {
-        return ensure_existing_resumable_git_worktree(spec).await;
+        if worktree_git_metadata_usable(&spec.cwd).await? {
+            return ensure_existing_resumable_git_worktree(spec).await;
+        }
+        archive_broken_git_worktree(spec, repo_path).await?;
     }
 
     ensure_worktree_with_effective_base(spec, repo_path, &base_ref).await
@@ -79,6 +89,47 @@ async fn ensure_worktree_with_effective_base(
 
     prune_stale_worktree_entries(repo_path).await?;
     create_git_worktree(spec, repo_path, base_ref).await
+}
+
+async fn worktree_git_metadata_usable(path: &Path) -> Result<bool, OpenCodeError> {
+    git_success(path, ["rev-parse", "--is-inside-work-tree"]).await
+}
+
+async fn archive_broken_git_worktree(
+    spec: &OpenCodeLaunchSpec,
+    repo_path: &Path,
+) -> Result<(), OpenCodeError> {
+    let archive_root = spec
+        .worktree_root
+        .as_deref()
+        .or_else(|| spec.cwd.parent())
+        .map(|root| root.join(".stale-worktrees"))
+        .ok_or_else(|| {
+            OpenCodeError::InvalidWorktree(format!(
+                "cannot archive broken worktree {} without a parent directory",
+                spec.cwd.display()
+            ))
+        })?;
+    tokio::fs::create_dir_all(&archive_root).await?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let archive_path = archive_root.join(format!(
+        "{}-{}-{timestamp}",
+        spec.issue_identifier,
+        std::process::id()
+    ));
+
+    info!(
+        issue = %spec.issue_identifier,
+        cwd = %spec.cwd.display(),
+        archive_path = %archive_path.display(),
+        "archiving broken OpenCode git worktree metadata before fresh launch"
+    );
+    tokio::fs::rename(&spec.cwd, &archive_path).await?;
+    prune_stale_worktree_entries(repo_path).await?;
+    Ok(())
 }
 
 async fn ensure_existing_git_worktree(
@@ -124,12 +175,14 @@ async fn ensure_existing_git_worktree(
     }
 
     if !status.trim().is_empty() {
-        return Err(OpenCodeError::InvalidWorktree(format!(
-            "existing worktree {} is on expected branch {} but has dirty or untracked files: {}",
-            spec.cwd.display(),
-            spec.branch_name,
-            dirty_or_untracked_evidence(&status)
-        )));
+        info!(
+            issue = %spec.issue_identifier,
+            cwd = %spec.cwd.display(),
+            branch_name = %spec.branch_name,
+            dirty_evidence = %dirty_or_untracked_evidence(&status),
+            "OpenCode worktree already contains preserved same-issue changes; launching repair in place"
+        );
+        return Ok(());
     }
 
     align_existing_worktree_to_base(spec, repo_path, base_ref).await?;
@@ -381,7 +434,7 @@ async fn git_status<const N: usize>(
         Ok(())
     } else {
         Err(OpenCodeError::GitCommand {
-            command: format!("git -C {} {command}", cwd.display()),
+            command: format!("git -C {} {}", cwd.display(), git_subcommand_label(command)),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
     }
@@ -402,7 +455,7 @@ async fn git_output<const N: usize>(
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
         Err(OpenCodeError::GitCommand {
-            command: format!("git -C {} {command}", cwd.display()),
+            command: format!("git -C {} {}", cwd.display(), git_subcommand_label(command)),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
     }
@@ -416,6 +469,10 @@ async fn git_success<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<bool
         .output()
         .await?;
     Ok(output.status.success())
+}
+
+fn git_subcommand_label(command: &str) -> &str {
+    command.strip_prefix("git ").unwrap_or(command)
 }
 
 async fn directory_has_entries(path: &Path) -> Result<bool, OpenCodeError> {
@@ -499,11 +556,22 @@ pub(super) async fn remove_stale_handoff_sidecar(
 }
 
 pub fn worktree_path_allowed(root: &Path, candidate: &Path) -> bool {
-    candidate.is_absolute()
-        && candidate.starts_with(root)
-        && !candidate
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
+    if !candidate.is_absolute() || path_has_parent_dir(candidate) {
+        return false;
+    }
+    if candidate.starts_with(root) {
+        return true;
+    }
+
+    let (Ok(root), Ok(candidate)) = (fs::canonicalize(root), fs::canonicalize(candidate)) else {
+        return false;
+    };
+    candidate.starts_with(root)
+}
+
+fn path_has_parent_dir(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
 }
 
 #[cfg(test)]
@@ -544,19 +612,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn existing_worktree_reuse_rejects_dirty_expected_branch() {
+    async fn existing_worktree_reuse_accepts_dirty_expected_branch() {
         let fixture = GitFixture::new();
         fixture.add_worktree("symphony/SYM-1", false);
         fs::write(fixture.worktree.join("untracked.txt"), "dirty").expect("write dirty file");
 
-        let error = ensure_worktree(&fixture.launch_spec())
+        ensure_worktree(&fixture.launch_spec())
             .await
-            .expect_err("dirty worktree must be rejected");
-
-        assert!(
-            matches!(&error, OpenCodeError::InvalidWorktree(message) if message.contains("has dirty or untracked files")),
-            "{error}"
-        );
+            .expect("dirty expected branch belongs to the same issue and must be reusable");
     }
 
     #[tokio::test]
@@ -651,6 +714,88 @@ mod tests {
             .trim(),
             "symphony/SYM-1"
         );
+    }
+
+    #[tokio::test]
+    async fn broken_gitdir_worktree_is_archived_and_recreated() {
+        let fixture = GitFixture::new();
+        fixture.add_worktree("symphony/SYM-1", false);
+        fs::write(fixture.worktree.join("artifact.txt"), "preserve me").expect("artifact");
+        fs::write(
+            fixture.worktree.join(".git"),
+            "gitdir: /agent/proj/nervure/.git/worktrees/NRV-18\n",
+        )
+        .expect("break gitdir");
+
+        ensure_worktree(&fixture.launch_spec())
+            .await
+            .expect("broken git metadata should be archived and recreated");
+
+        assert_eq!(
+            git_output(
+                &fixture.worktree,
+                ["branch", "--show-current"],
+                "git branch --show-current",
+            )
+            .await
+            .expect("worktree branch")
+            .trim(),
+            "symphony/SYM-1"
+        );
+
+        let archive_root = fixture.root.join(".stale-worktrees");
+        let archived = fs::read_dir(&archive_root)
+            .expect("archive root")
+            .map(|entry| entry.expect("archive entry").path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("SYM-1-"))
+            })
+            .expect("archived broken worktree");
+        assert_eq!(
+            fs::read_to_string(archived.join("artifact.txt")).expect("archived artifact"),
+            "preserve me"
+        );
+    }
+
+    #[tokio::test]
+    async fn git_command_error_label_does_not_duplicate_git() {
+        let fixture = GitFixture::new();
+
+        let error = git_output(
+            &fixture.root,
+            ["branch", "--show-current"],
+            "git branch --show-current",
+        )
+        .await
+        .expect_err("non-repo command should fail");
+
+        assert!(
+            matches!(
+                &error,
+                OpenCodeError::GitCommand { command, .. }
+                    if command == &format!(
+                        "git -C {} branch --show-current",
+                        fixture.root.display()
+                    )
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn worktree_path_allowed_accepts_canonical_path_behind_symlink_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical_root = dir.path().join("shared").join("worktrees");
+        fs::create_dir_all(canonical_root.join("SYM-1")).expect("canonical worktree");
+        let symlink_root = dir.path().join("linked-worktrees");
+        std::os::unix::fs::symlink(&canonical_root, &symlink_root).expect("symlink root");
+
+        assert!(worktree_path_allowed(
+            &symlink_root,
+            &canonical_root.join("SYM-1")
+        ));
     }
 
     struct GitFixture {

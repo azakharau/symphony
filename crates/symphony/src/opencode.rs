@@ -697,12 +697,18 @@ fn normalize_handoff_sidecar_value(value: &mut Value, worktree_path: &str) {
     } else {
         object.remove("subagents_used");
     }
+    normalize_string_array_field(object, "subagents", structured_agent_label);
+    normalize_string_array_field(object, "changed_files", structured_changed_file_label);
+    normalize_string_array_field(object, "risks", structured_summary_label);
 
     if let Some(stages) = object
         .get_mut("lifecycle_stages")
         .and_then(serde_json::Value::as_array_mut)
     {
         for stage in stages {
+            if !stage.is_string() {
+                *stage = Value::String(structured_stage_label(stage));
+            }
             if let Some(stage_name) = stage.as_str().and_then(canonical_handoff_stage) {
                 *stage = Value::String(stage_name.to_owned());
             }
@@ -749,6 +755,7 @@ fn normalize_handoff_sidecar_value(value: &mut Value, worktree_path: &str) {
             }]),
         );
     }
+    normalize_eval_results(object);
 
     object.remove("validation");
 
@@ -772,6 +779,12 @@ fn normalize_handoff_sidecar_value(value: &mut Value, worktree_path: &str) {
         git.remove("previous_head_sha");
         git.remove("remote_ref");
         git.remove("remote_head_sha");
+        git.remove("commit_message");
+        git.remove("commit_summary");
+        normalize_object_string_field(git, "branch", structured_summary_label);
+        normalize_object_string_field(git, "head_sha", structured_summary_label);
+        normalize_object_string_field(git, "pr_url", structured_summary_label);
+        normalize_object_string_field(git, "worktree_path", structured_summary_label);
     }
 
     if let Some(stop_reason) = object.get_mut("stop_reason")
@@ -782,6 +795,157 @@ fn normalize_handoff_sidecar_value(value: &mut Value, worktree_path: &str) {
             other => json!({"type": other}),
         };
     }
+}
+
+fn normalize_eval_results(object: &mut serde_json::Map<String, Value>) {
+    let Some(results) = object
+        .get_mut("eval_results")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+
+    for result in results {
+        let Some(result_object) = result.as_object_mut() else {
+            continue;
+        };
+        normalize_object_string_field(result_object, "suite", structured_summary_label);
+        normalize_object_string_field(
+            result_object,
+            "failure_fingerprint",
+            structured_summary_label,
+        );
+        normalize_object_string_field(result_object, "details", structured_summary_label);
+        normalize_object_string_field(result_object, "evidence_ref", structured_summary_label);
+    }
+}
+
+fn normalize_string_array_field(
+    object: &mut serde_json::Map<String, Value>,
+    field: &str,
+    formatter: fn(&Value) -> String,
+) {
+    let Some(value) = object.get_mut(field) else {
+        return;
+    };
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                if !item.is_string() {
+                    *item = Value::String(formatter(item));
+                }
+            }
+        }
+        other if !other.is_string() => {
+            *other = Value::Array(vec![Value::String(formatter(other))]);
+        }
+        Value::String(_) => {
+            let item = value.take();
+            *value = Value::Array(vec![item]);
+        }
+        _ => {}
+    }
+}
+
+fn normalize_object_string_field(
+    object: &mut serde_json::Map<String, Value>,
+    field: &str,
+    formatter: fn(&Value) -> String,
+) {
+    let Some(value) = object.get_mut(field) else {
+        return;
+    };
+    if !value.is_null() && !value.is_string() {
+        *value = Value::String(formatter(value));
+    }
+}
+
+fn structured_agent_label(value: &Value) -> String {
+    let Some(object) = value.as_object() else {
+        return structured_summary_label(value);
+    };
+    let name = object
+        .get("name")
+        .or_else(|| object.get("agent"))
+        .or_else(|| object.get("role"))
+        .or_else(|| object.get("id"))
+        .and_then(Value::as_str);
+    let session = object
+        .get("session_id")
+        .or_else(|| object.get("session"))
+        .and_then(Value::as_str);
+    match (name, session) {
+        (Some(name), Some(session)) => format!("{name}:{session}"),
+        (Some(name), None) => name.to_owned(),
+        _ => structured_summary_label(value),
+    }
+}
+
+fn structured_changed_file_label(value: &Value) -> String {
+    let Some(object) = value.as_object() else {
+        return structured_summary_label(value);
+    };
+    let Some(path) = object
+        .get("path")
+        .or_else(|| object.get("file"))
+        .or_else(|| object.get("filepath"))
+        .and_then(Value::as_str)
+    else {
+        return structured_summary_label(value);
+    };
+    let start = object
+        .get("start")
+        .or_else(|| object.get("start_line"))
+        .or_else(|| object.get("line_start"))
+        .and_then(Value::as_u64);
+    let end = object
+        .get("end")
+        .or_else(|| object.get("end_line"))
+        .or_else(|| object.get("line_end"))
+        .and_then(Value::as_u64);
+    match (start, end) {
+        (Some(start), Some(end)) => format!("{path}:{start}-{end}"),
+        (Some(line), None) | (None, Some(line)) => format!("{path}:{line}"),
+        _ => object
+            .get("line_span")
+            .and_then(Value::as_str)
+            .map(|span| format!("{path}:{span}"))
+            .unwrap_or_else(|| path.to_owned()),
+    }
+}
+
+fn structured_stage_label(value: &Value) -> String {
+    value
+        .as_object()
+        .and_then(|object| {
+            object
+                .get("stage")
+                .or_else(|| object.get("name"))
+                .or_else(|| object.get("type"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_owned)
+        .unwrap_or_else(|| structured_summary_label(value))
+}
+
+fn structured_summary_label(value: &Value) -> String {
+    if let Some(text) = value.as_str() {
+        return text.to_owned();
+    }
+    if let Some(object) = value.as_object()
+        && let Some(text) = object
+            .get("summary")
+            .or_else(|| object.get("message"))
+            .or_else(|| object.get("description"))
+            .or_else(|| object.get("name"))
+            .or_else(|| object.get("risk"))
+            .or_else(|| object.get("ref"))
+            .or_else(|| object.get("path"))
+            .and_then(Value::as_str)
+    {
+        return text.to_owned();
+    }
+    value.to_string()
 }
 
 fn canonical_handoff_stage(stage: &str) -> Option<&'static str> {
@@ -974,6 +1138,74 @@ mod tests {
             serde_json::from_value(value).expect("status-derived handoff should parse");
 
         assert_eq!(handoff.stop_reason, OpenCodeStopReason::Success);
+    }
+
+    #[test]
+    fn normalizes_structured_string_fields_from_opencode_handoff() {
+        let mut value = json!({
+            "session_id": "ses_structured",
+            "lifecycle_stages": [
+                {"stage": "final_review"},
+                "completed"
+            ],
+            "subagents": [
+                {"agent": "rust-engineer", "session_id": "ses_child"},
+                {"summary": "evaluator"}
+            ],
+            "eval_results": [
+                {
+                    "suite": {"name": "opencode-evaluation"},
+                    "passed": true,
+                    "failure_fingerprint": null,
+                    "details": {"summary": "all validation passed"},
+                    "evidence_ref": {"path": "docs/evidence.md"}
+                }
+            ],
+            "changed_files": [
+                {"path": "src/lib.rs", "start_line": 1, "end_line": 20},
+                {"path": "scripts/tools/gate.py", "line_span": "1-771"}
+            ],
+            "git": {
+                "branch": {"ref": "feature/mne-215"},
+                "head_sha": {"ref": "0123456789abcdef"},
+                "worktree_path": {"path": "/tmp/worktree"},
+                "pr_url": {"ref": "https://example.test/pr/1"},
+                "commit_message": "test: commit message should be ignored"
+            },
+            "risks": [
+                {"risk": "none"}
+            ],
+            "stop_reason": {"type": "success"}
+        });
+
+        normalize_handoff_sidecar_value(&mut value, "/tmp/worktree");
+        let handoff: OpenCodeHandoff =
+            serde_json::from_value(value).expect("structured string fields should parse");
+
+        assert_eq!(
+            handoff.lifecycle_stages,
+            vec![OpenCodeStage::Review, OpenCodeStage::Completed]
+        );
+        assert_eq!(handoff.subagents, ["rust-engineer:ses_child", "evaluator"]);
+        assert_eq!(handoff.eval_results[0].suite, "opencode-evaluation");
+        assert_eq!(
+            handoff.eval_results[0].details.as_deref(),
+            Some("all validation passed")
+        );
+        assert_eq!(
+            handoff.eval_results[0].evidence_ref.as_deref(),
+            Some("docs/evidence.md")
+        );
+        assert_eq!(
+            handoff.changed_files,
+            ["src/lib.rs:1-20", "scripts/tools/gate.py:1-771"]
+        );
+        assert_eq!(handoff.risks, ["none"]);
+        let git = handoff.git.expect("git evidence");
+        assert_eq!(git.branch, "feature/mne-215");
+        assert_eq!(git.head_sha.as_deref(), Some("0123456789abcdef"));
+        assert_eq!(git.worktree_path, "/tmp/worktree");
+        assert_eq!(git.pr_url.as_deref(), Some("https://example.test/pr/1"));
     }
 }
 

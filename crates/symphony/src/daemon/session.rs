@@ -324,13 +324,11 @@ pub(super) async fn has_reusable_existing_session(
 fn reusable_session_record(session: &OpenCodeSessionRecord) -> bool {
     (matches!(
         session.lifecycle_stage,
-        LifecycleStage::Running
-            | LifecycleStage::Queued
-            | LifecycleStage::Blocked
-            | LifecycleStage::Failed
+        LifecycleStage::Running | LifecycleStage::Queued | LifecycleStage::Blocked
     ) || retired_provider_blocker_retry_session(session))
         && !terminal_completed_stage(session)
         && !non_reusable_failed_launch_session(session)
+        && !non_reusable_failed_handoff_session(session)
 }
 
 fn terminal_completed_stage(session: &OpenCodeSessionRecord) -> bool {
@@ -343,6 +341,18 @@ fn non_reusable_failed_launch_session(session: &OpenCodeSessionRecord) -> bool {
     }
     let marker = session.lifecycle_marker.as_deref().unwrap_or_default();
     marker == "failed:launch_failed" || marker == "failed:resume_launch_failed"
+}
+
+fn non_reusable_failed_handoff_session(session: &OpenCodeSessionRecord) -> bool {
+    if session.stage != OpenCodeStage::Failed {
+        return false;
+    }
+    let marker = session.lifecycle_marker.as_deref().unwrap_or_default();
+    let last_event = session.last_event.as_deref().unwrap_or_default();
+    marker == "failed:malformed_handoff"
+        || marker == "failed:runtime_defect"
+        || last_event.starts_with("failed:missing_handoff_sidecar")
+        || last_event.starts_with("failed:malformed_handoff_sidecar")
 }
 
 fn retired_provider_blocker_retry_session(session: &OpenCodeSessionRecord) -> bool {
@@ -371,7 +381,10 @@ pub(super) async fn session_requires_resume(session: &OpenCodeSessionRecord) -> 
     let Some(process_id) = session.process_id else {
         return true;
     };
-    !opencode_process_is_alive(process_id).await
+    if !opencode_process_is_alive(process_id).await {
+        return true;
+    }
+    false
 }
 
 pub(super) async fn session_has_live_process(session: &OpenCodeSessionRecord) -> bool {
@@ -393,18 +406,42 @@ async fn opencode_process_is_alive(process_id: u32) -> bool {
 }
 
 pub(super) async fn process_elapsed_seconds(process_id: u32) -> Option<u64> {
-    let output = tokio::process::Command::new("ps")
-        .args(["-o", "etimes=", "-p", &process_id.to_string()])
+    let uptime_seconds = process_uptime_seconds(process_id).await?;
+    let system_uptime = tokio::fs::read_to_string("/proc/uptime").await.ok()?;
+    let system_uptime_seconds = system_uptime
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<f64>().ok())?;
+    if system_uptime_seconds < uptime_seconds {
+        return None;
+    }
+    Some((system_uptime_seconds - uptime_seconds).floor() as u64)
+}
+
+async fn process_uptime_seconds(process_id: u32) -> Option<f64> {
+    let stat = tokio::fs::read_to_string(format!("/proc/{process_id}/stat"))
+        .await
+        .ok()?;
+    let start_time_ticks = process_start_time_ticks(&stat)?;
+    let ticks_per_second = clock_ticks_per_second().await?;
+    Some(start_time_ticks as f64 / ticks_per_second as f64)
+}
+
+fn process_start_time_ticks(stat: &str) -> Option<u64> {
+    let after_command = stat.rsplit_once(") ")?.1;
+    after_command.split_whitespace().nth(19)?.parse().ok()
+}
+
+async fn clock_ticks_per_second() -> Option<u64> {
+    let output = tokio::process::Command::new("getconf")
+        .arg("CLK_TCK")
         .output()
         .await
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<u64>()
-        .ok()
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
 pub(super) async fn terminate_current_session_process(

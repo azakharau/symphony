@@ -1754,8 +1754,52 @@ pub(super) async fn seed_opencode_session_tree(path: &std::path::Path) {
         "INSERT INTO todo (session_id, content, status, priority, position, time_created, time_updated) VALUES ('ses-root', 'Run eval', 'completed', 'high', 0, 1000, 2000)",
         (),
     )
-    .await
+        .await
         .expect("insert todo");
+}
+
+pub(super) async fn seed_stale_active_opencode_session_tree(path: &std::path::Path) {
+    seed_opencode_session_tree(path).await;
+    let stale_ms = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_millis() as i64)
+        - (11 * 60 * 1000);
+    let database = libsql::Builder::new_local(path.display().to_string())
+        .build()
+        .await
+        .expect("build opencode db");
+    let conn = database.connect().expect("connect opencode db");
+    conn.execute(
+        "UPDATE session SET time_created = ?1, time_updated = ?1",
+        libsql::params![stale_ms],
+    )
+    .await
+    .expect("stale sessions");
+    conn.execute(
+        "UPDATE message SET time_created = ?1, time_updated = ?1",
+        libsql::params![stale_ms],
+    )
+    .await
+    .expect("stale messages");
+    conn.execute(
+        "UPDATE part SET time_created = ?1, time_updated = ?1",
+        libsql::params![stale_ms],
+    )
+    .await
+    .expect("stale parts");
+    conn.execute(
+        "UPDATE session_message SET time_created = ?1, time_updated = ?1",
+        libsql::params![stale_ms],
+    )
+    .await
+    .expect("stale session messages");
+    conn.execute(
+        "UPDATE todo SET status = 'pending', time_created = ?1, time_updated = ?1",
+        libsql::params![stale_ms],
+    )
+    .await
+    .expect("stale active todo");
 }
 
 pub(super) async fn seed_opencode_provider_auth_error_session(path: &std::path::Path) {

@@ -1496,6 +1496,7 @@ dependencies = [
  "clap",
  "libsql",
  "lineark-sdk",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

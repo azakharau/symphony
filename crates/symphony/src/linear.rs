@@ -129,6 +129,69 @@ impl<T> LinearGraphqlClient<T> {
 }
 
 #[derive(Clone, Debug)]
+pub struct ReqwestGraphqlTransport {
+    client: reqwest::Client,
+}
+
+impl ReqwestGraphqlTransport {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            client: reqwest::Client::new(),
+        }
+    }
+}
+
+impl Default for ReqwestGraphqlTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LinearGraphqlClient<ReqwestGraphqlTransport> {
+    pub fn from_env() -> Result<Self, LinearClientError> {
+        let api_key = std::env::var("LINEAR_API_KEY")
+            .map_err(|_| LinearClientError::Message("LINEAR_API_KEY is required".into()))?;
+        Ok(Self::new(
+            "https://api.linear.app/graphql",
+            api_key,
+            ReqwestGraphqlTransport::new(),
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl LinearGraphqlTransport for ReqwestGraphqlTransport {
+    async fn post_graphql(
+        &self,
+        endpoint: &str,
+        api_key: &str,
+        request: Value,
+    ) -> Result<Value, LinearClientError> {
+        let response = self
+            .client
+            .post(endpoint)
+            .header("Authorization", api_key)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| LinearClientError::Message(format!("linear http request: {error}")))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| LinearClientError::Message(format!("linear http body: {error}")))?;
+        if !status.is_success() {
+            return Err(LinearClientError::Message(format!(
+                "linear http status {status}: {body}"
+            )));
+        }
+        serde_json::from_str(&body)
+            .map_err(|error| LinearClientError::Message(format!("decode linear response: {error}")))
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct LinearSdkClient {
     client: lineark_sdk::Client,
 }

@@ -568,11 +568,6 @@ async fn reconcile_project(
             }
             "Todo" => {
                 let existing = store.issue(&project.id, &issue.id).await?;
-                if retain_typed_non_owner_blocker(project, store, &issue, existing.as_ref()).await?
-                {
-                    report.blocked.push(issue.identifier);
-                    continue;
-                }
                 if has_unanswered_owner_input {
                     debug!(
                         project_id = %project.id,
@@ -657,6 +652,18 @@ async fn reconcile_project(
                     store.upsert_issue(&record).await?;
                     mark_existing_session_blocked(store, project, &issue).await?;
                     report.blocked.push(issue.identifier);
+                } else if process_recoverable_failed_handoff(
+                    project,
+                    self_defect_project,
+                    store,
+                    linear,
+                    opencode,
+                    &issue,
+                    existing.clone(),
+                )
+                .await?
+                {
+                    continue;
                 } else if let Some(failure) =
                     unresolved_runtime_defect(store, project, &issue).await?
                 {
@@ -688,6 +695,10 @@ async fn reconcile_project(
                     )
                     .await?;
                     report.blocked.push(issue.identifier);
+                } else if retain_typed_non_owner_blocker(project, store, &issue, existing.as_ref())
+                    .await?
+                {
+                    report.blocked.push(issue.identifier);
                 } else if issue_milestone.is_some() && runnable_todo_milestone_count > 1 {
                     let record = issue_record(
                         project,
@@ -716,18 +727,6 @@ async fn reconcile_project(
                         CleanupStatus::Clean,
                     );
                     store.upsert_issue(&record).await?;
-                } else if process_recoverable_failed_handoff(
-                    project,
-                    self_defect_project,
-                    store,
-                    linear,
-                    opencode,
-                    &issue,
-                    existing.clone(),
-                )
-                .await?
-                {
-                    continue;
                 } else if has_reusable_existing_session(store, &project.id, &issue.id).await? {
                     info!(
                         project_id = %project.id,

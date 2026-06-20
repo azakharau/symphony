@@ -388,6 +388,25 @@ async fn todo_issue_with_recoverable_failed_success_handoff_closes_without_new_l
         .upsert_opencode_session(session)
         .await
         .expect("failed session");
+    store
+        .record_self_defect_occurrence(&SelfDefectOccurrenceRecord {
+            fingerprint: "incomplete_success_handoff".into(),
+            defect_kind: "malformed_handoff".into(),
+            category: "handoff".into(),
+            severity: "p0".into(),
+            initial_routing_decision: "managed_self_defect".into(),
+            source_project_id: "symphony".into(),
+            source_issue_id: "recoverable".into(),
+            source_issue_identifier: "SYM-211".into(),
+            source_session_id: Some("oc-211".into()),
+            source_process_id: Some(1234),
+            managed_issue_id: "managed-self-defect".into(),
+            managed_issue_identifier: "SYM-212".into(),
+            latest_evidence_summary: "stale self-defect registry row".into(),
+            relation_mode: SelfDefectRelationMode::Blocking,
+        })
+        .await
+        .expect("self-defect registry row");
 
     let client = RecordingLinearClient::new(vec![linear_issue(
         "recoverable",

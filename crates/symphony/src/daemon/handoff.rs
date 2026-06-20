@@ -1,4 +1,5 @@
 use std::{
+    fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -61,7 +62,16 @@ pub(super) async fn process_in_progress_handoff(
     let handoff = match opencode.latest_handoff(&session).await {
         Ok(Some(handoff)) => handoff,
         Ok(None) => {
-            if session_has_live_process(&session).await {
+            let tree_state =
+                session_opencode_tree_state(opencode_storage, store, project, issue, &session)
+                    .await?;
+            match tree_state {
+                OpenCodeTreeState::FreshActive => return Ok(false),
+                OpenCodeTreeState::StaleActive | OpenCodeTreeState::Inactive => {}
+            }
+            if session_has_live_process(&session).await
+                && tree_state != OpenCodeTreeState::StaleActive
+            {
                 debug!(
                     project_id = %project.id,
                     issue = %issue.identifier,
@@ -69,13 +79,6 @@ pub(super) async fn process_in_progress_handoff(
                     "OpenCode handoff not available yet"
                 );
                 return Ok(false);
-            }
-
-            match session_opencode_tree_state(opencode_storage, store, project, issue, &session)
-                .await?
-            {
-                OpenCodeTreeState::FreshActive => return Ok(false),
-                OpenCodeTreeState::StaleActive | OpenCodeTreeState::Inactive => {}
             }
 
             let message = ".symphony/opencode-handoff.json was not produced before the OpenCode ACP process ended".to_string();
@@ -307,7 +310,11 @@ async fn session_opencode_tree_state(
             previous_marker.as_deref(),
         );
     }
-    active_session.process_id = None;
+    active_session.process_id = if session_has_live_process(session).await {
+        session.process_id
+    } else {
+        None
+    };
     active_session.lifecycle_stage = LifecycleStage::Running;
     active_session.stage = OpenCodeStage::Running;
     active_session.lifecycle_marker = Some("opencode_db_active".into());
@@ -357,6 +364,7 @@ fn opencode_tree_has_active_work(activity: &OpenCodeSessionTreeActivity) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn stale_epoch_opencode_activity_is_not_fresh() {
@@ -372,6 +380,17 @@ mod tests {
     #[test]
     fn legacy_fixture_timestamps_do_not_trip_freshness_gate() {
         assert!(opencode_tree_activity_is_fresh(Some(2_000)));
+    }
+
+    #[test]
+    fn paths_equivalent_accepts_symlink_and_canonical_worktree_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dir.path().join("shared").join("worktree");
+        fs::create_dir_all(&canonical).expect("canonical worktree");
+        let symlink = dir.path().join("linked-worktree");
+        std::os::unix::fs::symlink(&canonical, &symlink).expect("symlink");
+
+        assert!(paths_equivalent(&canonical, &symlink));
     }
 }
 
@@ -1246,7 +1265,7 @@ fn successful_handoff_worktree_error(
         ));
     }
     let active_path = PathBuf::from(session.worktree_path.trim());
-    if path != active_path {
+    if !paths_equivalent(&path, &active_path) {
         return Some(format!(
             "git closure worktree path `{}` does not match active session worktree `{}`",
             path.display(),
@@ -1255,6 +1274,16 @@ fn successful_handoff_worktree_error(
     }
 
     None
+}
+
+fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 #[expect(

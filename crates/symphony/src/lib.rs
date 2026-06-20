@@ -4,7 +4,6 @@ pub mod api;
 pub mod cli;
 pub mod config;
 pub mod daemon;
-pub mod dashboard;
 pub mod linear;
 pub mod opencode;
 pub mod state;

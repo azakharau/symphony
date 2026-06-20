@@ -1,0 +1,22 @@
+[Unit]
+Description=Symphony Next dashboard
+After=network-online.target symphony.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=HOME=/home/agent
+Environment=PATH=/home/agent/.bun/bin:/home/agent/.cargo/bin:/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=NODE_ENV=production
+Environment=PORT=4120
+Environment=SYMPHONY_API_BASE=http://127.0.0.1:4115
+Environment="OCU_COMMAND=ocu --plain --localhost"
+Environment=OCU_TIMEOUT_MS=5000
+EnvironmentFile=-/home/agent/.symphony/env/dashboard.env
+WorkingDirectory=/home/agent/proj/symphony/apps/dashboard
+ExecStart=/home/agent/.bun/bin/bun run start -- -H 127.0.0.1 -p ${PORT}
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

@@ -19,8 +19,8 @@ use tracing::{debug, error, info, warn};
 use crate::{
     config::{OpenCodeStorageConfig, ProjectConfig, RootConfig},
     linear::{
-        EmptyLinearClient, LinearClient, LinearIssue, LinearIssueEvidence, LinearSdkClient,
-        LinearTransition,
+        EmptyLinearClient, LinearClient, LinearGraphqlClient, LinearIssue, LinearIssueEvidence,
+        LinearTransition, ReqwestGraphqlTransport,
     },
     opencode::{
         DeterministicOpenCodeLauncher, OpenCodeLaunchObserver, OpenCodeLauncher,
@@ -119,7 +119,7 @@ pub async fn record_acceptance_self_defect(
     store.migrate().await?;
     store.reconcile_projects(&config).await?;
 
-    let linear = LinearSdkClient::from_env()?;
+    let linear = LinearGraphqlClient::<ReqwestGraphqlTransport>::from_env()?;
     record_acceptance_self_defect_with_linear_client(
         &config,
         &store,
@@ -499,7 +499,6 @@ async fn reconcile_project(
                     CleanupStatus::Clean,
                 );
                 if let Some(existing) = &existing {
-                    record.failure = existing.failure.clone();
                     record.git_ref = existing.git_ref.clone().or(record.git_ref);
                     record.cleanup_status = existing.cleanup_status;
                 }
@@ -511,34 +510,19 @@ async fn reconcile_project(
                         project_id = %project.id,
                         issue = %issue.identifier,
                         reason = "missing_active_session",
-                        "In Progress issue has no active OpenCode session; marking runtime defect"
+                        "In Progress issue has no active OpenCode session; returning to Todo for fresh dispatch"
                     );
-                    let failure = FailureRecord {
-                        kind: "runtime_defect".into(),
-                        message:
-                            "In Progress issue has no active running or resumable OpenCode session"
-                                .into(),
-                        fingerprint: Some("missing_active_session".into()),
-                        occurrence_count: 1,
-                    };
                     linear
                         .transition_issue(&issue.id, LinearTransition::Todo)
                         .await?;
                     let mut record = issue_record(
                         project,
                         &issue,
-                        LifecycleStage::Failed,
-                        Some(BlockerRecord {
-                            kind: "runtime_defect".into(),
-                            message: format!(
-                                "unresolved runtime defect: {}",
-                                failure.fingerprint.as_deref().unwrap_or(&failure.message)
-                            ),
-                            observed_at: issue.updated_at.clone(),
-                        }),
+                        LifecycleStage::Queued,
+                        None,
                         CleanupStatus::Clean,
                     );
-                    record.failure = Some(failure);
+                    record.failure = None;
                     store.upsert_issue(&record).await?;
                     mark_historical_sessions_ignored(store, project, &issue).await?;
                     continue;

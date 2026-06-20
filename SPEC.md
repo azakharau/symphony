@@ -38,9 +38,9 @@ Purpose: Define the active Symphony runtime that orchestrates project work throu
   a persisted session id but no live OpenCode ACP process, it starts a new ACP transport and calls
   `session/resume` for that session id. It must not call `session/new` or replay the original task
   prompt for restart recovery.
-- OpenCode activity and cost telemetry are derived from the OpenCode SQLite session tree:
+- OpenCode activity and billing telemetry are derived from the OpenCode SQLite session tree:
   the root ACP session plus direct child sessions count as one issue execution. Symphony reads
-  messages, parts, todos, token counters, cost, active agent/model, and subagent count from that
+  messages, parts, todos, token counters, billing counters, active agent/model, and subagent count from that
   persisted tree, so missing incremental ACP stream events do not produce false silence.
 
 ## Mnemesh Evidence Workspace Contract
@@ -156,7 +156,7 @@ The Rust runtime exposes stable read-model builders for:
 
 These projections report project activity, parked and terminal counts, runner health, capacity,
 cleanup state, Linear state, Symphony lifecycle state, blocker/failure details, OpenCode session
-metadata, eval results, git refs, worktree paths, token/cost counters, subagent count/activity, and
+metadata, eval results, git refs, worktree paths, token and billing counters, subagent count/activity, and
 display status.
 
 ## Operator Validation

@@ -1157,6 +1157,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
     "available_sessions": 1,
     "max_sessions": 2,
     "running_tokens": 4096,
+    "running_cached_tokens": 0,
     "recorded_tokens": 4096,
     "running_cost_micros": 123456,
     "recorded_cost_micros": 123456
@@ -1191,6 +1192,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
       },
       "cleanup_status": "clean",
       "running_tokens": 4096,
+      "running_cached_tokens": 0,
       "recorded_tokens": 4096,
       "running_cost_micros": 123456,
       "recorded_cost_micros": 123456,
@@ -1211,6 +1213,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
           "active_agent": "evaluator",
           "active_model": "gpt-5",
           "token_count": 4096,
+          "cached_token_count": 0,
           "cost_micros": 123456,
           "subagents_used": 2,
           "running_tool_count": 0,
@@ -1235,6 +1238,54 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
     assert!(issue_json.contains(r#""subagents_used": 2"#));
     assert!(issue_json.contains(r#""eval_results""#));
     assert!(issue_json.contains(r#""pr_url": "https://example.test/pr/91""#));
+    assert!(aggregate_json.contains(r#""running_cost_micros": 123456"#));
+    assert!(issue_json.contains(r#""cost_micros": 123456"#));
+
+    let ui_aggregate =
+        symphony::api::runtime_api_json_response(&config, &store, "/api/dashboard/ui")
+            .await
+            .expect("ui aggregate response");
+    let ui_project =
+        symphony::api::runtime_api_json_response(&config, &store, "/api/projects/symphony/ui")
+            .await
+            .expect("ui project response");
+    let ui_issue = symphony::api::runtime_api_json_response(
+        &config,
+        &store,
+        "/api/projects/symphony/issues/repair/ui",
+    )
+    .await
+    .expect("ui issue response");
+    let events = symphony::api::runtime_api_json_response(&config, &store, "/api/dashboard/events")
+        .await
+        .expect("dashboard event stream");
+
+    assert_eq!(ui_aggregate.status, 200);
+    assert_eq!(ui_project.status, 200);
+    assert_eq!(ui_issue.status, 200);
+    assert_eq!(events.status, 200);
+    assert_eq!(events.content_type, "text/event-stream; charset=utf-8");
+    assert!(
+        ui_aggregate
+            .body
+            .contains(r#""polling_fallback_endpoint":"/api/dashboard/ui""#)
+    );
+    assert!(
+        ui_aggregate
+            .body
+            .contains(r#""live_events_endpoint":"/api/dashboard/events""#)
+    );
+    assert!(ui_project.body.contains(r#""active_issues""#));
+    assert!(
+        ui_issue
+            .body
+            .contains(r#""opencode_session_id":"oc-repair""#)
+    );
+    assert!(events.body.starts_with("event: dashboard.snapshot\ndata: "));
+    assert!(!ui_aggregate.body.contains("cost_micros"));
+    assert!(!ui_project.body.contains("cost_micros"));
+    assert!(!ui_issue.body.contains("cost_micros"));
+    assert!(!events.body.contains("cost_micros"));
 }
 
 #[tokio::test]
@@ -1277,165 +1328,48 @@ async fn dashboard_api_json_routes_aggregate_project_and_issue_paths() {
 }
 
 #[tokio::test]
-async fn dashboard_html_routes_render_aggregate_project_issue_and_keep_json_api() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = dir.path().join("runtime.sqlite3");
-    let opencode_db_path = dir.path().join("opencode.sqlite3");
-    opencode_runtime::seed_opencode_session_tree(&opencode_db_path).await;
-    let configured = valid_config_toml().replace(
-        "[[projects]]\n",
-        &format!(
-            "[opencode_storage]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]\n",
-            opencode_db_path.display(),
-            dir.path().display(),
-        ),
-    );
-    let config = RootConfig::from_toml_str(&configured).expect("config");
-    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
-    store.migrate().await.expect("migrate");
-    store.reconcile_projects(&config).await.expect("projects");
-    let mut html_issue = test_issue("symphony", "html-issue", "SYM-101");
-    html_issue.failure = Some(FailureRecord {
-        kind: "malformed_handoff".into(),
-        message: "handoff session id did not match the launched root session".into(),
-        fingerprint: Some("session_id_mismatch".into()),
-        occurrence_count: 2,
-    });
-    store.upsert_issue(html_issue).await.expect("issue");
-    let mut session = test_session(
-        "symphony",
-        "html-issue",
-        "ses-root",
-        "/home/agent/.symphony/workspaces/opencode/symphony/SYM-101",
-    );
-    session.process_id = Some(u32::MAX);
-    store
-        .upsert_opencode_session(session)
-        .await
-        .expect("session");
-
-    let aggregate = symphony::dashboard::runtime_dashboard_response(&config, &store, "/")
-        .await
-        .expect("aggregate html");
-    let project =
-        symphony::dashboard::runtime_dashboard_response(&config, &store, "/projects/symphony")
-            .await
-            .expect("project html");
-    let issue = symphony::dashboard::runtime_dashboard_response(
-        &config,
-        &store,
-        "/projects/symphony/issues/html-issue",
-    )
-    .await
-    .expect("issue html");
-    let json = symphony::dashboard::runtime_dashboard_response(&config, &store, "/api/dashboard")
-        .await
-        .expect("json api");
-    let quota = symphony::dashboard::runtime_dashboard_response(&config, &store, "/quota")
-        .await
-        .expect("quota html");
-
-    assert_eq!(aggregate.0, 200);
-    assert_eq!(aggregate.1, "text/html; charset=utf-8");
-    assert!(aggregate.2.contains("Running work, tokens, and blockers"));
-    assert!(aggregate.2.contains("Running now"));
-    assert!(aggregate.2.contains("Current work"));
-    assert!(aggregate.2.contains("Capacity"));
-    assert!(aggregate.2.contains("5h quota"));
-    assert!(aggregate.2.contains("href=\"/quota\""));
-    assert!(!aggregate.2.contains("OpenCode cost"));
-    assert!(aggregate.2.contains("/projects/symphony"));
-    assert!(aggregate.2.contains("SYM-101"));
-    assert!(aggregate.2.contains("100 tokens"));
-    assert!(!aggregate.2.contains(">cost<"));
-    assert!(project.2.contains("Active issues"));
-    assert!(project.2.contains("Current execution"));
-    assert!(project.2.contains("Recent history"));
-    assert!(issue.2.contains("process_alive"));
-    assert!(issue.2.contains("process: <strong>dead</strong>"));
-    assert!(issue.2.contains("runtime defect"));
-    assert!(issue.2.contains("session_id_mismatch"));
-    assert!(issue.2.contains("repair attempts"));
-    assert!(issue.2.contains("continue_repair"));
-    assert!(issue.2.contains("root session"));
-    assert!(issue.2.contains("title: Child engineer"));
-    assert!(issue.2.contains("updated: 2000"));
-    assert!(issue.2.contains("time: 1000"));
-    assert_eq!(quota.0, 200);
-    assert_eq!(quota.1, "text/html; charset=utf-8");
-    assert!(quota.2.contains("Usage limits"));
-    assert!(!quota.2.contains("OpenCode cost"));
-    assert_eq!(json.1, "application/json");
-    assert!(json.2.contains(r#""project_id":"symphony""#));
-}
-
-#[tokio::test]
-async fn dashboard_html_escapes_user_controlled_values() {
+async fn dashboard_api_only_rejects_root_and_legacy_ui_paths_without_html() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
-    let mut issue = test_issue("symphony", "escape", "SYM-102");
-    issue.title = "<script>alert('owned')</script>".into();
-    store.upsert_issue(issue).await.expect("issue");
-
-    let response = symphony::dashboard::runtime_dashboard_response(
-        &config,
-        &store,
-        "/projects/symphony/issues/escape",
-    )
-    .await
-    .expect("issue html");
-
-    assert_eq!(response.0, 200);
-    assert!(
-        response
-            .2
-            .contains("&lt;script&gt;alert(&#39;owned&#39;)&lt;/script&gt;")
-    );
-    assert!(!response.2.contains("<script>alert"));
-}
-
-#[tokio::test]
-async fn dashboard_html_surfaces_activity_error_fallback() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = dir.path().join("runtime.sqlite3");
-    let configured = valid_config_toml().replace(
-        "[[projects]]\n",
-        "[opencode_storage]\ndatabase_path = \"/definitely/missing/opencode.db\"\narchive_root = \"/tmp/opencode-archive\"\n\n[[projects]]\n",
-    );
-    let config = RootConfig::from_toml_str(&configured).expect("config");
-    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
-    store.migrate().await.expect("migrate");
-    store.reconcile_projects(&config).await.expect("projects");
     store
-        .upsert_issue(test_issue("symphony", "activity", "SYM-103"))
+        .upsert_issue(test_issue("symphony", "api-only", "SYM-101"))
         .await
         .expect("issue");
-    store
-        .upsert_opencode_session(test_session(
-            "symphony",
-            "activity",
-            "oc-activity",
-            "/home/agent/worktree/with/a/very/long/path/that/should/wrap/or/truncate/safely",
-        ))
-        .await
-        .expect("session");
 
-    let response = symphony::dashboard::runtime_dashboard_response(
+    let root = symphony::api::runtime_api_json_response(&config, &store, "/")
+        .await
+        .expect("root response");
+    let project_ui_path =
+        symphony::api::runtime_api_json_response(&config, &store, "/projects/symphony")
+            .await
+            .expect("legacy project path response");
+    let issue_ui_path = symphony::api::runtime_api_json_response(
         &config,
         &store,
-        "/projects/symphony/issues/activity",
+        "/projects/symphony/issues/api-only",
     )
     .await
-    .expect("issue html");
+    .expect("legacy issue path response");
+    let api = symphony::api::runtime_api_json_response(&config, &store, "/api/dashboard")
+        .await
+        .expect("json api");
 
-    assert_eq!(response.0, 200);
-    assert!(response.2.contains("activity_error:"));
-    assert!(response.2.contains("No tree activity available"));
-    assert!(response.2.contains("oc-activity"));
+    assert_eq!(root.status, 404);
+    assert_eq!(project_ui_path.status, 404);
+    assert_eq!(issue_ui_path.status, 404);
+    assert_eq!(root.content_type, "application/json");
+    assert_eq!(project_ui_path.content_type, "application/json");
+    assert_eq!(issue_ui_path.content_type, "application/json");
+    assert_eq!(api.status, 200);
+    assert_eq!(api.content_type, "application/json");
+    assert!(api.body.contains(r#""project_id":"symphony""#));
+    assert!(!root.body.contains("<html"));
+    assert!(!project_ui_path.body.contains("<html"));
+    assert!(!issue_ui_path.body.contains("<html"));
 }
 
 #[tokio::test]
@@ -1518,6 +1452,30 @@ async fn dashboard_surfaces_managed_self_defect_routing_projection() {
     assert!(aggregate_json.contains(r#""managed_issue_identifier":"SYM-62""#));
     assert!(project_json.contains(r#""self_defect_routing""#));
     assert!(!project_json.contains("latest_evidence_summary"));
+
+    let ui_aggregate =
+        symphony::api::runtime_api_json_response(&config, &store, "/api/dashboard/ui")
+            .await
+            .expect("ui aggregate response");
+    let ui_issue = symphony::api::runtime_api_json_response(
+        &config,
+        &store,
+        "/api/projects/symphony/issues/runtime-held/ui",
+    )
+    .await
+    .expect("ui issue response");
+    assert!(ui_aggregate.body.contains(r#""self_defect_routes""#));
+    assert!(
+        ui_aggregate
+            .body
+            .contains(r#""managed_issue_identifier":"SYM-62""#)
+    );
+    assert!(ui_issue.body.contains(r#""self_defect_routing""#));
+    assert!(
+        ui_issue
+            .body
+            .contains(r#""next_action":"repair_managed_self_defect""#)
+    );
 }
 
 #[tokio::test]
@@ -1570,16 +1528,20 @@ async fn dashboard_surfaces_related_only_self_defect_and_deadlock_skip() {
     );
     assert!(routing.deadlock_skipped_blocker);
 
-    let html = symphony::dashboard::runtime_dashboard_response(
+    let ui_issue = symphony::api::runtime_api_json_response(
         &config,
         &store,
-        "/projects/symphony/issues/active-self",
+        "/api/projects/symphony/issues/active-self/ui",
     )
     .await
-    .expect("issue html");
-    assert!(html.2.contains("self-defect relation"));
-    assert!(html.2.contains("related_only"));
-    assert!(html.2.contains("deadlock skipped blocker"));
+    .expect("ui issue response");
+    assert!(ui_issue.body.contains(r#""relation_mode":"related_only""#));
+    assert!(
+        ui_issue
+            .body
+            .contains(r#""skipped_blocker_reason":"active_symphony_self_deadlock_prevention""#)
+    );
+    assert!(ui_issue.body.contains(r#""deadlock_skipped_blocker":true"#));
 }
 
 #[tokio::test]

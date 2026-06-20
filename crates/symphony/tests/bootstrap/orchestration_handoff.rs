@@ -2002,7 +2002,7 @@ async fn dead_in_progress_session_without_handoff_sidecar_fails_fast_instead_of_
 }
 
 #[tokio::test]
-async fn dead_acp_process_with_active_opencode_child_session_resumes_session() {
+async fn dead_acp_process_with_active_opencode_child_session_resumes_instead_of_parking_capacity() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let opencode_db_path = dir.path().join("opencode.sqlite3");
@@ -2083,6 +2083,166 @@ async fn dead_acp_process_with_active_opencode_child_session_resumes_session() {
         "last_event={:?}",
         session.last_event
     );
+}
+
+#[tokio::test]
+async fn live_acp_process_with_fresh_opencode_activity_keeps_process_id_without_resume() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let opencode_db_path = dir.path().join("opencode.sqlite3");
+    super::opencode_runtime::seed_opencode_session_tree(&opencode_db_path).await;
+    let config = RootConfig::from_toml_str(&valid_config_toml().replacen(
+        "[[projects]]",
+        &format!(
+            "[opencode_storage]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]",
+            opencode_db_path.display(),
+            dir.path().join("archives").display()
+        ),
+        1,
+    ))
+    .expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let worktree = dir.path().join("SYM-93-worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    store
+        .upsert_issue(test_issue("symphony", "fresh-live", "SYM-93"))
+        .await
+        .expect("running issue");
+    let mut live_process = Command::new("bash")
+        .arg("-c")
+        .arg("exec -a opencode sleep 120")
+        .spawn()
+        .expect("spawn opencode-shaped process");
+    thread::sleep(Duration::from_millis(100));
+    let live_process_id = live_process.id();
+    store
+        .upsert_opencode_session({
+            let mut session = test_session("symphony", "fresh-live", "ses-root", &worktree);
+            session.process_id = Some(live_process_id);
+            session
+        })
+        .await
+        .expect("running session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "fresh-live",
+        "SYM-93",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(4243);
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert!(opencode.continuations().is_empty());
+    let session = store
+        .opencode_session("symphony", "fresh-live", "ses-root")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(session.stage, OpenCodeStage::Running);
+    assert_eq!(session.process_id, Some(live_process_id));
+
+    let _ = live_process.kill();
+    let _ = live_process.wait();
+}
+
+#[tokio::test]
+async fn live_acp_process_with_stale_opencode_activity_fails_fast_without_resume_loop() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let opencode_db_path = dir.path().join("opencode.sqlite3");
+    super::opencode_runtime::seed_stale_active_opencode_session_tree(&opencode_db_path).await;
+    let config = RootConfig::from_toml_str(&valid_config_toml().replacen(
+        "[[projects]]",
+        &format!(
+            "[opencode_storage]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]",
+            opencode_db_path.display(),
+            dir.path().join("archives").display()
+        ),
+        1,
+    ))
+    .expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let worktree = dir.path().join("SYM-92-worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    store
+        .upsert_issue(test_issue("symphony", "stale-live", "SYM-92"))
+        .await
+        .expect("running issue");
+    let mut stale_process = Command::new("bash")
+        .arg("-c")
+        .arg("exec -a opencode sleep 120")
+        .spawn()
+        .expect("spawn stale opencode-shaped process");
+    thread::sleep(Duration::from_millis(100));
+    let stale_process_id = stale_process.id();
+    store
+        .upsert_opencode_session({
+            let mut session = test_session("symphony", "stale-live", "ses-root", &worktree);
+            session.process_id = Some(stale_process_id);
+            session
+        })
+        .await
+        .expect("running session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "stale-live",
+        "SYM-92",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedOpenCodeLauncher::new(None);
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    let mut stale_terminated = false;
+    for _ in 0..20 {
+        if stale_process
+            .try_wait()
+            .expect("poll stale process")
+            .is_some()
+        {
+            stale_terminated = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    if !stale_terminated {
+        let _ = stale_process.kill();
+        let _ = stale_process.wait();
+    }
+    assert!(
+        stale_terminated,
+        "stale live ACP process must be terminated instead of treated as active work"
+    );
+    assert_todo_transition(&client.transitions(), "stale-live");
+    assert!(opencode.repairs().is_empty());
+    let issue = store
+        .issue("symphony", "stale-live")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(
+        issue.failure.expect("failure").fingerprint.as_deref(),
+        Some("missing_handoff_sidecar")
+    );
+    let session = store
+        .opencode_session("symphony", "stale-live", "ses-root")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(session.stage, OpenCodeStage::Failed);
+    assert_eq!(session.process_id, None);
 }
 
 #[tokio::test]

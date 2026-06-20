@@ -12,11 +12,19 @@ use crate::{
 };
 
 pub const AGGREGATE_DASHBOARD_ENDPOINT: &str = "/api/dashboard";
+pub const UI_AGGREGATE_DASHBOARD_ENDPOINT: &str = "/api/dashboard/ui";
+pub const DASHBOARD_EVENTS_ENDPOINT: &str = "/api/dashboard/events";
 pub const PROJECT_DRILLDOWN_ENDPOINT_TEMPLATE: &str = "/api/projects/{project_id}";
 pub const ISSUE_DETAIL_ENDPOINT_TEMPLATE: &str = "/api/projects/{project_id}/issues/{issue_id}";
 
+mod dashboard_contract;
 mod self_defect_routing;
 
+pub use dashboard_contract::{
+    DashboardEventStreamResponse, UiAggregateDashboardResponse, UiIssueDetailResponse,
+    UiProjectDashboardResponse,
+};
+use dashboard_contract::{dashboard_event_stream_response, ui_aggregate_response};
 pub use self_defect_routing::{
     ManagedSelfDefectProjection, SelfDefectRecommendationProjection, SelfDefectRouteSummary,
     SelfDefectRoutingProjection, SelfDefectSourceContext,
@@ -26,6 +34,7 @@ use self_defect_routing::{self_defect_route_summaries, self_defect_routing_proje
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApiJsonResponse {
     pub status: u16,
+    pub content_type: &'static str,
     pub body: String,
 }
 
@@ -39,6 +48,12 @@ pub async fn runtime_api_json_response(
     if path == AGGREGATE_DASHBOARD_ENDPOINT {
         return json_response(200, api.aggregate());
     }
+    if path == UI_AGGREGATE_DASHBOARD_ENDPOINT {
+        return json_response(200, &ui_aggregate_response(&api));
+    }
+    if path == DASHBOARD_EVENTS_ENDPOINT {
+        return event_stream_response(200, &dashboard_event_stream_response(&api));
+    }
 
     let Some(rest) = path.strip_prefix("/api/projects/") else {
         return json_response(404, &serde_json::json!({ "error": "not_found" }));
@@ -50,10 +65,20 @@ pub async fn runtime_api_json_response(
             || json_response(404, &serde_json::json!({ "error": "project_not_found" })),
             |project| json_response(200, project),
         ),
+        [project_id, "ui"] => api.project_drilldown(project_id)?.map_or_else(
+            || json_response(404, &serde_json::json!({ "error": "project_not_found" })),
+            |project| json_response(200, &UiProjectDashboardResponse::from(project)),
+        ),
         [project_id, "issues", issue_id] => api.issue_detail(project_id, issue_id)?.map_or_else(
             || json_response(404, &serde_json::json!({ "error": "issue_not_found" })),
             |issue| json_response(200, issue),
         ),
+        [project_id, "issues", issue_id, "ui"] => {
+            api.issue_detail(project_id, issue_id)?.map_or_else(
+                || json_response(404, &serde_json::json!({ "error": "issue_not_found" })),
+                |issue| json_response(200, &UiIssueDetailResponse::from(issue)),
+            )
+        }
         _ => json_response(404, &serde_json::json!({ "error": "not_found" })),
     }
 }
@@ -61,7 +86,20 @@ pub async fn runtime_api_json_response(
 fn json_response<T: Serialize>(status: u16, value: &T) -> Result<ApiJsonResponse, StorageError> {
     Ok(ApiJsonResponse {
         status,
+        content_type: "application/json",
         body: serde_json::to_string(value).map_err(StorageError::from)?,
+    })
+}
+
+fn event_stream_response<T: Serialize>(
+    status: u16,
+    value: &T,
+) -> Result<ApiJsonResponse, StorageError> {
+    let data = serde_json::to_string(value).map_err(StorageError::from)?;
+    Ok(ApiJsonResponse {
+        status,
+        content_type: "text/event-stream; charset=utf-8",
+        body: format!("event: dashboard.snapshot\ndata: {data}\n\n"),
     })
 }
 
@@ -209,6 +247,7 @@ pub struct AggregateDashboardTotals {
     pub available_sessions: u32,
     pub max_sessions: u32,
     pub running_tokens: u64,
+    pub running_cached_tokens: u64,
     pub recorded_tokens: u64,
     pub running_cost_micros: u64,
     pub recorded_cost_micros: u64,
@@ -228,6 +267,7 @@ pub struct ProjectDashboardCard {
     pub liveness: ProjectRuntimeLivenessResponse,
     pub cleanup_status: CleanupStatus,
     pub running_tokens: u64,
+    pub running_cached_tokens: u64,
     pub recorded_tokens: u64,
     pub running_cost_micros: u64,
     pub recorded_cost_micros: u64,
@@ -252,6 +292,7 @@ pub struct RunningIssueSummary {
     pub active_agent: Option<String>,
     pub active_model: Option<String>,
     pub token_count: u64,
+    pub cached_token_count: u64,
     pub cost_micros: u64,
     pub subagents_used: u64,
     pub running_tool_count: u64,
@@ -317,6 +358,10 @@ impl ProjectDashboardResponse {
             .iter()
             .map(|issue| issue.token_count)
             .sum::<u64>();
+        let running_cached_tokens = running_issues
+            .iter()
+            .map(|issue| issue.cached_token_count)
+            .sum::<u64>();
         let running_cost_micros = running_issues
             .iter()
             .map(|issue| issue.cost_micros)
@@ -345,6 +390,7 @@ impl ProjectDashboardResponse {
             liveness: self.liveness.clone(),
             cleanup_status: self.cleanup_status,
             running_tokens,
+            running_cached_tokens,
             recorded_tokens,
             running_cost_micros,
             recorded_cost_micros,
@@ -397,6 +443,10 @@ fn aggregate_dashboard_totals(projects: &[ProjectDashboardCard]) -> AggregateDas
             .map(|project| project.capacity.max_sessions)
             .sum(),
         running_tokens: projects.iter().map(|project| project.running_tokens).sum(),
+        running_cached_tokens: projects
+            .iter()
+            .map(|project| project.running_cached_tokens)
+            .sum(),
         recorded_tokens: projects.iter().map(|project| project.recorded_tokens).sum(),
         running_cost_micros: projects
             .iter()
@@ -432,6 +482,7 @@ fn running_issue_summary(
         active_agent: session.and_then(|session| session.active_agent.clone()),
         active_model: session.and_then(|session| session.active_model.clone()),
         token_count: session.map_or(0, |session| session.token_count),
+        cached_token_count: session.map_or(0, |session| session.cached_token_count),
         cost_micros: session.map_or(0, |session| session.cost_micros),
         subagents_used: session.map_or(0, |session| session.subagents_used),
         running_tool_count: activity.map_or(0, |activity| activity.running_tool_count),
@@ -507,6 +558,7 @@ pub struct OpenCodeSessionDetail {
     pub todo_count: u64,
     pub part_count: u64,
     pub token_count: u64,
+    pub cached_token_count: u64,
     pub cost_micros: u64,
     pub lifecycle_marker: Option<String>,
     pub last_event: Option<String>,
@@ -978,6 +1030,8 @@ async fn session_detail(
         },
         None => (None, None),
     };
+    let cached_token_count = activity.as_ref().map_or(0, session_tree_cached_token_count);
+    let token_count = session.token_count.saturating_add(cached_token_count);
 
     Ok(OpenCodeSessionDetail {
         opencode_session_id: session.session_id,
@@ -996,7 +1050,8 @@ async fn session_detail(
         message_count: session.message_count,
         todo_count: session.todo_count,
         part_count: session.part_count,
-        token_count: session.token_count,
+        token_count,
+        cached_token_count,
         cost_micros: session.cost_micros,
         lifecycle_marker: session.lifecycle_marker,
         last_event: session.last_event,
@@ -1013,6 +1068,19 @@ async fn process_alive(process_id: Option<u32>) -> Option<bool> {
             .await
             .unwrap_or(false),
     )
+}
+
+fn session_tree_cached_token_count(activity: &OpenCodeSessionTreeActivity) -> u64 {
+    activity
+        .sessions
+        .iter()
+        .chain(activity.subagents.iter())
+        .map(|session| {
+            session
+                .tokens_cache_read
+                .saturating_add(session.tokens_cache_write)
+        })
+        .sum()
 }
 
 fn issue_display_status(

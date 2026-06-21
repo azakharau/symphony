@@ -383,6 +383,7 @@ max_sessions = 1
                 effort: None,
                 permission_policy: PermissionPolicy::Reject,
             },
+            omp_acp_providers: Vec::new(),
             eval: EvalDefaults {
                 default_suite: "default".into(),
                 max_identical_failure_fingerprints: 2,

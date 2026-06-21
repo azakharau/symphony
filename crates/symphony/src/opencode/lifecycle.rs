@@ -36,6 +36,8 @@ impl AcpChildLifecycle {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        command.process_group(0);
         if let Some(recall_workspace_root) = &spec.recall_workspace_root {
             command.env("SYMPHONY_RECALL_WORKSPACE_ROOT", recall_workspace_root);
         }
@@ -145,7 +147,12 @@ pub(crate) async fn terminate_process_tree(
     targets.reverse();
     targets.push(root_process_id);
 
-    terminate_processes(&targets, "-TERM").await?;
+    let process_group_id = read_process_group_id(root_process_id).await.ok();
+    if process_group_id == Some(root_process_id) {
+        terminate_process_group(root_process_id, "-TERM").await?;
+    } else {
+        terminate_processes(&targets, "-TERM").await?;
+    }
     for _ in 0..20 {
         if !process_exists(root_process_id).await {
             return Ok(ProcessTreeTerminationEvidence {
@@ -160,7 +167,11 @@ pub(crate) async fn terminate_process_tree(
         sleep(Duration::from_millis(100)).await;
     }
 
-    terminate_processes(&targets, "-KILL").await?;
+    if process_group_id == Some(root_process_id) {
+        terminate_process_group(root_process_id, "-KILL").await?;
+    } else {
+        terminate_processes(&targets, "-KILL").await?;
+    }
     for _ in 0..10 {
         if !process_exists(root_process_id).await {
             return Ok(ProcessTreeTerminationEvidence {
@@ -207,6 +218,24 @@ async fn terminate_processes(process_ids: &[u32], signal: &str) -> Result<(), Op
     Ok(())
 }
 
+async fn terminate_process_group(process_group_id: u32, signal: &str) -> Result<(), OpenCodeError> {
+    let status = Command::new("kill")
+        .arg(signal)
+        .arg("--")
+        .arg(format!("-{process_group_id}"))
+        .status()
+        .await?;
+    if !status.success() && process_exists(process_group_id).await {
+        warn!(
+            process_group_id,
+            signal,
+            status = %status,
+            "failed to signal OpenCode process group"
+        );
+    }
+    Ok(())
+}
+
 async fn process_exists(process_id: u32) -> bool {
     let Ok(stat) = tokio::fs::read_to_string(format!("/proc/{process_id}/stat")).await else {
         return false;
@@ -240,6 +269,26 @@ async fn descendant_process_ids(root_process_id: u32) -> Result<Vec<u32>, OpenCo
         descendants.push(pid);
     }
     Ok(descendants)
+}
+
+async fn read_process_group_id(process_id: u32) -> Result<u32, OpenCodeError> {
+    let stat = tokio::fs::read_to_string(format!("/proc/{process_id}/stat")).await?;
+    let Some(after_command) = stat.rsplit_once(") ") else {
+        return Err(OpenCodeError::ProcessTree(format!(
+            "invalid proc stat for pid {process_id}"
+        )));
+    };
+    let mut fields = after_command.1.split_whitespace();
+    let _state = fields.next();
+    let _parent_pid = fields.next();
+    let Some(process_group_id) = fields.next() else {
+        return Err(OpenCodeError::ProcessTree(format!(
+            "missing process group id for pid {process_id}"
+        )));
+    };
+    process_group_id
+        .parse::<u32>()
+        .map_err(|error| OpenCodeError::ProcessTree(error.to_string()))
 }
 
 async fn read_parent_process_id(process_id: u32) -> Result<u32, OpenCodeError> {
@@ -294,5 +343,55 @@ mod tests {
         assert!(evidence.term_signal_sent);
         assert_eq!(evidence.reason, "stale_opencode_process_tree");
         assert!(!evidence.still_alive);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn process_group_termination_kills_orphaned_tool_processes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let orphan_pid_path = dir.path().join("orphan.pid");
+        let mut child = Command::new("sh")
+            .process_group(0)
+            .arg("-c")
+            .arg(format!(
+                "(sleep 60 & echo $! > {}) & sleep 60",
+                orphan_pid_path.display()
+            ))
+            .spawn()
+            .expect("spawn process group");
+        let root = child.id().expect("child pid");
+
+        let orphan_pid = wait_for_pid_file(&orphan_pid_path).await;
+        assert_ne!(orphan_pid, root);
+
+        let evidence = terminate_process_tree(root, "stale_opencode_process_group")
+            .await
+            .expect("terminate process group");
+        let _ = child.wait().await;
+
+        assert_eq!(evidence.root_process_id, root);
+        assert!(evidence.term_signal_sent);
+        assert_eq!(evidence.reason, "stale_opencode_process_group");
+        assert!(!evidence.still_alive);
+        for _ in 0..20 {
+            if !process_exists(orphan_pid).await {
+                return;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        panic!("orphaned tool process {orphan_pid} survived process-group termination");
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_pid_file(path: &std::path::Path) -> u32 {
+        for _ in 0..50 {
+            if let Ok(input) = tokio::fs::read_to_string(path).await
+                && let Ok(pid) = input.trim().parse()
+            {
+                return pid;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        panic!("pid file was not written: {}", path.display());
     }
 }

@@ -94,6 +94,8 @@ pub struct OpenCodeSessionRecord {
     pub project_id: String,
     pub issue_id: String,
     pub session_id: String,
+    pub provider_mode: RuntimeProviderMode,
+    pub provider_id: Option<String>,
     pub agent: String,
     pub model: Option<String>,
     pub worktree_path: String,
@@ -111,7 +113,84 @@ pub struct OpenCodeSessionRecord {
     pub eval_stage: Option<String>,
     pub lifecycle_marker: Option<String>,
     pub last_event: Option<String>,
+    pub runtime_failure_kind: Option<RuntimeFailureKind>,
+    pub acp_frame_count: u64,
+    pub session_evidence_refs: Vec<String>,
     pub silence_observed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeProviderMode {
+    OpenCodeAcp,
+    OmpAcp,
+}
+
+impl RuntimeProviderMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenCodeAcp => "opencode_acp",
+            Self::OmpAcp => "omp_acp",
+        }
+    }
+}
+
+impl fmt::Display for RuntimeProviderMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for RuntimeProviderMode {
+    type Err = StateParseError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input {
+            "opencode_acp" => Ok(Self::OpenCodeAcp),
+            "omp_acp" => Ok(Self::OmpAcp),
+            other => Err(StateParseError::RuntimeProviderMode(other.into())),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeFailureKind {
+    MissingBinary,
+    ProviderAuthUnavailable,
+    MalformedAcpFrame,
+    UnsupportedOmpVersion,
+}
+
+impl RuntimeFailureKind {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::MissingBinary => "missing_binary",
+            Self::ProviderAuthUnavailable => "provider_auth_unavailable",
+            Self::MalformedAcpFrame => "malformed_acp_frame",
+            Self::UnsupportedOmpVersion => "unsupported_omp_version",
+        }
+    }
+}
+
+impl fmt::Display for RuntimeFailureKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for RuntimeFailureKind {
+    type Err = StateParseError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input {
+            "missing_binary" => Ok(Self::MissingBinary),
+            "provider_auth_unavailable" => Ok(Self::ProviderAuthUnavailable),
+            "malformed_acp_frame" => Ok(Self::MalformedAcpFrame),
+            "unsupported_omp_version" => Ok(Self::UnsupportedOmpVersion),
+            other => Err(StateParseError::RuntimeFailureKind(other.into())),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -435,4 +514,8 @@ pub enum StateParseError {
     CleanupStatus(String),
     #[error("unknown runtime liveness status `{0}`")]
     RuntimeLivenessStatus(String),
+    #[error("unknown runtime provider mode `{0}`")]
+    RuntimeProviderMode(String),
+    #[error("unknown runtime failure kind `{0}`")]
+    RuntimeFailureKind(String),
 }

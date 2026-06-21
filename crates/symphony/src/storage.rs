@@ -63,6 +63,24 @@ impl SqliteStore {
         self.conn.execute_batch(RUNTIME_STATE_MIGRATION).await?;
         self.ensure_column("opencode_sessions", "process_id", "INTEGER")
             .await?;
+        self.ensure_column(
+            "opencode_sessions",
+            "provider_mode",
+            "TEXT NOT NULL DEFAULT 'opencode_acp'",
+        )
+        .await?;
+        self.ensure_column("opencode_sessions", "provider_id", "TEXT")
+            .await?;
+        self.ensure_column("opencode_sessions", "runtime_failure_kind", "TEXT")
+            .await?;
+        self.ensure_column(
+            "opencode_sessions",
+            "acp_frame_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        self.ensure_column("opencode_sessions", "session_evidence_refs_json", "TEXT")
+            .await?;
         self.drop_issue_linear_state_column().await?;
         Ok(())
     }
@@ -464,6 +482,8 @@ impl SqliteStore {
                     project_id,
                     issue_id,
                     session_id,
+                    provider_mode,
+                    provider_id,
                     agent,
                     model,
                     worktree_path,
@@ -481,10 +501,15 @@ impl SqliteStore {
                     eval_stage,
                     lifecycle_marker,
                     last_event,
+                    runtime_failure_kind,
+                    acp_frame_count,
+                    session_evidence_refs_json,
                     silence_observed
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
                 ON CONFLICT(project_id, issue_id, session_id) DO UPDATE SET
+                    provider_mode = excluded.provider_mode,
+                    provider_id = excluded.provider_id,
                     agent = excluded.agent,
                     model = excluded.model,
                     worktree_path = excluded.worktree_path,
@@ -502,6 +527,9 @@ impl SqliteStore {
                     eval_stage = excluded.eval_stage,
                     lifecycle_marker = excluded.lifecycle_marker,
                     last_event = excluded.last_event,
+                    runtime_failure_kind = excluded.runtime_failure_kind,
+                    acp_frame_count = excluded.acp_frame_count,
+                    session_evidence_refs_json = excluded.session_evidence_refs_json,
                     silence_observed = excluded.silence_observed,
                     updated_at = CURRENT_TIMESTAMP
                 "#,
@@ -509,6 +537,8 @@ impl SqliteStore {
                     session.project_id.as_str(),
                     session.issue_id.as_str(),
                     session.session_id.as_str(),
+                    session.provider_mode.as_str(),
+                    session.provider_id.as_deref(),
                     session.agent.as_str(),
                     session.model.as_deref(),
                     session.worktree_path.as_str(),
@@ -526,6 +556,9 @@ impl SqliteStore {
                     session.eval_stage.as_deref(),
                     session.lifecycle_marker.as_deref(),
                     session.last_event.as_deref(),
+                    session.runtime_failure_kind.as_ref().map(|kind| kind.as_str()),
+                    session.acp_frame_count as i64,
+                    serde_json::to_string(&session.session_evidence_refs)?,
                     session.silence_observed,
                 ],
             )
@@ -543,10 +576,11 @@ impl SqliteStore {
             .conn
             .query(
                 r#"
-                SELECT project_id, issue_id, session_id, agent, model, worktree_path,
+                SELECT project_id, issue_id, session_id, provider_mode, provider_id, agent, model, worktree_path,
                        process_id, lifecycle_stage, stage, active_agent, active_model, message_count,
                        todo_count, part_count, token_count, cost_micros, subagent_count,
-                       eval_stage, lifecycle_marker, last_event, silence_observed
+                       eval_stage, lifecycle_marker, last_event, runtime_failure_kind,
+                       acp_frame_count, session_evidence_refs_json, silence_observed
                 FROM opencode_sessions
                 WHERE project_id = ?1 AND issue_id = ?2 AND session_id = ?3
                 "#,
@@ -583,10 +617,11 @@ impl SqliteStore {
             .conn
             .query(
                 r#"
-                SELECT project_id, issue_id, session_id, agent, model, worktree_path,
+                SELECT project_id, issue_id, session_id, provider_mode, provider_id, agent, model, worktree_path,
                        process_id, lifecycle_stage, stage, active_agent, active_model, message_count,
                        todo_count, part_count, token_count, cost_micros, subagent_count,
-                       eval_stage, lifecycle_marker, last_event, silence_observed
+                       eval_stage, lifecycle_marker, last_event, runtime_failure_kind,
+                       acp_frame_count, session_evidence_refs_json, silence_observed
                 FROM opencode_sessions
                 WHERE project_id = ?1 AND issue_id = ?2
                 ORDER BY updated_at ASC, rowid ASC, session_id ASC
@@ -604,10 +639,11 @@ impl SqliteStore {
             .conn
             .query(
                 r#"
-                SELECT project_id, issue_id, session_id, agent, model, worktree_path,
+                SELECT project_id, issue_id, session_id, provider_mode, provider_id, agent, model, worktree_path,
                        process_id, lifecycle_stage, stage, active_agent, active_model, message_count,
                        todo_count, part_count, token_count, cost_micros, subagent_count,
-                       eval_stage, lifecycle_marker, last_event, silence_observed
+                       eval_stage, lifecycle_marker, last_event, runtime_failure_kind,
+                       acp_frame_count, session_evidence_refs_json, silence_observed
                 FROM opencode_sessions
                 WHERE lifecycle_stage = 'running'
                    OR stage IN ('starting', 'running', 'eval', 'review', 'handoff', 'silent')

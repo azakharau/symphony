@@ -45,6 +45,12 @@ pub(super) async fn ensure_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), Ope
     create_git_worktree(spec, repo_path, &base_ref).await
 }
 
+pub(super) fn launch_uses_issue_worktree(spec: &OpenCodeLaunchSpec) -> bool {
+    spec.worktree_root
+        .as_ref()
+        .is_some_and(|root| spec.cwd == root.join(&spec.issue_identifier))
+}
+
 pub(super) async fn ensure_resumable_worktree(
     spec: &OpenCodeLaunchSpec,
 ) -> Result<(), OpenCodeError> {
@@ -856,9 +862,12 @@ mod tests {
 
         fn launch_spec(&self) -> OpenCodeLaunchSpec {
             OpenCodeLaunchSpec {
+                provider_mode: crate::state::RuntimeProviderMode::OpenCodeAcp,
+                provider_id: None,
                 command: PathBuf::from("opencode"),
                 args: Vec::new(),
                 cwd: self.worktree.clone(),
+                env_allowlist: Vec::new(),
                 worktree_root: Some(self.root.clone()),
                 issue_identifier: "SYM-1".into(),
                 branch_name: "symphony/SYM-1".into(),

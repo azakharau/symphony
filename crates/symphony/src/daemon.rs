@@ -968,6 +968,7 @@ async fn dispatch_candidate(
                         worktree_path = %session.worktree_path,
                         "OpenCode session recorded"
                     );
+                    upsert_observed_launch_session(store, session).await?;
                     report.dispatched.push(issue.identifier);
                 }
                 Err(error) => {
@@ -1004,6 +1005,7 @@ async fn dispatch_candidate(
                             previous_failure_reason = %failure_reason,
                             "fresh OpenCode session recorded after failed resume"
                         );
+                        upsert_observed_launch_session(store, session).await?;
                         report.dispatched.push(issue.identifier);
                     }
                     Err(error) => {
@@ -1031,6 +1033,27 @@ async fn dispatch_candidate(
         }
     }
     Ok(())
+}
+
+async fn upsert_observed_launch_session(
+    store: &SqliteStore,
+    mut session: OpenCodeSessionRecord,
+) -> anyhow::Result<()> {
+    if let Some(existing) = store
+        .opencode_session(&session.project_id, &session.issue_id, &session.session_id)
+        .await?
+        && is_observed_launch_marker(existing.lifecycle_marker.as_deref())
+    {
+        session.lifecycle_marker = existing.lifecycle_marker;
+        session.last_event = existing.last_event;
+    }
+
+    store.upsert_opencode_session(&session).await?;
+    Ok(())
+}
+
+fn is_observed_launch_marker(marker: Option<&str>) -> bool {
+    matches!(marker, Some("acp_process_started" | "acp_session_attached"))
 }
 
 fn missing_recall_workspace_reason(project: &ProjectConfig) -> Option<String> {
@@ -1093,15 +1116,17 @@ impl OpenCodeLaunchObserver for RuntimeLaunchObserver<'_> {
             OpenCodeStartedSession {
                 session_id,
                 process_id: event.process_id,
+                acp_frame_count: 0,
+                session_evidence_refs: Vec::new(),
             },
             self.launch_spec,
         );
-        session.lifecycle_marker = Some("acp_process_spawned".into());
+        session.lifecycle_marker = Some("acp_process_started".into());
         session.last_event = Some(
             event
                 .process_id
-                .map(|process_id| format!("acp_process_spawned:{process_id}"))
-                .unwrap_or_else(|| "acp_process_spawned:no_pid".into()),
+                .map(|process_id| format!("acp_process_started:{process_id}"))
+                .unwrap_or_else(|| "acp_process_started:no_pid".into()),
         );
         self.store
             .upsert_opencode_session(&session)
@@ -1132,6 +1157,8 @@ impl OpenCodeLaunchObserver for RuntimeLaunchObserver<'_> {
             OpenCodeStartedSession {
                 session_id: event.session_id,
                 process_id: event.process_id,
+                acp_frame_count: 0,
+                session_evidence_refs: Vec::new(),
             },
             self.launch_spec,
         );
@@ -1360,7 +1387,11 @@ async fn handle_launch_failure(
     linear
         .transition_issue(&issue.id, LinearTransition::Todo)
         .await?;
-    if matches!(error, crate::opencode::OpenCodeError::AcpSetupFailed { .. }) {
+    if matches!(
+        launch_spec.provider_mode,
+        crate::state::RuntimeProviderMode::OmpAcp
+    ) || matches!(error, crate::opencode::OpenCodeError::AcpSetupFailed { .. })
+    {
         store.upsert_opencode_session(&session).await?;
     }
     Ok(())
@@ -1392,14 +1423,16 @@ fn launch_failure_session(
             project_id: project.id.clone(),
             issue_id: issue.id.clone(),
             session_id: format!("launch-failed:{}", issue.identifier),
-            agent: project.opencode.agent.clone(),
-            model: project.opencode.model.clone(),
+            provider_mode: launch_spec.provider_mode,
+            provider_id: launch_spec.provider_id.clone(),
+            agent: launch_spec.agent.clone(),
+            model: launch_spec.model.clone(),
             worktree_path: launch_spec.cwd.display().to_string(),
             process_id: None,
             lifecycle_stage: LifecycleStage::Failed,
             stage: OpenCodeStage::Failed,
-            active_agent: Some(project.opencode.agent.clone()),
-            active_model: project.opencode.model.clone(),
+            active_agent: Some(launch_spec.agent.clone()),
+            active_model: launch_spec.model.clone(),
             message_count: 0,
             todo_count: 0,
             part_count: 0,
@@ -1409,6 +1442,9 @@ fn launch_failure_session(
             eval_stage: None,
             lifecycle_marker: Some("launch_failed".into()),
             last_event: Some("launch_failed".into()),
+            runtime_failure_kind: launch_failure_kind(error),
+            acp_frame_count: 0,
+            session_evidence_refs: Vec::new(),
             silence_observed: false,
         }
     })
@@ -1437,14 +1473,16 @@ fn setup_failure_session(
         project_id: project.id.clone(),
         issue_id: issue.id.clone(),
         session_id,
-        agent: project.opencode.agent.clone(),
-        model: project.opencode.model.clone(),
+        provider_mode: launch_spec.provider_mode,
+        provider_id: launch_spec.provider_id.clone(),
+        agent: launch_spec.agent.clone(),
+        model: launch_spec.model.clone(),
         worktree_path: launch_spec.cwd.display().to_string(),
         process_id: *process_id,
         lifecycle_stage: LifecycleStage::Failed,
         stage: OpenCodeStage::Failed,
-        active_agent: Some(project.opencode.agent.clone()),
-        active_model: project.opencode.model.clone(),
+        active_agent: Some(launch_spec.agent.clone()),
+        active_model: launch_spec.model.clone(),
         message_count: 0,
         todo_count: 0,
         part_count: 0,
@@ -1454,8 +1492,25 @@ fn setup_failure_session(
         eval_stage: Some(project.eval.default_suite.clone()),
         lifecycle_marker: Some(format!("setup_failed:{reason}")),
         last_event: Some(setup_failure_last_event(*process_id, termination)),
+        runtime_failure_kind: (launch_spec.provider_mode
+            == crate::state::RuntimeProviderMode::OmpAcp)
+            .then(|| crate::opencode::classify_omp_acp_failure_kind(reason)),
+        acp_frame_count: 0,
+        session_evidence_refs: Vec::new(),
         silence_observed: false,
     })
+}
+
+fn launch_failure_kind(
+    error: &crate::opencode::OpenCodeError,
+) -> Option<crate::state::RuntimeFailureKind> {
+    match error {
+        crate::opencode::OpenCodeError::RuntimeFailure { kind, .. } => Some(kind.clone()),
+        crate::opencode::OpenCodeError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
+            Some(crate::state::RuntimeFailureKind::MissingBinary)
+        }
+        _ => None,
+    }
 }
 
 fn setup_failure_last_event(

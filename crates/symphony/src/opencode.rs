@@ -1,6 +1,7 @@
 mod acp;
 mod archive;
 mod lifecycle;
+mod omp;
 mod prompt;
 mod session_metrics;
 mod types;
@@ -16,9 +17,9 @@ use tokio::{
 use tracing::{debug, info, warn};
 
 use crate::{
-    config::ProjectConfig,
+    config::{OhMyPiAcpCwdPolicy, OhMyPiAcpProviderConfig, ProjectConfig},
     linear::LinearIssue,
-    state::{LifecycleStage, OpenCodeSessionRecord, OpenCodeStage},
+    state::{LifecycleStage, OpenCodeSessionRecord, OpenCodeStage, RuntimeProviderMode},
 };
 use acp::{
     acp_request, drain_acp_stream, extract_session_id, read_acp_response, session_new_params,
@@ -33,6 +34,7 @@ pub use archive::{
 use lifecycle::AcpChildLifecycle;
 pub use lifecycle::ProcessTreeTerminationEvidence;
 pub(crate) use lifecycle::terminate_process_tree;
+pub use omp::{OmpAcpTelemetry, classify_omp_acp_failure_kind};
 use prompt::{
     build_issue_prompt, commit_policy_text, delegated_subagent_contract_text,
     mcp_tool_loop_guard_text, recall_workspace_contract_text, validation_policy_text,
@@ -41,6 +43,7 @@ pub use session_metrics::{
     apply_session_tree_metrics, apply_session_tree_metrics_preserving_marker, ingest_session_event,
     mark_session_silence,
 };
+pub(crate) use types::OMP_CLEANUP_MARKER_ENV;
 pub use types::{
     GitClosureEvidence, OpenCodeEvalResult, OpenCodeHandoff, OpenCodeLaunchSpec,
     OpenCodeProcessStarted, OpenCodeRuntimeConfig, OpenCodeSessionCreated, OpenCodeSessionEvent,
@@ -48,7 +51,8 @@ pub use types::{
 };
 pub use worktree::worktree_path_allowed;
 use worktree::{
-    ensure_resumable_worktree, ensure_worktree, handoff_sidecar_path, remove_stale_handoff_sidecar,
+    ensure_resumable_worktree, ensure_worktree, handoff_sidecar_path, launch_uses_issue_worktree,
+    remove_stale_handoff_sidecar,
 };
 
 #[async_trait::async_trait]
@@ -106,6 +110,8 @@ pub trait OpenCodeLauncher: Sync {
         Ok(OpenCodeStartedSession {
             session_id: session.session_id.clone(),
             process_id: session.process_id,
+            acp_frame_count: session.acp_frame_count,
+            session_evidence_refs: session.session_evidence_refs.clone(),
         })
     }
 
@@ -118,6 +124,8 @@ pub trait OpenCodeLauncher: Sync {
         Ok(OpenCodeStartedSession {
             session_id: session.session_id.clone(),
             process_id: session.process_id,
+            acp_frame_count: session.acp_frame_count,
+            session_evidence_refs: session.session_evidence_refs.clone(),
         })
     }
 
@@ -129,6 +137,8 @@ pub trait OpenCodeLauncher: Sync {
         Ok(OpenCodeStartedSession {
             session_id: session.session_id.clone(),
             process_id: session.process_id,
+            acp_frame_count: session.acp_frame_count,
+            session_evidence_refs: session.session_evidence_refs.clone(),
         })
     }
 }
@@ -145,6 +155,8 @@ impl OpenCodeLauncher for DeterministicOpenCodeLauncher {
         Ok(OpenCodeStartedSession {
             session_id: deterministic_session_id(&spec.cwd.display().to_string()),
             process_id: None,
+            acp_frame_count: 0,
+            session_evidence_refs: Vec::new(),
         })
     }
 }
@@ -306,6 +318,11 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         spec: &OpenCodeLaunchSpec,
         observer: &dyn OpenCodeLaunchObserver,
     ) -> Result<OpenCodeStartedSession, OpenCodeError> {
+        if spec.provider_mode == RuntimeProviderMode::OmpAcp {
+            return omp::StdioOmpAcpLauncher
+                .launch_observed(spec, observer)
+                .await;
+        }
         info!(
             issue = %spec.issue_identifier,
             cwd = %spec.cwd.display(),
@@ -398,6 +415,8 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         Ok(OpenCodeStartedSession {
             session_id,
             process_id,
+            acp_frame_count: 4,
+            session_evidence_refs: Vec::new(),
         })
     }
 
@@ -449,6 +468,8 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         Ok(OpenCodeStartedSession {
             session_id: session.session_id.clone(),
             process_id,
+            acp_frame_count: 3,
+            session_evidence_refs: session.session_evidence_refs.clone(),
         })
     }
 
@@ -545,6 +566,8 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         Ok(OpenCodeStartedSession {
             session_id: session.session_id.clone(),
             process_id,
+            acp_frame_count: 3,
+            session_evidence_refs: session.session_evidence_refs.clone(),
         })
     }
 
@@ -635,6 +658,8 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         Ok(OpenCodeStartedSession {
             session_id: session.session_id.clone(),
             process_id,
+            acp_frame_count: 3,
+            session_evidence_refs: session.session_evidence_refs.clone(),
         })
     }
 
@@ -1040,11 +1065,17 @@ fn canonical_handoff_stage(stage: &str) -> Option<&'static str> {
 }
 
 pub fn build_acp_launch_spec(project: &ProjectConfig, issue: &LinearIssue) -> OpenCodeLaunchSpec {
+    if let Some(provider) = project.omp_acp_providers.first() {
+        return build_omp_acp_launch_spec(project, issue, provider);
+    }
     let branch_name = issue_branch_name(issue);
     OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+        provider_id: None,
         command: project.opencode.command.clone(),
         args: project.opencode.args.clone(),
         cwd: project.branch.worktree_root.join(&issue.identifier),
+        env_allowlist: Vec::new(),
         worktree_root: Some(project.branch.worktree_root.clone()),
         issue_identifier: issue.identifier.clone(),
         branch_name: branch_name.clone(),
@@ -1057,6 +1088,50 @@ pub fn build_acp_launch_spec(project: &ProjectConfig, issue: &LinearIssue) -> Op
         agent: project.opencode.agent.clone(),
         model: project.opencode.model.clone(),
         effort: project.opencode.effort.clone(),
+        prompt: build_issue_prompt(project, issue, &branch_name),
+        permission_policy: project.opencode.permission_policy.clone(),
+    }
+}
+
+pub fn build_omp_acp_launch_spec(
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+    provider: &OhMyPiAcpProviderConfig,
+) -> OpenCodeLaunchSpec {
+    let branch_name = issue_branch_name(issue);
+    let issue_worktree = project.branch.worktree_root.join(&issue.identifier);
+    let cwd = match provider.cwd {
+        OhMyPiAcpCwdPolicy::IssueWorktree => issue_worktree,
+        OhMyPiAcpCwdPolicy::ProjectRepo => project.repo_path.clone(),
+    };
+    OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OmpAcp,
+        provider_id: Some(provider.id.clone()),
+        command: provider.command.clone(),
+        args: provider.args.clone(),
+        cwd,
+        env_allowlist: provider.env_allowlist.clone(),
+        worktree_root: Some(project.branch.worktree_root.clone()),
+        issue_identifier: issue.identifier.clone(),
+        branch_name: branch_name.clone(),
+        repo_path: Some(project.repo_path.clone()),
+        recall_workspace_root: project
+            .recall
+            .as_ref()
+            .map(|recall| recall.workspace_root.clone()),
+        base_ref: Some(project.branch.base.clone()),
+        agent: provider
+            .agent
+            .clone()
+            .unwrap_or_else(|| project.opencode.agent.clone()),
+        model: provider
+            .model
+            .clone()
+            .or_else(|| project.opencode.model.clone()),
+        effort: provider
+            .effort
+            .clone()
+            .or_else(|| project.opencode.effort.clone()),
         prompt: build_issue_prompt(project, issue, &branch_name),
         permission_policy: project.opencode.permission_policy.clone(),
     }
@@ -1081,14 +1156,16 @@ pub fn new_session_record(
         project_id: project.id.clone(),
         issue_id: issue.id.clone(),
         session_id: started.session_id,
-        agent: project.opencode.agent.clone(),
-        model: project.opencode.model.clone(),
+        provider_mode: spec.provider_mode,
+        provider_id: spec.provider_id.clone(),
+        agent: spec.agent.clone(),
+        model: spec.model.clone(),
         worktree_path: spec.cwd.display().to_string(),
         process_id: started.process_id,
         lifecycle_stage: LifecycleStage::Running,
         stage: OpenCodeStage::Starting,
-        active_agent: Some(project.opencode.agent.clone()),
-        active_model: project.opencode.model.clone(),
+        active_agent: Some(spec.agent.clone()),
+        active_model: spec.model.clone(),
         message_count: 0,
         todo_count: 0,
         part_count: 0,
@@ -1096,8 +1173,11 @@ pub fn new_session_record(
         cost_micros: 0,
         subagent_count: 0,
         eval_stage: Some(project.eval.default_suite.clone()),
-        lifecycle_marker: Some("acp_started".into()),
+        lifecycle_marker: Some("acp_process_started".into()),
         last_event: Some("acp_process_started".into()),
+        runtime_failure_kind: None,
+        acp_frame_count: started.acp_frame_count,
+        session_evidence_refs: started.session_evidence_refs,
         silence_observed: false,
     }
 }
@@ -1373,6 +1453,11 @@ pub enum OpenCodeError {
         session_id: Option<String>,
         reason: String,
         termination: Box<ProcessTreeTerminationEvidence>,
+    },
+    #[error("runtime provider failure ({kind}): {message}")]
+    RuntimeFailure {
+        kind: crate::state::RuntimeFailureKind,
+        message: String,
     },
     #[error("opencode process tree error: {0}")]
     ProcessTree(String),

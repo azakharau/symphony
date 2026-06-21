@@ -1648,6 +1648,72 @@ async fn terminal_reconciliation_terminates_live_opencode_process_tree() {
 }
 
 #[tokio::test]
+async fn terminal_reconciliation_does_not_terminate_unidentified_omp_pid() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let missing_worktree = dir.path().join("already-removed").join("SYM-70");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let mut active = test_issue("symphony", "closed-omp", "SYM-70");
+    active.lifecycle_stage = LifecycleStage::Running;
+    active.cleanup_status = CleanupStatus::Pending;
+    active.git_ref = Some(GitRefRecord {
+        branch: "feature/sym-70".into(),
+        worktree_path: missing_worktree.display().to_string(),
+        head_sha: None,
+        pr_url: None,
+    });
+    store.upsert_issue(active).await.expect("active issue");
+    let mut unrelated_process = Command::new("sleep")
+        .arg("120")
+        .spawn()
+        .expect("spawn unrelated process");
+    thread::sleep(Duration::from_millis(100));
+    let process_id = unrelated_process.id();
+    let mut live_session = test_session("symphony", "closed-omp", "omp-70", &missing_worktree);
+    live_session.provider_mode = RuntimeProviderMode::OmpAcp;
+    live_session.provider_id = Some("omp-primary".into());
+    live_session.process_id = Some(process_id);
+    live_session.lifecycle_stage = LifecycleStage::Running;
+    live_session.stage = OpenCodeStage::Running;
+    store
+        .upsert_opencode_session(live_session)
+        .await
+        .expect("live session");
+
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "closed-omp",
+        "SYM-70",
+        "Canceled",
+        Some(1),
+    )]);
+
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+        .await
+        .expect("terminal reconciliation");
+
+    assert_eq!(report.terminal_reconciled, vec!["SYM-70"]);
+    assert!(
+        process_exists(process_id),
+        "unidentified OMP PID must not be terminated"
+    );
+    unrelated_process.kill().expect("kill unrelated process");
+    let _ = unrelated_process.wait();
+    let session = store
+        .opencode_session("symphony", "closed-omp", "omp-70")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(session.process_id, None);
+    assert_eq!(
+        session.last_event.as_deref(),
+        Some("linear_terminal_reconciled")
+    );
+}
+
+#[tokio::test]
 async fn terminal_reconciliation_skips_unchanged_issue_and_session_rows() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
@@ -1970,7 +2036,7 @@ async fn orchestration_records_process_while_acp_session_new_is_still_pending() 
     assert_eq!(session.stage, OpenCodeStage::Starting);
     assert_eq!(
         session.lifecycle_marker.as_deref(),
-        Some("acp_process_spawned")
+        Some("acp_process_started")
     );
     assert!(
         session.process_id.is_some(),

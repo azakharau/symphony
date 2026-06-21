@@ -553,6 +553,457 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
 }
 
 #[tokio::test]
+async fn omp_acp_launch_spec_uses_provider_command_cwd_env_and_mode() {
+    let config_toml = valid_config_toml().replace(
+        "[projects.eval]\n",
+        r#"[[projects.omp_acp_providers]]
+id = "omp-primary"
+command = "/tmp/mock-omp"
+args = ["acp"]
+cwd = "project_repo"
+env_allowlist = ["PATH", "OMP_TOKEN"]
+agent = "implementer"
+model = "openai/gpt-5.5"
+effort = "medium"
+
+[projects.omp_acp_providers.capabilities]
+acp_stdio = true
+hook_evidence = true
+sdk_session_evidence = true
+rpc_secondary_mode = false
+inverse_bridge_reference = true
+
+[projects.eval]
+"#,
+    );
+    let config = RootConfig::from_toml_str(&config_toml).expect("config");
+    let project = config.project("symphony").expect("project");
+    let issue = linear_issue("issue-27", "SYM-27", "Todo", Some(1));
+
+    let spec = opencode::build_acp_launch_spec(project, &issue);
+
+    assert_eq!(spec.provider_mode, RuntimeProviderMode::OmpAcp);
+    assert_eq!(spec.provider_id.as_deref(), Some("omp-primary"));
+    assert_eq!(spec.command, PathBuf::from("/tmp/mock-omp"));
+    assert_eq!(spec.args, ["acp"]);
+    assert_eq!(spec.cwd, PathBuf::from("/home/agent/proj/symphony"));
+    assert_eq!(spec.env_allowlist, ["PATH", "OMP_TOKEN"]);
+    assert_eq!(spec.agent, "implementer");
+    assert_eq!(spec.model.as_deref(), Some("openai/gpt-5.5"));
+}
+
+#[tokio::test]
+async fn mocked_omp_acp_launch_returns_session_telemetry_and_evidence_refs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let command = dir.path().join("mock-omp-acp.py");
+    fs::write(
+        &command,
+        r#"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"protocolVersion":1}}), flush=True)
+    elif method == "session/new":
+        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"sessionId":"omp-session-1","sdkSessionEvidenceRefs":["sdk:one","sdk:two"]}}), flush=True)
+    elif method == "session/prompt":
+        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"ok":True}}), flush=True)
+        break
+"#,
+    )
+    .expect("write mock");
+    fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod");
+    let worktree = dir.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OmpAcp,
+        provider_id: Some("omp-primary".into()),
+        command,
+        args: Vec::new(),
+        cwd: worktree,
+        env_allowlist: vec!["PATH".into()],
+        worktree_root: None,
+        issue_identifier: "SYM-102".into(),
+        branch_name: "feature/sym-102".into(),
+        repo_path: None,
+        recall_workspace_root: None,
+        base_ref: None,
+        agent: "implementer".into(),
+        model: Some("openai/gpt-5.5".into()),
+        effort: None,
+        prompt: "Implement SYM-102".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+
+    let started = opencode::StdioOpenCodeLauncher
+        .launch(&spec)
+        .await
+        .expect("mock OMP launch");
+
+    assert_eq!(started.session_id, "omp-session-1");
+    assert!(started.process_id.is_some());
+    assert_eq!(started.acp_frame_count, 5);
+    assert_eq!(started.session_evidence_refs, ["sdk:one", "sdk:two"]);
+}
+
+#[tokio::test]
+async fn mocked_omp_acp_launch_with_env_allowlist_retains_issue_worktree_marker() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let command = dir.path().join("mock-omp-acp-env.py");
+    fs::write(
+        &command,
+        r#"#!/usr/bin/env python3
+import json, os, sys
+if os.environ.get("SYMPHONY_ISSUE_WORKTREE") != os.getcwd():
+    print("missing SYMPHONY_ISSUE_WORKTREE marker", file=sys.stderr, flush=True)
+    sys.exit(2)
+expected_cleanup_marker = "provider=omp-primary;issue=SYM-102;cwd=" + os.getcwd()
+if os.environ.get("SYMPHONY_OMP_CLEANUP_MARKER") != expected_cleanup_marker:
+    print("missing SYMPHONY_OMP_CLEANUP_MARKER marker", file=sys.stderr, flush=True)
+    sys.exit(3)
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"protocolVersion":1}}), flush=True)
+    elif method == "session/new":
+        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"sessionId":"omp-session-env"}}), flush=True)
+    elif method == "session/prompt":
+        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"ok":True}}), flush=True)
+        break
+"#,
+    )
+    .expect("write mock");
+    fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod");
+    let worktree = dir.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OmpAcp,
+        provider_id: Some("omp-primary".into()),
+        command,
+        args: Vec::new(),
+        cwd: worktree,
+        env_allowlist: vec!["PATH".into()],
+        worktree_root: None,
+        issue_identifier: "SYM-102".into(),
+        branch_name: "feature/sym-102".into(),
+        repo_path: None,
+        recall_workspace_root: None,
+        base_ref: None,
+        agent: "implementer".into(),
+        model: Some("openai/gpt-5.5".into()),
+        effort: None,
+        prompt: "Implement SYM-102".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+
+    let started = opencode::StdioOpenCodeLauncher
+        .launch(&spec)
+        .await
+        .expect("mock OMP launch");
+
+    assert_eq!(started.session_id, "omp-session-env");
+    assert!(started.process_id.is_some());
+}
+
+#[tokio::test]
+async fn mocked_project_repo_omp_acp_launch_uses_issue_specific_cleanup_marker() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let command = dir.path().join("mock-project-repo-omp-acp-env.py");
+    fs::write(
+        &command,
+        r#"#!/usr/bin/env python3
+import json, os, sys
+repo = os.getcwd()
+if os.environ.get("SYMPHONY_ISSUE_WORKTREE") != repo:
+    print("provider cwd marker changed", file=sys.stderr, flush=True)
+    sys.exit(2)
+expected_cleanup_marker = "provider=omp-primary;issue=SYM-102;cwd=" + repo
+if os.environ.get("SYMPHONY_OMP_CLEANUP_MARKER") != expected_cleanup_marker:
+    print("cleanup marker is not issue-specific", file=sys.stderr, flush=True)
+    sys.exit(3)
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"protocolVersion":1}}), flush=True)
+    elif method == "session/new":
+        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"sessionId":"omp-session-project-repo"}}), flush=True)
+    elif method == "session/prompt":
+        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"ok":True}}), flush=True)
+        break
+"#,
+    )
+    .expect("write mock");
+    fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OmpAcp,
+        provider_id: Some("omp-primary".into()),
+        command,
+        args: Vec::new(),
+        cwd: repo,
+        env_allowlist: vec!["PATH".into()],
+        worktree_root: None,
+        issue_identifier: "SYM-102".into(),
+        branch_name: "feature/sym-102".into(),
+        repo_path: None,
+        recall_workspace_root: None,
+        base_ref: None,
+        agent: "implementer".into(),
+        model: Some("openai/gpt-5.5".into()),
+        effort: None,
+        prompt: "Implement SYM-102".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+
+    let started = opencode::StdioOpenCodeLauncher
+        .launch(&spec)
+        .await
+        .expect("mock OMP project repo launch");
+
+    assert_eq!(started.session_id, "omp-session-project-repo");
+    assert!(started.process_id.is_some());
+}
+
+#[tokio::test]
+async fn mocked_omp_acp_launch_prepares_issue_worktree_before_spawn() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let command = dir.path().join("mock-omp-acp.py");
+    fs::write(
+        &command,
+        r#"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"protocolVersion":1}}), flush=True)
+    elif method == "session/new":
+        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"sessionId":"omp-session-worktree"}}), flush=True)
+    elif method == "session/prompt":
+        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"ok":True}}), flush=True)
+        break
+"#,
+    )
+    .expect("write mock");
+    fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod");
+    let worktree_root = dir.path().join("worktrees");
+    let worktree = worktree_root.join("SYM-102");
+    let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OmpAcp,
+        provider_id: Some("omp-primary".into()),
+        command,
+        args: Vec::new(),
+        cwd: worktree.clone(),
+        env_allowlist: vec!["PATH".into()],
+        worktree_root: Some(worktree_root),
+        issue_identifier: "SYM-102".into(),
+        branch_name: "feature/sym-102".into(),
+        repo_path: None,
+        recall_workspace_root: None,
+        base_ref: None,
+        agent: "implementer".into(),
+        model: None,
+        effort: None,
+        prompt: "Implement SYM-102".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+
+    let started = opencode::StdioOpenCodeLauncher
+        .launch(&spec)
+        .await
+        .expect("mock OMP launch");
+
+    assert_eq!(started.session_id, "omp-session-worktree");
+    assert!(worktree.is_dir());
+}
+
+#[tokio::test]
+async fn malformed_omp_acp_frame_is_typed_and_cleans_process_tree() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let command = dir.path().join("bad-omp-acp.sh");
+    fs::write(
+        &command,
+        "#!/bin/sh\nsleep 30 &\necho '{not-json'\nsleep 30\n",
+    )
+    .expect("write bad mock");
+    fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod");
+    let worktree = dir.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OmpAcp,
+        provider_id: Some("omp-primary".into()),
+        command,
+        args: Vec::new(),
+        cwd: worktree,
+        env_allowlist: vec!["PATH".into()],
+        worktree_root: None,
+        issue_identifier: "SYM-102".into(),
+        branch_name: "feature/sym-102".into(),
+        repo_path: None,
+        recall_workspace_root: None,
+        base_ref: None,
+        agent: "implementer".into(),
+        model: None,
+        effort: None,
+        prompt: "Implement SYM-102".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+
+    let err = opencode::StdioOpenCodeLauncher
+        .launch(&spec)
+        .await
+        .expect_err("malformed ACP frame fails");
+
+    let opencode::OpenCodeError::AcpSetupFailed {
+        reason,
+        termination,
+        ..
+    } = err
+    else {
+        panic!("expected setup failure");
+    };
+    assert!(
+        reason.contains("malformed_acp_frame") || reason.contains("invalid ACP JSON"),
+        "{reason}"
+    );
+    assert!(termination.term_signal_sent || termination.kill_signal_sent);
+    assert!(!termination.still_alive);
+}
+
+#[tokio::test]
+async fn missing_omp_acp_binary_is_typed_runtime_failure() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OmpAcp,
+        provider_id: Some("omp-primary".into()),
+        command: dir.path().join("missing-omp"),
+        args: Vec::new(),
+        cwd: dir.path().to_path_buf(),
+        env_allowlist: vec!["PATH".into()],
+        worktree_root: None,
+        issue_identifier: "SYM-102".into(),
+        branch_name: "feature/sym-102".into(),
+        repo_path: None,
+        recall_workspace_root: None,
+        base_ref: None,
+        agent: "implementer".into(),
+        model: None,
+        effort: None,
+        prompt: "Implement SYM-102".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+
+    let err = opencode::StdioOpenCodeLauncher
+        .launch(&spec)
+        .await
+        .expect_err("missing OMP binary fails");
+
+    let opencode::OpenCodeError::RuntimeFailure { kind, .. } = err else {
+        panic!("expected typed runtime failure");
+    };
+    assert_eq!(kind, RuntimeFailureKind::MissingBinary);
+}
+
+#[tokio::test]
+async fn unsupported_omp_acp_version_is_typed_and_cleans_process_tree() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let command = dir.path().join("unsupported-omp-acp.py");
+    fs::write(
+        &command,
+        r#"#!/usr/bin/env python3
+import json, sys, time
+line = sys.stdin.readline()
+msg = json.loads(line)
+print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"protocolVersion":2}}), flush=True)
+time.sleep(30)
+"#,
+    )
+    .expect("write mock");
+    fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod");
+    let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OmpAcp,
+        provider_id: Some("omp-primary".into()),
+        command,
+        args: Vec::new(),
+        cwd: dir.path().to_path_buf(),
+        env_allowlist: vec!["PATH".into()],
+        worktree_root: None,
+        issue_identifier: "SYM-102".into(),
+        branch_name: "feature/sym-102".into(),
+        repo_path: None,
+        recall_workspace_root: None,
+        base_ref: None,
+        agent: "implementer".into(),
+        model: None,
+        effort: None,
+        prompt: "Implement SYM-102".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+
+    let err = opencode::StdioOpenCodeLauncher
+        .launch(&spec)
+        .await
+        .expect_err("unsupported OMP ACP version fails");
+
+    let opencode::OpenCodeError::AcpSetupFailed {
+        reason,
+        termination,
+        ..
+    } = err
+    else {
+        panic!("expected setup failure");
+    };
+    assert!(reason.contains("unsupported_omp_version"), "{reason}");
+    assert!(!termination.still_alive);
+}
+
+#[tokio::test]
+async fn runtime_api_surfaces_omp_acp_provider_mode_and_session_telemetry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "issue-102", "SYM-102"))
+        .await
+        .expect("issue");
+    let mut session = test_session("symphony", "issue-102", "omp-session-1", "/tmp/sym-102");
+    session.provider_mode = RuntimeProviderMode::OmpAcp;
+    session.provider_id = Some("omp-primary".into());
+    session.runtime_failure_kind = Some(RuntimeFailureKind::ProviderAuthUnavailable);
+    session.acp_frame_count = 5;
+    session.session_evidence_refs = vec!["sdk:one".into()];
+    store
+        .upsert_opencode_session(&session)
+        .await
+        .expect("session");
+
+    let api = RuntimeDashboardApi::from_store(&config, &store)
+        .await
+        .expect("dashboard api");
+    let detail = api
+        .issue_detail("symphony", "issue-102")
+        .expect("issue detail")
+        .expect("issue exists");
+    let session = &detail.opencode_sessions[0];
+
+    assert_eq!(session.provider_mode, RuntimeProviderMode::OmpAcp);
+    assert_eq!(session.provider_id.as_deref(), Some("omp-primary"));
+    assert_eq!(
+        session.runtime_failure_kind,
+        Some(RuntimeFailureKind::ProviderAuthUnavailable)
+    );
+    assert_eq!(session.acp_frame_count, 5);
+    assert_eq!(session.session_evidence_refs, ["sdk:one"]);
+}
+
+#[tokio::test]
 async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
     let dir = tempfile::tempdir().expect("tempdir");
     let transcript_path = dir.path().join("acp-transcript.jsonl");
@@ -560,9 +1011,12 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
     let worktree = dir.path().join("worktree");
     let recall_workspace_root = dir.path().join("recall-root");
     let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+        provider_id: None,
         command: script_path,
         args: Vec::new(),
         cwd: worktree.clone(),
+        env_allowlist: Vec::new(),
         worktree_root: None,
         issue_identifier: "SYM-200".into(),
         branch_name: "feature/sym-200".into(),
@@ -667,9 +1121,12 @@ async fn stdio_launcher_kills_process_tree_when_setup_fails_before_session_attac
     let worktree = dir.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
     let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+        provider_id: None,
         command: script_path,
         args: Vec::new(),
         cwd: worktree.clone(),
+        env_allowlist: Vec::new(),
         worktree_root: None,
         issue_identifier: "SYM-209".into(),
         branch_name: "feature/sym-209".into(),
@@ -1077,9 +1534,12 @@ async fn stdio_launcher_removes_stale_handoff_before_prompting_new_session() {
     )
     .expect("stale handoff");
     let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+        provider_id: None,
         command: script_path,
         args: Vec::new(),
         cwd: worktree,
+        env_allowlist: Vec::new(),
         worktree_root: Some(worktree_root),
         issue_identifier: "SYM-201".into(),
         branch_name: "feature/sym-201".into(),
@@ -1124,9 +1584,12 @@ async fn stdio_launcher_resumes_existing_session_without_replaying_prompt() {
     let worktree = dir.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
     let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+        provider_id: None,
         command: script_path,
         args: Vec::new(),
         cwd: worktree.clone(),
+        env_allowlist: Vec::new(),
         worktree_root: None,
         issue_identifier: "SYM-202".into(),
         branch_name: "feature/sym-202".into(),
@@ -1203,9 +1666,12 @@ async fn stdio_launcher_continues_existing_session_from_dirty_resumable_worktree
     );
     fs::write(worktree.join("in-flight.txt"), "uncommitted work\n").expect("dirty file");
     let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+        provider_id: None,
         command: script_path,
         args: Vec::new(),
         cwd: worktree.clone(),
+        env_allowlist: Vec::new(),
         worktree_root: Some(worktree_root),
         issue_identifier: "SYM-203".into(),
         branch_name: "feature/sym-203".into(),
@@ -1302,9 +1768,12 @@ async fn stdio_launcher_continues_dirty_same_issue_worktree_after_branch_title_d
     );
     fs::write(worktree.join("in-flight.txt"), "uncommitted work\n").expect("dirty file");
     let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+        provider_id: None,
         command: script_path,
         args: Vec::new(),
         cwd: worktree.clone(),
+        env_allowlist: Vec::new(),
         worktree_root: Some(worktree_root),
         issue_identifier: "NRV-48".into(),
         branch_name: "feature/nrv-48-implement-runtime-context-efficiency-attestation-and".into(),
@@ -1472,9 +1941,12 @@ async fn stdio_launcher_creates_git_worktree_from_project_repo_and_base_ref() {
     let transcript_path = dir.path().join("acp-transcript.jsonl");
     let script_path = write_fake_acp_script(dir.path(), &transcript_path);
     let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+        provider_id: None,
         command: script_path,
         args: Vec::new(),
         cwd: worktree.clone(),
+        env_allowlist: Vec::new(),
         worktree_root: Some(dir.path().join("worktrees")),
         issue_identifier: "SYM-200".into(),
         branch_name: "feature/sym-200".into(),
@@ -1521,9 +1993,12 @@ async fn stdio_launcher_rejects_issue_identifier_path_separators_before_worktree
     let root = dir.path().join("worktrees");
     let nested = root.join("SYM").join("200");
     let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+        provider_id: None,
         command: PathBuf::from("/bin/false"),
         args: Vec::new(),
         cwd: nested.clone(),
+        env_allowlist: Vec::new(),
         worktree_root: Some(root.clone()),
         issue_identifier: "SYM/200".into(),
         branch_name: "feature/sym-200".into(),
@@ -1565,6 +2040,8 @@ async fn opencode_event_ingestion_updates_stage_telemetry_without_losing_session
         opencode::OpenCodeStartedSession {
             session_id: "oc-session-27".into(),
             process_id: None,
+            acp_frame_count: 0,
+            session_evidence_refs: Vec::new(),
         },
         &spec,
     );
@@ -1614,6 +2091,8 @@ async fn opencode_silence_is_observable_without_marking_session_failed() {
         opencode::OpenCodeStartedSession {
             session_id: "oc-session-27".into(),
             process_id: None,
+            acp_frame_count: 0,
+            session_evidence_refs: Vec::new(),
         },
         &spec,
     );
@@ -2028,9 +2507,12 @@ async fn stdio_launcher_rejects_clean_existing_worktree_on_wrong_branch() {
     let transcript_path = dir.path().join("acp-transcript.jsonl");
     let script_path = write_fake_acp_script(dir.path(), &transcript_path);
     let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+        provider_id: None,
         command: script_path,
         args: Vec::new(),
         cwd: worktree.clone(),
+        env_allowlist: Vec::new(),
         worktree_root: Some(root),
         issue_identifier: "SYM-204".into(),
         branch_name: "feature/sym-204".into(),
@@ -2088,9 +2570,12 @@ async fn stdio_launcher_rejects_existing_worktree_on_wrong_branch() {
     );
     fs::write(worktree.join("dirty.txt"), "local work").expect("dirty file");
     let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+        provider_id: None,
         command: PathBuf::from("/bin/false"),
         args: Vec::new(),
         cwd: worktree.clone(),
+        env_allowlist: Vec::new(),
         worktree_root: Some(root),
         issue_identifier: "SYM-205".into(),
         branch_name: "feature/sym-205".into(),

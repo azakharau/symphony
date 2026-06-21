@@ -111,6 +111,8 @@ impl OpenCodeLauncher for MismatchedHandoffOpenCodeLauncher {
         Ok(opencode::OpenCodeStartedSession {
             session_id: session.session_id.clone(),
             process_id: session.process_id,
+            acp_frame_count: 0,
+            session_evidence_refs: Vec::new(),
         })
     }
 }

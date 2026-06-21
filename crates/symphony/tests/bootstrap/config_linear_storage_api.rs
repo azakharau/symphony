@@ -923,6 +923,8 @@ async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
                 project_id: "symphony".into(),
                 issue_id: "0af8ad67-37b9-412a-9869-82ca96b418e1".into(),
                 session_id: "oc-session-1".into(),
+                provider_mode: RuntimeProviderMode::OpenCodeAcp,
+                provider_id: None,
                 agent: "build".into(),
                 model: None,
                 worktree_path: "/home/agent/.symphony/workspaces/opencode/symphony/SYM-25".into(),
@@ -940,6 +942,9 @@ async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
                 eval_stage: Some("unit".into()),
                 lifecycle_marker: Some("implementation".into()),
                 last_event: Some("started".into()),
+                runtime_failure_kind: None,
+                acp_frame_count: 0,
+                session_evidence_refs: Vec::new(),
                 silence_observed: false,
             })
             .await
@@ -1554,6 +1559,8 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
           "title": "Test issue",
           "display_status": "repair loop",
           "session_id": "oc-repair",
+          "provider_mode": "open_code_acp",
+          "provider_id": null,
           "process_id": null,
           "process_alive": null,
           "stage": "eval",

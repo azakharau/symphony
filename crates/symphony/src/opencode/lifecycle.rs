@@ -32,10 +32,24 @@ impl AcpChildLifecycle {
         command
             .args(&spec.args)
             .current_dir(&spec.cwd)
-            .env("SYMPHONY_ISSUE_WORKTREE", &spec.cwd)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        if !spec.env_allowlist.is_empty() {
+            let allowed_env = spec
+                .env_allowlist
+                .iter()
+                .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
+                .collect::<Vec<_>>();
+            command.env_clear();
+            for (name, value) in allowed_env {
+                command.env(name, value);
+            }
+        }
+        command.env("SYMPHONY_ISSUE_WORKTREE", &spec.cwd);
+        if let Some(marker) = spec.omp_cleanup_marker() {
+            command.env(super::OMP_CLEANUP_MARKER_ENV, marker);
+        }
         if let Some(recall_workspace_root) = &spec.recall_workspace_root {
             command.env("SYMPHONY_RECALL_WORKSPACE_ROOT", recall_workspace_root);
         }

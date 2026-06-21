@@ -4,11 +4,14 @@ use crate::{
     config::ProjectConfig,
     linear::LinearIssue,
     opencode::{
-        OpenCodeLauncher, OpenCodeStartedSession, build_acp_launch_spec, terminate_process_tree,
+        OMP_CLEANUP_MARKER_ENV, OpenCodeLauncher, OpenCodeStartedSession, build_acp_launch_spec,
+        terminate_process_tree,
     },
     state::{FailureRecord, LifecycleStage, OpenCodeSessionRecord, OpenCodeStage},
     storage::SqliteStore,
 };
+
+use std::path::Path;
 
 use super::policy::recoverable_opencode_failure;
 
@@ -381,7 +384,7 @@ pub(super) async fn session_requires_resume(session: &OpenCodeSessionRecord) -> 
     let Some(process_id) = session.process_id else {
         return true;
     };
-    if !opencode_process_is_alive(process_id).await {
+    if !session_process_is_alive(session, process_id).await {
         return true;
     }
     false
@@ -391,7 +394,156 @@ pub(super) async fn session_has_live_process(session: &OpenCodeSessionRecord) ->
     let Some(process_id) = session.process_id else {
         return false;
     };
-    opencode_process_is_alive(process_id).await
+    session_process_is_alive(session, process_id).await
+}
+
+async fn session_process_is_alive(session: &OpenCodeSessionRecord, process_id: u32) -> bool {
+    match session.provider_mode {
+        crate::state::RuntimeProviderMode::OpenCodeAcp => {
+            opencode_process_is_alive(process_id).await
+        }
+        crate::state::RuntimeProviderMode::OmpAcp => {
+            omp_acp_process_is_alive(session, process_id).await
+        }
+    }
+}
+
+async fn omp_acp_process_is_alive(session: &OpenCodeSessionRecord, process_id: u32) -> bool {
+    if session.provider_id.is_none() {
+        return false;
+    }
+
+    let Ok(environ) = tokio::fs::read(format!("/proc/{process_id}/environ")).await else {
+        return false;
+    };
+    environ.split(|byte| *byte == 0).any(|entry| {
+        entry == format!("SYMPHONY_ISSUE_WORKTREE={}", session.worktree_path).as_bytes()
+    })
+}
+
+async fn session_process_matches_cleanup_owner(
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+    session: &OpenCodeSessionRecord,
+    process_id: u32,
+) -> bool {
+    match session.provider_mode {
+        crate::state::RuntimeProviderMode::OpenCodeAcp => {
+            opencode_process_is_alive(process_id).await
+        }
+        crate::state::RuntimeProviderMode::OmpAcp => {
+            omp_acp_process_matches_cleanup_owner(project, issue, session, process_id).await
+        }
+    }
+}
+
+async fn omp_acp_process_matches_cleanup_owner(
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+    session: &OpenCodeSessionRecord,
+    process_id: u32,
+) -> bool {
+    if session.provider_id.is_none() {
+        return false;
+    }
+
+    let Ok(environ) = tokio::fs::read(format!("/proc/{process_id}/environ")).await else {
+        return false;
+    };
+    let issue_worktree = project.branch.worktree_root.join(&issue.identifier);
+    omp_acp_environ_matches_cleanup_owner(&issue_worktree, &issue.identifier, session, &environ)
+}
+
+fn omp_acp_environ_matches_cleanup_owner(
+    issue_worktree: &Path,
+    issue_identifier: &str,
+    session: &OpenCodeSessionRecord,
+    environ: &[u8],
+) -> bool {
+    let Some(provider_id) = session.provider_id.as_deref() else {
+        return false;
+    };
+    let expected_marker = format!(
+        "{OMP_CLEANUP_MARKER_ENV}=provider={provider_id};issue={issue_identifier};cwd={}",
+        session.worktree_path
+    );
+    if environ
+        .split(|byte| *byte == 0)
+        .any(|entry| entry == expected_marker.as_bytes())
+    {
+        return true;
+    }
+
+    if session.worktree_path != issue_worktree.display().to_string() {
+        return false;
+    }
+    environ.split(|byte| *byte == 0).any(|entry| {
+        entry == format!("SYMPHONY_ISSUE_WORKTREE={}", session.worktree_path).as_bytes()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{LifecycleStage, RuntimeProviderMode};
+
+    fn omp_session(worktree_path: &Path) -> OpenCodeSessionRecord {
+        OpenCodeSessionRecord {
+            project_id: "project".into(),
+            issue_id: "issue".into(),
+            session_id: "session".into(),
+            provider_mode: RuntimeProviderMode::OmpAcp,
+            provider_id: Some("omp-primary".into()),
+            agent: "implementer".into(),
+            model: None,
+            worktree_path: worktree_path.display().to_string(),
+            process_id: Some(123),
+            lifecycle_stage: LifecycleStage::Running,
+            stage: OpenCodeStage::Starting,
+            active_agent: Some("implementer".into()),
+            active_model: None,
+            message_count: 0,
+            todo_count: 0,
+            part_count: 0,
+            token_count: 0,
+            cost_micros: 0,
+            subagent_count: 0,
+            eval_stage: None,
+            lifecycle_marker: None,
+            last_event: None,
+            runtime_failure_kind: None,
+            acp_frame_count: 0,
+            session_evidence_refs: Vec::new(),
+            silence_observed: false,
+        }
+    }
+
+    #[test]
+    fn project_repo_omp_cleanup_marker_must_match_issue_owner() {
+        let repo_path = Path::new("/repo/shared");
+        let issue_worktree = Path::new("/worktrees/SYM-102");
+        let session = omp_session(repo_path);
+        let other_issue_environ = format!(
+            "SYMPHONY_ISSUE_WORKTREE=/repo/shared\0{OMP_CLEANUP_MARKER_ENV}=provider=omp-primary;issue=SYM-103;cwd=/repo/shared\0"
+        );
+
+        assert!(!omp_acp_environ_matches_cleanup_owner(
+            issue_worktree,
+            "SYM-102",
+            &session,
+            other_issue_environ.as_bytes(),
+        ));
+
+        let owned_environ = format!(
+            "SYMPHONY_ISSUE_WORKTREE=/repo/shared\0{OMP_CLEANUP_MARKER_ENV}=provider=omp-primary;issue=SYM-102;cwd=/repo/shared\0"
+        );
+        assert!(omp_acp_environ_matches_cleanup_owner(
+            issue_worktree,
+            "SYM-102",
+            &session,
+            owned_environ.as_bytes(),
+        ));
+    }
 }
 
 async fn opencode_process_is_alive(process_id: u32) -> bool {
@@ -452,7 +604,7 @@ pub(super) async fn terminate_current_session_process(
     let Some(process_id) = session.process_id else {
         return Ok(());
     };
-    if !opencode_process_is_alive(process_id).await {
+    if !session_process_matches_cleanup_owner(project, issue, session, process_id).await {
         return Ok(());
     }
     info!(

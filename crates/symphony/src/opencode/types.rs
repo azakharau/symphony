@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::state::OpenCodeStage;
+use crate::state::{OpenCodeStage, RuntimeProviderMode};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -25,9 +25,12 @@ pub enum PermissionPolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OpenCodeLaunchSpec {
+    pub provider_mode: RuntimeProviderMode,
+    pub provider_id: Option<String>,
     pub command: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
+    pub env_allowlist: Vec<String>,
     pub worktree_root: Option<PathBuf>,
     pub issue_identifier: String,
     pub branch_name: String,
@@ -41,10 +44,28 @@ pub struct OpenCodeLaunchSpec {
     pub permission_policy: PermissionPolicy,
 }
 
+pub(crate) const OMP_CLEANUP_MARKER_ENV: &str = "SYMPHONY_OMP_CLEANUP_MARKER";
+
+impl OpenCodeLaunchSpec {
+    pub(crate) fn omp_cleanup_marker(&self) -> Option<String> {
+        if self.provider_mode != RuntimeProviderMode::OmpAcp {
+            return None;
+        }
+        let provider_id = self.provider_id.as_deref()?;
+        Some(format!(
+            "provider={provider_id};issue={};cwd={}",
+            self.issue_identifier,
+            self.cwd.display()
+        ))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OpenCodeStartedSession {
     pub session_id: String,
     pub process_id: Option<u32>,
+    pub acp_frame_count: u64,
+    pub session_evidence_refs: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

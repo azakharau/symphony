@@ -26,8 +26,9 @@ use symphony::{
     state::{
         BlockerRecord, CleanupStatus, EvalRunRecord, FailureRecord, GitRefRecord, IssueStateRecord,
         LifecycleStage, OpenCodeSessionRecord, OpenCodeStage, OpenCodeStageEventRecord,
-        ProjectStateRecord, RuntimeLivenessStatus, SelfDefectOccurrenceRecord,
-        SelfDefectRecommendationConfidence, SelfDefectRecommendationRecord, SelfDefectRelationMode,
+        ProjectStateRecord, RuntimeFailureKind, RuntimeLivenessStatus, RuntimeProviderMode,
+        SelfDefectOccurrenceRecord, SelfDefectRecommendationConfidence,
+        SelfDefectRecommendationRecord, SelfDefectRelationMode,
     },
     storage::SqliteStore,
 };
@@ -224,6 +225,8 @@ fn test_session(
         project_id: project_id.into(),
         issue_id: issue_id.into(),
         session_id: session_id.into(),
+        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+        provider_id: None,
         agent: "build".into(),
         model: None,
         worktree_path: worktree_path.as_ref().display().to_string(),
@@ -241,6 +244,9 @@ fn test_session(
         eval_stage: Some("symphony-smoke".into()),
         lifecycle_marker: Some("implementation".into()),
         last_event: Some("working".into()),
+        runtime_failure_kind: None,
+        acp_frame_count: 0,
+        session_evidence_refs: Vec::new(),
         silence_observed: false,
     }
 }
@@ -989,6 +995,8 @@ impl OpenCodeLauncher for FailingContinueOpenCodeLauncher {
         Ok(opencode::OpenCodeStartedSession {
             session_id: format!("new:{}", spec.issue_identifier),
             process_id: Some(6210),
+            acp_frame_count: 0,
+            session_evidence_refs: Vec::new(),
         })
     }
 
@@ -1057,6 +1065,8 @@ impl OpenCodeLauncher for ResumeRecordingOpenCodeLauncher {
         Ok(opencode::OpenCodeStartedSession {
             session_id: format!("new:{}", spec.issue_identifier),
             process_id: Some(self.resumed_process_id + 1),
+            acp_frame_count: 0,
+            session_evidence_refs: Vec::new(),
         })
     }
 
@@ -1072,6 +1082,8 @@ impl OpenCodeLauncher for ResumeRecordingOpenCodeLauncher {
         Ok(opencode::OpenCodeStartedSession {
             session_id: session.session_id.clone(),
             process_id: Some(self.resumed_process_id),
+            acp_frame_count: 0,
+            session_evidence_refs: Vec::new(),
         })
     }
 
@@ -1088,6 +1100,8 @@ impl OpenCodeLauncher for ResumeRecordingOpenCodeLauncher {
         Ok(opencode::OpenCodeStartedSession {
             session_id: session.session_id.clone(),
             process_id: Some(self.resumed_process_id),
+            acp_frame_count: 0,
+            session_evidence_refs: Vec::new(),
         })
     }
 
@@ -1105,6 +1119,8 @@ impl OpenCodeLauncher for ResumeRecordingOpenCodeLauncher {
         Ok(opencode::OpenCodeStartedSession {
             session_id: session.session_id.clone(),
             process_id: Some(self.resumed_process_id),
+            acp_frame_count: 0,
+            session_evidence_refs: Vec::new(),
         })
     }
 }
@@ -1160,6 +1176,8 @@ impl OpenCodeLauncher for MalformedHandoffOpenCodeLauncher {
         Ok(opencode::OpenCodeStartedSession {
             session_id: session.session_id.clone(),
             process_id: session.process_id,
+            acp_frame_count: 0,
+            session_evidence_refs: Vec::new(),
         })
     }
 }
@@ -1177,6 +1195,8 @@ impl OpenCodeLauncher for ScriptedOpenCodeLauncher {
         Ok(opencode::OpenCodeStartedSession {
             session_id: format!("scripted:{}", spec.cwd.display()),
             process_id: None,
+            acp_frame_count: 0,
+            session_evidence_refs: Vec::new(),
         })
     }
 
@@ -1204,6 +1224,8 @@ impl OpenCodeLauncher for ScriptedOpenCodeLauncher {
         Ok(opencode::OpenCodeStartedSession {
             session_id: session.session_id.clone(),
             process_id: session.process_id,
+            acp_frame_count: 0,
+            session_evidence_refs: Vec::new(),
         })
     }
 }

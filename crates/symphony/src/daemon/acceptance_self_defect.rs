@@ -90,6 +90,8 @@ fn acceptance_session_record(
         project_id: project.id.clone(),
         issue_id: issue.id.clone(),
         session_id: session_id.into(),
+        provider_mode: crate::state::RuntimeProviderMode::OpenCodeAcp,
+        provider_id: None,
         agent: "acceptance-self-defect".into(),
         model: None,
         worktree_path: project.repo_path.to_string_lossy().into_owned(),
@@ -107,6 +109,9 @@ fn acceptance_session_record(
         eval_stage: None,
         lifecycle_marker: None,
         last_event: None,
+        runtime_failure_kind: None,
+        acp_frame_count: 0,
+        session_evidence_refs: Vec::new(),
         silence_observed: false,
     }
 }

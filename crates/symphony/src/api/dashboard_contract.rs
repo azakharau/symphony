@@ -67,6 +67,8 @@ pub struct UiRunningIssueSummary {
     pub title: String,
     pub display_status: String,
     pub session_id: Option<String>,
+    pub provider_mode: Option<crate::state::RuntimeProviderMode>,
+    pub provider_id: Option<String>,
     pub process_id: Option<u32>,
     pub process_alive: Option<bool>,
     pub stage: Option<OpenCodeStage>,
@@ -126,6 +128,8 @@ pub struct UiIssueDetailResponse {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UiOpenCodeSessionDetail {
     pub opencode_session_id: String,
+    pub provider_mode: crate::state::RuntimeProviderMode,
+    pub provider_id: Option<String>,
     pub agent: String,
     pub model: Option<String>,
     pub worktree_path: String,
@@ -146,6 +150,9 @@ pub struct UiOpenCodeSessionDetail {
     pub started_at_ms: Option<u64>,
     pub duration_ms: Option<u64>,
     pub last_event: Option<String>,
+    pub runtime_failure_kind: Option<crate::state::RuntimeFailureKind>,
+    pub acp_frame_count: u64,
+    pub session_evidence_refs: Vec<String>,
     pub silence_observed: bool,
     pub activity: Option<UiOpenCodeSessionTreeActivity>,
     pub activity_error: Option<String>,
@@ -273,6 +280,8 @@ impl From<&RunningIssueSummary> for UiRunningIssueSummary {
             title: issue.title.clone(),
             display_status: issue.display_status.clone(),
             session_id: issue.session_id.clone(),
+            provider_mode: issue.provider_mode,
+            provider_id: issue.provider_id.clone(),
             process_id: issue.process_id,
             process_alive: issue.process_alive,
             stage: issue.stage,
@@ -353,6 +362,8 @@ impl From<&OpenCodeSessionDetail> for UiOpenCodeSessionDetail {
     fn from(session: &OpenCodeSessionDetail) -> Self {
         Self {
             opencode_session_id: session.opencode_session_id.clone(),
+            provider_mode: session.provider_mode,
+            provider_id: session.provider_id.clone(),
             agent: session.agent.clone(),
             model: session.model.clone(),
             worktree_path: session.worktree_path.clone(),
@@ -373,6 +384,9 @@ impl From<&OpenCodeSessionDetail> for UiOpenCodeSessionDetail {
             started_at_ms: session.started_at_ms,
             duration_ms: session.duration_ms,
             last_event: session.last_event.clone(),
+            runtime_failure_kind: session.runtime_failure_kind.clone(),
+            acp_frame_count: session.acp_frame_count,
+            session_evidence_refs: session.session_evidence_refs.clone(),
             silence_observed: session.silence_observed,
             activity: session
                 .activity

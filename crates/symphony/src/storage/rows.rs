@@ -7,7 +7,8 @@ use crate::{
     state::{
         BlockerRecord, CleanupStatus, EvalRunRecord, FailureRecord, GitRefRecord, IssueStateRecord,
         LifecycleStage, OpenCodeSessionRecord, OpenCodeStage, OpenCodeStageEventRecord,
-        ProjectRuntimeLivenessRecord, ProjectStateRecord, RuntimeLivenessStatus,
+        ProjectRuntimeLivenessRecord, ProjectStateRecord, RuntimeFailureKind,
+        RuntimeLivenessStatus, RuntimeProviderMode,
     },
     storage::StorageError,
 };
@@ -77,33 +78,49 @@ pub(super) fn liveness_from_row(row: &Row) -> Result<ProjectRuntimeLivenessRecor
 }
 
 pub(super) fn session_from_row(row: &Row) -> Result<OpenCodeSessionRecord, StorageError> {
-    let lifecycle_stage: String = row.get(7)?;
-    let stage: String = row.get(8)?;
+    let provider_mode: String = row.get(3)?;
+    let lifecycle_stage: String = row.get(9)?;
+    let stage: String = row.get(10)?;
     let process_id = row
-        .get::<Option<i64>>(6)?
+        .get::<Option<i64>>(8)?
         .and_then(|value| u32::try_from(value).ok());
+    let runtime_failure_kind: Option<String> = row.get(22)?;
+    let session_evidence_refs_json: Option<String> = row.get(24)?;
     Ok(OpenCodeSessionRecord {
         project_id: row.get(0)?,
         issue_id: row.get(1)?,
         session_id: row.get(2)?,
-        agent: row.get(3)?,
-        model: row.get(4)?,
-        worktree_path: row.get(5)?,
+        provider_mode: RuntimeProviderMode::from_str(&provider_mode)
+            .map_err(StorageError::State)?,
+        provider_id: row.get(4)?,
+        agent: row.get(5)?,
+        model: row.get(6)?,
+        worktree_path: row.get(7)?,
         process_id,
         lifecycle_stage: parse_lifecycle(&lifecycle_stage)?,
         stage: parse_opencode_stage(&stage)?,
-        active_agent: row.get(9)?,
-        active_model: row.get(10)?,
-        message_count: get_u64(row, 11)?,
-        todo_count: get_u64(row, 12)?,
-        part_count: get_u64(row, 13)?,
-        token_count: get_u64(row, 14)?,
-        cost_micros: get_u64(row, 15)?,
-        subagent_count: get_u64(row, 16)?,
-        eval_stage: row.get(17)?,
-        lifecycle_marker: row.get(18)?,
-        last_event: row.get(19)?,
-        silence_observed: row.get::<bool>(20)?,
+        active_agent: row.get(11)?,
+        active_model: row.get(12)?,
+        message_count: get_u64(row, 13)?,
+        todo_count: get_u64(row, 14)?,
+        part_count: get_u64(row, 15)?,
+        token_count: get_u64(row, 16)?,
+        cost_micros: get_u64(row, 17)?,
+        subagent_count: get_u64(row, 18)?,
+        eval_stage: row.get(19)?,
+        lifecycle_marker: row.get(20)?,
+        last_event: row.get(21)?,
+        runtime_failure_kind: runtime_failure_kind
+            .as_deref()
+            .map(RuntimeFailureKind::from_str)
+            .transpose()
+            .map_err(StorageError::State)?,
+        acp_frame_count: get_u64(row, 23)?,
+        session_evidence_refs: session_evidence_refs_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()?
+            .unwrap_or_default(),
+        silence_observed: row.get::<bool>(25)?,
     })
 }
 

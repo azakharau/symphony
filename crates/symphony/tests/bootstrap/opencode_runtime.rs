@@ -306,7 +306,14 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
     );
     assert!(
         spec.prompt.contains(
-            "Required `mcp__recall__create_task` payload shape is exactly `objective`, `playbook`, `requested_by`, and `worktree` at top level"
+            "Required OpenCode MCP tool is `recall_create_task`; do not use Codex-style tool names such as `mcp__recall__create_task`"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "Required `recall_create_task` payload shape is exactly `objective`, `playbook`, `requested_by`, and `worktree` at top level"
         ),
         "{}",
         spec.prompt
@@ -318,7 +325,7 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
     );
     assert!(
         spec.prompt.contains(
-            "`mcp__recall__create_task.requested_by` payload: include `actor_id`, `actor_type`, `label`, and `role`"
+            "`recall_create_task.requested_by` payload: include `actor_id`, `actor_type`, `label`, and `role`"
         ),
         "{}",
         spec.prompt
@@ -339,7 +346,7 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
     );
     assert!(
         spec.prompt.contains(
-            "Never set `mcp__recall__create_task.worktree.worktree_path` to `/home/agent/.symphony/workspaces/opencode/symphony/SYM-27`"
+            "Never set `recall_create_task.worktree.worktree_path` to `/home/agent/.symphony/workspaces/opencode/symphony/SYM-27`"
         ),
         "{}",
         spec.prompt

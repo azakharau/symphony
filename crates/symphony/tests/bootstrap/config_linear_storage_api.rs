@@ -36,6 +36,118 @@ async fn multiproject_toml_config_loads_deterministically_and_validates_required
 }
 
 #[tokio::test]
+async fn omp_acp_provider_config_loads_capabilities_without_changing_opencode_runtime() {
+    let configured = valid_config_toml().replace(
+        "[projects.eval]\n",
+        r#"[[projects.omp_acp_providers]]
+id = "omp-primary"
+command = "/usr/local/bin/omp"
+args = ["acp"]
+cwd = "issue_worktree"
+env_allowlist = ["PATH", "HOME"]
+agent = "build"
+model = "openai/gpt-5.5"
+effort = "high"
+live_smoke = true
+
+[projects.omp_acp_providers.capabilities]
+acp_stdio = true
+hook_evidence = true
+sdk_session_evidence = true
+rpc_secondary_mode = true
+inverse_bridge_reference = true
+
+[projects.eval]
+"#,
+    );
+
+    let config = RootConfig::from_toml_str(&configured).expect("OMP ACP provider config");
+    let project = config.project("symphony").expect("project");
+    assert_eq!(
+        project.opencode.command,
+        PathBuf::from("/usr/local/bin/opencode")
+    );
+    assert_eq!(project.opencode.args, vec!["acp"]);
+
+    let provider = project.omp_acp_providers.first().expect("OMP ACP provider");
+    assert_eq!(provider.id, "omp-primary");
+    assert_eq!(provider.command, PathBuf::from("/usr/local/bin/omp"));
+    assert_eq!(provider.args, vec!["acp"]);
+    assert_eq!(provider.env_allowlist, vec!["PATH", "HOME"]);
+    assert_eq!(provider.agent.as_deref(), Some("build"));
+    assert_eq!(provider.model.as_deref(), Some("openai/gpt-5.5"));
+    assert_eq!(provider.effort.as_deref(), Some("high"));
+    assert!(provider.live_smoke);
+    assert!(provider.capabilities.acp_stdio);
+    assert!(provider.capabilities.hook_evidence);
+    assert!(provider.capabilities.sdk_session_evidence);
+    assert!(provider.capabilities.rpc_secondary_mode);
+    assert!(provider.capabilities.inverse_bridge_reference);
+}
+
+#[tokio::test]
+async fn omp_acp_provider_config_rejects_invalid_definitions() {
+    let configured = valid_config_toml().replace(
+        "[projects.eval]\n",
+        r#"[[projects.omp_acp_providers]]
+id = "omp-primary"
+command = "/usr/local/bin/omp"
+args = ["acp"]
+cwd = "issue_worktree"
+env_allowlist = ["PATH"]
+agent = "build"
+model = "openai/gpt-5.5"
+effort = "high"
+
+[projects.omp_acp_providers.capabilities]
+acp_stdio = true
+hook_evidence = true
+sdk_session_evidence = true
+rpc_secondary_mode = false
+inverse_bridge_reference = true
+
+[projects.eval]
+"#,
+    );
+
+    let unknown_field = configured.replace(
+        "agent = \"build\"",
+        "agent = \"build\"\nmutation = \"implicit\"",
+    );
+    let err =
+        RootConfig::from_toml_str(&unknown_field).expect_err("unknown provider field rejected");
+    assert!(err.to_string().contains("mutation"), "{err}");
+
+    let invalid_capability = configured.replace("acp_stdio = true", "acp_stdio = false");
+    let err = RootConfig::from_toml_str(&invalid_capability)
+        .expect_err("ACP stdio capability must be explicit");
+    assert!(err.to_string().contains("capabilities.acp_stdio"), "{err}");
+
+    let duplicate = configured.replace(
+        "[projects.eval]\n",
+        r#"[[projects.omp_acp_providers]]
+id = "omp-primary"
+command = "/usr/local/bin/omp"
+cwd = "project_repo"
+
+[projects.omp_acp_providers.capabilities]
+acp_stdio = true
+hook_evidence = false
+sdk_session_evidence = false
+rpc_secondary_mode = false
+inverse_bridge_reference = true
+
+[projects.eval]
+"#,
+    );
+    let err = RootConfig::from_toml_str(&duplicate).expect_err("duplicate provider id rejected");
+    assert!(
+        err.to_string().contains("duplicate omp_acp_providers"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
 async fn recall_workspace_config_validates_global_project_workspace_root() {
     let invalid = valid_config_toml().replace(
         "workspace_root = \"/home/agent/proj/symphony\"",

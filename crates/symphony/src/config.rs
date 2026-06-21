@@ -73,6 +73,16 @@ impl RootConfig {
             if let Some(recall) = &project.recall {
                 recall.validate(&project.id)?;
             }
+            let mut seen_omp_provider_ids = HashSet::new();
+            for provider in &project.omp_acp_providers {
+                provider.validate(&project.id)?;
+                if !seen_omp_provider_ids.insert(provider.id.as_str()) {
+                    return Err(ConfigError::Validation(format!(
+                        "project `{}` duplicate omp_acp_providers id `{}`",
+                        project.id, provider.id
+                    )));
+                }
+            }
             if project.concurrency.max_sessions == 0 {
                 return Err(ConfigError::Validation(format!(
                     "project `{}` concurrency.max_sessions must be greater than zero",
@@ -179,8 +189,109 @@ pub struct ProjectConfig {
     pub branch: BranchPolicy,
     pub linear: LinearProjectConfig,
     pub opencode: OpenCodeRuntimeConfig,
+    #[serde(default)]
+    pub omp_acp_providers: Vec<OhMyPiAcpProviderConfig>,
     pub eval: EvalDefaults,
     pub concurrency: ConcurrencyConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OhMyPiAcpProviderConfig {
+    pub id: String,
+    pub command: PathBuf,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub cwd: OhMyPiAcpCwdPolicy,
+    #[serde(default)]
+    pub env_allowlist: Vec<String>,
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub live_smoke: bool,
+    pub capabilities: OhMyPiAcpProviderCapabilities,
+}
+
+impl OhMyPiAcpProviderConfig {
+    fn validate(&self, project_id: &str) -> Result<(), ConfigError> {
+        if self.id.trim().is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "project `{project_id}` omp_acp_providers.id must not be empty"
+            )));
+        }
+        if self.command.as_os_str().is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "project `{project_id}` omp_acp_providers `{}` command must not be empty",
+                self.id
+            )));
+        }
+        if self
+            .agent
+            .as_deref()
+            .is_some_and(|agent| agent.trim().is_empty())
+        {
+            return Err(ConfigError::Validation(format!(
+                "project `{project_id}` omp_acp_providers `{}` agent must not be empty",
+                self.id
+            )));
+        }
+        if self
+            .model
+            .as_deref()
+            .is_some_and(|model| model.trim().is_empty())
+        {
+            return Err(ConfigError::Validation(format!(
+                "project `{project_id}` omp_acp_providers `{}` model must not be empty",
+                self.id
+            )));
+        }
+        if self
+            .effort
+            .as_deref()
+            .is_some_and(|effort| effort.trim().is_empty())
+        {
+            return Err(ConfigError::Validation(format!(
+                "project `{project_id}` omp_acp_providers `{}` effort must not be empty",
+                self.id
+            )));
+        }
+        if self.env_allowlist.iter().any(|name| name.trim().is_empty()) {
+            return Err(ConfigError::Validation(format!(
+                "project `{project_id}` omp_acp_providers `{}` env_allowlist entries must not be empty",
+                self.id
+            )));
+        }
+        self.capabilities.validate(project_id, &self.id)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OhMyPiAcpCwdPolicy {
+    IssueWorktree,
+    ProjectRepo,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OhMyPiAcpProviderCapabilities {
+    pub acp_stdio: bool,
+    pub hook_evidence: bool,
+    pub sdk_session_evidence: bool,
+    pub rpc_secondary_mode: bool,
+    pub inverse_bridge_reference: bool,
+}
+
+impl OhMyPiAcpProviderCapabilities {
+    fn validate(&self, project_id: &str, provider_id: &str) -> Result<(), ConfigError> {
+        if !self.acp_stdio {
+            return Err(ConfigError::Validation(format!(
+                "project `{project_id}` omp_acp_providers `{provider_id}` capabilities.acp_stdio must be true"
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

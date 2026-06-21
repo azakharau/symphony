@@ -465,7 +465,7 @@ fn running_issue_summary(
     project: &ProjectDashboardResponse,
     issue: &IssueDetailResponse,
 ) -> RunningIssueSummary {
-    let session = issue.opencode_sessions.last();
+    let session = preferred_issue_session(&issue.opencode_sessions);
     let activity = session.and_then(|session| session.activity.as_ref());
 
     RunningIssueSummary {
@@ -937,10 +937,9 @@ async fn issue_detail_response(
     for session in issue.opencode_sessions {
         sessions.push(session_detail(store, session, opencode_database_path).await?);
     }
-    let last_runner_event = sessions
-        .iter()
-        .rev()
-        .find_map(|session| session.last_event.clone());
+    sessions.sort_by_key(session_display_priority);
+    let preferred_session = preferred_issue_session(&sessions);
+    let last_runner_event = preferred_session.and_then(|session| session.last_event.clone());
     let stop_reason = if issue.issue.lifecycle_stage == LifecycleStage::Running {
         None
     } else {
@@ -957,7 +956,7 @@ async fn issue_detail_response(
                     .map(|blocker| blocker.kind.clone())
             })
     };
-    let display_status = issue_display_status(&issue.issue, sessions.last());
+    let display_status = issue_display_status(&issue.issue, preferred_session);
     let runtime_defect = runtime_defect_projection(&issue.issue);
     let self_defect_routing = self_defect_routing_projection(store, &issue.issue).await?;
 
@@ -979,6 +978,34 @@ async fn issue_detail_response(
         opencode_sessions: sessions,
         eval_results,
     })
+}
+
+fn preferred_issue_session(sessions: &[OpenCodeSessionDetail]) -> Option<&OpenCodeSessionDetail> {
+    sessions
+        .iter()
+        .find(|session| session_is_active_for_display(session))
+        .or_else(|| sessions.last())
+}
+
+fn session_display_priority(session: &OpenCodeSessionDetail) -> u8 {
+    if session_is_active_for_display(session) {
+        0
+    } else {
+        1
+    }
+}
+
+fn session_is_active_for_display(session: &OpenCodeSessionDetail) -> bool {
+    session.lifecycle_stage == LifecycleStage::Running
+        || matches!(
+            session.current_stage,
+            OpenCodeStage::Starting
+                | OpenCodeStage::Running
+                | OpenCodeStage::Eval
+                | OpenCodeStage::Review
+                | OpenCodeStage::Handoff
+                | OpenCodeStage::Silent
+        )
 }
 
 fn runtime_defect_projection(issue: &IssueStateRecord) -> Option<RuntimeDefectProjection> {

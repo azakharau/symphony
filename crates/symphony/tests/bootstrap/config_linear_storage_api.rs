@@ -940,6 +940,79 @@ async fn opencode_sessions_for_issue_orders_by_runtime_update_not_session_id() {
 }
 
 #[tokio::test]
+async fn dashboard_api_orders_active_opencode_session_before_stale_failures() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let mut issue = test_issue("symphony", "mixed-sessions", "SYM-233");
+    issue.lifecycle_stage = LifecycleStage::Running;
+    store.upsert_issue(issue).await.expect("issue");
+
+    let failed_worktree = dir.path().join("SYM-233-failed");
+    let running_worktree = dir.path().join("SYM-233-running");
+    let mut failed = test_session("symphony", "mixed-sessions", "zz-failed", &failed_worktree);
+    failed.lifecycle_stage = LifecycleStage::Failed;
+    failed.stage = OpenCodeStage::Failed;
+    failed.last_event = Some("failed:missing_handoff_sidecar".into());
+    store
+        .upsert_opencode_session(failed)
+        .await
+        .expect("failed session");
+
+    let mut running = test_session(
+        "symphony",
+        "mixed-sessions",
+        "aa-running",
+        &running_worktree,
+    );
+    running.lifecycle_stage = LifecycleStage::Running;
+    running.stage = OpenCodeStage::Running;
+    running.last_event = Some("opencode_db_updated:123".into());
+    store
+        .upsert_opencode_session(running)
+        .await
+        .expect("running session");
+
+    let api = RuntimeDashboardApi::from_store(&config, &store)
+        .await
+        .expect("dashboard api");
+    let _project = api
+        .project_drilldown("symphony")
+        .expect("project endpoint")
+        .expect("project exists");
+    let issue = api
+        .issue_detail("symphony", "mixed-sessions")
+        .expect("issue endpoint")
+        .expect("issue exists");
+    let card = api
+        .aggregate()
+        .projects
+        .iter()
+        .find(|project| project.project_id == "symphony")
+        .expect("project card");
+
+    assert_eq!(issue.opencode_sessions[0].opencode_session_id, "aa-running");
+    assert_eq!(
+        issue.opencode_sessions[0].last_event.as_deref(),
+        Some("opencode_db_updated:123")
+    );
+    assert_eq!(issue.opencode_sessions[1].opencode_session_id, "zz-failed");
+    assert_eq!(card.runner_health, "active");
+    assert_eq!(
+        card.running_issues[0].session_id.as_deref(),
+        Some("aa-running")
+    );
+    assert_eq!(
+        card.running_issues[0].last_event.as_deref(),
+        Some("opencode_db_updated:123")
+    );
+}
+
+#[tokio::test]
 async fn active_opencode_sessions_excludes_terminal_sessions_for_metrics_polling() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

@@ -66,7 +66,7 @@ cargo build --release -p symphony
 systemctl --user status symphony.service
 curl -fsS http://127.0.0.1:4115/api/dashboard
 curl -fsS http://127.0.0.1:4115/api/projects/symphony
-curl -fsS http://127.0.0.1:4115/api/projects/mnemesh
+curl -fsS http://127.0.0.1:4115/api/projects/recall
 ```
 
 ## Runtime Contract

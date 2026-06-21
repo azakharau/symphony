@@ -129,7 +129,7 @@ Multiproject activation checks remain API-first:
 ```bash
 /home/agent/.cargo/bin/symphony validate-config --config config/symphony.projects.toml
 curl -fsS http://127.0.0.1:4115/api/projects/symphony | python3 -m json.tool | sed -n '/"eligible"/,/"blockers"/p'
-curl -fsS http://127.0.0.1:4115/api/projects/mnemesh | python3 -m json.tool | sed -n '/"eligible"/,/"blockers"/p'
+curl -fsS http://127.0.0.1:4115/api/projects/recall | python3 -m json.tool | sed -n '/"eligible"/,/"blockers"/p'
 ```
 
 ## Rollback

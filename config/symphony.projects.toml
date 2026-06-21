@@ -9,16 +9,16 @@ retention_secs = 86400
 
 [opencode_storage]
 database_path = "/home/agent/.local/share/opencode/opencode.db"
-archive_root = "/home/agent/mnemesh-benchmark-runs/symphony-opencode-session-archives"
+archive_root = "/home/agent/recall-benchmark-runs/symphony-opencode-session-archives"
 
 [[projects]]
 id = "symphony"
 name = "Symphony"
-enabled = false
+enabled = true
 workflow_path = "/home/agent/proj/symphony/SPEC.md"
 repo_path = "/home/agent/proj/symphony"
 
-[projects.mnemesh]
+[projects.recall]
 workspace_root = "/home/agent/proj/symphony"
 
 [projects.branch]
@@ -51,7 +51,7 @@ enabled = true
 workflow_path = "/home/agent/proj/neryva-agent-forge/WORKFLOW.md"
 repo_path = "/home/agent/proj/neryva-agent-forge"
 
-[projects.mnemesh]
+[projects.recall]
 workspace_root = "/home/agent/proj/neryva-agent-forge"
 
 [projects.branch]
@@ -78,18 +78,18 @@ max_identical_failure_fingerprints = 2
 max_sessions = 1
 
 [[projects]]
-id = "mnemesh"
-name = "Mnemesh"
+id = "recall"
+name = "Recall"
 enabled = true
-workflow_path = "/home/agent/proj/mnemesh/WORKFLOW.md"
-repo_path = "/home/agent/proj/mnemesh"
+workflow_path = "/home/agent/proj/recall/WORKFLOW.md"
+repo_path = "/home/agent/proj/recall"
 
-[projects.mnemesh]
-workspace_root = "/home/agent/proj/mnemesh"
+[projects.recall]
+workspace_root = "/home/agent/proj/recall"
 
 [projects.branch]
 base = "master"
-worktree_root = "/home/agent/.symphony/workspaces/opencode/mnemesh"
+worktree_root = "/home/agent/.symphony/workspaces/opencode/recall"
 
 [projects.linear]
 team_key = "MNE"
@@ -104,7 +104,7 @@ effort = "high"
 permission_policy = "reject"
 
 [projects.eval]
-default_suite = "mnemesh-refactor-validation"
+default_suite = "recall-refactor-validation"
 max_identical_failure_fingerprints = 2
 
 [projects.concurrency]
@@ -117,7 +117,7 @@ enabled = true
 workflow_path = "/home/agent/proj/nervure/WORKFLOW.md"
 repo_path = "/home/agent/proj/nervure"
 
-[projects.mnemesh]
+[projects.recall]
 workspace_root = "/home/agent/proj/nervure"
 
 [projects.branch]

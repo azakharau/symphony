@@ -12,9 +12,9 @@ async fn multiproject_toml_config_loads_deterministically_and_validates_required
     assert_eq!(project.linear.team_key, "SYM");
     assert_eq!(
         project
-            .mnemesh
+            .recall
             .as_ref()
-            .expect("mnemesh config")
+            .expect("recall config")
             .workspace_root,
         PathBuf::from("/home/agent/proj/symphony")
     );
@@ -36,21 +36,21 @@ async fn multiproject_toml_config_loads_deterministically_and_validates_required
 }
 
 #[tokio::test]
-async fn mnemesh_workspace_config_validates_global_project_workspace_root() {
+async fn recall_workspace_config_validates_global_project_workspace_root() {
     let invalid = valid_config_toml().replace(
         "workspace_root = \"/home/agent/proj/symphony\"",
         "workspace_root = \"relative/project\"",
     );
     let err = RootConfig::from_toml_str(&invalid).expect_err("relative workspace root rejected");
 
-    assert!(err.to_string().contains("mnemesh.workspace_root"), "{err}");
+    assert!(err.to_string().contains("recall.workspace_root"), "{err}");
 }
 
 #[tokio::test]
 async fn opencode_storage_config_loads_and_validates_archive_paths() {
     let configured = valid_config_toml().replace(
         "[[projects]]\n",
-        "[opencode_storage]\ndatabase_path = \"/home/agent/.local/share/opencode/opencode.db\"\narchive_root = \"/home/agent/mnemesh-benchmark-runs/symphony-opencode-session-archives\"\n\n[[projects]]\n",
+        "[opencode_storage]\ndatabase_path = \"/home/agent/.local/share/opencode/opencode.db\"\narchive_root = \"/home/agent/recall-benchmark-runs/symphony-opencode-session-archives\"\n\n[[projects]]\n",
     );
     let config = RootConfig::from_toml_str(&configured).expect("opencode storage config");
     let storage = config.opencode_storage.expect("storage config");
@@ -61,7 +61,7 @@ async fn opencode_storage_config_loads_and_validates_archive_paths() {
     );
     assert_eq!(
         storage.archive_root,
-        PathBuf::from("/home/agent/mnemesh-benchmark-runs/symphony-opencode-session-archives")
+        PathBuf::from("/home/agent/recall-benchmark-runs/symphony-opencode-session-archives")
     );
 
     let invalid = configured.replace(
@@ -133,14 +133,14 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
                                             "id": "blocker-1",
                                             "identifier": "SYM-99",
                                             "title": "Accepted upstream implementation",
-                                            "description": "Mnemesh workspace_id: `workspace-upstream`\nAccepted artifact: `docs/upstream.md`",
+                                            "description": "Recall workspace_id: `workspace-upstream`\nAccepted artifact: `docs/upstream.md`",
                                             "state": { "name": "Done" },
                                             "branchName": "feature/sym-99-upstream",
                                             "url": "https://linear.example/SYM-99",
                                             "comments": {
                                                 "nodes": [
                                                     {
-                                                        "body": "## OpenCode Handoff Accepted\nMnemesh task_id: `task-upstream`\n### Changed Files\n- `src/upstream.rs:1-10`",
+                                                        "body": "## OpenCode Handoff Accepted\nRecall task_id: `task-upstream`\n### Changed Files\n- `src/upstream.rs:1-10`",
                                                         "createdAt": "2026-06-10T00:02:00Z"
                                                     }
                                                 ]
@@ -277,10 +277,10 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
     assert_eq!(upstream.title, "Accepted upstream implementation");
     assert_eq!(upstream.state, "Done");
     assert_eq!(
-        upstream.mnemesh_workspace_ids,
+        upstream.recall_workspace_ids,
         vec!["workspace-upstream".to_string()]
     );
-    assert_eq!(upstream.mnemesh_task_ids, vec!["task-upstream".to_string()]);
+    assert_eq!(upstream.recall_task_ids, vec!["task-upstream".to_string()]);
     assert_eq!(
         upstream.accepted_artifacts,
         vec![

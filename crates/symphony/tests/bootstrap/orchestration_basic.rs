@@ -508,11 +508,11 @@ async fn dashboard_does_not_report_queued_candidate_as_selected() {
 }
 
 #[tokio::test]
-async fn orchestration_parks_todo_issue_when_mnemesh_workspace_root_is_missing() {
+async fn orchestration_parks_todo_issue_when_recall_workspace_root_is_missing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config_toml = valid_config_toml().replace(
-        "\n[projects.mnemesh]\nworkspace_root = \"/home/agent/proj/symphony\"\n",
+        "\n[projects.recall]\nworkspace_root = \"/home/agent/proj/symphony\"\n",
         "\n",
     );
     let config = RootConfig::from_toml_str(&config_toml).expect("config");
@@ -540,12 +540,12 @@ async fn orchestration_parks_todo_issue_when_mnemesh_workspace_root_is_missing()
     assert_eq!(evidence.len(), 1);
     assert_eq!(evidence[0].0, "missing-workspace");
     assert_eq!(evidence[0].1.kind, "provider_blocker");
-    assert!(evidence[0].1.body.contains("mnemesh_workspace_missing"));
+    assert!(evidence[0].1.body.contains("recall_workspace_missing"));
     assert!(
         evidence[0]
             .1
             .body
-            .contains("mnemesh workspace_root is not configured")
+            .contains("recall workspace_root is not configured")
     );
     let parked = store
         .issue("symphony", "missing-workspace")
@@ -555,7 +555,7 @@ async fn orchestration_parks_todo_issue_when_mnemesh_workspace_root_is_missing()
     assert_eq!(parked.lifecycle_stage, LifecycleStage::Blocked);
     assert_eq!(
         parked.blocker.expect("blocker").kind,
-        "mnemesh_workspace_missing"
+        "recall_workspace_missing"
     );
 
     let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)

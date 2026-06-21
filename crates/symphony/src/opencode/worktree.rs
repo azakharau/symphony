@@ -863,7 +863,7 @@ mod tests {
                 issue_identifier: "SYM-1".into(),
                 branch_name: "symphony/SYM-1".into(),
                 repo_path: Some(self.repo.clone()),
-                mnemesh_workspace_root: None,
+                recall_workspace_root: None,
                 base_ref: Some("master".into()),
                 agent: "build".into(),
                 model: None,

@@ -70,8 +70,8 @@ impl RootConfig {
                     project.id
                 )));
             }
-            if let Some(mnemesh) = &project.mnemesh {
-                mnemesh.validate(&project.id)?;
+            if let Some(recall) = &project.recall {
+                recall.validate(&project.id)?;
             }
             if project.concurrency.max_sessions == 0 {
                 return Err(ConfigError::Validation(format!(
@@ -175,7 +175,7 @@ pub struct ProjectConfig {
     pub enabled: bool,
     pub workflow_path: PathBuf,
     pub repo_path: PathBuf,
-    pub mnemesh: Option<MnemeshProjectConfig>,
+    pub recall: Option<RecallProjectConfig>,
     pub branch: BranchPolicy,
     pub linear: LinearProjectConfig,
     pub opencode: OpenCodeRuntimeConfig,
@@ -185,20 +185,20 @@ pub struct ProjectConfig {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct MnemeshProjectConfig {
+pub struct RecallProjectConfig {
     pub workspace_root: PathBuf,
 }
 
-impl MnemeshProjectConfig {
+impl RecallProjectConfig {
     fn validate(&self, project_id: &str) -> Result<(), ConfigError> {
         if self.workspace_root.as_os_str().is_empty() {
             return Err(ConfigError::Validation(format!(
-                "project `{project_id}` mnemesh.workspace_root must not be empty"
+                "project `{project_id}` recall.workspace_root must not be empty"
             )));
         }
         if !self.workspace_root.is_absolute() {
             return Err(ConfigError::Validation(format!(
-                "project `{project_id}` mnemesh.workspace_root must be absolute"
+                "project `{project_id}` recall.workspace_root must be absolute"
             )));
         }
         Ok(())

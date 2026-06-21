@@ -35,7 +35,7 @@ pub use lifecycle::ProcessTreeTerminationEvidence;
 pub(crate) use lifecycle::terminate_process_tree;
 use prompt::{
     build_issue_prompt, commit_policy_text, delegated_subagent_contract_text,
-    mcp_tool_loop_guard_text, mnemesh_workspace_contract_text, validation_policy_text,
+    mcp_tool_loop_guard_text, recall_workspace_contract_text, validation_policy_text,
 };
 pub use session_metrics::{
     apply_session_tree_metrics, apply_session_tree_metrics_preserving_marker, ingest_session_event,
@@ -497,7 +497,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             "Symphony repair required for the current ACP session.\n\n\
              Failure fingerprint: `{}`\n\n\
              Repair details:\n{}\n\n\
-             Mnemesh evidence workspace contract:\n{}\n\n\
+             Recall evidence workspace contract:\n{}\n\n\
              MCP tool-schema loop guard:\n{}\n\n\
              Delegated review/evaluator subagent contract:\n{}\n\n\
              Validation policy:\n{}\n\n\
@@ -507,8 +507,8 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
              and rewrite the structured Symphony handoff JSON at the configured sidecar path.",
             failure_fingerprint,
             repair_message,
-            mnemesh_workspace_contract_text(
-                spec.mnemesh_workspace_root.as_deref(),
+            recall_workspace_contract_text(
+                spec.recall_workspace_root.as_deref(),
                 spec.cwd.as_path()
             ),
             mcp_tool_loop_guard_text(),
@@ -591,13 +591,13 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             "Symphony continuation required for the current ACP session.\n\n\
              Continue the same implementation session. Do not start a new task. \
              Do not repeat already completed work unless validation requires it.\n\n\
-             Mnemesh evidence workspace contract:\n{}\n\n\
+             Recall evidence workspace contract:\n{}\n\n\
              MCP tool-schema loop guard:\n{}\n\n\
              Delegated review/evaluator subagent contract:\n{}\n\n\
              Validation policy:\n{}\n\n\
              Commit policy for successful handoff:\n{}\n\n{}",
-            mnemesh_workspace_contract_text(
-                spec.mnemesh_workspace_root.as_deref(),
+            recall_workspace_contract_text(
+                spec.recall_workspace_root.as_deref(),
                 spec.cwd.as_path()
             ),
             mcp_tool_loop_guard_text(),
@@ -682,7 +682,7 @@ fn normalize_handoff_sidecar_value(value: &mut Value, worktree_path: &str) {
     object.remove("repair_fingerprint");
     object.remove("task_id");
     object.remove("subtask_id");
-    object.remove("mnemesh");
+    object.remove("recall");
 
     if !object.contains_key("subagents") {
         if let Some(subagents_used) = object.remove("subagents_used") {
@@ -1049,10 +1049,10 @@ pub fn build_acp_launch_spec(project: &ProjectConfig, issue: &LinearIssue) -> Op
         issue_identifier: issue.identifier.clone(),
         branch_name: branch_name.clone(),
         repo_path: Some(project.repo_path.clone()),
-        mnemesh_workspace_root: project
-            .mnemesh
+        recall_workspace_root: project
+            .recall
             .as_ref()
-            .map(|mnemesh| mnemesh.workspace_root.clone()),
+            .map(|recall| recall.workspace_root.clone()),
         base_ref: Some(project.branch.base.clone()),
         agent: project.opencode.agent.clone(),
         model: project.opencode.model.clone(),
@@ -1149,8 +1149,8 @@ mod tests {
                 "remote_ref": "refs/heads/feature/test",
                 "pushed": true
             },
-            "mnemesh": {
-                "canonical_evidence_workspace": "/home/agent/proj/mnemesh"
+            "recall": {
+                "canonical_evidence_workspace": "/home/agent/proj/recall"
             },
             "risks": [],
             "stop_reason": "accepted"
@@ -1229,7 +1229,7 @@ mod tests {
                 "pushed": true,
                 "remote": "origin"
             },
-            "mnemesh": {
+            "recall": {
                 "task_id": "3d0058f5-49bf-45df-a63f-2e3c779a7f6f"
             },
             "risks": [],

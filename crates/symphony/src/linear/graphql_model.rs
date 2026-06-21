@@ -224,8 +224,8 @@ impl RelatedIssueNode {
             state: self.state.name.clone(),
             url: self.url.clone(),
             branch_name: self.branch_name.clone(),
-            mnemesh_workspace_ids: dedupe_preserve_order(workspace_ids),
-            mnemesh_task_ids: dedupe_preserve_order(task_ids),
+            recall_workspace_ids: dedupe_preserve_order(workspace_ids),
+            recall_task_ids: dedupe_preserve_order(task_ids),
             accepted_artifacts: dedupe_preserve_order(artifacts),
             handoff_summary,
         })
@@ -247,10 +247,10 @@ fn latest_handoff_comment(comments: &[LinearCommentNode]) -> Option<&LinearComme
 fn extract_context_refs(text: &str, workspace_ids: &mut Vec<String>, task_ids: &mut Vec<String>) {
     for line in text.lines() {
         let lower = line.to_lowercase();
-        if lower.contains("mnemesh workspace_id") || lower.contains("workspace_id") {
+        if lower.contains("recall workspace_id") || lower.contains("workspace_id") {
             workspace_ids.extend(extract_backtick_or_colon_values(line));
         }
-        if lower.contains("mnemesh task_id") || lower.contains("task_id") {
+        if lower.contains("recall task_id") || lower.contains("task_id") {
             task_ids.extend(extract_backtick_or_colon_values(line));
         }
     }

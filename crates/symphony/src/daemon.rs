@@ -921,14 +921,14 @@ async fn dispatch_candidate(
     report: &mut OrchestrationReport,
 ) -> anyhow::Result<()> {
     let issue = candidate.issue();
-    if let Some(reason) = missing_mnemesh_workspace_reason(project) {
+    if let Some(reason) = missing_recall_workspace_reason(project) {
         warn!(
             project_id = %project.id,
             issue = %issue.identifier,
             reason = %reason,
-            "parking issue because Mnemesh workspace is not configured"
+            "parking issue because Recall workspace is not configured"
         );
-        park_missing_mnemesh_workspace(project, store, linear, issue, reason).await?;
+        park_missing_recall_workspace(project, store, linear, issue, reason).await?;
         report.blocked.push(issue.identifier.clone());
         return Ok(());
     }
@@ -1033,17 +1033,17 @@ async fn dispatch_candidate(
     Ok(())
 }
 
-fn missing_mnemesh_workspace_reason(project: &ProjectConfig) -> Option<String> {
-    let Some(mnemesh) = project.mnemesh.as_ref() else {
-        return Some("mnemesh workspace_root is not configured".into());
+fn missing_recall_workspace_reason(project: &ProjectConfig) -> Option<String> {
+    let Some(recall) = project.recall.as_ref() else {
+        return Some("recall workspace_root is not configured".into());
     };
-    let workspace_root = mnemesh.workspace_root.as_path();
+    let workspace_root = recall.workspace_root.as_path();
     if workspace_root.as_os_str().is_empty() {
-        return Some("mnemesh workspace_root is empty".into());
+        return Some("recall workspace_root is empty".into());
     }
     if !workspace_root.is_absolute() {
         return Some(format!(
-            "mnemesh workspace_root is not absolute: {}",
+            "recall workspace_root is not absolute: {}",
             workspace_root.display()
         ));
     }
@@ -1155,7 +1155,7 @@ fn provisional_session_id(issue: &LinearIssue, process_id: Option<u32>) -> Strin
         .unwrap_or_else(|| format!("starting:{}:no_pid", issue.identifier))
 }
 
-async fn park_missing_mnemesh_workspace(
+async fn park_missing_recall_workspace(
     project: &ProjectConfig,
     store: &SqliteStore,
     linear: &impl LinearClient,
@@ -1163,7 +1163,7 @@ async fn park_missing_mnemesh_workspace(
     reason: String,
 ) -> anyhow::Result<()> {
     let body = format!(
-        "mnemesh_workspace_missing: {reason}\n\nConfigure `[projects.mnemesh].workspace_root` with the canonical project root Mnemesh workspace, for example `{}`. The OpenCode runner will not start until the global project workspace is passed explicitly.",
+        "recall_workspace_missing: {reason}\n\nConfigure `[projects.recall].workspace_root` with the canonical project root Recall workspace, for example `{}`. The OpenCode runner will not start until the global project workspace is passed explicitly.",
         project.repo_path.display()
     );
     linear
@@ -1180,7 +1180,7 @@ async fn park_missing_mnemesh_workspace(
         issue,
         LifecycleStage::Blocked,
         Some(BlockerRecord {
-            kind: "mnemesh_workspace_missing".into(),
+            kind: "recall_workspace_missing".into(),
             message: reason,
             observed_at: issue.updated_at.clone(),
         }),
@@ -1283,14 +1283,14 @@ fn is_typed_non_owner_blocker_kind(kind: &str) -> bool {
     matches!(
         kind,
         "provider_blocker"
-            | "mnemesh_workspace_missing"
+            | "recall_workspace_missing"
             | "repeated_eval_failure"
             | "runtime_defect"
     )
 }
 
 fn retryable_todo_blocker_kind(kind: &str) -> bool {
-    matches!(kind, "provider_blocker" | "mnemesh_workspace_missing")
+    matches!(kind, "provider_blocker" | "recall_workspace_missing")
 }
 
 async fn handle_launch_failure(

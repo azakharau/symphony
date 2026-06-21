@@ -18,12 +18,12 @@ pub(super) fn build_issue_prompt(
          Project: {project_id}\n\
          Repository: {repo_path}\n\
          Isolated worktree: {worktree}\n\
-         Mnemesh workspace root: {mnemesh_workspace_root}\n\
+         Recall workspace root: {recall_workspace_root}\n\
          Eval default suite: {eval_suite} (fallback metadata, not a blanket workspace gate)\n\
          Linear state: {state}\n\
          URL: {url}\n\n\
-         Mnemesh evidence workspace contract:\n\
-         {mnemesh_workspace_contract}\n\n\
+         Recall evidence workspace contract:\n\
+         {recall_workspace_contract}\n\n\
          Upstream accepted context:\n\
          {upstream_context}\n\n\
          MCP tool-schema loop guard:\n\
@@ -65,22 +65,22 @@ pub(super) fn build_issue_prompt(
             .worktree_root
             .join(&issue.identifier)
             .display(),
-        mnemesh_workspace_root = mnemesh_workspace_root_display(
+        recall_workspace_root = recall_workspace_root_display(
             project
-                .mnemesh
+                .recall
                 .as_ref()
-                .map(|mnemesh| { mnemesh.workspace_root.as_path() })
+                .map(|recall| { recall.workspace_root.as_path() })
         ),
         handoff_path =
             handoff_sidecar_path(project.branch.worktree_root.join(&issue.identifier)).display(),
         eval_suite = project.eval.default_suite,
         state = issue.state,
         url = issue.url.as_deref().unwrap_or("none"),
-        mnemesh_workspace_contract = mnemesh_workspace_contract_text(
+        recall_workspace_contract = recall_workspace_contract_text(
             project
-                .mnemesh
+                .recall
                 .as_ref()
-                .map(|mnemesh| mnemesh.workspace_root.as_path()),
+                .map(|recall| recall.workspace_root.as_path()),
             &project.branch.worktree_root.join(&issue.identifier),
         ),
         upstream_context = upstream_context_text(issue),
@@ -118,16 +118,11 @@ fn upstream_context_text(issue: &LinearIssue) -> String {
         }
         push_limited_values(
             &mut lines,
-            "  Mnemesh workspace ids",
-            &context.mnemesh_workspace_ids,
+            "  Recall workspace ids",
+            &context.recall_workspace_ids,
             6,
         );
-        push_limited_values(
-            &mut lines,
-            "  Mnemesh task ids",
-            &context.mnemesh_task_ids,
-            6,
-        );
+        push_limited_values(&mut lines, "  Recall task ids", &context.recall_task_ids, 6);
         push_limited_values(
             &mut lines,
             "  Accepted artifacts",
@@ -150,7 +145,7 @@ fn upstream_context_text(issue: &LinearIssue) -> String {
             );
         }
         lines.push(
-            "  Required use: treat this as accepted upstream input; inspect the Mnemesh refs/artifacts before rediscovering or replanning this surface."
+            "  Required use: treat this as accepted upstream input; inspect the Recall refs/artifacts before rediscovering or replanning this surface."
                 .to_owned(),
         );
     }
@@ -194,28 +189,28 @@ fn push_limited_values(lines: &mut Vec<String>, label: &str, values: &[String], 
     }
 }
 
-pub(super) fn mnemesh_workspace_contract_text(
-    mnemesh_workspace_root: Option<&Path>,
+pub(super) fn recall_workspace_contract_text(
+    recall_workspace_root: Option<&Path>,
     isolated_worktree: &Path,
 ) -> String {
-    let workspace_root = mnemesh_workspace_root_display(mnemesh_workspace_root);
+    let workspace_root = recall_workspace_root_display(recall_workspace_root);
     let isolated_worktree = isolated_worktree.display();
     format!(
-        "- Use `{workspace_root}` as the durable project evidence workspace for all Mnemesh MCP calls, observations, claims, evidence, verification, and handoff records.\n\
-         - The Mnemesh workspace belongs to the canonical project root, not the isolated issue worktree.\n\
-         - Do not create or register a separate Mnemesh workspace for the isolated worktree `{isolated_worktree}`.\n\
-         - Required `mcp__mnemesh__create_task` payload shape is exactly `objective`, `playbook`, `requested_by`, and `worktree` at top level. Do not send top-level `session_id`, `project`, `workspace`, `repo_root`, `worktree_path`, `actor_id`, `actor_type`, `label`, or `role`.\n\
+        "- Use `{workspace_root}` as the durable project evidence workspace for all Recall MCP calls, observations, claims, evidence, verification, and handoff records.\n\
+         - The Recall workspace belongs to the canonical project root, not the isolated issue worktree.\n\
+         - Do not create or register a separate Recall workspace for the isolated worktree `{isolated_worktree}`.\n\
+         - Required `mcp__recall__create_task` payload shape is exactly `objective`, `playbook`, `requested_by`, and `worktree` at top level. Do not send top-level `session_id`, `project`, `workspace`, `repo_root`, `worktree_path`, `actor_id`, `actor_type`, `label`, or `role`.\n\
          - Use `playbook: \"coding\"` for implementation tasks, `\"investigation\"` for RCA/audit tasks, and `\"planning\"` only for explicit planning specs.\n\
-         - Required `mcp__mnemesh__create_task.requested_by` payload: include `actor_id`, `actor_type`, `label`, and `role`, for example `{{\"actor_id\":\"symphony-opencode\",\"actor_type\":\"agent\",\"label\":\"Symphony OpenCode\",\"role\":\"implementation-runner\"}}`.\n\
-         - Required `mcp__mnemesh__create_task.worktree` payload: `repo_root` must be `{workspace_root}`, `worktree_path` must be `{workspace_root}`, and `head` must describe the current git HEAD of `{workspace_root}` using only `reference` and `commit` fields.\n\
-         - Never set `mcp__mnemesh__create_task.worktree.worktree_path` to `{isolated_worktree}`. Mention the isolated implementation worktree only in free-text objective or workstream label when useful.\n\
-         - Minimal valid `mcp__mnemesh__create_task` example: `{{\"objective\":\"<issue identifier and objective>\",\"playbook\":\"coding\",\"requested_by\":{{\"actor_id\":\"symphony-opencode\",\"actor_type\":\"agent\",\"label\":\"Symphony OpenCode\",\"role\":\"implementation-runner\"}},\"worktree\":{{\"repo_root\":\"{workspace_root}\",\"worktree_path\":\"{workspace_root}\",\"head\":{{\"reference\":\"<current branch ref>\",\"commit\":\"<current commit sha>\"}}}}}}`.\n\
+         - Required `mcp__recall__create_task.requested_by` payload: include `actor_id`, `actor_type`, `label`, and `role`, for example `{{\"actor_id\":\"symphony-opencode\",\"actor_type\":\"agent\",\"label\":\"Symphony OpenCode\",\"role\":\"implementation-runner\"}}`.\n\
+         - Required `mcp__recall__create_task.worktree` payload: `repo_root` must be `{workspace_root}`, `worktree_path` must be `{workspace_root}`, and `head` must describe the current git HEAD of `{workspace_root}` using only `reference` and `commit` fields.\n\
+         - Never set `mcp__recall__create_task.worktree.worktree_path` to `{isolated_worktree}`. Mention the isolated implementation worktree only in free-text objective or workstream label when useful.\n\
+         - Minimal valid `mcp__recall__create_task` example: `{{\"objective\":\"<issue identifier and objective>\",\"playbook\":\"coding\",\"requested_by\":{{\"actor_id\":\"symphony-opencode\",\"actor_type\":\"agent\",\"label\":\"Symphony OpenCode\",\"role\":\"implementation-runner\"}},\"worktree\":{{\"repo_root\":\"{workspace_root}\",\"worktree_path\":\"{workspace_root}\",\"head\":{{\"reference\":\"<current branch ref>\",\"commit\":\"<current commit sha>\"}}}}}}`.\n\
          - If `{workspace_root}` is missing or unavailable, stop with provider_blocker and explain the workspace failure; do not continue with degraded local evidence."
     )
 }
 
-fn mnemesh_workspace_root_display(mnemesh_workspace_root: Option<&Path>) -> String {
-    mnemesh_workspace_root
+fn recall_workspace_root_display(recall_workspace_root: Option<&Path>) -> String {
+    recall_workspace_root
         .map(|root| root.display().to_string())
         .unwrap_or_else(|| "missing".to_owned())
 }
@@ -238,9 +233,9 @@ pub(super) const fn mcp_tool_loop_guard_text() -> &'static str {
 
 pub(super) const fn delegated_subagent_contract_text() -> &'static str {
     "- Delegated reviewer/evaluator subagents are read-only unless the issue spec explicitly says otherwise.\n\
-     - Do not ask delegated reviewer/evaluator subagents to call Mnemesh mutation tools such as record_artifact, attach_evidence, record_verification, or create_task.\n\
+     - Do not ask delegated reviewer/evaluator subagents to call Recall mutation tools such as record_artifact, attach_evidence, record_verification, or create_task.\n\
      - Delegated reviewer/evaluator subagents should inspect files/tests/evidence and return a concise structured verdict to the parent OpenCode session.\n\
-     - The parent OpenCode session owns any required Mnemesh writeback after reading the subagent verdict.\n\
+     - The parent OpenCode session owns any required Recall writeback after reading the subagent verdict.\n\
      - If a delegated subagent already failed an MCP mutation because of schema/version errors, do not retry that mutation from another delegated subagent; continue with a text verdict and parent-owned writeback."
 }
 

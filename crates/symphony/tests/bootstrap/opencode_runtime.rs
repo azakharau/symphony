@@ -11,7 +11,7 @@ async fn opencode_session_archive_preserves_session_tree_before_deleting_sqlite_
         opencode::archive_and_delete_session_tree(opencode::OpenCodeSessionArchiveRequest {
             opencode_database_path: db_path.clone(),
             archive_root: archive_root.clone(),
-            project_id: "mnemesh".into(),
+            project_id: "recall".into(),
             issue_id: "issue-100".into(),
             issue_identifier: "MNE-100".into(),
             root_session_id: "ses-root".into(),
@@ -26,10 +26,7 @@ async fn opencode_session_archive_preserves_session_tree_before_deleting_sqlite_
     assert_eq!(report.sessions_deleted, 2);
     assert_eq!(
         report.artifact_root,
-        archive_root
-            .join("mnemesh")
-            .join("MNE-100")
-            .join("ses-root")
+        archive_root.join("recall").join("MNE-100").join("ses-root")
     );
 
     let manifest =
@@ -266,8 +263,8 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         state: "Done".into(),
         url: Some("https://linear.example/NER-55".into()),
         branch_name: Some("feature/ner-55-canon-source-authority-map".into()),
-        mnemesh_workspace_ids: vec!["workspace-54f6c799-4258-4b40-80ec-f0606bff3ce9".into()],
-        mnemesh_task_ids: vec!["task-ner-55".into()],
+        recall_workspace_ids: vec!["workspace-54f6c799-4258-4b40-80ec-f0606bff3ce9".into()],
+        recall_task_ids: vec!["task-ner-55".into()],
         accepted_artifacts: vec!["docs/canon-source-authority-map.md".into()],
         handoff_summary: Some(
             "## OpenCode Handoff Accepted\nCommitted 61f216d docs: add canon source authority map"
@@ -284,7 +281,7 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         PathBuf::from("/home/agent/.symphony/workspaces/opencode/symphony/SYM-27")
     );
     assert_eq!(
-        spec.mnemesh_workspace_root,
+        spec.recall_workspace_root,
         Some(PathBuf::from("/home/agent/proj/symphony"))
     );
     assert!(spec.prompt.contains("SYM-27"), "{}", spec.prompt);
@@ -296,20 +293,20 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
     );
     assert!(
         spec.prompt
-            .contains("Mnemesh workspace root: /home/agent/proj/symphony"),
+            .contains("Recall workspace root: /home/agent/proj/symphony"),
         "{}",
         spec.prompt
     );
     assert!(
         spec.prompt.contains(
-            "Do not create or register a separate Mnemesh workspace for the isolated worktree"
+            "Do not create or register a separate Recall workspace for the isolated worktree"
         ),
         "{}",
         spec.prompt
     );
     assert!(
         spec.prompt.contains(
-            "Required `mcp__mnemesh__create_task` payload shape is exactly `objective`, `playbook`, `requested_by`, and `worktree` at top level"
+            "Required `mcp__recall__create_task` payload shape is exactly `objective`, `playbook`, `requested_by`, and `worktree` at top level"
         ),
         "{}",
         spec.prompt
@@ -321,7 +318,7 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
     );
     assert!(
         spec.prompt.contains(
-            "`mcp__mnemesh__create_task.requested_by` payload: include `actor_id`, `actor_type`, `label`, and `role`"
+            "`mcp__recall__create_task.requested_by` payload: include `actor_id`, `actor_type`, `label`, and `role`"
         ),
         "{}",
         spec.prompt
@@ -342,7 +339,7 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
     );
     assert!(
         spec.prompt.contains(
-            "Never set `mcp__mnemesh__create_task.worktree.worktree_path` to `/home/agent/.symphony/workspaces/opencode/symphony/SYM-27`"
+            "Never set `mcp__recall__create_task.worktree.worktree_path` to `/home/agent/.symphony/workspaces/opencode/symphony/SYM-27`"
         ),
         "{}",
         spec.prompt
@@ -363,7 +360,7 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         "task-ner-55",
         "docs/canon-source-authority-map.md",
         "Committed 61f216d docs: add canon source authority map",
-        "treat this as accepted upstream input; inspect the Mnemesh refs/artifacts before rediscovering or replanning this surface",
+        "treat this as accepted upstream input; inspect the Recall refs/artifacts before rediscovering or replanning this surface",
     ] {
         assert!(spec.prompt.contains(fragment), "{}", spec.prompt);
     }
@@ -389,7 +386,7 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
     );
     assert!(
         spec.prompt.contains(
-            "Do not ask delegated reviewer/evaluator subagents to call Mnemesh mutation tools"
+            "Do not ask delegated reviewer/evaluator subagents to call Recall mutation tools"
         ),
         "{}",
         spec.prompt
@@ -554,7 +551,7 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
     let transcript_path = dir.path().join("acp-transcript.jsonl");
     let script_path = write_fake_acp_script(dir.path(), &transcript_path);
     let worktree = dir.path().join("worktree");
-    let mnemesh_workspace_root = dir.path().join("mnemesh-root");
+    let recall_workspace_root = dir.path().join("recall-root");
     let spec = opencode::OpenCodeLaunchSpec {
         command: script_path,
         args: Vec::new(),
@@ -563,7 +560,7 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
         issue_identifier: "SYM-200".into(),
         branch_name: "feature/sym-200".into(),
         repo_path: None,
-        mnemesh_workspace_root: Some(mnemesh_workspace_root.clone()),
+        recall_workspace_root: Some(recall_workspace_root.clone()),
         base_ref: None,
         agent: "build".into(),
         model: Some("openai/gpt-5.5".into()),
@@ -623,8 +620,8 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
             assert!(!transcript.contains("Run OpenCode ACP"), "{transcript}");
             assert!(
                 transcript.contains(&format!(
-                    r#""SYMPHONY_MNEMESH_WORKSPACE_ROOT": "{}""#,
-                    mnemesh_workspace_root.display()
+                    r#""SYMPHONY_RECALL_WORKSPACE_ROOT": "{}""#,
+                    recall_workspace_root.display()
                 )),
                 "{transcript}"
             );
@@ -670,7 +667,7 @@ async fn stdio_launcher_kills_process_tree_when_setup_fails_before_session_attac
         issue_identifier: "SYM-209".into(),
         branch_name: "feature/sym-209".into(),
         repo_path: None,
-        mnemesh_workspace_root: Some(worktree),
+        recall_workspace_root: Some(worktree),
         base_ref: None,
         agent: "build".into(),
         model: Some("openai/gpt-5.5".into()),
@@ -723,7 +720,7 @@ async fn handoff_sidecar_accepts_eval_result_evidence_ref() {
   "session_id": "ses-evidence-ref",
   "lifecycle_stages": ["running", "eval", "handoff", "completed"],
   "subagents": ["rust-engineer:ses-child"],
-  "eval_results": [{"suite": "cargo test", "passed": true, "failure_fingerprint": null, "details": "ok", "evidence_ref": "mnemesh:evidence:abc123"}],
+  "eval_results": [{"suite": "cargo test", "passed": true, "failure_fingerprint": null, "details": "ok", "evidence_ref": "recall:evidence:abc123"}],
   "changed_files": ["crates/symphony/src/opencode/types.rs:80-87"],
   "git": {"branch": "feature/sym-37", "head_sha": "abc123", "pr_url": null, "worktree_path": "/tmp/worktree"},
   "risks": [],
@@ -742,7 +739,7 @@ async fn handoff_sidecar_accepts_eval_result_evidence_ref() {
 
     assert_eq!(
         handoff.eval_results[0].evidence_ref.as_deref(),
-        Some("mnemesh:evidence:abc123")
+        Some("recall:evidence:abc123")
     );
 }
 
@@ -759,7 +756,7 @@ async fn handoff_sidecar_normalizes_null_string_fields_from_opencode() {
   "lifecycle_stages": ["running", "eval", "handoff", "completed"],
   "subagents": ["build"],
   "eval_results": [{"suite": null, "passed": true, "failure_fingerprint": null, "details": null, "evidence_ref": null}],
-  "changed_files": ["crates/mnemesh-storage/src/migration.rs:1-20"],
+  "changed_files": ["crates/recall-storage/src/migration.rs:1-20"],
   "git": {"branch": "feature/mne-226", "head_sha": "2da52e40f3a0e75e4d4fdf28dc79d06c6ad49979", "pr_url": null, "worktree_path": null},
   "risks": [],
   "stop_reason": "accepted"
@@ -769,7 +766,7 @@ async fn handoff_sidecar_normalizes_null_string_fields_from_opencode() {
 
     let handoff = opencode::StdioOpenCodeLauncher
         .latest_handoff(&test_session(
-            "mnemesh",
+            "recall",
             "issue-mne-226",
             "ses-null-fields",
             &worktree,
@@ -856,16 +853,16 @@ async fn handoff_sidecar_normalizes_opencode_acp_shape() {
     "evaluation_ref": "mne188-final-evaluation-accept-pushed"
   },
   "changed_files": [
-    "crates/mnemesh-storage/src/graph/revision.rs:160-257",
-    "crates/mnemesh-runtime/src/service/code_graph_reads/readiness.rs:16-104"
+    "crates/recall-storage/src/graph/revision.rs:160-257",
+    "crates/recall-runtime/src/service/code_graph_reads/readiness.rs:16-104"
   ],
   "validation": [
     {"command":"cargo fmt --all -- --check","status":"passed"},
-    {"command":"cargo nextest run -p mnemesh-runtime graph","status":"passed"}
+    {"command":"cargo nextest run -p recall-runtime graph","status":"passed"}
   ],
   "git": {
     "branch": "feature/mne-188-p1-graph-summary-and-bounded-graph-query-projections",
-    "worktree_path": "/home/agent/.symphony/workspaces/opencode/mnemesh/MNE-188",
+    "worktree_path": "/home/agent/.symphony/workspaces/opencode/recall/MNE-188",
     "base_branch": "master",
     "base_sha": "1723b3cad4d65607cb5b645350d0541897effb4e",
     "remote": "origin",
@@ -885,7 +882,7 @@ async fn handoff_sidecar_normalizes_opencode_acp_shape() {
 
     let handoff = opencode::StdioOpenCodeLauncher
         .latest_handoff(&test_session(
-            "mnemesh",
+            "recall",
             "issue-mne-188",
             "ses_12805fdb5ffevWVN8GOADoEkPu",
             &worktree,
@@ -1080,7 +1077,7 @@ async fn stdio_launcher_removes_stale_handoff_before_prompting_new_session() {
         issue_identifier: "SYM-201".into(),
         branch_name: "feature/sym-201".into(),
         repo_path: None,
-        mnemesh_workspace_root: Some(dir.path().to_path_buf()),
+        recall_workspace_root: Some(dir.path().to_path_buf()),
         base_ref: None,
         agent: "build".into(),
         model: Some("openai/gpt-5.5".into()),
@@ -1127,7 +1124,7 @@ async fn stdio_launcher_resumes_existing_session_without_replaying_prompt() {
         issue_identifier: "SYM-202".into(),
         branch_name: "feature/sym-202".into(),
         repo_path: None,
-        mnemesh_workspace_root: Some(dir.path().to_path_buf()),
+        recall_workspace_root: Some(dir.path().to_path_buf()),
         base_ref: None,
         agent: "build".into(),
         model: Some("openai/gpt-5.5".into()),
@@ -1206,7 +1203,7 @@ async fn stdio_launcher_continues_existing_session_from_dirty_resumable_worktree
         issue_identifier: "SYM-203".into(),
         branch_name: "feature/sym-203".into(),
         repo_path: Some(repo),
-        mnemesh_workspace_root: Some(dir.path().to_path_buf()),
+        recall_workspace_root: Some(dir.path().to_path_buf()),
         base_ref: Some("main".into()),
         agent: "build".into(),
         model: Some("openai/gpt-5.5".into()),
@@ -1305,7 +1302,7 @@ async fn stdio_launcher_continues_dirty_same_issue_worktree_after_branch_title_d
         issue_identifier: "NRV-48".into(),
         branch_name: "feature/nrv-48-implement-runtime-context-efficiency-attestation-and".into(),
         repo_path: Some(repo),
-        mnemesh_workspace_root: Some(dir.path().to_path_buf()),
+        recall_workspace_root: Some(dir.path().to_path_buf()),
         base_ref: Some("main".into()),
         agent: "build".into(),
         model: Some("openai/gpt-5.5".into()),
@@ -1475,7 +1472,7 @@ async fn stdio_launcher_creates_git_worktree_from_project_repo_and_base_ref() {
         issue_identifier: "SYM-200".into(),
         branch_name: "feature/sym-200".into(),
         repo_path: Some(repo.clone()),
-        mnemesh_workspace_root: Some(repo.clone()),
+        recall_workspace_root: Some(repo.clone()),
         base_ref: Some("agent-server/opencode-runner-extension".into()),
         agent: "build".into(),
         model: Some("openai/gpt-5.5".into()),
@@ -1524,7 +1521,7 @@ async fn stdio_launcher_rejects_issue_identifier_path_separators_before_worktree
         issue_identifier: "SYM/200".into(),
         branch_name: "feature/sym-200".into(),
         repo_path: Some(dir.path().join("repo")),
-        mnemesh_workspace_root: Some(dir.path().join("repo")),
+        recall_workspace_root: Some(dir.path().join("repo")),
         base_ref: Some("main".into()),
         agent: "build".into(),
         model: Some("openai/gpt-5.5".into()),
@@ -2031,7 +2028,7 @@ async fn stdio_launcher_rejects_clean_existing_worktree_on_wrong_branch() {
         issue_identifier: "SYM-204".into(),
         branch_name: "feature/sym-204".into(),
         repo_path: Some(repo),
-        mnemesh_workspace_root: Some(dir.path().join("repo")),
+        recall_workspace_root: Some(dir.path().join("repo")),
         base_ref: Some("agent-server/opencode-runner-extension".into()),
         agent: "build".into(),
         model: Some("openai/gpt-5.5".into()),
@@ -2091,7 +2088,7 @@ async fn stdio_launcher_rejects_existing_worktree_on_wrong_branch() {
         issue_identifier: "SYM-205".into(),
         branch_name: "feature/sym-205".into(),
         repo_path: Some(repo),
-        mnemesh_workspace_root: Some(dir.path().join("repo")),
+        recall_workspace_root: Some(dir.path().join("repo")),
         base_ref: Some("agent-server/opencode-runner-extension".into()),
         agent: "build".into(),
         model: Some("openai/gpt-5.5".into()),

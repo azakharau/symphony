@@ -36,8 +36,8 @@ impl AcpChildLifecycle {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        if let Some(mnemesh_workspace_root) = &spec.mnemesh_workspace_root {
-            command.env("SYMPHONY_MNEMESH_WORKSPACE_ROOT", mnemesh_workspace_root);
+        if let Some(recall_workspace_root) = &spec.recall_workspace_root {
+            command.env("SYMPHONY_RECALL_WORKSPACE_ROOT", recall_workspace_root);
         }
         let mut child = command.spawn()?;
         let process_id = child.id();

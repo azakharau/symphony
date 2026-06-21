@@ -41,7 +41,7 @@ Symphony owns orchestration:
 - dashboard/API telemetry;
 - retry, parking, and self-defect routing.
 
-Symphony does not own product-specific runtime policy inside Nervure, Mnemesh,
+Symphony does not own product-specific runtime policy inside Nervure, Recall,
 Neryva, or other configured projects. Project repos may expose their own
 adapter semantics, but Symphony must treat them as project code executed by the
 OpenCode/OMP runtime, not as Symphony roadmap authority.

@@ -1667,7 +1667,7 @@ async fn park_opencode_provider_error_if_present(
         linear,
         issue,
         Some(&session),
-        true,
+        false,
         "provider_blocker",
         format!(
             "{message}\n\nsession_id: {session_id}\nmessage_id: {message_id}\ntime_updated_ms: {time_updated_ms}\n\nThis is a provider/runtime configuration blocker, not active implementation work. Symphony killed the OpenCode ACP process tree and freed project capacity.",

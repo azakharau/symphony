@@ -1099,10 +1099,7 @@ async fn orchestration_parks_opencode_provider_auth_error_without_false_running(
         .await
         .expect("orchestrate once");
 
-    assert_eq!(
-        client.transitions(),
-        vec![("work".into(), LinearTransition::NeedOwnerInput)]
-    );
+    assert!(client.transitions().is_empty());
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "provider_blocker"
             && evidence.body.contains("ProviderAuthError")

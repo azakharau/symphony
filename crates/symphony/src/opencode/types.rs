@@ -134,5 +134,7 @@ pub enum OpenCodeStopReason {
     Success,
     EvalFailed { failure_fingerprint: String },
     ProviderBlocker { message: String },
+    AuthBlocker { message: String },
+    UnsupportedOmpSurface { message: String },
     OwnerQuestion { question: String },
 }

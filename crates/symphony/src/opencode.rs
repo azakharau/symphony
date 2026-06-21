@@ -807,13 +807,104 @@ fn normalize_handoff_sidecar_value(value: &mut Value, worktree_path: &str) {
         remove_null_object_fields(git, &["head_sha", "pr_url"]);
     }
 
-    if let Some(stop_reason) = object.get_mut("stop_reason")
-        && let Some(reason) = stop_reason.as_str()
+    normalize_stop_reason(object);
+}
+
+fn normalize_stop_reason(object: &mut serde_json::Map<String, Value>) {
+    let Some(raw) = object.get("stop_reason").cloned() else {
+        return;
+    };
+    let fallback_message = object
+        .get("message")
+        .or_else(|| object.get("question"))
+        .or_else(|| object.get("failure_fingerprint"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let Some(normalized) = normalized_stop_reason_value(&raw, fallback_message.as_deref()) else {
+        return;
+    };
+    if fallback_message.is_some()
+        && normalized
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|reason| reason != "success")
     {
-        *stop_reason = match reason {
-            "accepted" | "completed" | "success" => json!({"type": "success"}),
-            other => json!({"type": other}),
-        };
+        object.remove("message");
+        object.remove("question");
+        object.remove("failure_fingerprint");
+    }
+    object.insert("stop_reason".to_owned(), normalized);
+}
+
+fn normalized_stop_reason_value(raw: &Value, fallback_message: Option<&str>) -> Option<Value> {
+    if let Some(reason) = raw.as_str() {
+        return normalized_stop_reason_from_parts(reason, fallback_message, None);
+    }
+
+    let object = raw.as_object()?;
+    let reason = object
+        .get("type")
+        .or_else(|| object.get("stop_reason"))
+        .or_else(|| object.get("reason"))
+        .or_else(|| object.get("kind"))
+        .or_else(|| object.get("category"))
+        .or_else(|| object.get("status"))
+        .and_then(Value::as_str)?;
+    let message = object
+        .get("message")
+        .or_else(|| object.get("question"))
+        .or_else(|| object.get("failure_fingerprint"))
+        .or_else(|| object.get("error"))
+        .or_else(|| object.get("summary"))
+        .or_else(|| object.get("details"))
+        .and_then(Value::as_str)
+        .or(fallback_message);
+    normalized_stop_reason_from_parts(reason, message, Some(object))
+}
+
+fn normalized_stop_reason_from_parts(
+    reason: &str,
+    message: Option<&str>,
+    object: Option<&serde_json::Map<String, Value>>,
+) -> Option<Value> {
+    let normalized = reason.trim().to_ascii_lowercase().replace('-', "_");
+    match normalized.as_str() {
+        "accepted" | "completed" | "success" => Some(json!({"type": "success"})),
+        "eval_failed" | "evaluation_failed" => Some(json!({
+            "type": "eval_failed",
+            "failure_fingerprint": message.unwrap_or("eval_failed"),
+        })),
+        "provider_blocker" | "provider_error" | "provider_failure" | "runtime_blocker" => {
+            Some(json!({
+                "type": "provider_blocker",
+                "message": message.unwrap_or("provider blocker"),
+            }))
+        }
+        "auth_blocker" | "provider_auth" | "provider_auth_error" | "credential_blocker" => {
+            Some(json!({
+                "type": "auth_blocker",
+                "message": message.unwrap_or("provider authentication blocker"),
+            }))
+        }
+        "unsupported_omp_surface" | "unsupported_surface" | "unsupported_provider_surface" => {
+            Some(json!({
+                "type": "unsupported_omp_surface",
+                "message": message.unwrap_or("unsupported OMP ACP surface"),
+            }))
+        }
+        "owner_question" => Some(json!({
+            "type": "owner_question",
+            "question": message.unwrap_or("owner question"),
+        })),
+        "blocked" => object.and_then(|object| {
+            object
+                .get("blocker_kind")
+                .or_else(|| object.get("blocker"))
+                .or_else(|| object.get("reason"))
+                .and_then(Value::as_str)
+                .and_then(|kind| normalized_stop_reason_from_parts(kind, message, None))
+        }),
+        _ => Some(json!({"type": normalized})),
     }
 }
 

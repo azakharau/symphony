@@ -1400,6 +1400,85 @@ async fn handoff_sidecar_normalizes_opencode_acp_shape() {
 }
 
 #[tokio::test]
+async fn handoff_sidecar_normalizes_provider_neutral_blocker_reasons() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let worktree = dir.path().join("worktree");
+    let sidecar_dir = worktree.join(".symphony");
+    fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
+    fs::write(
+        sidecar_dir.join("opencode-handoff.json"),
+        r#"{
+  "session_id":"ses-provider-blocker",
+  "lifecycle_stages":["running","failed"],
+  "subagents_used":["build"],
+  "eval_results":[],
+  "changed_files":[],
+  "git":null,
+  "risks":["provider unavailable"],
+  "stop_reason":{"reason":"provider_blocker","message":"provider quota exhausted"}
+}"#,
+    )
+    .expect("handoff fixture");
+
+    let handoff = opencode::StdioOpenCodeLauncher
+        .latest_handoff(&test_session(
+            "symphony",
+            "issue-provider-blocker",
+            "ses-provider-blocker",
+            &worktree,
+        ))
+        .await
+        .expect("provider-neutral blocker handoff should parse")
+        .expect("handoff present");
+
+    assert!(matches!(
+        handoff.stop_reason,
+        opencode::OpenCodeStopReason::ProviderBlocker { ref message }
+            if message == "provider quota exhausted"
+    ));
+}
+
+#[tokio::test]
+async fn handoff_sidecar_normalizes_unsupported_omp_surface_as_non_success() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let worktree = dir.path().join("worktree");
+    let sidecar_dir = worktree.join(".symphony");
+    fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
+    fs::write(
+        sidecar_dir.join("opencode-handoff.json"),
+        r#"{
+  "session_id":"ses-unsupported",
+  "lifecycle_stages":["running","failed"],
+  "subagents":[],
+  "eval_results":[],
+  "changed_files":[],
+  "git":null,
+  "risks":["unsupported OMP tool surface"],
+  "stop_reason":"unsupported_omp_surface",
+  "message":"OMP provider requested an unsupported tool surface"
+}"#,
+    )
+    .expect("handoff fixture");
+
+    let handoff = opencode::StdioOpenCodeLauncher
+        .latest_handoff(&test_session(
+            "symphony",
+            "issue-unsupported",
+            "ses-unsupported",
+            &worktree,
+        ))
+        .await
+        .expect("unsupported OMP surface handoff should parse")
+        .expect("handoff present");
+
+    assert!(matches!(
+        handoff.stop_reason,
+        opencode::OpenCodeStopReason::UnsupportedOmpSurface { ref message }
+            if message.contains("unsupported tool surface")
+    ));
+}
+
+#[tokio::test]
 async fn handoff_sidecar_fills_missing_git_worktree_path_from_session() {
     let dir = tempfile::tempdir().expect("tempdir");
     let worktree = dir.path().join("worktree");

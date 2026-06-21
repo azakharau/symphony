@@ -224,11 +224,61 @@ pub(super) async fn process_in_progress_handoff(
                 linear,
                 issue,
                 Some(&session),
-                true,
+                false,
                 "provider_blocker",
                 message.clone(),
                 Some(FailureRecord {
                     kind: "provider_blocker".into(),
+                    message: message.clone(),
+                    fingerprint: Some(stable_fingerprint(message)),
+                    occurrence_count: 1,
+                }),
+            )
+            .await?;
+        }
+        OpenCodeStopReason::AuthBlocker { message } => {
+            warn!(
+                project_id = %project.id,
+                issue = %issue.identifier,
+                session_id = %session.session_id,
+                "OpenCode auth blocker parked issue"
+            );
+            park_typed_blocker(
+                project,
+                store,
+                linear,
+                issue,
+                Some(&session),
+                false,
+                "auth_blocker",
+                message.clone(),
+                Some(FailureRecord {
+                    kind: "auth_blocker".into(),
+                    message: message.clone(),
+                    fingerprint: Some(stable_fingerprint(message)),
+                    occurrence_count: 1,
+                }),
+            )
+            .await?;
+        }
+        OpenCodeStopReason::UnsupportedOmpSurface { message } => {
+            warn!(
+                project_id = %project.id,
+                issue = %issue.identifier,
+                session_id = %session.session_id,
+                "unsupported OMP ACP surface parked issue"
+            );
+            park_typed_blocker(
+                project,
+                store,
+                linear,
+                issue,
+                Some(&session),
+                false,
+                "unsupported_omp_surface",
+                message.clone(),
+                Some(FailureRecord {
+                    kind: "unsupported_omp_surface".into(),
                     message: message.clone(),
                     fingerprint: Some(stable_fingerprint(message)),
                     occurrence_count: 1,

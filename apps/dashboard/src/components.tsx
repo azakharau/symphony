@@ -201,6 +201,7 @@ function RunningTable({ issues }: { issues: RunningIssueSummary[] }) {
             <th className="px-3 py-2">project</th>
             <th className="px-3 py-2">issue</th>
             <th className="px-3 py-2">stage</th>
+            <th className="px-3 py-2">provider/state</th>
             <th className="px-3 py-2">agent/model</th>
             <th className="px-3 py-2">tokens</th>
             <th className="px-3 py-2">duration</th>
@@ -212,6 +213,7 @@ function RunningTable({ issues }: { issues: RunningIssueSummary[] }) {
               <td className="px-3 py-3">{issue.project_name}</td>
               <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${issue.project_id}/issues/${issue.issue_id}`}>{issue.identifier}</Link><div className="text-xs text-slate-500">{issue.title}</div></td>
               <td className="px-3 py-3"><Badge tone={statusTone(issue.stage)}>{issue.stage ?? issue.display_status}</Badge></td>
+              <td className="px-3 py-3"><ProviderStateBlock providerMode={issue.provider_mode} providerId={issue.provider_id} sessionId={issue.session_id} processId={issue.process_id} processAlive={issue.process_alive} runtimeFailureKind={issue.runtime_failure_kind} acpFrameCount={issue.acp_frame_count} evidenceCount={issue.session_evidence_refs?.length} silenceObserved={issue.silence_observed} /></td>
               <td className="px-3 py-3">{issue.active_agent ?? issue.agent ?? "—"}<div className="text-xs text-slate-500">{issue.active_model ?? issue.model ?? "model unknown"}</div></td>
               <td className="px-3 py-3"><TokenCell total={issue.token_count} cached={issue.cached_token_count} /></td>
               <td className="px-3 py-3"><LiveDuration startedAtMs={issue.started_at_ms} fallbackMs={issue.duration_ms} /></td>
@@ -302,6 +304,7 @@ function IssueTable({ issues, projectId }: { issues: IssueDetail[]; projectId: s
             <th className="px-3 py-2">issue</th>
             <th className="px-3 py-2">stage</th>
             <th className="px-3 py-2">active agent/model</th>
+            <th className="px-3 py-2">provider/session</th>
             <th className="px-3 py-2">process</th>
             <th className="px-3 py-2">tokens</th>
             <th className="px-3 py-2">tools</th>
@@ -318,7 +321,8 @@ function IssueTable({ issues, projectId }: { issues: IssueDetail[]; projectId: s
                 <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${projectId}/issues/${issue.issue_id}`}>{issue.identifier}</Link><div className="text-xs text-slate-500">{issue.title}</div></td>
                 <td className="px-3 py-3"><Badge tone={statusTone(issue.lifecycle_stage)}>{issue.display_status}</Badge></td>
                 <td className="px-3 py-3">{session?.active_agent ?? session?.agent ?? "—"}<div className="text-xs text-slate-500">{session?.active_model ?? session?.model ?? "model unknown"}</div></td>
-                <td className="px-3 py-3">{session ? processState(session.process_alive) : "—"}</td>
+                <td className="px-3 py-3">{session ? <ProviderStateBlock providerMode={session.provider_mode} providerId={session.provider_id} sessionId={session.opencode_session_id} processId={session.process_id} processAlive={session.process_alive} runtimeFailureKind={session.runtime_failure_kind} acpFrameCount={session.acp_frame_count} evidenceCount={session.session_evidence_refs.length} silenceObserved={session.silence_observed} /> : "—"}</td>
+                <td className="px-3 py-3">{session ? processStateLabel(session.process_id, session.process_alive) : "—"}</td>
                 <td className="px-3 py-3"><TokenCell total={session?.token_count ?? 0} cached={session?.cached_token_count} /></td>
                 <td className="px-3 py-3">{session?.activity?.running_tool_count ?? 0}/{session?.activity?.pending_tool_count ?? 0}</td>
                 <td className="px-3 py-3">{session?.todo_count ?? 0}</td>
@@ -412,6 +416,40 @@ function TokenCell({ total, cached }: { total: number; cached?: number | null })
   );
 }
 
+function ProviderStateBlock({
+  providerMode,
+  providerId,
+  sessionId,
+  processId,
+  processAlive,
+  runtimeFailureKind,
+  acpFrameCount,
+  evidenceCount,
+  silenceObserved,
+}: {
+  providerMode?: string | null;
+  providerId?: string | null;
+  sessionId?: string | null;
+  processId?: number | null;
+  processAlive?: boolean | null;
+  runtimeFailureKind?: string | null;
+  acpFrameCount?: number | null;
+  evidenceCount?: number | null;
+  silenceObserved?: boolean | null;
+}) {
+  return (
+    <div>
+      <div className="font-medium">{providerModeLabel(providerMode)}</div>
+      <div className="text-xs text-slate-500">{providerId ? `provider ${providerId}` : "provider id unavailable"}</div>
+      <div className="text-xs text-slate-500">{sessionId ? `session ${sessionId}` : "session id unavailable"}</div>
+      <div className="text-xs text-slate-500">{processStateLabel(processId, processAlive)}</div>
+      {runtimeFailureKind ? <div className="text-xs font-medium text-amber-700">{runtimeFailureText(runtimeFailureKind)}</div> : null}
+      <div className="text-xs text-slate-500">{acpFrameCount ?? 0} ACP frames · {evidenceCount ?? 0} evidence refs</div>
+      {silenceObserved ? <div className="text-xs font-medium text-amber-700">session is quiet or stale</div> : null}
+    </div>
+  );
+}
+
 export function Panel({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
   return (
     <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -473,10 +511,27 @@ function dotClass(tone: Tone): string {
   }
 }
 
-function processState(alive?: boolean | null): string {
-  if (alive === true) return "alive";
-  if (alive === false) return "stopped";
-  return "unknown";
+export function providerModeLabel(mode?: string | null): string {
+  if (mode === "omp_acp") return "OMP ACP";
+  if (mode === "opencode_acp") return "OpenCode ACP";
+  return "provider unavailable";
+}
+
+export function runtimeFailureText(kind?: string | null): string {
+  switch (kind) {
+    case "provider_auth_unavailable": return "provider auth unavailable";
+    case "unsupported_omp_version": return "unsupported OMP version";
+    case "malformed_acp_frame": return "malformed ACP response";
+    case "missing_binary": return "runtime binary missing";
+    default: return kind ? kind.replaceAll("_", " ") : "none";
+  }
+}
+
+export function processStateLabel(processId?: number | null, alive?: boolean | null): string {
+  const pid = processId ? `pid ${processId}` : "pid unavailable";
+  if (alive === true) return `${pid} live`;
+  if (alive === false) return `${pid} stale/stopped`;
+  return `${pid} not checked`;
 }
 
 function isLiveIssue(issue: IssueDetail): boolean {

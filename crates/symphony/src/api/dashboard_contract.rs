@@ -71,6 +71,7 @@ pub struct UiRunningIssueSummary {
     pub provider_id: Option<String>,
     pub process_id: Option<u32>,
     pub process_alive: Option<bool>,
+    pub lifecycle_stage: Option<LifecycleStage>,
     pub stage: Option<OpenCodeStage>,
     pub agent: Option<String>,
     pub model: Option<String>,
@@ -85,6 +86,10 @@ pub struct UiRunningIssueSummary {
     pub started_at_ms: Option<u64>,
     pub duration_ms: Option<u64>,
     pub last_event: Option<String>,
+    pub runtime_failure_kind: Option<crate::state::RuntimeFailureKind>,
+    pub acp_frame_count: u64,
+    pub session_evidence_refs: Vec<String>,
+    pub silence_observed: bool,
     pub worktree_path: Option<String>,
 }
 
@@ -284,6 +289,7 @@ impl From<&RunningIssueSummary> for UiRunningIssueSummary {
             provider_id: issue.provider_id.clone(),
             process_id: issue.process_id,
             process_alive: issue.process_alive,
+            lifecycle_stage: issue.lifecycle_stage,
             stage: issue.stage,
             agent: issue.agent.clone(),
             model: issue.model.clone(),
@@ -298,6 +304,10 @@ impl From<&RunningIssueSummary> for UiRunningIssueSummary {
             started_at_ms: issue.started_at_ms,
             duration_ms: issue.duration_ms,
             last_event: issue.last_event.clone(),
+            runtime_failure_kind: issue.runtime_failure_kind.clone(),
+            acp_frame_count: issue.acp_frame_count,
+            session_evidence_refs: issue.session_evidence_refs.clone(),
+            silence_observed: issue.silence_observed,
             worktree_path: issue.worktree_path.clone(),
         }
     }

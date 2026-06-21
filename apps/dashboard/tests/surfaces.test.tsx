@@ -34,7 +34,13 @@ describe("dashboard surfaces", () => {
     expect(html).not.toContain(">Capacity</p>");
     expect(html).toContain("SYM-97");
     expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain(">duration</th>");
+    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain(">provider/state</th>");
     expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("1h 0m");
+    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("OpenCode ACP");
+    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("OMP ACP");
+    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("provider auth unavailable");
+    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("pid 5321 stale/stopped");
+    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("5 ACP frames");
     expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain("component tests passed");
     expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain(">last event</th>");
     expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain(">tools<");
@@ -103,6 +109,9 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("aria-label=\"pending\"");
     expect(html).toContain(">35,100</dd>");
     expect(html).toContain(">3,110 cached</dd>");
+    expect(html).toContain(">OpenCode ACP</dd>");
+    expect(html).toContain("provider opencode-primary");
+    expect(html).toContain(">18 frames</dd>");
     expect(html).toContain(">duration</dt>");
     expect(html).toContain("<span class=\"tabular-nums\">1h 0m</span>");
     expect(html).not.toContain(">cached</dt>");
@@ -111,6 +120,20 @@ describe("dashboard surfaces", () => {
     expect(html).not.toContain("OpenCode activity updated</dd>");
     expect(html).not.toContain("updated 178");
     expect(html).not.toContain(">medium<");
+  });
+
+  test("issue inspector renders OMP ACP blocker telemetry without raw event dumps", () => {
+    const html = render(<IssueInspector issue={failedProject.active_issues[0]} />);
+
+    expect(html).toContain("OMP ACP");
+    expect(html).toContain("provider omp-primary");
+    expect(html).toContain("oc-atl-42");
+    expect(html).toContain("pid 5321 stale/stopped");
+    expect(html).toContain("provider auth unavailable");
+    expect(html).toContain("session is quiet or stale");
+    expect(html).toContain(">5 frames</dd>");
+    expect(html).toContain("sdk:auth");
+    expect(html).not.toContain("runtime process exited</dd>");
   });
 
   test("issue inspector links OpenCode sessions by persisted session directory", () => {

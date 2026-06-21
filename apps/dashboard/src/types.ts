@@ -29,8 +29,11 @@ export type RunningIssueSummary = {
   title: string;
   display_status: string;
   session_id?: string | null;
+  provider_mode?: string | null;
+  provider_id?: string | null;
   process_id?: number | null;
   process_alive?: boolean | null;
+  lifecycle_stage?: LifecycleStage | null;
   stage?: string | null;
   agent?: string | null;
   model?: string | null;
@@ -45,6 +48,10 @@ export type RunningIssueSummary = {
   started_at_ms?: number | null;
   duration_ms?: number | null;
   last_event?: string | null;
+  runtime_failure_kind?: string | null;
+  acp_frame_count?: number;
+  session_evidence_refs?: string[];
+  silence_observed?: boolean;
   worktree_path?: string | null;
 };
 
@@ -200,6 +207,8 @@ export type SessionTreeActivity = {
 
 export type OpenCodeSession = {
   opencode_session_id: string;
+  provider_mode: string;
+  provider_id?: string | null;
   agent: string;
   model?: string | null;
   worktree_path: string;
@@ -220,6 +229,9 @@ export type OpenCodeSession = {
   started_at_ms?: number | null;
   duration_ms?: number | null;
   last_event?: string | null;
+  runtime_failure_kind?: string | null;
+  acp_frame_count: number;
+  session_evidence_refs: string[];
   silence_observed: boolean;
   activity?: SessionTreeActivity | null;
   activity_error?: string | null;

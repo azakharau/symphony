@@ -288,6 +288,7 @@ pub struct RunningIssueSummary {
     pub provider_id: Option<String>,
     pub process_id: Option<u32>,
     pub process_alive: Option<bool>,
+    pub lifecycle_stage: Option<LifecycleStage>,
     pub stage: Option<OpenCodeStage>,
     pub agent: Option<String>,
     pub model: Option<String>,
@@ -303,6 +304,10 @@ pub struct RunningIssueSummary {
     pub started_at_ms: Option<u64>,
     pub duration_ms: Option<u64>,
     pub last_event: Option<String>,
+    pub runtime_failure_kind: Option<crate::state::RuntimeFailureKind>,
+    pub acp_frame_count: u64,
+    pub session_evidence_refs: Vec<String>,
+    pub silence_observed: bool,
     pub worktree_path: Option<String>,
 }
 
@@ -482,6 +487,7 @@ fn running_issue_summary(
         provider_id: session.and_then(|session| session.provider_id.clone()),
         process_id: session.and_then(|session| session.process_id),
         process_alive: session.and_then(|session| session.process_alive),
+        lifecycle_stage: session.map(|session| session.lifecycle_stage),
         stage: session.map(|session| session.current_stage),
         agent: session.map(|session| session.agent.clone()),
         model: session.and_then(|session| session.model.clone()),
@@ -499,6 +505,12 @@ fn running_issue_summary(
         last_event: session
             .and_then(|session| session.last_event.clone())
             .or_else(|| issue.last_runner_event.clone()),
+        runtime_failure_kind: session.and_then(|session| session.runtime_failure_kind.clone()),
+        acp_frame_count: session.map_or(0, |session| session.acp_frame_count),
+        session_evidence_refs: session
+            .map(|session| session.session_evidence_refs.clone())
+            .unwrap_or_default(),
+        silence_observed: session.is_some_and(|session| session.silence_observed),
         worktree_path: session.map(|session| session.worktree_path.clone()),
     }
 }

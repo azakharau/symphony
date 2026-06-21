@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-import { Badge, Panel } from "@/src/components";
+import { Badge, Panel, processStateLabel, providerModeLabel, runtimeFailureText } from "@/src/components";
 import { LiveDuration } from "@/src/live-duration";
 import type { IssueDetail, SessionActivity, TimelineEvent, TodoActivity } from "@/src/types";
 
@@ -54,6 +54,10 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
             <dl className="grid gap-2 text-sm sm:grid-cols-2">
               <KeyValue label="active agent" value={session?.active_agent ?? session?.agent ?? "unavailable"} />
               <KeyValue label="model" value={session?.active_model ?? session?.model ?? "unavailable"} />
+              <KeyValue label="provider" value={providerModeLabel(session?.provider_mode)} detail={session?.provider_id ? `provider ${session.provider_id}` : "provider id unavailable"} />
+              <KeyValue label="session" value={session?.opencode_session_id ?? "unavailable"} detail={session ? processStateLabel(session.process_id, session.process_alive) : "process not checked"} mono />
+              <KeyValue label="failure taxonomy" value={runtimeFailureText(session?.runtime_failure_kind)} detail={session?.silence_observed ? "session is quiet or stale" : "no silence marker"} />
+              <KeyValue label="ACP telemetry" value={`${session?.acp_frame_count ?? 0} frames`} detail={sessionEvidenceSummary(session?.session_evidence_refs)} />
               <KeyValue label="tokens" value={formatCompactNumber(sessionTokens.net)} detail={`${formatCompactNumber(sessionTokens.cached)} cached`} />
               <KeyValue label="duration" value={<LiveDuration startedAtMs={session?.started_at_ms} fallbackMs={session?.duration_ms} />} />
               <KeyValue label="worktree" value={session?.worktree_path ?? issue.git_ref?.worktree_path ?? "unavailable"} mono />
@@ -330,6 +334,11 @@ function base64UrlEncodeUtf8(value: string): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+function sessionEvidenceSummary(refs?: string[] | null): string {
+  if (!refs?.length) return "0 evidence refs";
+  return `${refs.length} evidence refs: ${refs.slice(0, 2).join(", ")}`;
+}
+
 function tokenBreakdown(total: number, cached?: number | null): { net: number; cached: number } {
   const safeCached = Math.max(0, cached ?? 0);
   return {
@@ -359,6 +368,7 @@ function EvidenceTab({ issue }: { issue: IssueDetail }) {
       <Evidence label="blocker" value={issue.blocker ? `${issue.blocker.kind}: ${issue.blocker.message}` : "none"} />
       <Evidence label="failure" value={issue.failure ? `${issue.failure.kind}: ${issue.failure.message}` : "none"} />
       <Evidence label="runtime defect" value={issue.runtime_defect ? `${issue.runtime_defect.classification}: ${issue.runtime_defect.next_action}` : "none"} />
+      <Evidence label="session evidence refs" value={issue.opencode_sessions.at(-1)?.session_evidence_refs.length ? issue.opencode_sessions.at(-1)!.session_evidence_refs.join("; ") : "none"} />
       <Evidence label="self-defect routing" value={issue.self_defect_routing ? `${issue.self_defect_routing.fingerprint ?? "fingerprint unavailable"}: ${issue.self_defect_routing.next_action ?? "inspect"}` : "none"} />
       <Evidence label="evals" value={issue.eval_results.length ? issue.eval_results.map((item) => `${item.suite} ${item.status}`).join("; ") : "none"} />
       <Evidence label="stop reason" value={issue.stop_reason ?? "none"} />

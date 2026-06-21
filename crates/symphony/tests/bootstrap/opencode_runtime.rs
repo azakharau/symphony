@@ -976,9 +976,11 @@ async fn runtime_api_surfaces_omp_acp_provider_mode_and_session_telemetry() {
     let mut session = test_session("symphony", "issue-102", "omp-session-1", "/tmp/sym-102");
     session.provider_mode = RuntimeProviderMode::OmpAcp;
     session.provider_id = Some("omp-primary".into());
+    session.process_id = Some(std::process::id());
     session.runtime_failure_kind = Some(RuntimeFailureKind::ProviderAuthUnavailable);
     session.acp_frame_count = 5;
     session.session_evidence_refs = vec!["sdk:one".into()];
+    session.silence_observed = true;
     store
         .upsert_opencode_session(&session)
         .await
@@ -1001,6 +1003,21 @@ async fn runtime_api_surfaces_omp_acp_provider_mode_and_session_telemetry() {
     );
     assert_eq!(session.acp_frame_count, 5);
     assert_eq!(session.session_evidence_refs, ["sdk:one"]);
+    assert!(session.silence_observed);
+
+    let running = &api.aggregate().projects[0].running_issues[0];
+    assert_eq!(running.provider_mode, Some(RuntimeProviderMode::OmpAcp));
+    assert_eq!(running.provider_id.as_deref(), Some("omp-primary"));
+    assert_eq!(running.process_id, Some(std::process::id()));
+    assert_eq!(running.process_alive, Some(true));
+    assert_eq!(running.lifecycle_stage, Some(LifecycleStage::Running));
+    assert_eq!(
+        running.runtime_failure_kind,
+        Some(RuntimeFailureKind::ProviderAuthUnavailable)
+    );
+    assert_eq!(running.acp_frame_count, 5);
+    assert_eq!(running.session_evidence_refs, ["sdk:one"]);
+    assert!(running.silence_observed);
 }
 
 #[tokio::test]

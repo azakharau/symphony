@@ -3,19 +3,21 @@
 import { useEffect, useState } from "react";
 
 export function LiveDuration({ startedAtMs, fallbackMs }: { startedAtMs?: number | null; fallbackMs?: number | null }) {
-  const [value, setValue] = useState<number | null>(() => fallbackMs ?? null);
+  const [elapsed, setElapsed] = useState<number | null>(() => fallbackMs ?? null);
 
   useEffect(() => {
     if (startedAtMs == null || startedAtMs < 0) {
-      setValue(fallbackMs ?? null);
       return;
     }
 
-    const update = () => setValue(Math.max(0, Date.now() - startedAtMs));
-    update();
+    const update = () => setElapsed(Math.max(0, Date.now() - startedAtMs));
     const interval = window.setInterval(update, 1000);
     return () => window.clearInterval(interval);
-  }, [fallbackMs, startedAtMs]);
+  }, [startedAtMs]);
+
+  const value = startedAtMs == null || startedAtMs < 0
+    ? fallbackMs ?? null
+    : elapsed;
 
   return <span className="tabular-nums">{formatDuration(value)}</span>;
 }

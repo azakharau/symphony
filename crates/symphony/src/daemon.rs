@@ -246,12 +246,7 @@ async fn record_project_orchestration_error(
         error_chain = %error_chain,
         "project orchestration failed without aborting global poll"
     );
-    let running = store
-        .issues_for_project(&project.id)
-        .await?
-        .into_iter()
-        .filter(|issue| issue.lifecycle_stage == LifecycleStage::Running)
-        .count() as u32;
+    let running = running_execution_count(store, &project.id).await?;
     store
         .mark_project_liveness_poll(
             &project.id,
@@ -263,6 +258,24 @@ async fn record_project_orchestration_error(
         )
         .await?;
     Ok(())
+}
+
+async fn running_execution_count(store: &SqliteStore, project_id: &str) -> anyhow::Result<u32> {
+    let mut issue_ids = store
+        .issues_for_project(project_id)
+        .await?
+        .into_iter()
+        .filter(|issue| issue.lifecycle_stage == LifecycleStage::Running)
+        .map(|issue| issue.issue_id)
+        .collect::<HashSet<_>>();
+
+    for session in store.active_opencode_sessions().await? {
+        if session.project_id == project_id && session_has_live_process(&session).await {
+            issue_ids.insert(session.issue_id);
+        }
+    }
+
+    Ok(issue_ids.len() as u32)
 }
 
 struct ReconcileContext<'a, L, O> {

@@ -701,13 +701,25 @@ fn project_capacity(project: &ProjectReadModel, max_sessions: u32) -> ProjectCap
     let running_sessions = project
         .issues
         .iter()
-        .filter(|issue| issue.issue.lifecycle_stage == LifecycleStage::Running)
+        .filter(|issue| issue_has_running_execution(issue))
         .count() as u32;
     ProjectCapacity {
         max_sessions,
         running_sessions,
         available_sessions: max_sessions.saturating_sub(running_sessions),
     }
+}
+
+fn issue_has_running_execution(issue: &IssueReadModel) -> bool {
+    issue.issue.lifecycle_stage == LifecycleStage::Running
+        || issue.opencode_sessions.iter().any(|session| {
+            session.lifecycle_stage == LifecycleStage::Running
+                && !matches!(
+                    session.stage,
+                    OpenCodeStage::Failed | OpenCodeStage::Completed
+                )
+                && session.process_id.is_some()
+        })
 }
 
 fn project_liveness_response(

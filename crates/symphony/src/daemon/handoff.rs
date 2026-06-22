@@ -20,7 +20,8 @@ use crate::{
     },
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, GitRefRecord, IssueStateRecord,
-        LifecycleStage, OpenCodeStage, SelfDefectRelationMode, SelfDefectResolutionState,
+        LifecycleStage, OpenCodeStage, RuntimeProviderMode, SelfDefectRelationMode,
+        SelfDefectResolutionState,
     },
     storage::SqliteStore,
 };
@@ -90,12 +91,14 @@ pub(super) async fn process_in_progress_handoff(
                 message,
                 "OpenCode session ended without handoff sidecar"
             );
-            fail_runtime_defect(
+            request_opencode_repair(
                 project,
                 self_defect_project,
                 store,
+                opencode,
                 linear,
                 issue,
+                existing_issue.as_ref(),
                 "malformed_handoff",
                 message.clone(),
                 FailureRecord {
@@ -117,12 +120,14 @@ pub(super) async fn process_in_progress_handoff(
                 message,
                 "OpenCode handoff sidecar failed validation"
             );
-            fail_runtime_defect(
+            request_opencode_repair(
                 project,
                 self_defect_project,
                 store,
+                opencode,
                 linear,
                 issue,
+                existing_issue.as_ref(),
                 "malformed_handoff",
                 message.clone(),
                 FailureRecord {
@@ -146,7 +151,7 @@ pub(super) async fn process_in_progress_handoff(
         "OpenCode handoff observed"
     );
 
-    if handoff.session_id != session.session_id {
+    if handoff_session_id_mismatch_is_fatal(&session, &handoff) {
         warn!(
             project_id = %project.id,
             issue = %issue.identifier,
@@ -310,6 +315,13 @@ pub(super) async fn process_in_progress_handoff(
     Ok(true)
 }
 
+fn handoff_session_id_mismatch_is_fatal(
+    session: &crate::state::OpenCodeSessionRecord,
+    handoff: &OpenCodeHandoff,
+) -> bool {
+    handoff.session_id != session.session_id && session.provider_mode != RuntimeProviderMode::OmpAcp
+}
+
 pub(super) async fn process_recoverable_failed_handoff(
     project: &ProjectConfig,
     self_defect_project: &ProjectConfig,
@@ -325,9 +337,73 @@ pub(super) async fn process_recoverable_failed_handoff(
         return Ok(false);
     };
 
+    if let Some(running_session) = latest_session(store, &project.id, &issue.id).await?
+        && running_session.session_id != session.session_id
+        && running_session.lifecycle_marker.as_deref() == Some("repair_prompted")
+        && session_has_live_process(&running_session).await
+    {
+        let mut record = issue_record(
+            project,
+            issue,
+            LifecycleStage::Running,
+            None,
+            CleanupStatus::Clean,
+        );
+        if let Some(existing) = existing_issue.as_ref() {
+            record.failure.clone_from(&existing.failure);
+            record.git_ref.clone_from(&existing.git_ref);
+            record.cleanup_status = existing.cleanup_status;
+        }
+        store.upsert_issue(&record).await?;
+        return Ok(true);
+    }
+
     let handoff = match opencode.latest_handoff(&session).await {
         Ok(Some(handoff)) => handoff,
-        Ok(None) | Err(OpenCodeError::MalformedHandoff(_)) => return Ok(false),
+        Ok(None) => {
+            request_opencode_repair(
+                project,
+                self_defect_project,
+                store,
+                opencode,
+                linear,
+                issue,
+                existing_issue.as_ref(),
+                "malformed_handoff",
+                ".symphony/opencode-handoff.json was not produced before the OpenCode ACP process ended".to_string(),
+                FailureRecord {
+                    kind: "malformed_handoff".into(),
+                    message: "missing handoff sidecar".into(),
+                    fingerprint: Some("missing_handoff_sidecar".into()),
+                    occurrence_count: 1,
+                },
+                &session,
+            )
+            .await?;
+            return Ok(true);
+        }
+        Err(OpenCodeError::MalformedHandoff(message)) => {
+            request_opencode_repair(
+                project,
+                self_defect_project,
+                store,
+                opencode,
+                linear,
+                issue,
+                existing_issue.as_ref(),
+                "malformed_handoff",
+                message.clone(),
+                FailureRecord {
+                    kind: "malformed_handoff".into(),
+                    message,
+                    fingerprint: Some("malformed_handoff_sidecar".into()),
+                    occurrence_count: 1,
+                },
+                &session,
+            )
+            .await?;
+            return Ok(true);
+        }
         Err(error) => return Err(error.into()),
     };
 
@@ -864,7 +940,7 @@ async fn request_opencode_repair(
     )
     .saturating_add(1);
     failure.occurrence_count = occurrence_count;
-    if occurrence_count >= project.eval.max_identical_failure_fingerprints.max(1) {
+    if occurrence_count > project.eval.max_identical_failure_fingerprints.max(1) {
         fail_runtime_defect(
             project,
             self_defect_project,
@@ -1347,6 +1423,7 @@ fn recoverable_failed_handoff_session(session: &crate::state::OpenCodeSessionRec
         && session.lifecycle_marker.as_deref() == Some("failed:malformed_handoff")
         && session.last_event.as_deref().is_some_and(|event| {
             event.starts_with("failed:incomplete_success_handoff")
+                || event.starts_with("failed:missing_handoff_sidecar")
                 || event.starts_with("failed:malformed_handoff_sidecar")
                 || event.starts_with("failed:missing_git_closure")
         })

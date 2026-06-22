@@ -237,24 +237,28 @@ async fn orchestration_schedules_repair_for_dead_running_session_without_handoff
         .await
         .expect("orchestrate once");
 
-    assert_backlog_transition(&client.transitions(), "work");
-    assert!(opencode.repairs().is_empty());
+    assert!(
+        client.transitions().is_empty(),
+        "dead running session without sidecar should repair in place, got {:?}",
+        client.transitions()
+    );
+    assert_eq!(
+        opencode.repairs(),
+        vec![("SYM-65".into(), "missing_handoff_sidecar".into())]
+    );
     let liveness = store
         .project_liveness("symphony")
         .await
         .expect("query liveness")
         .expect("liveness row");
-    assert_eq!(liveness.status, RuntimeLivenessStatus::NoEligibleIssues);
+    assert_eq!(liveness.status, RuntimeLivenessStatus::RunnerProcessDead);
     let issue = store
         .issue("symphony", "work")
         .await
         .expect("query work")
         .expect("work issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
-    assert_eq!(
-        issue.blocker.expect("runtime defect blocker").kind,
-        "runtime_defect"
-    );
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    assert!(issue.blocker.is_none());
     let failure = issue.failure.expect("failure");
     assert_eq!(
         failure.fingerprint.as_deref(),
@@ -992,7 +996,11 @@ async fn orchestration_reconciles_terminal_issues_and_avoids_duplicate_dispatch_
         first_poll.transitions(),
         vec![("new-work".into(), LinearTransition::InProgress)]
     );
-    assert_backlog_transition(&restart_poll.transitions(), "new-work");
+    assert!(
+        restart_poll.transitions().is_empty(),
+        "restart reconciliation should not duplicate dispatch or park active work, got {:?}",
+        restart_poll.transitions()
+    );
     let finished = store
         .issue("symphony", "finished")
         .await
@@ -1275,8 +1283,15 @@ async fn orchestration_repairs_stale_in_progress_session_without_handoff_sidecar
     assert!(opencode.launches().is_empty());
     assert!(opencode.resumes().is_empty());
     assert!(opencode.continuations().is_empty());
-    assert!(opencode.repairs().is_empty());
-    assert_backlog_transition(&client.transitions(), "work");
+    assert_eq!(
+        opencode.repairs(),
+        vec![("SYM-65".into(), "missing_handoff_sidecar".into())]
+    );
+    assert!(
+        client.transitions().is_empty(),
+        "first missing-sidecar observation should repair in place, got {:?}",
+        client.transitions()
+    );
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff"
             && evidence
@@ -1291,20 +1306,13 @@ async fn orchestration_repairs_stale_in_progress_session_without_handoff_sidecar
         .await
         .expect("query session")
         .expect("session");
-    assert_eq!(failed.lifecycle_stage, LifecycleStage::Failed);
-    assert_eq!(failed.stage, OpenCodeStage::Failed);
-    assert_eq!(failed.process_id, None);
+    assert_eq!(failed.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(failed.stage, OpenCodeStage::Running);
+    assert_eq!(failed.process_id, Some(4242));
+    assert_eq!(failed.lifecycle_marker.as_deref(), Some("repair_prompted"));
     assert_eq!(
-        failed.lifecycle_marker.as_deref(),
-        Some("failed:malformed_handoff")
-    );
-    assert!(
-        failed
-            .last_event
-            .as_deref()
-            .is_some_and(|event| event.starts_with("failed:missing_handoff_sidecar")),
-        "last_event={:?}",
-        failed.last_event
+        failed.last_event.as_deref(),
+        Some("repair_prompted:missing_handoff_sidecar")
     );
     assert!(!failed.silence_observed);
 }
@@ -1352,14 +1360,21 @@ async fn orchestration_reissues_repair_prompt_for_stale_malformed_handoff_sessio
 
     assert!(opencode.launches().is_empty());
     assert!(opencode.resumes().is_empty());
-    assert!(opencode.repairs().is_empty());
-    assert_backlog_transition(&client.transitions(), "repair-stale");
+    assert_eq!(
+        opencode.repairs(),
+        vec![("SYM-66".into(), "missing_handoff_sidecar".into())]
+    );
+    assert!(
+        client.transitions().is_empty(),
+        "stale repair session should be continued before parking, got {:?}",
+        client.transitions()
+    );
     let issue = store
         .issue("symphony", "repair-stale")
         .await
         .expect("query repair issue")
         .expect("repair issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
     let failure = issue.failure.expect("failure");
     assert_eq!(
         failure.fingerprint.as_deref(),
@@ -1374,12 +1389,11 @@ async fn orchestration_reissues_repair_prompt_for_stale_malformed_handoff_sessio
         .expect("session");
     assert_eq!(
         failed.last_event.as_deref(),
-        Some("failed:missing_handoff_sidecar")
+        Some("repair_prompted:missing_handoff_sidecar")
     );
-    assert_eq!(
-        failed.lifecycle_marker.as_deref(),
-        Some("failed:malformed_handoff")
-    );
+    assert_eq!(failed.lifecycle_marker.as_deref(), Some("repair_prompted"));
+    assert_eq!(failed.stage, OpenCodeStage::Running);
+    assert_eq!(failed.process_id, Some(4242));
 }
 
 #[tokio::test]
@@ -1945,6 +1959,97 @@ async fn orchestration_restores_requeued_issue_with_existing_session_without_dup
         sessions[0].lifecycle_marker.as_deref(),
         Some("continuation_prompted")
     );
+}
+
+#[tokio::test]
+async fn orchestration_does_not_repair_again_when_recoverable_issue_already_has_live_omp_session() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let worktree = dir.path().join("SYM-62-worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue({
+            let mut issue = test_issue("symphony", "requeued", "SYM-62");
+            issue.lifecycle_stage = LifecycleStage::Queued;
+            issue.failure = Some(FailureRecord {
+                kind: "malformed_handoff".into(),
+                message: ".symphony/opencode-handoff.json was not produced".into(),
+                fingerprint: Some("missing_handoff_sidecar".into()),
+                occurrence_count: 1,
+            });
+            issue
+        })
+        .await
+        .expect("queued issue");
+    store
+        .upsert_opencode_session({
+            let mut failed = test_session("symphony", "requeued", "oc-failed", &worktree);
+            failed.lifecycle_stage = LifecycleStage::Failed;
+            failed.stage = OpenCodeStage::Failed;
+            failed.process_id = None;
+            failed.lifecycle_marker = Some("failed:malformed_handoff".into());
+            failed.last_event = Some("failed:missing_handoff_sidecar".into());
+            failed
+        })
+        .await
+        .expect("failed session");
+
+    let mut live_process = Command::new("sleep")
+        .arg("120")
+        .env("SYMPHONY_ISSUE_WORKTREE", &worktree)
+        .spawn()
+        .expect("spawn live OMP-shaped process");
+    thread::sleep(Duration::from_millis(100));
+    store
+        .upsert_opencode_session({
+            let mut running = test_session("symphony", "requeued", "omp-running", &worktree);
+            running.provider_mode = RuntimeProviderMode::OmpAcp;
+            running.provider_id = Some("omp-primary".into());
+            running.process_id = Some(live_process.id());
+            running.lifecycle_stage = LifecycleStage::Running;
+            running.stage = OpenCodeStage::Running;
+            running.lifecycle_marker = Some("repair_prompted".into());
+            running.last_event = Some("repair_prompted:missing_handoff_sidecar".into());
+            running
+        })
+        .await
+        .expect("running repair session");
+
+    let client =
+        RecordingLinearClient::new(vec![linear_issue("requeued", "SYM-62", "Todo", Some(1))]);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("poll");
+
+    assert!(client.transitions().is_empty());
+    assert!(opencode.launches().is_empty());
+    assert!(opencode.repairs().is_empty());
+    let issue = store
+        .issue("symphony", "requeued")
+        .await
+        .expect("query requeued")
+        .expect("requeued");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
+    let sessions = store
+        .opencode_sessions_for_issue("symphony", "requeued")
+        .await
+        .expect("sessions");
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(
+        sessions
+            .iter()
+            .filter(|session| session.lifecycle_stage == LifecycleStage::Running)
+            .count(),
+        1
+    );
+    let _ = live_process.kill();
+    let _ = live_process.wait();
 }
 
 #[tokio::test]
@@ -2853,12 +2958,17 @@ async fn orchestration_releases_runtime_defect_with_fresh_session_after_linear_b
         .await
         .expect("poll");
 
-    assert_eq!(
-        client.transitions(),
-        vec![("runtime-released".into(), LinearTransition::InProgress)]
+    assert!(
+        client.transitions().is_empty(),
+        "released recoverable handoff defect should repair the existing session without redundant state transition, got {:?}",
+        client.transitions()
     );
-    assert_eq!(opencode.launches(), vec!["SYM-206"]);
+    assert!(opencode.launches().is_empty());
     assert!(opencode.continuations().is_empty());
+    assert_eq!(
+        opencode.repairs(),
+        vec![("SYM-206".into(), "missing_handoff_sidecar".into())]
+    );
     let record = store
         .issue("symphony", "runtime-released")
         .await
@@ -2870,11 +2980,11 @@ async fn orchestration_releases_runtime_defect_with_fresh_session_after_linear_b
         .opencode_sessions_for_issue("symphony", "runtime-released")
         .await
         .expect("sessions");
-    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].session_id, "ses-failed");
-    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Failed);
-    assert_eq!(sessions[1].session_id, "new:SYM-206");
-    assert_eq!(sessions[1].lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(sessions[0].stage, OpenCodeStage::Running);
+    assert_eq!(sessions[0].process_id, Some(6206));
 }
 
 #[tokio::test]
@@ -3023,12 +3133,17 @@ async fn orchestration_does_not_self_block_managed_runtime_defect_issue() {
         .expect("poll");
 
     assert!(report.blocked.is_empty());
-    assert_eq!(
-        client.transitions(),
-        vec![("managed-self".into(), LinearTransition::InProgress)]
+    assert!(
+        client.transitions().is_empty(),
+        "managed self-defect issue should repair without self-blocking or redundant state transition, got {:?}",
+        client.transitions()
     );
-    assert_eq!(opencode.launches(), vec!["SYM-210"]);
+    assert!(opencode.launches().is_empty());
     assert!(opencode.continuations().is_empty());
+    assert_eq!(
+        opencode.repairs(),
+        vec![("SYM-210".into(), "missing_handoff_sidecar".into())]
+    );
     let record = store
         .issue("symphony", "managed-self")
         .await
@@ -3040,11 +3155,11 @@ async fn orchestration_does_not_self_block_managed_runtime_defect_issue() {
         .opencode_sessions_for_issue("symphony", "managed-self")
         .await
         .expect("sessions");
-    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].session_id, "ses-failed");
-    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Failed);
-    assert_eq!(sessions[1].session_id, "new:SYM-210");
-    assert_eq!(sessions[1].lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(sessions[0].stage, OpenCodeStage::Running);
+    assert_eq!(sessions[0].process_id, Some(6210));
 }
 
 #[tokio::test]

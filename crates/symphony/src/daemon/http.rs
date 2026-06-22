@@ -12,10 +12,11 @@ use crate::{
     config::{OpenCodeStorageConfig, RootConfig},
     linear::LinearSdkClient,
     opencode::{
-        OpenCodeSessionArchiveRequest, StdioOpenCodeLauncher, apply_session_tree_metrics,
-        archive_and_delete_session_tree, read_session_tree_metrics,
+        OpenCodeSessionArchiveRequest, StdioOpenCodeLauncher, apply_omp_session_tree_metrics,
+        apply_session_tree_metrics, archive_and_delete_session_tree, read_omp_session_tree_metrics,
+        read_session_tree_metrics,
     },
-    state::OpenCodeSessionRecord,
+    state::{OpenCodeSessionRecord, RuntimeProviderMode},
     storage::SqliteStore,
 };
 
@@ -70,22 +71,23 @@ pub(super) async fn run_continuous(
         }
     });
 
-    if let Some(opencode_storage) = config.opencode_storage.clone() {
+    {
         let metrics_database_path = database_path.clone();
+        let opencode_storage = config.opencode_storage.clone();
         tokio::spawn(async move {
             loop {
                 match SqliteStore::open(&metrics_database_path).await {
                     Ok(store) => {
                         if let Err(error) = store.migrate().await {
-                            error!(error = %error, "OpenCode metrics poll storage migration failed");
+                            error!(error = %error, "runtime metrics poll storage migration failed");
                         } else if let Err(error) =
-                            refresh_opencode_session_metrics(&store, &opencode_storage).await
+                            refresh_runtime_session_metrics(&store, opencode_storage.as_ref()).await
                         {
-                            warn!(error = %error, "OpenCode metrics poll failed");
+                            warn!(error = %error, "runtime metrics poll failed");
                         }
                     }
                     Err(error) => {
-                        error!(error = %error, "OpenCode metrics poll storage open failed");
+                        error!(error = %error, "runtime metrics poll storage open failed");
                     }
                 }
                 tokio::time::sleep(OPENCODE_METRICS_POLL_INTERVAL).await;
@@ -217,29 +219,73 @@ async fn cleanup_opencode_sessions(
     Ok(())
 }
 
-async fn refresh_opencode_session_metrics(
+async fn refresh_runtime_session_metrics(
+    store: &SqliteStore,
+    opencode_storage: Option<&OpenCodeStorageConfig>,
+) -> anyhow::Result<()> {
+    for session in store.active_opencode_sessions().await? {
+        match session.provider_mode {
+            RuntimeProviderMode::OpenCodeAcp => {
+                let Some(storage) = opencode_storage else {
+                    continue;
+                };
+                refresh_single_opencode_session_metrics(store, storage, session).await?;
+            }
+            RuntimeProviderMode::OmpAcp => {
+                refresh_single_omp_session_metrics(store, session).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn refresh_single_opencode_session_metrics(
     store: &SqliteStore,
     storage: &OpenCodeStorageConfig,
+    mut session: OpenCodeSessionRecord,
 ) -> anyhow::Result<()> {
-    for mut session in store.active_opencode_sessions().await? {
-        let Some(metrics) =
-            read_session_tree_metrics(&storage.database_path, &session.session_id).await?
-        else {
-            continue;
-        };
-        if session_metrics_are_current(&session, metrics.last_updated_ms) {
-            continue;
-        }
-        apply_session_tree_metrics(&mut session, &metrics);
-        store.upsert_opencode_session(&session).await?;
-        debug!(
-            project_id = %session.project_id,
-            issue_id = %session.issue_id,
-            session_id = %session.session_id,
-            last_updated_ms = metrics.last_updated_ms,
-            "OpenCode session metrics refreshed from lightweight poll"
-        );
+    let Some(metrics) =
+        read_session_tree_metrics(&storage.database_path, &session.session_id).await?
+    else {
+        return Ok(());
+    };
+    if session_metrics_are_current(&session, metrics.last_updated_ms) {
+        return Ok(());
     }
+    apply_session_tree_metrics(&mut session, &metrics);
+    store.upsert_opencode_session(&session).await?;
+    debug!(
+        project_id = %session.project_id,
+        issue_id = %session.issue_id,
+        session_id = %session.session_id,
+        last_updated_ms = metrics.last_updated_ms,
+        "OpenCode session metrics refreshed from lightweight poll"
+    );
+    Ok(())
+}
+
+async fn refresh_single_omp_session_metrics(
+    store: &SqliteStore,
+    mut session: OpenCodeSessionRecord,
+) -> anyhow::Result<()> {
+    let Some(metrics) = read_omp_session_tree_metrics(&session.session_id).await? else {
+        return Ok(());
+    };
+    if omp_session_metrics_are_current(&session, metrics.last_updated_ms) {
+        return Ok(());
+    }
+    apply_omp_session_tree_metrics(&mut session, &metrics);
+    store.upsert_opencode_session(&session).await?;
+    debug!(
+        project_id = %session.project_id,
+        issue_id = %session.issue_id,
+        session_id = %session.session_id,
+        subagents = metrics.subagent_count,
+        messages = metrics.message_count,
+        tokens = metrics.tokens_total,
+        last_updated_ms = metrics.last_updated_ms,
+        "OMP session metrics refreshed from lightweight poll"
+    );
     Ok(())
 }
 
@@ -250,6 +296,16 @@ fn session_metrics_are_current(
     let expected_event = last_updated_ms
         .map(|updated| format!("opencode_db_updated:{updated}"))
         .unwrap_or_else(|| "opencode_db_snapshot".into());
+    session.last_event.as_deref() == Some(expected_event.as_str())
+}
+
+fn omp_session_metrics_are_current(
+    session: &OpenCodeSessionRecord,
+    last_updated_ms: Option<u64>,
+) -> bool {
+    let expected_event = last_updated_ms
+        .map(|updated| format!("omp_jsonl_updated:{updated}"))
+        .unwrap_or_else(|| "omp_jsonl_snapshot".into());
     session.last_event.as_deref() == Some(expected_event.as_str())
 }
 

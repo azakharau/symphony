@@ -3,6 +3,7 @@ mod adapter;
 mod archive;
 mod lifecycle;
 mod omp;
+mod omp_metrics;
 mod prompt;
 mod session_metrics;
 mod types;
@@ -37,13 +38,14 @@ use lifecycle::AcpChildLifecycle;
 pub use lifecycle::ProcessTreeTerminationEvidence;
 pub(crate) use lifecycle::terminate_process_tree;
 pub use omp::{OmpAcpTelemetry, classify_omp_acp_failure_kind};
+pub use omp_metrics::read_omp_session_tree_metrics;
 use prompt::{
     build_issue_prompt, commit_policy_text, delegated_subagent_contract_text,
     mcp_tool_loop_guard_text, validation_policy_text,
 };
 pub use session_metrics::{
-    apply_session_tree_metrics, apply_session_tree_metrics_preserving_marker, ingest_session_event,
-    mark_session_silence,
+    apply_omp_session_tree_metrics, apply_session_tree_metrics,
+    apply_session_tree_metrics_preserving_marker, ingest_session_event, mark_session_silence,
 };
 pub(crate) use types::OMP_CLEANUP_MARKER_ENV;
 pub use types::{

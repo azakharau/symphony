@@ -75,6 +75,18 @@ pub fn apply_session_tree_metrics_preserving_marker(
     }
 }
 
+pub fn apply_omp_session_tree_metrics(
+    session: &mut OpenCodeSessionRecord,
+    metrics: &OpenCodeSessionTreeMetrics,
+) {
+    apply_session_tree_metrics(session, metrics);
+    session.lifecycle_marker = Some("omp_session_activity".into());
+    session.last_event = metrics
+        .last_updated_ms
+        .map(|updated| format!("omp_jsonl_updated:{updated}"))
+        .or_else(|| Some("omp_jsonl_snapshot".into()));
+}
+
 pub fn mark_session_silence(session: &mut OpenCodeSessionRecord, reason: &str) {
     session.stage = OpenCodeStage::Silent;
     session.silence_observed = true;

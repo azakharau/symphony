@@ -9,21 +9,59 @@ pub(super) fn build_issue_prompt(
     issue: &LinearIssue,
     branch_name: &str,
 ) -> String {
+    build_issue_prompt_with_recall_context(project, issue, branch_name, true)
+}
+
+pub(super) fn build_issue_prompt_without_recall_context(
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+    branch_name: &str,
+) -> String {
+    build_issue_prompt_with_recall_context(project, issue, branch_name, false)
+}
+
+fn build_issue_prompt_with_recall_context(
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+    branch_name: &str,
+    include_recall_context: bool,
+) -> String {
     let description = issue
         .description
         .as_deref()
         .unwrap_or("No description provided.");
+    let worktree = project.branch.worktree_root.join(&issue.identifier);
+    let recall_context = if include_recall_context {
+        format!(
+            "Recall workspace root: {recall_workspace_root}\n\n\
+             Recall evidence workspace contract:\n\
+             {recall_workspace_contract}\n\n",
+            recall_workspace_root = recall_workspace_root_display(
+                project
+                    .recall
+                    .as_ref()
+                    .map(|recall| { recall.workspace_root.as_path() })
+            ),
+            recall_workspace_contract = recall_workspace_contract_text(
+                project
+                    .recall
+                    .as_ref()
+                    .map(|recall| recall.workspace_root.as_path()),
+                &worktree,
+            )
+        )
+    } else {
+        String::new()
+    };
     format!(
         "Issue {identifier}: {title}\n\n\
          Project: {project_id}\n\
          Repository: {repo_path}\n\
          Isolated worktree: {worktree}\n\
-         Recall workspace root: {recall_workspace_root}\n\
          Eval default suite: {eval_suite} (fallback metadata, not a blanket workspace gate)\n\
          Linear state: {state}\n\
          URL: {url}\n\n\
-         Recall evidence workspace contract:\n\
-         {recall_workspace_contract}\n\n\
+         {recall_context}\
          Upstream accepted context:\n\
          {upstream_context}\n\n\
          MCP tool-schema loop guard:\n\
@@ -60,39 +98,22 @@ pub(super) fn build_issue_prompt(
         title = issue.title,
         project_id = project.id,
         repo_path = project.repo_path.display(),
-        worktree = project
-            .branch
-            .worktree_root
-            .join(&issue.identifier)
-            .display(),
-        recall_workspace_root = recall_workspace_root_display(
-            project
-                .recall
-                .as_ref()
-                .map(|recall| { recall.workspace_root.as_path() })
-        ),
-        handoff_path =
-            handoff_sidecar_path(project.branch.worktree_root.join(&issue.identifier)).display(),
+        worktree = worktree.display(),
+        recall_context = recall_context,
+        handoff_path = handoff_sidecar_path(&worktree).display(),
         eval_suite = project.eval.default_suite,
         state = issue.state,
         url = issue.url.as_deref().unwrap_or("none"),
-        recall_workspace_contract = recall_workspace_contract_text(
-            project
-                .recall
-                .as_ref()
-                .map(|recall| recall.workspace_root.as_path()),
-            &project.branch.worktree_root.join(&issue.identifier),
-        ),
-        upstream_context = upstream_context_text(issue),
+        upstream_context = upstream_context_text(issue, include_recall_context),
         validation_policy = validation_policy_text(),
         mcp_tool_loop_guard = mcp_tool_loop_guard_text(),
-        delegated_subagent_contract = delegated_subagent_contract_text(),
+        delegated_subagent_contract = delegated_subagent_contract_text(include_recall_context),
         triage_policy = triage_policy_text(),
         commit_policy = commit_policy_text(),
     )
 }
 
-fn upstream_context_text(issue: &LinearIssue) -> String {
+fn upstream_context_text(issue: &LinearIssue, include_recall_context: bool) -> String {
     if issue.upstream_context.is_empty() {
         return "- No accepted upstream Linear blocker context is available for this issue."
             .to_owned();
@@ -116,13 +137,15 @@ fn upstream_context_text(issue: &LinearIssue) -> String {
         {
             lines.push(format!("  Branch: {branch}"));
         }
-        push_limited_values(
-            &mut lines,
-            "  Recall workspace ids",
-            &context.recall_workspace_ids,
-            6,
-        );
-        push_limited_values(&mut lines, "  Recall task ids", &context.recall_task_ids, 6);
+        if include_recall_context {
+            push_limited_values(
+                &mut lines,
+                "  Recall workspace ids",
+                &context.recall_workspace_ids,
+                6,
+            );
+            push_limited_values(&mut lines, "  Recall task ids", &context.recall_task_ids, 6);
+        }
         push_limited_values(
             &mut lines,
             "  Accepted artifacts",
@@ -144,10 +167,12 @@ fn upstream_context_text(issue: &LinearIssue) -> String {
                     .map(|line| format!("    {line}")),
             );
         }
-        lines.push(
+        let required_use = if include_recall_context {
             "  Required use: treat this as accepted upstream input; inspect the Recall refs/artifacts before rediscovering or replanning this surface."
-                .to_owned(),
-        );
+        } else {
+            "  Required use: treat this as accepted upstream input; inspect accepted artifacts and git context before rediscovering or replanning this surface."
+        };
+        lines.push(required_use.to_owned());
     }
 
     if issue.upstream_context.len() > 8 {
@@ -232,12 +257,19 @@ pub(super) const fn mcp_tool_loop_guard_text() -> &'static str {
      - Never spend additional turns reverse-engineering MCP payloads after the bounded retry limit; use the handoff sidecar to make the blocker explicit."
 }
 
-pub(super) const fn delegated_subagent_contract_text() -> &'static str {
-    "- Delegated reviewer/evaluator subagents are read-only unless the issue spec explicitly says otherwise.\n\
-     - Do not ask delegated reviewer/evaluator subagents to call Recall mutation tools such as record_artifact, attach_evidence, record_verification, or create_task.\n\
-     - Delegated reviewer/evaluator subagents should inspect files/tests/evidence and return a concise structured verdict to the parent OpenCode session.\n\
-     - The parent OpenCode session owns any required Recall writeback after reading the subagent verdict.\n\
-     - If a delegated subagent already failed an MCP mutation because of schema/version errors, do not retry that mutation from another delegated subagent; continue with a text verdict and parent-owned writeback."
+pub(super) const fn delegated_subagent_contract_text(include_recall_context: bool) -> &'static str {
+    if include_recall_context {
+        "- Delegated reviewer/evaluator subagents are read-only unless the issue spec explicitly says otherwise.\n\
+         - Do not ask delegated reviewer/evaluator subagents to call Recall mutation tools such as record_artifact, attach_evidence, record_verification, or create_task.\n\
+         - Delegated reviewer/evaluator subagents should inspect files/tests/evidence and return a concise structured verdict to the parent OpenCode session.\n\
+         - The parent OpenCode session owns any required Recall writeback after reading the subagent verdict.\n\
+         - If a delegated subagent already failed an MCP mutation because of schema/version errors, do not retry that mutation from another delegated subagent; continue with a text verdict and parent-owned writeback."
+    } else {
+        "- Delegated reviewer/evaluator subagents are read-only unless the issue spec explicitly says otherwise.\n\
+         - Delegated reviewer/evaluator subagents should inspect files/tests/evidence and return a concise structured verdict to the parent ACP session.\n\
+         - The parent ACP session owns final validation, git closure, and structured handoff sidecar writeback.\n\
+         - If a delegated subagent reports a tool schema/version error, do not retry the same failing mutation from another delegated subagent; continue with a text verdict and parent-owned closure."
+    }
 }
 
 pub(super) const fn triage_policy_text() -> &'static str {

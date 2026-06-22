@@ -578,7 +578,19 @@ inverse_bridge_reference = true
     );
     let config = RootConfig::from_toml_str(&config_toml).expect("config");
     let project = config.project("symphony").expect("project");
-    let issue = linear_issue("issue-27", "SYM-27", "Todo", Some(1));
+    let mut issue = linear_issue("issue-27", "SYM-27", "Todo", Some(1));
+    issue.upstream_context.push(LinearUpstreamContext {
+        id: "upstream-55".into(),
+        identifier: "NER-55".into(),
+        title: "Canon source authority map".into(),
+        state: "Done".into(),
+        url: Some("https://linear.example/NER-55".into()),
+        branch_name: Some("feature/ner-55-canon-source-authority-map".into()),
+        recall_workspace_ids: vec!["workspace-54f6c799-4258-4b40-80ec-f0606bff3ce9".into()],
+        recall_task_ids: vec!["task-ner-55".into()],
+        accepted_artifacts: vec!["docs/canon-source-authority-map.md".into()],
+        handoff_summary: Some("Accepted upstream artifact".into()),
+    });
 
     let spec = opencode::build_acp_launch_spec(project, &issue);
 
@@ -590,6 +602,26 @@ inverse_bridge_reference = true
     assert_eq!(spec.env_allowlist, ["PATH", "OMP_TOKEN"]);
     assert_eq!(spec.agent, "implementer");
     assert_eq!(spec.model.as_deref(), Some("openai/gpt-5.5"));
+    assert_eq!(spec.recall_workspace_root, None);
+    assert!(spec.prompt.contains("SYM-27"), "{}", spec.prompt);
+    assert!(
+        spec.prompt.contains(
+            "Isolated worktree: /home/agent/.symphony/workspaces/opencode/symphony/SYM-27"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(spec.prompt.contains("NER-55"), "{}", spec.prompt);
+    assert!(
+        spec.prompt.contains("Accepted upstream artifact"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        !spec.prompt.contains("Recall"),
+        "OMP prompt must not include Recall context:\n{}",
+        spec.prompt
+    );
 }
 
 #[tokio::test]
@@ -606,7 +638,7 @@ async fn mocked_omp_acp_launch_returns_session_telemetry_and_evidence_refs() {
 import json, os, pathlib, sys
 transcript_path = pathlib.Path({transcript_literal})
 with transcript_path.open("a", encoding="utf-8") as transcript:
-    transcript.write(json.dumps({{"argv": sys.argv, "cwd": os.getcwd(), "env": {{"SYMPHONY_ISSUE_WORKTREE": os.environ.get("SYMPHONY_ISSUE_WORKTREE"), "SYMPHONY_OMP_CLEANUP_MARKER": os.environ.get("SYMPHONY_OMP_CLEANUP_MARKER")}}}}, sort_keys=True) + "\n")
+    transcript.write(json.dumps({{"argv": sys.argv, "cwd": os.getcwd(), "env": {{"SYMPHONY_ISSUE_WORKTREE": os.environ.get("SYMPHONY_ISSUE_WORKTREE"), "SYMPHONY_OMP_CLEANUP_MARKER": os.environ.get("SYMPHONY_OMP_CLEANUP_MARKER"), "SYMPHONY_RECALL_WORKSPACE_ROOT": os.environ.get("SYMPHONY_RECALL_WORKSPACE_ROOT")}}}}, sort_keys=True) + "\n")
 for line in sys.stdin:
     msg = json.loads(line)
     method = msg.get("method")
@@ -710,6 +742,11 @@ for line in sys.stdin:
                 transcript.contains(r#""SYMPHONY_OMP_CLEANUP_MARKER""#),
                 "{transcript}"
             );
+            assert!(
+                transcript.contains(r#""SYMPHONY_RECALL_WORKSPACE_ROOT": null"#),
+                "{transcript}"
+            );
+            assert!(!transcript.contains("Recall workspace"), "{transcript}");
             return;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

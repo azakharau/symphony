@@ -568,6 +568,66 @@ async fn orchestration_parks_todo_issue_when_recall_workspace_root_is_missing() 
 }
 
 #[tokio::test]
+async fn orchestration_dispatches_omp_issue_without_recall_service_context() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config_toml = valid_config_toml()
+        .replace(
+            "\n[projects.recall]\nworkspace_root = \"/home/agent/proj/symphony\"\n",
+            "\n",
+        )
+        .replace(
+            "[projects.eval]\n",
+            r#"[[projects.omp_acp_providers]]
+id = "omp-primary"
+command = "/tmp/mock-omp"
+args = ["acp"]
+cwd = "issue_worktree"
+env_allowlist = ["PATH"]
+
+[projects.omp_acp_providers.capabilities]
+acp_stdio = true
+hook_evidence = false
+sdk_session_evidence = false
+rpc_secondary_mode = false
+inverse_bridge_reference = false
+
+[projects.eval]
+"#,
+        );
+    let config = RootConfig::from_toml_str(&config_toml).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "omp-no-recall",
+        "SYM-251",
+        "Todo",
+        Some(1),
+    )]);
+    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+
+    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert_eq!(report.dispatched, vec!["SYM-251"]);
+    assert!(report.blocked.is_empty());
+    assert_eq!(opencode.launches(), vec!["SYM-251"]);
+    assert_eq!(
+        client.transitions(),
+        vec![("omp-no-recall".to_owned(), LinearTransition::InProgress)]
+    );
+    assert!(client.evidence().is_empty());
+    let running = store
+        .issue("symphony", "omp-no-recall")
+        .await
+        .expect("query running")
+        .expect("running issue");
+    assert_eq!(running.lifecycle_stage, LifecycleStage::Running);
+}
+
+#[tokio::test]
 async fn orchestration_never_dispatches_nonterminal_blockers_or_backlog() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

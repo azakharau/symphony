@@ -36,8 +36,9 @@ pub use lifecycle::ProcessTreeTerminationEvidence;
 pub(crate) use lifecycle::terminate_process_tree;
 pub use omp::{OmpAcpTelemetry, classify_omp_acp_failure_kind};
 use prompt::{
-    build_issue_prompt, commit_policy_text, delegated_subagent_contract_text,
-    mcp_tool_loop_guard_text, recall_workspace_contract_text, validation_policy_text,
+    build_issue_prompt, build_issue_prompt_without_recall_context, commit_policy_text,
+    delegated_subagent_contract_text, mcp_tool_loop_guard_text, recall_workspace_contract_text,
+    validation_policy_text,
 };
 pub use session_metrics::{
     apply_session_tree_metrics, apply_session_tree_metrics_preserving_marker, ingest_session_event,
@@ -514,29 +515,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         }
 
         let prompt_request_id = next_id;
-        let prompt = format!(
-            "Symphony repair required for the current ACP session.\n\n\
-             Failure fingerprint: `{}`\n\n\
-             Repair details:\n{}\n\n\
-             Recall evidence workspace contract:\n{}\n\n\
-             MCP tool-schema loop guard:\n{}\n\n\
-             Delegated review/evaluator subagent contract:\n{}\n\n\
-             Validation policy:\n{}\n\n\
-             Commit policy for successful handoff:\n{}\n\n\
-             Continue the same implementation session. Do not start a new task. \
-             Fix the implementation or handoff, rerun the required validation, \
-             and rewrite the structured Symphony handoff JSON at the configured sidecar path.",
-            failure_fingerprint,
-            repair_message,
-            recall_workspace_contract_text(
-                spec.recall_workspace_root.as_deref(),
-                spec.cwd.as_path()
-            ),
-            mcp_tool_loop_guard_text(),
-            delegated_subagent_contract_text(),
-            validation_policy_text(),
-            commit_policy_text()
-        );
+        let prompt = repair_prompt(spec, failure_fingerprint, repair_message);
         write_acp_request(
             child.stdin(),
             prompt_request_id,
@@ -610,25 +589,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         }
 
         let prompt_request_id = next_id;
-        let prompt = format!(
-            "Symphony continuation required for the current ACP session.\n\n\
-             Continue the same implementation session. Do not start a new task. \
-             Do not repeat already completed work unless validation requires it.\n\n\
-             Recall evidence workspace contract:\n{}\n\n\
-             MCP tool-schema loop guard:\n{}\n\n\
-             Delegated review/evaluator subagent contract:\n{}\n\n\
-             Validation policy:\n{}\n\n\
-             Commit policy for successful handoff:\n{}\n\n{}",
-            recall_workspace_contract_text(
-                spec.recall_workspace_root.as_deref(),
-                spec.cwd.as_path()
-            ),
-            mcp_tool_loop_guard_text(),
-            delegated_subagent_contract_text(),
-            validation_policy_text(),
-            commit_policy_text(),
-            continuation_message
-        );
+        let prompt = continuation_prompt(spec, continuation_message);
         write_acp_request(
             child.stdin(),
             prompt_request_id,
@@ -1206,10 +1167,7 @@ pub fn build_omp_acp_launch_spec(
         issue_identifier: issue.identifier.clone(),
         branch_name: branch_name.clone(),
         repo_path: Some(project.repo_path.clone()),
-        recall_workspace_root: project
-            .recall
-            .as_ref()
-            .map(|recall| recall.workspace_root.clone()),
+        recall_workspace_root: None,
         base_ref: Some(project.branch.base.clone()),
         agent: provider
             .agent
@@ -1223,8 +1181,68 @@ pub fn build_omp_acp_launch_spec(
             .effort
             .clone()
             .or_else(|| project.opencode.effort.clone()),
-        prompt: build_issue_prompt(project, issue, &branch_name),
+        prompt: build_issue_prompt_without_recall_context(project, issue, &branch_name),
         permission_policy: project.opencode.permission_policy.clone(),
+    }
+}
+
+fn repair_prompt(
+    spec: &OpenCodeLaunchSpec,
+    failure_fingerprint: &str,
+    repair_message: &str,
+) -> String {
+    let provider_context = provider_context_text(spec);
+    format!(
+        "Symphony repair required for the current ACP session.\n\n\
+         Failure fingerprint: `{failure_fingerprint}`\n\n\
+         Repair details:\n{repair_message}\n\n\
+         {provider_context}\
+         MCP tool-schema loop guard:\n{mcp_tool_loop_guard}\n\n\
+         Delegated review/evaluator subagent contract:\n{delegated_subagent_contract}\n\n\
+         Validation policy:\n{validation_policy}\n\n\
+         Commit policy for successful handoff:\n{commit_policy}\n\n\
+         Continue the same implementation session. Do not start a new task. \
+         Fix the implementation or handoff, rerun the required validation, \
+         and rewrite the structured Symphony handoff JSON at the configured sidecar path.",
+        mcp_tool_loop_guard = mcp_tool_loop_guard_text(),
+        delegated_subagent_contract = delegated_subagent_contract_text(
+            spec.provider_mode == RuntimeProviderMode::OpenCodeAcp
+        ),
+        validation_policy = validation_policy_text(),
+        commit_policy = commit_policy_text()
+    )
+}
+
+fn continuation_prompt(spec: &OpenCodeLaunchSpec, continuation_message: &str) -> String {
+    let provider_context = provider_context_text(spec);
+    format!(
+        "Symphony continuation required for the current ACP session.\n\n\
+         Continue the same implementation session. Do not start a new task. \
+         Do not repeat already completed work unless validation requires it.\n\n\
+         {provider_context}\
+         MCP tool-schema loop guard:\n{mcp_tool_loop_guard}\n\n\
+         Delegated review/evaluator subagent contract:\n{delegated_subagent_contract}\n\n\
+         Validation policy:\n{validation_policy}\n\n\
+         Commit policy for successful handoff:\n{commit_policy}\n\n{continuation_message}",
+        mcp_tool_loop_guard = mcp_tool_loop_guard_text(),
+        delegated_subagent_contract = delegated_subagent_contract_text(
+            spec.provider_mode == RuntimeProviderMode::OpenCodeAcp
+        ),
+        validation_policy = validation_policy_text(),
+        commit_policy = commit_policy_text()
+    )
+}
+
+fn provider_context_text(spec: &OpenCodeLaunchSpec) -> String {
+    match spec.provider_mode {
+        RuntimeProviderMode::OpenCodeAcp => format!(
+            "Recall evidence workspace contract:\n{}\n\n",
+            recall_workspace_contract_text(
+                spec.recall_workspace_root.as_deref(),
+                spec.cwd.as_path()
+            )
+        ),
+        RuntimeProviderMode::OmpAcp => String::new(),
     }
 }
 

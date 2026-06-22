@@ -921,7 +921,9 @@ async fn dispatch_candidate(
     report: &mut OrchestrationReport,
 ) -> anyhow::Result<()> {
     let issue = candidate.issue();
-    if let Some(reason) = missing_recall_workspace_reason(project) {
+    if project.omp_acp_providers.is_empty()
+        && let Some(reason) = missing_recall_workspace_reason(project)
+    {
         warn!(
             project_id = %project.id,
             issue = %issue.identifier,

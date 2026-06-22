@@ -343,7 +343,14 @@ fn non_reusable_failed_launch_session(session: &OpenCodeSessionRecord) -> bool {
         return false;
     }
     let marker = session.lifecycle_marker.as_deref().unwrap_or_default();
-    marker == "failed:launch_failed" || marker == "failed:resume_launch_failed"
+    let last_event = session.last_event.as_deref().unwrap_or_default();
+    matches!(
+        marker,
+        "launch_failed" | "failed:launch_failed" | "failed:resume_launch_failed"
+    ) || matches!(
+        last_event,
+        "launch_failed" | "failed:launch_failed" | "failed:resume_launch_failed"
+    )
 }
 
 fn non_reusable_failed_handoff_session(session: &OpenCodeSessionRecord) -> bool {

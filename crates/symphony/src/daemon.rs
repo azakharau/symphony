@@ -921,19 +921,6 @@ async fn dispatch_candidate(
     report: &mut OrchestrationReport,
 ) -> anyhow::Result<()> {
     let issue = candidate.issue();
-    if project.omp_acp_providers.is_empty()
-        && let Some(reason) = missing_recall_workspace_reason(project)
-    {
-        warn!(
-            project_id = %project.id,
-            issue = %issue.identifier,
-            reason = %reason,
-            "parking issue because Recall workspace is not configured"
-        );
-        park_missing_recall_workspace(project, store, linear, issue, reason).await?;
-        report.blocked.push(issue.identifier.clone());
-        return Ok(());
-    }
     info!(
         project_id = %project.id,
         issue = %issue.identifier,
@@ -1058,23 +1045,6 @@ fn is_observed_launch_marker(marker: Option<&str>) -> bool {
     matches!(marker, Some("acp_process_started" | "acp_session_attached"))
 }
 
-fn missing_recall_workspace_reason(project: &ProjectConfig) -> Option<String> {
-    let Some(recall) = project.recall.as_ref() else {
-        return Some("recall workspace_root is not configured".into());
-    };
-    let workspace_root = recall.workspace_root.as_path();
-    if workspace_root.as_os_str().is_empty() {
-        return Some("recall workspace_root is empty".into());
-    }
-    if !workspace_root.is_absolute() {
-        return Some(format!(
-            "recall workspace_root is not absolute: {}",
-            workspace_root.display()
-        ));
-    }
-    None
-}
-
 struct RuntimeLaunchObserver<'a> {
     project: &'a ProjectConfig,
     issue: &'a LinearIssue,
@@ -1184,41 +1154,6 @@ fn provisional_session_id(issue: &LinearIssue, process_id: Option<u32>) -> Strin
         .unwrap_or_else(|| format!("starting:{}:no_pid", issue.identifier))
 }
 
-async fn park_missing_recall_workspace(
-    project: &ProjectConfig,
-    store: &SqliteStore,
-    linear: &impl LinearClient,
-    issue: &LinearIssue,
-    reason: String,
-) -> anyhow::Result<()> {
-    let body = format!(
-        "recall_workspace_missing: {reason}\n\nConfigure `[projects.recall].workspace_root` with the canonical project root Recall workspace, for example `{}`. The OpenCode runner will not start until the global project workspace is passed explicitly.",
-        project.repo_path.display()
-    );
-    linear
-        .record_issue_evidence(
-            &issue.id,
-            LinearIssueEvidence {
-                kind: "provider_blocker".into(),
-                body,
-            },
-        )
-        .await?;
-    let record = issue_record(
-        project,
-        issue,
-        LifecycleStage::Blocked,
-        Some(BlockerRecord {
-            kind: "recall_workspace_missing".into(),
-            message: reason,
-            observed_at: issue.updated_at.clone(),
-        }),
-        CleanupStatus::Clean,
-    );
-    store.upsert_issue(&record).await?;
-    Ok(())
-}
-
 async fn retain_typed_non_owner_blocker(
     project: &ProjectConfig,
     store: &SqliteStore,
@@ -1311,15 +1246,12 @@ async fn open_managed_runtime_defect_blocker(
 fn is_typed_non_owner_blocker_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "provider_blocker"
-            | "recall_workspace_missing"
-            | "repeated_eval_failure"
-            | "runtime_defect"
+        "provider_blocker" | "repeated_eval_failure" | "runtime_defect"
     )
 }
 
 fn retryable_todo_blocker_kind(kind: &str) -> bool {
-    matches!(kind, "provider_blocker" | "recall_workspace_missing")
+    matches!(kind, "provider_blocker")
 }
 
 async fn handle_launch_failure(

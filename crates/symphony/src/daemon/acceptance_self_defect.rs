@@ -371,7 +371,6 @@ max_sessions = 1
             enabled: true,
             workflow_path: PathBuf::from("/tmp/workflow"),
             repo_path: PathBuf::from("/tmp/repo"),
-            recall: None,
             branch: BranchPolicy {
                 base: "main".into(),
                 worktree_root: PathBuf::from("/tmp/worktrees"),

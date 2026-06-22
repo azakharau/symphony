@@ -11,14 +11,6 @@ async fn multiproject_toml_config_loads_deterministically_and_validates_required
     let project = first.project("symphony").expect("project lookup");
     assert_eq!(project.linear.team_key, "SYM");
     assert_eq!(
-        project
-            .recall
-            .as_ref()
-            .expect("recall config")
-            .workspace_root,
-        PathBuf::from("/home/agent/proj/symphony")
-    );
-    assert_eq!(
         project.opencode.command,
         PathBuf::from("/usr/local/bin/opencode")
     );
@@ -145,17 +137,6 @@ inverse_bridge_reference = true
         err.to_string().contains("duplicate omp_acp_providers"),
         "{err}"
     );
-}
-
-#[tokio::test]
-async fn recall_workspace_config_validates_global_project_workspace_root() {
-    let invalid = valid_config_toml().replace(
-        "workspace_root = \"/home/agent/proj/symphony\"",
-        "workspace_root = \"relative/project\"",
-    );
-    let err = RootConfig::from_toml_str(&invalid).expect_err("relative workspace root rejected");
-
-    assert!(err.to_string().contains("recall.workspace_root"), "{err}");
 }
 
 #[tokio::test]
@@ -388,11 +369,6 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
     assert_eq!(upstream.identifier, "SYM-99");
     assert_eq!(upstream.title, "Accepted upstream implementation");
     assert_eq!(upstream.state, "Done");
-    assert_eq!(
-        upstream.recall_workspace_ids,
-        vec!["workspace-upstream".to_string()]
-    );
-    assert_eq!(upstream.recall_task_ids, vec!["task-upstream".to_string()]);
     assert_eq!(
         upstream.accepted_artifacts,
         vec![
@@ -1127,6 +1103,47 @@ async fn dashboard_api_orders_active_opencode_session_before_stale_failures() {
         card.running_issues[0].last_event.as_deref(),
         Some("opencode_db_updated:123")
     );
+}
+
+#[tokio::test]
+async fn dashboard_api_does_not_surface_stale_starting_session_as_running() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let mut issue = test_issue("symphony", "stale-starting", "SYM-234");
+    issue.lifecycle_stage = LifecycleStage::Running;
+    store.upsert_issue(issue).await.expect("issue");
+
+    let mut stale = test_session(
+        "symphony",
+        "stale-starting",
+        "stale-starting-session",
+        dir.path().join("SYM-234"),
+    );
+    stale.lifecycle_stage = LifecycleStage::Failed;
+    stale.stage = OpenCodeStage::Starting;
+    stale.last_event = Some("failed:missing_handoff_sidecar".into());
+    store
+        .upsert_opencode_session(stale)
+        .await
+        .expect("stale session");
+
+    let api = RuntimeDashboardApi::from_store(&config, &store)
+        .await
+        .expect("dashboard api");
+    let card = api
+        .aggregate()
+        .projects
+        .iter()
+        .find(|project| project.project_id == "symphony")
+        .expect("project card");
+
+    assert!(card.running_issues.is_empty());
+    assert_eq!(card.running_tokens, 0);
 }
 
 #[tokio::test]

@@ -57,9 +57,6 @@ enabled = true
 workflow_path = "/home/agent/proj/symphony/WORKFLOW.md"
 repo_path = "/home/agent/proj/symphony"
 
-[projects.recall]
-workspace_root = "/home/agent/proj/symphony"
-
 [projects.branch]
 base = "agent-server/opencode-runner-extension"
 worktree_root = "/home/agent/.symphony/workspaces/opencode/symphony"
@@ -97,9 +94,6 @@ enabled = true
 workflow_path = "/home/agent/proj/alpha/WORKFLOW.md"
 repo_path = "/home/agent/proj/alpha"
 
-[projects.recall]
-workspace_root = "/home/agent/proj/alpha"
-
 [projects.branch]
 base = "main"
 worktree_root = "/home/agent/.symphony/workspaces/opencode/alpha"
@@ -128,9 +122,6 @@ name = "Symphony"
 enabled = true
 workflow_path = "/home/agent/proj/symphony/WORKFLOW.md"
 repo_path = "/home/agent/proj/symphony"
-
-[projects.recall]
-workspace_root = "/home/agent/proj/symphony"
 
 [projects.branch]
 base = "agent-server/opencode-runner-extension"
@@ -352,7 +343,7 @@ transcript_path = pathlib.Path({transcript_literal})
 cwd = None
 config = {{"mode": "build", "model": "opencode/big-pickle", "effort": "none"}}
 with transcript_path.open("a", encoding="utf-8") as transcript:
-    transcript.write(json.dumps({{"env": {{"SYMPHONY_RECALL_WORKSPACE_ROOT": os.environ.get("SYMPHONY_RECALL_WORKSPACE_ROOT"), "SYMPHONY_ISSUE_WORKTREE": os.environ.get("SYMPHONY_ISSUE_WORKTREE")}}}}, sort_keys=True) + "\n")
+    transcript.write(json.dumps({{"env": {{"SYMPHONY_ISSUE_WORKTREE": os.environ.get("SYMPHONY_ISSUE_WORKTREE")}}}}, sort_keys=True) + "\n")
 
 def config_options():
     return [

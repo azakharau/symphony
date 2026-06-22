@@ -1,9 +1,7 @@
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::state::OpenCodeSessionRecord;
-
-use super::{OpenCodeError, OpenCodeLaunchSpec, PermissionPolicy};
+use super::{OpenCodeError, PermissionPolicy};
 
 pub(super) async fn set_session_config_option<R, W>(
     stdin: &mut W,
@@ -35,30 +33,6 @@ where
     )
     .await?;
     Ok(())
-}
-
-pub(super) fn session_new_params(spec: &OpenCodeLaunchSpec) -> Value {
-    json!({
-        "cwd": spec.cwd,
-        "title": spec
-            .prompt
-            .lines()
-            .next()
-            .unwrap_or("Symphony OpenCode issue"),
-        "agent": spec.agent,
-        "mcpServers": [],
-    })
-}
-
-pub(super) fn session_resume_params(
-    spec: &OpenCodeLaunchSpec,
-    session: &OpenCodeSessionRecord,
-) -> Value {
-    json!({
-        "sessionId": session.session_id,
-        "cwd": spec.cwd,
-        "mcpServers": [],
-    })
 }
 
 pub(super) async fn acp_request<R, W>(

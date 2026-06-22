@@ -1,4 +1,5 @@
 mod acp;
+mod adapter;
 mod archive;
 mod lifecycle;
 mod omp;
@@ -22,9 +23,10 @@ use crate::{
     state::{LifecycleStage, OpenCodeSessionRecord, OpenCodeStage, RuntimeProviderMode},
 };
 use acp::{
-    acp_request, drain_acp_stream, extract_session_id, read_acp_response, session_new_params,
-    session_resume_params, set_session_config_option, write_acp_request,
+    acp_request, drain_acp_stream, extract_session_id, read_acp_response,
+    set_session_config_option, write_acp_request,
 };
+use adapter::AgentExecutionAdapter;
 pub use archive::{
     OpenCodeSessionActivity, OpenCodeSessionArchiveReport, OpenCodeSessionArchiveRequest,
     OpenCodeSessionMessageError, OpenCodeSessionTreeActivity, OpenCodeSessionTreeMetrics,
@@ -36,9 +38,8 @@ pub use lifecycle::ProcessTreeTerminationEvidence;
 pub(crate) use lifecycle::terminate_process_tree;
 pub use omp::{OmpAcpTelemetry, classify_omp_acp_failure_kind};
 use prompt::{
-    build_issue_prompt, build_issue_prompt_without_recall_context, commit_policy_text,
-    delegated_subagent_contract_text, mcp_tool_loop_guard_text, recall_workspace_contract_text,
-    validation_policy_text,
+    build_issue_prompt, commit_policy_text, delegated_subagent_contract_text,
+    mcp_tool_loop_guard_text, validation_policy_text,
 };
 pub use session_metrics::{
     apply_session_tree_metrics, apply_session_tree_metrics_preserving_marker, ingest_session_event,
@@ -171,17 +172,14 @@ async fn initialize_acp_child(
     request_id: u64,
 ) -> Result<(), OpenCodeError> {
     let (stdin, stdout) = child.io();
+    let adapter = AgentExecutionAdapter::for_spec(spec);
     acp_request(
         stdin,
         stdout,
         &spec.permission_policy,
         request_id,
         "initialize",
-        json!({
-            "protocolVersion": 1,
-            "agent": spec.agent,
-            "model": spec.model,
-        }),
+        adapter.initialize_params(spec),
     )
     .await?;
     Ok(())
@@ -193,42 +191,21 @@ async fn configure_acp_session(
     session_id: &str,
     next_id: &mut u64,
 ) -> Result<(), OpenCodeError> {
-    let (stdin, stdout) = child.io();
-    set_session_config_option(
-        stdin,
-        stdout,
-        &spec.permission_policy,
-        *next_id,
-        session_id,
-        "mode",
-        Some(spec.agent.as_str()),
-    )
-    .await?;
-    *next_id += 1;
-    let (stdin, stdout) = child.io();
-    set_session_config_option(
-        stdin,
-        stdout,
-        &spec.permission_policy,
-        *next_id,
-        session_id,
-        "model",
-        spec.model.as_deref(),
-    )
-    .await?;
-    *next_id += 1;
-    let (stdin, stdout) = child.io();
-    set_session_config_option(
-        stdin,
-        stdout,
-        &spec.permission_policy,
-        *next_id,
-        session_id,
-        "effort",
-        spec.effort.as_deref(),
-    )
-    .await?;
-    *next_id += 1;
+    let adapter = AgentExecutionAdapter::for_spec(spec);
+    for option in adapter.config_options(spec) {
+        let (stdin, stdout) = child.io();
+        set_session_config_option(
+            stdin,
+            stdout,
+            &spec.permission_policy,
+            *next_id,
+            session_id,
+            option.id,
+            option.value,
+        )
+        .await?;
+        *next_id += 1;
+    }
     Ok(())
 }
 
@@ -245,7 +222,7 @@ async fn resume_acp_session(
         &spec.permission_policy,
         request_id,
         "session/resume",
-        session_resume_params(spec, session),
+        AgentExecutionAdapter::for_spec(spec).session_resume_params(spec, &session.session_id),
     )
     .await?;
     let resumed_session_id =
@@ -280,6 +257,10 @@ fn spawn_prompt_reader(
         .await
         {
             warn!(error = %error, message = warning, "OpenCode ACP prompt stream ended with error");
+            if let Some(process_id) = child.id() {
+                let _ = terminate_process_tree(process_id, warning).await;
+            }
+            let _ = child.kill().await;
         }
         let _ = child.wait().await;
         stderr_drain.abort();
@@ -357,7 +338,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
                 &spec.permission_policy,
                 next_id,
                 "session/new",
-                session_new_params(spec),
+                AgentExecutionAdapter::for_spec(spec).session_new_params(spec),
             )
             .await?;
             next_id += 1;
@@ -1132,10 +1113,7 @@ pub fn build_acp_launch_spec(project: &ProjectConfig, issue: &LinearIssue) -> Op
         issue_identifier: issue.identifier.clone(),
         branch_name: branch_name.clone(),
         repo_path: Some(project.repo_path.clone()),
-        recall_workspace_root: project
-            .recall
-            .as_ref()
-            .map(|recall| recall.workspace_root.clone()),
+        recall_workspace_root: None,
         base_ref: Some(project.branch.base.clone()),
         agent: project.opencode.agent.clone(),
         model: project.opencode.model.clone(),
@@ -1169,19 +1147,10 @@ pub fn build_omp_acp_launch_spec(
         repo_path: Some(project.repo_path.clone()),
         recall_workspace_root: None,
         base_ref: Some(project.branch.base.clone()),
-        agent: provider
-            .agent
-            .clone()
-            .unwrap_or_else(|| project.opencode.agent.clone()),
-        model: provider
-            .model
-            .clone()
-            .or_else(|| project.opencode.model.clone()),
-        effort: provider
-            .effort
-            .clone()
-            .or_else(|| project.opencode.effort.clone()),
-        prompt: build_issue_prompt_without_recall_context(project, issue, &branch_name),
+        agent: String::new(),
+        model: None,
+        effort: None,
+        prompt: build_issue_prompt(project, issue, &branch_name),
         permission_policy: project.opencode.permission_policy.clone(),
     }
 }
@@ -1205,9 +1174,7 @@ fn repair_prompt(
          Fix the implementation or handoff, rerun the required validation, \
          and rewrite the structured Symphony handoff JSON at the configured sidecar path.",
         mcp_tool_loop_guard = mcp_tool_loop_guard_text(),
-        delegated_subagent_contract = delegated_subagent_contract_text(
-            spec.provider_mode == RuntimeProviderMode::OpenCodeAcp
-        ),
+        delegated_subagent_contract = delegated_subagent_contract_text(),
         validation_policy = validation_policy_text(),
         commit_policy = commit_policy_text()
     )
@@ -1225,9 +1192,7 @@ fn continuation_prompt(spec: &OpenCodeLaunchSpec, continuation_message: &str) ->
          Validation policy:\n{validation_policy}\n\n\
          Commit policy for successful handoff:\n{commit_policy}\n\n{continuation_message}",
         mcp_tool_loop_guard = mcp_tool_loop_guard_text(),
-        delegated_subagent_contract = delegated_subagent_contract_text(
-            spec.provider_mode == RuntimeProviderMode::OpenCodeAcp
-        ),
+        delegated_subagent_contract = delegated_subagent_contract_text(),
         validation_policy = validation_policy_text(),
         commit_policy = commit_policy_text()
     )
@@ -1235,13 +1200,7 @@ fn continuation_prompt(spec: &OpenCodeLaunchSpec, continuation_message: &str) ->
 
 fn provider_context_text(spec: &OpenCodeLaunchSpec) -> String {
     match spec.provider_mode {
-        RuntimeProviderMode::OpenCodeAcp => format!(
-            "Recall evidence workspace contract:\n{}\n\n",
-            recall_workspace_contract_text(
-                spec.recall_workspace_root.as_deref(),
-                spec.cwd.as_path()
-            )
-        ),
+        RuntimeProviderMode::OpenCodeAcp => String::new(),
         RuntimeProviderMode::OmpAcp => String::new(),
     }
 }

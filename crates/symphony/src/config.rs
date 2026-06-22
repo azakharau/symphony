@@ -70,9 +70,6 @@ impl RootConfig {
                     project.id
                 )));
             }
-            if let Some(recall) = &project.recall {
-                recall.validate(&project.id)?;
-            }
             let mut seen_omp_provider_ids = HashSet::new();
             for provider in &project.omp_acp_providers {
                 provider.validate(&project.id)?;
@@ -185,7 +182,6 @@ pub struct ProjectConfig {
     pub enabled: bool,
     pub workflow_path: PathBuf,
     pub repo_path: PathBuf,
-    pub recall: Option<RecallProjectConfig>,
     pub branch: BranchPolicy,
     pub linear: LinearProjectConfig,
     pub opencode: OpenCodeRuntimeConfig,
@@ -288,28 +284,6 @@ impl OhMyPiAcpProviderCapabilities {
         if !self.acp_stdio {
             return Err(ConfigError::Validation(format!(
                 "project `{project_id}` omp_acp_providers `{provider_id}` capabilities.acp_stdio must be true"
-            )));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct RecallProjectConfig {
-    pub workspace_root: PathBuf,
-}
-
-impl RecallProjectConfig {
-    fn validate(&self, project_id: &str) -> Result<(), ConfigError> {
-        if self.workspace_root.as_os_str().is_empty() {
-            return Err(ConfigError::Validation(format!(
-                "project `{project_id}` recall.workspace_root must not be empty"
-            )));
-        }
-        if !self.workspace_root.is_absolute() {
-            return Err(ConfigError::Validation(format!(
-                "project `{project_id}` recall.workspace_root must be absolute"
             )));
         }
         Ok(())

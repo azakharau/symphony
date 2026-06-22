@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use crate::{config::ProjectConfig, linear::LinearIssue};
 
 use super::worktree::handoff_sidecar_path;
@@ -9,50 +7,11 @@ pub(super) fn build_issue_prompt(
     issue: &LinearIssue,
     branch_name: &str,
 ) -> String {
-    build_issue_prompt_with_recall_context(project, issue, branch_name, true)
-}
-
-pub(super) fn build_issue_prompt_without_recall_context(
-    project: &ProjectConfig,
-    issue: &LinearIssue,
-    branch_name: &str,
-) -> String {
-    build_issue_prompt_with_recall_context(project, issue, branch_name, false)
-}
-
-fn build_issue_prompt_with_recall_context(
-    project: &ProjectConfig,
-    issue: &LinearIssue,
-    branch_name: &str,
-    include_recall_context: bool,
-) -> String {
     let description = issue
         .description
         .as_deref()
         .unwrap_or("No description provided.");
     let worktree = project.branch.worktree_root.join(&issue.identifier);
-    let recall_context = if include_recall_context {
-        format!(
-            "Recall workspace root: {recall_workspace_root}\n\n\
-             Recall evidence workspace contract:\n\
-             {recall_workspace_contract}\n\n",
-            recall_workspace_root = recall_workspace_root_display(
-                project
-                    .recall
-                    .as_ref()
-                    .map(|recall| { recall.workspace_root.as_path() })
-            ),
-            recall_workspace_contract = recall_workspace_contract_text(
-                project
-                    .recall
-                    .as_ref()
-                    .map(|recall| recall.workspace_root.as_path()),
-                &worktree,
-            )
-        )
-    } else {
-        String::new()
-    };
     format!(
         "Issue {identifier}: {title}\n\n\
          Project: {project_id}\n\
@@ -61,7 +20,6 @@ fn build_issue_prompt_with_recall_context(
          Eval default suite: {eval_suite} (fallback metadata, not a blanket workspace gate)\n\
          Linear state: {state}\n\
          URL: {url}\n\n\
-         {recall_context}\
          Upstream accepted context:\n\
          {upstream_context}\n\n\
          MCP tool-schema loop guard:\n\
@@ -99,21 +57,20 @@ fn build_issue_prompt_with_recall_context(
         project_id = project.id,
         repo_path = project.repo_path.display(),
         worktree = worktree.display(),
-        recall_context = recall_context,
         handoff_path = handoff_sidecar_path(&worktree).display(),
         eval_suite = project.eval.default_suite,
         state = issue.state,
         url = issue.url.as_deref().unwrap_or("none"),
-        upstream_context = upstream_context_text(issue, include_recall_context),
+        upstream_context = upstream_context_text(issue),
         validation_policy = validation_policy_text(),
         mcp_tool_loop_guard = mcp_tool_loop_guard_text(),
-        delegated_subagent_contract = delegated_subagent_contract_text(include_recall_context),
+        delegated_subagent_contract = delegated_subagent_contract_text(),
         triage_policy = triage_policy_text(),
         commit_policy = commit_policy_text(),
     )
 }
 
-fn upstream_context_text(issue: &LinearIssue, include_recall_context: bool) -> String {
+fn upstream_context_text(issue: &LinearIssue) -> String {
     if issue.upstream_context.is_empty() {
         return "- No accepted upstream Linear blocker context is available for this issue."
             .to_owned();
@@ -137,15 +94,6 @@ fn upstream_context_text(issue: &LinearIssue, include_recall_context: bool) -> S
         {
             lines.push(format!("  Branch: {branch}"));
         }
-        if include_recall_context {
-            push_limited_values(
-                &mut lines,
-                "  Recall workspace ids",
-                &context.recall_workspace_ids,
-                6,
-            );
-            push_limited_values(&mut lines, "  Recall task ids", &context.recall_task_ids, 6);
-        }
         push_limited_values(
             &mut lines,
             "  Accepted artifacts",
@@ -167,12 +115,10 @@ fn upstream_context_text(issue: &LinearIssue, include_recall_context: bool) -> S
                     .map(|line| format!("    {line}")),
             );
         }
-        let required_use = if include_recall_context {
-            "  Required use: treat this as accepted upstream input; inspect the Recall refs/artifacts before rediscovering or replanning this surface."
-        } else {
+        lines.push(
             "  Required use: treat this as accepted upstream input; inspect accepted artifacts and git context before rediscovering or replanning this surface."
-        };
-        lines.push(required_use.to_owned());
+                .to_owned(),
+        );
     }
 
     if issue.upstream_context.len() > 8 {
@@ -214,33 +160,6 @@ fn push_limited_values(lines: &mut Vec<String>, label: &str, values: &[String], 
     }
 }
 
-pub(super) fn recall_workspace_contract_text(
-    recall_workspace_root: Option<&Path>,
-    isolated_worktree: &Path,
-) -> String {
-    let workspace_root = recall_workspace_root_display(recall_workspace_root);
-    let isolated_worktree = isolated_worktree.display();
-    format!(
-        "- Use `{workspace_root}` as the durable project evidence workspace for all Recall MCP calls, observations, claims, evidence, verification, and handoff records.\n\
-         - The Recall workspace belongs to the canonical project root, not the isolated issue worktree.\n\
-         - Do not create or register a separate Recall workspace for the isolated worktree `{isolated_worktree}`.\n\
-         - Required OpenCode MCP tool is `recall_create_task`; do not use Codex-style tool names such as `mcp__recall__create_task`.\n\
-         - Required `recall_create_task` payload shape is exactly `objective`, `playbook`, `requested_by`, and `worktree` at top level. Do not send top-level `session_id`, `project`, `workspace`, `repo_root`, `worktree_path`, `actor_id`, `actor_type`, `label`, or `role`.\n\
-         - Use `playbook: \"coding\"` for implementation tasks, `\"investigation\"` for RCA/audit tasks, and `\"planning\"` only for explicit planning specs.\n\
-         - Required `recall_create_task.requested_by` payload: include `actor_id`, `actor_type`, `label`, and `role`, for example `{{\"actor_id\":\"symphony-opencode\",\"actor_type\":\"agent\",\"label\":\"Symphony OpenCode\",\"role\":\"implementation-runner\"}}`.\n\
-         - Required `recall_create_task.worktree` payload: `repo_root` must be `{workspace_root}`, `worktree_path` must be `{workspace_root}`, and `head` must describe the current git HEAD of `{workspace_root}` using only `reference` and `commit` fields.\n\
-         - Never set `recall_create_task.worktree.worktree_path` to `{isolated_worktree}`. Mention the isolated implementation worktree only in free-text objective or workstream label when useful.\n\
-         - Minimal valid `recall_create_task` example: `{{\"objective\":\"<issue identifier and objective>\",\"playbook\":\"coding\",\"requested_by\":{{\"actor_id\":\"symphony-opencode\",\"actor_type\":\"agent\",\"label\":\"Symphony OpenCode\",\"role\":\"implementation-runner\"}},\"worktree\":{{\"repo_root\":\"{workspace_root}\",\"worktree_path\":\"{workspace_root}\",\"head\":{{\"reference\":\"<current branch ref>\",\"commit\":\"<current commit sha>\"}}}}}}`.\n\
-         - If `{workspace_root}` is missing or unavailable, stop with provider_blocker and explain the workspace failure; do not continue with degraded local evidence."
-    )
-}
-
-fn recall_workspace_root_display(recall_workspace_root: Option<&Path>) -> String {
-    recall_workspace_root
-        .map(|root| root.display().to_string())
-        .unwrap_or_else(|| "missing".to_owned())
-}
-
 pub(super) const fn validation_policy_text() -> &'static str {
     "- Treat the issue's Validation section as the authority for required commands.\n\
      - Scope validation to the changed surface and the issue's explicit acceptance criteria.\n\
@@ -257,19 +176,11 @@ pub(super) const fn mcp_tool_loop_guard_text() -> &'static str {
      - Never spend additional turns reverse-engineering MCP payloads after the bounded retry limit; use the handoff sidecar to make the blocker explicit."
 }
 
-pub(super) const fn delegated_subagent_contract_text(include_recall_context: bool) -> &'static str {
-    if include_recall_context {
-        "- Delegated reviewer/evaluator subagents are read-only unless the issue spec explicitly says otherwise.\n\
-         - Do not ask delegated reviewer/evaluator subagents to call Recall mutation tools such as record_artifact, attach_evidence, record_verification, or create_task.\n\
-         - Delegated reviewer/evaluator subagents should inspect files/tests/evidence and return a concise structured verdict to the parent OpenCode session.\n\
-         - The parent OpenCode session owns any required Recall writeback after reading the subagent verdict.\n\
-         - If a delegated subagent already failed an MCP mutation because of schema/version errors, do not retry that mutation from another delegated subagent; continue with a text verdict and parent-owned writeback."
-    } else {
-        "- Delegated reviewer/evaluator subagents are read-only unless the issue spec explicitly says otherwise.\n\
-         - Delegated reviewer/evaluator subagents should inspect files/tests/evidence and return a concise structured verdict to the parent ACP session.\n\
-         - The parent ACP session owns final validation, git closure, and structured handoff sidecar writeback.\n\
-         - If a delegated subagent reports a tool schema/version error, do not retry the same failing mutation from another delegated subagent; continue with a text verdict and parent-owned closure."
-    }
+pub(super) const fn delegated_subagent_contract_text() -> &'static str {
+    "- Delegated reviewer/evaluator subagents are read-only unless the issue spec explicitly says otherwise.\n\
+     - Delegated reviewer/evaluator subagents should inspect files/tests/evidence and return a concise structured verdict to the parent ACP session.\n\
+     - The parent ACP session owns final validation, git closure, and structured handoff sidecar writeback.\n\
+     - If a delegated subagent reports a tool schema/version error, do not retry the same failing mutation from another delegated subagent; continue with a text verdict and parent-owned closure."
 }
 
 pub(super) const fn triage_policy_text() -> &'static str {

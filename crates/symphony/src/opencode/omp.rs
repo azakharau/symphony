@@ -1,14 +1,17 @@
 use serde_json::{Value, json};
+use tokio::time::timeout;
 use tracing::info;
 
 use crate::state::RuntimeFailureKind;
 
-use super::lifecycle::AcpChildLifecycle;
 use super::{
     OpenCodeError, OpenCodeLaunchObserver, OpenCodeLaunchSpec, OpenCodeProcessStarted,
     OpenCodeSessionCreated, OpenCodeStartedSession,
     acp::{acp_request, extract_session_id, write_acp_request},
-    ensure_worktree, launch_uses_issue_worktree, remove_stale_handoff_sidecar, spawn_prompt_reader,
+    adapter::AgentExecutionAdapter,
+    ensure_worktree, launch_uses_issue_worktree,
+    lifecycle::AcpChildLifecycle,
+    read_acp_response, remove_stale_handoff_sidecar, spawn_prompt_reader, spawn_stream_drain,
 };
 
 #[derive(Debug, Default)]
@@ -59,6 +62,7 @@ impl StdioOmpAcpLauncher {
         }
 
         let mut telemetry = OmpAcpTelemetry::default();
+        let adapter = AgentExecutionAdapter::for_spec(spec);
         let mut next_id = 1_u64;
         let setup = async {
             let initialize = omp_acp_request(
@@ -67,13 +71,7 @@ impl StdioOmpAcpLauncher {
                 spec,
                 next_id,
                 "initialize",
-                json!({
-                    "protocolVersion": 1,
-                    "client": {"name": "symphony", "version": env!("CARGO_PKG_VERSION")},
-                    "agent": spec.agent,
-                    "model": spec.model,
-                    "providerId": spec.provider_id,
-                }),
+                adapter.initialize_params(spec),
             )
             .await?;
             ensure_supported_version(&initialize)?;
@@ -85,13 +83,7 @@ impl StdioOmpAcpLauncher {
                 spec,
                 next_id,
                 "session/new",
-                json!({
-                    "cwd": spec.cwd,
-                    "title": spec.issue_identifier,
-                    "agent": spec.agent,
-                    "model": spec.model,
-                    "mcpServers": [],
-                }),
+                adapter.session_new_params(spec),
             )
             .await?;
             telemetry
@@ -128,16 +120,52 @@ impl StdioOmpAcpLauncher {
         )
         .await?;
         telemetry.frame_count = telemetry.frame_count.saturating_add(1);
-        let (process, stdin, stdout, stderr_drain) = child.into_parts();
-        spawn_prompt_reader(
-            &spec.permission_policy,
-            next_id,
-            "OMP ACP prompt stream ended with error",
-            process,
-            stdin,
-            stdout,
-            stderr_drain,
-        );
+        let prompt_response = {
+            let (stdin, stdout) = child.io();
+            timeout(
+                adapter
+                    .prompt_startup_probe()
+                    .expect("OMP ACP adapter must define prompt startup probe"),
+                read_acp_response(
+                    stdout,
+                    stdin,
+                    &spec.permission_policy,
+                    next_id,
+                    "session/prompt",
+                ),
+            )
+            .await
+        };
+        match prompt_response {
+            Ok(Ok(_)) => {
+                let (process, stdin, stdout, stderr_drain) = child.into_parts();
+                spawn_stream_drain(
+                    &spec.permission_policy,
+                    "OMP ACP stream drain ended with error",
+                    process,
+                    stdin,
+                    stdout,
+                    stderr_drain,
+                );
+            }
+            Ok(Err(error)) => {
+                return Err(child
+                    .setup_failed(&spec.issue_identifier, Some(session_id), error.to_string())
+                    .await);
+            }
+            Err(_) => {
+                let (process, stdin, stdout, stderr_drain) = child.into_parts();
+                spawn_prompt_reader(
+                    &spec.permission_policy,
+                    next_id,
+                    "OMP ACP prompt stream ended with error",
+                    process,
+                    stdin,
+                    stdout,
+                    stderr_drain,
+                );
+            }
+        }
 
         Ok(OpenCodeStartedSession {
             session_id,

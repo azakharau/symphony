@@ -413,7 +413,13 @@ impl ProjectDashboardResponse {
     fn running_issue_summaries(&self) -> Vec<RunningIssueSummary> {
         self.active_issues
             .iter()
-            .filter(|issue| issue.lifecycle_stage == LifecycleStage::Running)
+            .filter(|issue| {
+                issue.lifecycle_stage == LifecycleStage::Running
+                    && issue
+                        .opencode_sessions
+                        .iter()
+                        .any(session_is_active_for_display)
+            })
             .map(|issue| running_issue_summary(self, issue))
             .collect()
     }
@@ -1018,7 +1024,7 @@ fn session_display_priority(session: &OpenCodeSessionDetail) -> u8 {
 
 fn session_is_active_for_display(session: &OpenCodeSessionDetail) -> bool {
     session.lifecycle_stage == LifecycleStage::Running
-        || matches!(
+        && matches!(
             session.current_stage,
             OpenCodeStage::Starting
                 | OpenCodeStage::Running

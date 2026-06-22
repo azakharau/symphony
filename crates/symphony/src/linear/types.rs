@@ -77,8 +77,6 @@ pub struct LinearUpstreamContext {
     pub state: String,
     pub url: Option<String>,
     pub branch_name: Option<String>,
-    pub recall_workspace_ids: Vec<String>,
-    pub recall_task_ids: Vec<String>,
     pub accepted_artifacts: Vec<String>,
     pub handoff_summary: Option<String>,
 }

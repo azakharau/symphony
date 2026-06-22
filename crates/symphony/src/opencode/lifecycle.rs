@@ -52,9 +52,6 @@ impl AcpChildLifecycle {
         if let Some(marker) = spec.omp_cleanup_marker() {
             command.env(super::OMP_CLEANUP_MARKER_ENV, marker);
         }
-        if let Some(recall_workspace_root) = &spec.recall_workspace_root {
-            command.env("SYMPHONY_RECALL_WORKSPACE_ROOT", recall_workspace_root);
-        }
         let mut child = command.spawn()?;
         let process_id = child.id();
         let stdin = child.stdin.take().ok_or(OpenCodeError::MissingStdin)?;

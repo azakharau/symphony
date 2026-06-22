@@ -263,8 +263,6 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         state: "Done".into(),
         url: Some("https://linear.example/NER-55".into()),
         branch_name: Some("feature/ner-55-canon-source-authority-map".into()),
-        recall_workspace_ids: vec!["workspace-54f6c799-4258-4b40-80ec-f0606bff3ce9".into()],
-        recall_task_ids: vec!["task-ner-55".into()],
         accepted_artifacts: vec!["docs/canon-source-authority-map.md".into()],
         handoff_summary: Some(
             "## OpenCode Handoff Accepted\nCommitted 61f216d docs: add canon source authority map"
@@ -280,10 +278,7 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         spec.cwd,
         PathBuf::from("/home/agent/.symphony/workspaces/opencode/symphony/SYM-27")
     );
-    assert_eq!(
-        spec.recall_workspace_root,
-        Some(PathBuf::from("/home/agent/proj/symphony"))
-    );
+    assert_eq!(spec.recall_workspace_root, None);
     assert!(spec.prompt.contains("SYM-27"), "{}", spec.prompt);
     assert!(!spec.prompt.contains("Run OpenCode ACP"), "{}", spec.prompt);
     assert!(
@@ -292,65 +287,16 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         spec.prompt
     );
     assert!(
-        spec.prompt
-            .contains("Recall workspace root: /home/agent/proj/symphony"),
+        !spec.prompt.contains("Recall workspace root"),
         "{}",
         spec.prompt
     );
     assert!(
-        spec.prompt.contains(
-            "Do not create or register a separate Recall workspace for the isolated worktree"
-        ),
+        !spec.prompt.contains("recall_create_task"),
         "{}",
         spec.prompt
     );
-    assert!(
-        spec.prompt.contains(
-            "Required OpenCode MCP tool is `recall_create_task`; do not use Codex-style tool names such as `mcp__recall__create_task`"
-        ),
-        "{}",
-        spec.prompt
-    );
-    assert!(
-        spec.prompt.contains(
-            "Required `recall_create_task` payload shape is exactly `objective`, `playbook`, `requested_by`, and `worktree` at top level"
-        ),
-        "{}",
-        spec.prompt
-    );
-    assert!(
-        spec.prompt.contains("Do not send top-level `session_id`, `project`, `workspace`, `repo_root`, `worktree_path`, `actor_id`, `actor_type`, `label`, or `role`"),
-        "{}",
-        spec.prompt
-    );
-    assert!(
-        spec.prompt.contains(
-            "`recall_create_task.requested_by` payload: include `actor_id`, `actor_type`, `label`, and `role`"
-        ),
-        "{}",
-        spec.prompt
-    );
-    assert!(
-        spec.prompt.contains(
-            "\"requested_by\":{\"actor_id\":\"symphony-opencode\",\"actor_type\":\"agent\",\"label\":\"Symphony OpenCode\",\"role\":\"implementation-runner\"}"
-        ),
-        "{}",
-        spec.prompt
-    );
-    assert!(
-        spec.prompt.contains(
-            "\"worktree\":{\"repo_root\":\"/home/agent/proj/symphony\",\"worktree_path\":\"/home/agent/proj/symphony\""
-        ),
-        "{}",
-        spec.prompt
-    );
-    assert!(
-        spec.prompt.contains(
-            "Never set `recall_create_task.worktree.worktree_path` to `/home/agent/.symphony/workspaces/opencode/symphony/SYM-27`"
-        ),
-        "{}",
-        spec.prompt
-    );
+    assert!(!spec.prompt.contains("mcp__recall"), "{}", spec.prompt);
     assert!(
         spec.prompt.contains("MCP tool-schema loop guard"),
         "{}",
@@ -363,14 +309,20 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
     );
     for fragment in [
         "NER-55 (`Done`): Canon source authority map",
-        "workspace-54f6c799-4258-4b40-80ec-f0606bff3ce9",
-        "task-ner-55",
         "docs/canon-source-authority-map.md",
         "Committed 61f216d docs: add canon source authority map",
-        "treat this as accepted upstream input; inspect the Recall refs/artifacts before rediscovering or replanning this surface",
+        "treat this as accepted upstream input; inspect accepted artifacts and git context before rediscovering or replanning this surface",
     ] {
         assert!(spec.prompt.contains(fragment), "{}", spec.prompt);
     }
+    assert!(
+        !spec
+            .prompt
+            .contains("workspace-54f6c799-4258-4b40-80ec-f0606bff3ce9"),
+        "{}",
+        spec.prompt
+    );
+    assert!(!spec.prompt.contains("task-ner-55"), "{}", spec.prompt);
     assert!(
         spec.prompt.contains(
             "After two failed calls to the same MCP method for schema/validation reasons, stop retrying that method in this session"
@@ -392,9 +344,8 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         spec.prompt
     );
     assert!(
-        spec.prompt.contains(
-            "Do not ask delegated reviewer/evaluator subagents to call Recall mutation tools"
-        ),
+        spec.prompt
+            .contains("The parent ACP session owns final validation, git closure"),
         "{}",
         spec.prompt
     );
@@ -559,12 +510,9 @@ async fn omp_acp_launch_spec_uses_provider_command_cwd_env_and_mode() {
         r#"[[projects.omp_acp_providers]]
 id = "omp-primary"
 command = "/tmp/mock-omp"
-args = ["acp"]
+args = ["--model=openai/gpt-5.5", "--thinking=medium", "acp"]
 cwd = "project_repo"
 env_allowlist = ["PATH", "OMP_TOKEN"]
-agent = "implementer"
-model = "openai/gpt-5.5"
-effort = "medium"
 
 [projects.omp_acp_providers.capabilities]
 acp_stdio = true
@@ -586,8 +534,6 @@ inverse_bridge_reference = true
         state: "Done".into(),
         url: Some("https://linear.example/NER-55".into()),
         branch_name: Some("feature/ner-55-canon-source-authority-map".into()),
-        recall_workspace_ids: vec!["workspace-54f6c799-4258-4b40-80ec-f0606bff3ce9".into()],
-        recall_task_ids: vec!["task-ner-55".into()],
         accepted_artifacts: vec!["docs/canon-source-authority-map.md".into()],
         handoff_summary: Some("Accepted upstream artifact".into()),
     });
@@ -597,11 +543,15 @@ inverse_bridge_reference = true
     assert_eq!(spec.provider_mode, RuntimeProviderMode::OmpAcp);
     assert_eq!(spec.provider_id.as_deref(), Some("omp-primary"));
     assert_eq!(spec.command, PathBuf::from("/tmp/mock-omp"));
-    assert_eq!(spec.args, ["acp"]);
+    assert_eq!(
+        spec.args,
+        ["--model=openai/gpt-5.5", "--thinking=medium", "acp"]
+    );
     assert_eq!(spec.cwd, PathBuf::from("/home/agent/proj/symphony"));
     assert_eq!(spec.env_allowlist, ["PATH", "OMP_TOKEN"]);
-    assert_eq!(spec.agent, "implementer");
-    assert_eq!(spec.model.as_deref(), Some("openai/gpt-5.5"));
+    assert_eq!(spec.agent, "");
+    assert_eq!(spec.model, None);
+    assert_eq!(spec.effort, None);
     assert_eq!(spec.recall_workspace_root, None);
     assert!(spec.prompt.contains("SYM-27"), "{}", spec.prompt);
     assert!(
@@ -638,7 +588,7 @@ async fn mocked_omp_acp_launch_returns_session_telemetry_and_evidence_refs() {
 import json, os, pathlib, sys
 transcript_path = pathlib.Path({transcript_literal})
 with transcript_path.open("a", encoding="utf-8") as transcript:
-    transcript.write(json.dumps({{"argv": sys.argv, "cwd": os.getcwd(), "env": {{"SYMPHONY_ISSUE_WORKTREE": os.environ.get("SYMPHONY_ISSUE_WORKTREE"), "SYMPHONY_OMP_CLEANUP_MARKER": os.environ.get("SYMPHONY_OMP_CLEANUP_MARKER"), "SYMPHONY_RECALL_WORKSPACE_ROOT": os.environ.get("SYMPHONY_RECALL_WORKSPACE_ROOT")}}}}, sort_keys=True) + "\n")
+    transcript.write(json.dumps({{"argv": sys.argv, "cwd": os.getcwd(), "env": {{"SYMPHONY_ISSUE_WORKTREE": os.environ.get("SYMPHONY_ISSUE_WORKTREE"), "SYMPHONY_OMP_CLEANUP_MARKER": os.environ.get("SYMPHONY_OMP_CLEANUP_MARKER")}}}}, sort_keys=True) + "\n")
 for line in sys.stdin:
     msg = json.loads(line)
     method = msg.get("method")
@@ -662,7 +612,11 @@ for line in sys.stdin:
         provider_mode: RuntimeProviderMode::OmpAcp,
         provider_id: Some("omp-primary".into()),
         command: command.clone(),
-        args: vec!["acp".into()],
+        args: vec![
+            "--model=openai/gpt-5.5".into(),
+            "--thinking=medium".into(),
+            "acp".into(),
+        ],
         cwd: worktree.clone(),
         env_allowlist: vec!["PATH".into()],
         worktree_root: None,
@@ -710,6 +664,14 @@ for line in sys.stdin:
             );
             assert!(transcript.contains(r#""acp""#), "{transcript}");
             assert!(
+                transcript.contains(r#""--model=openai/gpt-5.5""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(r#""--thinking=medium""#),
+                "{transcript}"
+            );
+            assert!(
                 transcript.contains(&worktree.display().to_string()),
                 "{transcript}"
             );
@@ -727,11 +689,15 @@ for line in sys.stdin:
             );
             assert!(transcript.contains(r#""title": "SYM-102""#), "{transcript}");
             assert!(
-                transcript.contains(r#""agent": "implementer""#),
+                !transcript.contains(r#""agent": "implementer""#),
                 "{transcript}"
             );
             assert!(
-                transcript.contains(r#""model": "openai/gpt-5.5""#),
+                !transcript.contains(r#""model": "openai/gpt-5.5""#),
+                "{transcript}"
+            );
+            assert!(
+                !transcript.contains(r#""method": "session/set_config_option""#),
                 "{transcript}"
             );
             assert!(
@@ -743,7 +709,7 @@ for line in sys.stdin:
                 "{transcript}"
             );
             assert!(
-                transcript.contains(r#""SYMPHONY_RECALL_WORKSPACE_ROOT": null"#),
+                !transcript.contains("SYMPHONY_RECALL_WORKSPACE_ROOT"),
                 "{transcript}"
             );
             assert!(!transcript.contains("Recall workspace"), "{transcript}");
@@ -753,6 +719,197 @@ for line in sys.stdin:
     }
     panic!(
         "OMP ACP transcript was not observed; transcript={:?}",
+        fs::read_to_string(transcript_path)
+    );
+}
+
+#[tokio::test]
+async fn omp_acp_prompt_error_fails_setup_and_terminates_process() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let command = dir.path().join("mock-omp-acp-prompt-error.py");
+    fs::write(
+        &command,
+        r#"#!/usr/bin/env python3
+import json, sys, time
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"protocolVersion":1}}), flush=True)
+    elif method == "session/new":
+        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"sessionId":"omp-session-prompt-error"}}), flush=True)
+    elif method == "session/prompt":
+        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"error":{"code":-32603,"message":"prompt rejected before execution"}}), flush=True)
+        time.sleep(30)
+"#,
+    )
+    .expect("write mock");
+    fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod");
+    let worktree = dir.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OmpAcp,
+        provider_id: Some("omp-primary".into()),
+        command,
+        args: Vec::new(),
+        cwd: worktree,
+        env_allowlist: vec!["PATH".into()],
+        worktree_root: None,
+        issue_identifier: "SYM-102".into(),
+        branch_name: "feature/sym-102".into(),
+        repo_path: None,
+        recall_workspace_root: None,
+        base_ref: None,
+        agent: "implementer".into(),
+        model: Some("openai/gpt-5.5".into()),
+        effort: None,
+        prompt: "Implement SYM-102".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+
+    let err = opencode::StdioOpenCodeLauncher
+        .launch(&spec)
+        .await
+        .expect_err("prompt error fails OMP launch");
+
+    let opencode::OpenCodeError::AcpSetupFailed {
+        process_id,
+        session_id,
+        reason,
+        termination,
+        ..
+    } = err
+    else {
+        panic!("expected setup failure");
+    };
+    assert_eq!(session_id.as_deref(), Some("omp-session-prompt-error"));
+    assert!(
+        reason.contains("prompt rejected before execution"),
+        "{reason}"
+    );
+    assert!(process_id.is_some());
+    assert!(!termination.still_alive, "{termination:?}");
+    let process_id = process_id.expect("process id");
+    assert!(
+        !std::path::Path::new(&format!("/proc/{process_id}")).exists(),
+        "OMP process must not stay alive after prompt setup failure"
+    );
+}
+
+#[tokio::test]
+async fn omp_acp_repair_does_not_send_opencode_config_options() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transcript_path = dir.path().join("omp-acp-repair-transcript.jsonl");
+    let transcript_literal =
+        serde_json::to_string(&transcript_path.display().to_string()).expect("json path");
+    let command = dir.path().join("mock-omp-acp-repair.py");
+    fs::write(
+        &command,
+        format!(
+            r#"#!/usr/bin/env python3
+import json, pathlib, sys
+transcript_path = pathlib.Path({transcript_literal})
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    with transcript_path.open("a", encoding="utf-8") as transcript:
+        transcript.write(json.dumps(msg, sort_keys=True) + "\n")
+    if method == "initialize":
+        print(json.dumps({{"jsonrpc":"2.0","id":msg["id"],"result":{{"protocolVersion":1}}}}), flush=True)
+    elif method == "session/resume":
+        print(json.dumps({{"jsonrpc":"2.0","id":msg["id"],"result":{{"sessionId":msg["params"]["sessionId"],"resumed":True}}}}), flush=True)
+    elif method == "session/set_config_option":
+        print(json.dumps({{"jsonrpc":"2.0","id":msg["id"],"error":{{"code":-32603,"message":"Unsupported ACP mode: build"}}}}), flush=True)
+        break
+    elif method == "session/prompt":
+        print(json.dumps({{"jsonrpc":"2.0","id":msg["id"],"result":{{"ok":True}}}}), flush=True)
+        break
+"#
+        ),
+    )
+    .expect("write mock");
+    fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod");
+    let worktree = dir.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let spec = opencode::OpenCodeLaunchSpec {
+        provider_mode: RuntimeProviderMode::OmpAcp,
+        provider_id: Some("omp-primary".into()),
+        command,
+        args: Vec::new(),
+        cwd: worktree.clone(),
+        env_allowlist: vec!["PATH".into()],
+        worktree_root: None,
+        issue_identifier: "MNE-235".into(),
+        branch_name: "feature/mne-235".into(),
+        repo_path: None,
+        recall_workspace_root: None,
+        base_ref: None,
+        agent: String::new(),
+        model: None,
+        effort: None,
+        prompt: "Implement MNE-235".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+    let session = OpenCodeSessionRecord {
+        project_id: "recall".into(),
+        issue_id: "issue-mne-235".into(),
+        session_id: "omp-session-existing".into(),
+        provider_mode: RuntimeProviderMode::OmpAcp,
+        provider_id: Some("omp-primary".into()),
+        agent: String::new(),
+        model: None,
+        worktree_path: worktree.display().to_string(),
+        process_id: None,
+        lifecycle_stage: LifecycleStage::Failed,
+        stage: OpenCodeStage::Failed,
+        active_agent: None,
+        active_model: None,
+        message_count: 0,
+        todo_count: 0,
+        part_count: 0,
+        token_count: 0,
+        cost_micros: 0,
+        subagent_count: 0,
+        eval_stage: None,
+        lifecycle_marker: Some("repair_launch_failed".into()),
+        last_event: Some("failed:repair_launch_failed".into()),
+        runtime_failure_kind: None,
+        acp_frame_count: 0,
+        session_evidence_refs: Vec::new(),
+        silence_observed: false,
+    };
+
+    let started = opencode::StdioOpenCodeLauncher
+        .continue_repair(
+            &spec,
+            &session,
+            "missing_handoff_sidecar",
+            "sidecar was missing",
+        )
+        .await
+        .expect("OMP repair starts without OpenCode config options");
+
+    assert_eq!(started.session_id, "omp-session-existing");
+    assert!(started.process_id.is_some());
+    for _ in 0..50 {
+        if let Ok(transcript) = fs::read_to_string(&transcript_path)
+            && transcript.contains(r#""method": "session/prompt""#)
+        {
+            assert!(
+                transcript.contains(r#""method": "session/resume""#),
+                "{transcript}"
+            );
+            assert!(
+                !transcript.contains(r#""method": "session/set_config_option""#),
+                "{transcript}"
+            );
+            assert!(!transcript.contains(r#""value": "build""#), "{transcript}");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!(
+        "OMP ACP repair transcript was not observed; transcript={:?}",
         fs::read_to_string(transcript_path)
     );
 }
@@ -1136,7 +1293,6 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
     let transcript_path = dir.path().join("acp-transcript.jsonl");
     let script_path = write_fake_acp_script(dir.path(), &transcript_path);
     let worktree = dir.path().join("worktree");
-    let recall_workspace_root = dir.path().join("recall-root");
     let spec = opencode::OpenCodeLaunchSpec {
         provider_mode: RuntimeProviderMode::OpenCodeAcp,
         provider_id: None,
@@ -1148,7 +1304,7 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
         issue_identifier: "SYM-200".into(),
         branch_name: "feature/sym-200".into(),
         repo_path: None,
-        recall_workspace_root: Some(recall_workspace_root.clone()),
+        recall_workspace_root: None,
         base_ref: None,
         agent: "build".into(),
         model: Some("openai/gpt-5.5".into()),
@@ -1207,10 +1363,7 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
             );
             assert!(!transcript.contains("Run OpenCode ACP"), "{transcript}");
             assert!(
-                transcript.contains(&format!(
-                    r#""SYMPHONY_RECALL_WORKSPACE_ROOT": "{}""#,
-                    recall_workspace_root.display()
-                )),
+                !transcript.contains("SYMPHONY_RECALL_WORKSPACE_ROOT"),
                 "{transcript}"
             );
             assert!(

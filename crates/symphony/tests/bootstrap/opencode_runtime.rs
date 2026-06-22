@@ -595,22 +595,32 @@ inverse_bridge_reference = true
 #[tokio::test]
 async fn mocked_omp_acp_launch_returns_session_telemetry_and_evidence_refs() {
     let dir = tempfile::tempdir().expect("tempdir");
+    let transcript_path = dir.path().join("omp-acp-transcript.jsonl");
+    let transcript_literal =
+        serde_json::to_string(&transcript_path.display().to_string()).expect("json path");
     let command = dir.path().join("mock-omp-acp.py");
     fs::write(
         &command,
-        r#"#!/usr/bin/env python3
-import json, sys
+        format!(
+            r#"#!/usr/bin/env python3
+import json, os, pathlib, sys
+transcript_path = pathlib.Path({transcript_literal})
+with transcript_path.open("a", encoding="utf-8") as transcript:
+    transcript.write(json.dumps({{"argv": sys.argv, "cwd": os.getcwd(), "env": {{"SYMPHONY_ISSUE_WORKTREE": os.environ.get("SYMPHONY_ISSUE_WORKTREE"), "SYMPHONY_OMP_CLEANUP_MARKER": os.environ.get("SYMPHONY_OMP_CLEANUP_MARKER")}}}}, sort_keys=True) + "\n")
 for line in sys.stdin:
     msg = json.loads(line)
     method = msg.get("method")
+    with transcript_path.open("a", encoding="utf-8") as transcript:
+        transcript.write(json.dumps(msg, sort_keys=True) + "\n")
     if method == "initialize":
-        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"protocolVersion":1}}), flush=True)
+        print(json.dumps({{"jsonrpc":"2.0","id":msg["id"],"result":{{"protocolVersion":1}}}}), flush=True)
     elif method == "session/new":
-        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"sessionId":"omp-session-1","sdkSessionEvidenceRefs":["sdk:one","sdk:two"]}}), flush=True)
+        print(json.dumps({{"jsonrpc":"2.0","id":msg["id"],"result":{{"sessionId":"omp-session-1","sdkSessionEvidenceRefs":["sdk:one","sdk:two","sdk:three","sdk:four","sdk:five","sdk:six","sdk:seven","sdk:eight","sdk:nine"]}}}}), flush=True)
     elif method == "session/prompt":
-        print(json.dumps({"jsonrpc":"2.0","id":msg["id"],"result":{"ok":True}}), flush=True)
+        print(json.dumps({{"jsonrpc":"2.0","id":msg["id"],"result":{{"ok":True}}}}), flush=True)
         break
 "#,
+        ),
     )
     .expect("write mock");
     fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -619,9 +629,9 @@ for line in sys.stdin:
     let spec = opencode::OpenCodeLaunchSpec {
         provider_mode: RuntimeProviderMode::OmpAcp,
         provider_id: Some("omp-primary".into()),
-        command,
-        args: Vec::new(),
-        cwd: worktree,
+        command: command.clone(),
+        args: vec!["acp".into()],
+        cwd: worktree.clone(),
         env_allowlist: vec!["PATH".into()],
         worktree_root: None,
         issue_identifier: "SYM-102".into(),
@@ -644,7 +654,70 @@ for line in sys.stdin:
     assert_eq!(started.session_id, "omp-session-1");
     assert!(started.process_id.is_some());
     assert_eq!(started.acp_frame_count, 5);
-    assert_eq!(started.session_evidence_refs, ["sdk:one", "sdk:two"]);
+    assert_eq!(
+        started.session_evidence_refs,
+        [
+            "sdk:one",
+            "sdk:two",
+            "sdk:three",
+            "sdk:four",
+            "sdk:five",
+            "sdk:six",
+            "sdk:seven",
+            "sdk:eight"
+        ]
+    );
+    for _ in 0..50 {
+        if let Ok(transcript) = fs::read_to_string(&transcript_path)
+            && transcript.contains(r#""method": "session/prompt""#)
+        {
+            assert!(transcript.contains(r#""argv": ["#), "{transcript}");
+            assert!(
+                transcript.contains(&command.display().to_string()),
+                "{transcript}"
+            );
+            assert!(transcript.contains(r#""acp""#), "{transcript}");
+            assert!(
+                transcript.contains(&worktree.display().to_string()),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(r#""method": "initialize""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(r#""protocolVersion": 1"#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(r#""method": "session/new""#),
+                "{transcript}"
+            );
+            assert!(transcript.contains(r#""title": "SYM-102""#), "{transcript}");
+            assert!(
+                transcript.contains(r#""agent": "implementer""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(r#""model": "openai/gpt-5.5""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(r#""SYMPHONY_ISSUE_WORKTREE""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(r#""SYMPHONY_OMP_CLEANUP_MARKER""#),
+                "{transcript}"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!(
+        "OMP ACP transcript was not observed; transcript={:?}",
+        fs::read_to_string(transcript_path)
+    );
 }
 
 #[tokio::test]
@@ -2018,6 +2091,236 @@ async fn installed_opencode_acp_supports_ndjson_config_options_without_prompting
 
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[tokio::test]
+async fn live_omp_acp_smoke_starts_session_when_explicitly_enabled() {
+    if std::env::var("SYMPHONY_LIVE_OMP_ACP").ok().as_deref() != Some("1") {
+        eprintln!(
+            "skipped live OMP ACP smoke: SYMPHONY_LIVE_OMP_ACP is not set to 1 (requires SYMPHONY_LIVE_OMP_COMMAND=/absolute/path/to/omp)"
+        );
+        return;
+    }
+    let command = std::env::var("SYMPHONY_LIVE_OMP_COMMAND")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .expect("SYMPHONY_LIVE_OMP_COMMAND must be set to the OMP executable path");
+    assert!(
+        command.is_absolute(),
+        "SYMPHONY_LIVE_OMP_COMMAND must be an absolute path: {}",
+        command.display()
+    );
+    let metadata = fs::metadata(&command).expect("OMP command path must exist");
+    assert!(metadata.is_file(), "OMP command path must be a file");
+    assert!(
+        metadata.permissions().mode() & 0o111 != 0,
+        "OMP command path must be executable"
+    );
+    let args = std::env::var("SYMPHONY_LIVE_OMP_ACP_ARGS")
+        .ok()
+        .map(|value| {
+            value
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|args| !args.is_empty())
+        .unwrap_or_else(|| vec!["acp".into()]);
+    live_omp_version_if_available(&command).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut child = tokio::process::Command::new(&command)
+        .args(&args)
+        .current_dir(dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn live OMP ACP");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    let mut stdout = tokio::io::BufReader::new(stdout);
+
+    let initialized = live_omp_acp_request(
+        &mut stdin,
+        &mut stdout,
+        1,
+        "initialize",
+        serde_json::json!({
+            "protocolVersion": 1,
+            "client": {"name": "symphony-live-smoke", "version": "0"},
+            "agent": "implementer",
+            "model": null,
+            "providerId": "live-omp"
+        }),
+    )
+    .await;
+    let protocol_version = initialized
+        .get("protocolVersion")
+        .or_else(|| initialized.get("protocol_version"))
+        .and_then(serde_json::Value::as_u64);
+    assert_eq!(protocol_version, Some(1));
+
+    let created = live_omp_acp_request(
+        &mut stdin,
+        &mut stdout,
+        2,
+        "session/new",
+        serde_json::json!({
+            "cwd": dir.path(),
+            "title": "SYM-105 live OMP ACP smoke",
+            "agent": "implementer",
+            "model": null,
+            "mcpServers": []
+        }),
+    )
+    .await;
+    let session_id = created["sessionId"].as_str().expect("session id");
+    assert!(
+        !session_id.trim().is_empty(),
+        "session id must not be empty"
+    );
+    let refs = live_omp_session_evidence_refs(&created);
+    assert!(
+        refs.total <= 8,
+        "session evidence refs must be bounded: {:?}",
+        refs.bounded
+    );
+    assert!(
+        refs.bounded
+            .iter()
+            .all(|reference| !reference.trim().is_empty()),
+        "session evidence refs must not be empty: {:?}",
+        refs.bounded
+    );
+    eprintln!(
+        "live OMP ACP smoke created session {session_id}; session_evidence_refs={}",
+        refs.total
+    );
+
+    let _ = tokio::io::AsyncWriteExt::shutdown(&mut stdin).await;
+    drop(stdin);
+    drop(stdout);
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+}
+
+async fn live_omp_version_if_available(command: &Path) {
+    let mut version = tokio::process::Command::new(command);
+    version
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    match tokio::time::timeout(Duration::from_secs(5), version.output()).await {
+        Ok(Ok(output)) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let version_line = stdout
+                .lines()
+                .chain(stderr.lines())
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("<empty version output>");
+            eprintln!("live OMP ACP smoke version: {version_line}");
+        }
+        Ok(Ok(output)) => {
+            eprintln!(
+                "live OMP ACP smoke version unavailable: --version exited with {}",
+                output.status
+            );
+        }
+        Ok(Err(error)) => {
+            eprintln!("live OMP ACP smoke version unavailable: {error}");
+        }
+        Err(_) => {
+            eprintln!("live OMP ACP smoke version unavailable: --version timed out after 5s");
+        }
+    }
+}
+
+async fn live_omp_acp_request(
+    stdin: &mut tokio::process::ChildStdin,
+    stdout: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
+    id: u64,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        })
+        .to_string()
+            + "\n";
+        tokio::io::AsyncWriteExt::write_all(stdin, request.as_bytes())
+            .await
+            .expect("write live OMP ACP request");
+        tokio::io::AsyncWriteExt::flush(stdin)
+            .await
+            .expect("flush live OMP ACP request");
+
+        for _ in 0..200 {
+            let mut line = String::new();
+            let read = tokio::io::AsyncBufReadExt::read_line(stdout, &mut line)
+                .await
+                .expect("read live OMP ACP response");
+            assert!(read != 0, "OMP ACP stdout closed before {method} response");
+            let message: serde_json::Value =
+                serde_json::from_str(&line).expect("live OMP ACP json response");
+            if message.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
+                if let Some(error) = message.get("error") {
+                    panic!("live OMP ACP {method} failed: {error}");
+                }
+                return message
+                    .get("result")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+            }
+        }
+
+        panic!("live OMP ACP response for {method} was not observed");
+    })
+    .await
+    .unwrap_or_else(|_| panic!("live OMP ACP {method} timed out after 10s"))
+}
+
+struct LiveOmpSessionEvidenceRefs {
+    total: usize,
+    bounded: Vec<String>,
+}
+
+fn live_omp_session_evidence_refs(value: &serde_json::Value) -> LiveOmpSessionEvidenceRefs {
+    let mut refs = LiveOmpSessionEvidenceRefs {
+        total: 0,
+        bounded: Vec::new(),
+    };
+
+    for reference in [
+        "sessionEvidenceRefs",
+        "sdkSessionEvidenceRefs",
+        "evidenceRefs",
+    ]
+    .into_iter()
+    .flat_map(|field| {
+        value
+            .get(field)
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+    })
+    .filter_map(serde_json::Value::as_str)
+    {
+        refs.total += 1;
+        if refs.bounded.len() < 8 {
+            refs.bounded.push(reference.to_owned());
+        }
+    }
+
+    refs
 }
 
 #[tokio::test]

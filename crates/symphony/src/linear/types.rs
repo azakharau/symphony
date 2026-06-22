@@ -148,6 +148,7 @@ impl ManagedLinearRelation {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinearTransition {
+    Backlog,
     Todo,
     InProgress,
     NeedOwnerInput,
@@ -157,6 +158,7 @@ pub enum LinearTransition {
 impl LinearTransition {
     pub const fn state_name(self) -> &'static str {
         match self {
+            Self::Backlog => "Backlog",
             Self::Todo => "Todo",
             Self::InProgress => "In Progress",
             Self::NeedOwnerInput => "Need Owner Input",

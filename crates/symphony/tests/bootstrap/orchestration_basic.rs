@@ -237,7 +237,7 @@ async fn orchestration_schedules_repair_for_dead_running_session_without_handoff
         .await
         .expect("orchestrate once");
 
-    assert_todo_transition(&client.transitions(), "work");
+    assert_backlog_transition(&client.transitions(), "work");
     assert!(opencode.repairs().is_empty());
     let liveness = store
         .project_liveness("symphony")
@@ -959,7 +959,7 @@ async fn orchestration_reconciles_terminal_issues_and_avoids_duplicate_dispatch_
         first_poll.transitions(),
         vec![("new-work".into(), LinearTransition::InProgress)]
     );
-    assert_todo_transition(&restart_poll.transitions(), "new-work");
+    assert_backlog_transition(&restart_poll.transitions(), "new-work");
     let finished = store
         .issue("symphony", "finished")
         .await
@@ -1243,7 +1243,7 @@ async fn orchestration_repairs_stale_in_progress_session_without_handoff_sidecar
     assert!(opencode.resumes().is_empty());
     assert!(opencode.continuations().is_empty());
     assert!(opencode.repairs().is_empty());
-    assert_todo_transition(&client.transitions(), "work");
+    assert_backlog_transition(&client.transitions(), "work");
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff"
             && evidence
@@ -1320,7 +1320,7 @@ async fn orchestration_reissues_repair_prompt_for_stale_malformed_handoff_sessio
     assert!(opencode.launches().is_empty());
     assert!(opencode.resumes().is_empty());
     assert!(opencode.repairs().is_empty());
-    assert_todo_transition(&client.transitions(), "repair-stale");
+    assert_backlog_transition(&client.transitions(), "repair-stale");
     let issue = store
         .issue("symphony", "repair-stale")
         .await

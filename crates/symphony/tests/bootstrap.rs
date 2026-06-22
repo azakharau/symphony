@@ -721,6 +721,15 @@ fn assert_todo_transition(transitions: &[(String, LinearTransition)], issue_id: 
     );
 }
 
+fn assert_backlog_transition(transitions: &[(String, LinearTransition)], issue_id: &str) {
+    assert!(
+        transitions
+            .iter()
+            .any(|(id, transition)| id == issue_id && *transition == LinearTransition::Backlog),
+        "expected {issue_id} to leave Linear In Progress via Backlog transition, got {transitions:?}"
+    );
+}
+
 #[async_trait::async_trait]
 impl LinearClient for RecordingLinearClient {
     async fn fetch_candidate_issues(

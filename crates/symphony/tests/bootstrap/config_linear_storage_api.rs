@@ -1563,6 +1563,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
           "provider_id": null,
           "process_id": null,
           "process_alive": null,
+          "lifecycle_stage": "running",
           "stage": "eval",
           "agent": "build",
           "model": null,
@@ -1578,6 +1579,10 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
           "started_at_ms": null,
           "duration_ms": null,
           "last_event": "eval_failed:clippy-needless-collect",
+          "runtime_failure_kind": null,
+          "acp_frame_count": 0,
+          "session_evidence_refs": [],
+          "silence_observed": false,
           "worktree_path": "/home/agent/.symphony/workspaces/opencode/symphony/SYM-91"
         }
       ],

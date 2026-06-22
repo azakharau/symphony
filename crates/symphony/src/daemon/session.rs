@@ -482,70 +482,6 @@ fn omp_acp_environ_matches_cleanup_owner(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::state::{LifecycleStage, RuntimeProviderMode};
-
-    fn omp_session(worktree_path: &Path) -> OpenCodeSessionRecord {
-        OpenCodeSessionRecord {
-            project_id: "project".into(),
-            issue_id: "issue".into(),
-            session_id: "session".into(),
-            provider_mode: RuntimeProviderMode::OmpAcp,
-            provider_id: Some("omp-primary".into()),
-            agent: "implementer".into(),
-            model: None,
-            worktree_path: worktree_path.display().to_string(),
-            process_id: Some(123),
-            lifecycle_stage: LifecycleStage::Running,
-            stage: OpenCodeStage::Starting,
-            active_agent: Some("implementer".into()),
-            active_model: None,
-            message_count: 0,
-            todo_count: 0,
-            part_count: 0,
-            token_count: 0,
-            cost_micros: 0,
-            subagent_count: 0,
-            eval_stage: None,
-            lifecycle_marker: None,
-            last_event: None,
-            runtime_failure_kind: None,
-            acp_frame_count: 0,
-            session_evidence_refs: Vec::new(),
-            silence_observed: false,
-        }
-    }
-
-    #[test]
-    fn project_repo_omp_cleanup_marker_must_match_issue_owner() {
-        let repo_path = Path::new("/repo/shared");
-        let issue_worktree = Path::new("/worktrees/SYM-102");
-        let session = omp_session(repo_path);
-        let other_issue_environ = format!(
-            "SYMPHONY_ISSUE_WORKTREE=/repo/shared\0{OMP_CLEANUP_MARKER_ENV}=provider=omp-primary;issue=SYM-103;cwd=/repo/shared\0"
-        );
-
-        assert!(!omp_acp_environ_matches_cleanup_owner(
-            issue_worktree,
-            "SYM-102",
-            &session,
-            other_issue_environ.as_bytes(),
-        ));
-
-        let owned_environ = format!(
-            "SYMPHONY_ISSUE_WORKTREE=/repo/shared\0{OMP_CLEANUP_MARKER_ENV}=provider=omp-primary;issue=SYM-102;cwd=/repo/shared\0"
-        );
-        assert!(omp_acp_environ_matches_cleanup_owner(
-            issue_worktree,
-            "SYM-102",
-            &session,
-            owned_environ.as_bytes(),
-        ));
-    }
-}
-
 async fn opencode_process_is_alive(process_id: u32) -> bool {
     let path = format!("/proc/{process_id}/cmdline");
     let Ok(cmdline) = tokio::fs::read(path).await else {
@@ -706,4 +642,68 @@ fn apply_repair_process(
     session.lifecycle_marker = Some("repair_prompted".into());
     session.last_event = Some(format!("repair_prompted:{fingerprint}"));
     session.silence_observed = false;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{LifecycleStage, RuntimeProviderMode};
+
+    fn omp_session(worktree_path: &Path) -> OpenCodeSessionRecord {
+        OpenCodeSessionRecord {
+            project_id: "project".into(),
+            issue_id: "issue".into(),
+            session_id: "session".into(),
+            provider_mode: RuntimeProviderMode::OmpAcp,
+            provider_id: Some("omp-primary".into()),
+            agent: "implementer".into(),
+            model: None,
+            worktree_path: worktree_path.display().to_string(),
+            process_id: Some(123),
+            lifecycle_stage: LifecycleStage::Running,
+            stage: OpenCodeStage::Starting,
+            active_agent: Some("implementer".into()),
+            active_model: None,
+            message_count: 0,
+            todo_count: 0,
+            part_count: 0,
+            token_count: 0,
+            cost_micros: 0,
+            subagent_count: 0,
+            eval_stage: None,
+            lifecycle_marker: None,
+            last_event: None,
+            runtime_failure_kind: None,
+            acp_frame_count: 0,
+            session_evidence_refs: Vec::new(),
+            silence_observed: false,
+        }
+    }
+
+    #[test]
+    fn project_repo_omp_cleanup_marker_must_match_issue_owner() {
+        let repo_path = Path::new("/repo/shared");
+        let issue_worktree = Path::new("/worktrees/SYM-102");
+        let session = omp_session(repo_path);
+        let other_issue_environ = format!(
+            "SYMPHONY_ISSUE_WORKTREE=/repo/shared\0{OMP_CLEANUP_MARKER_ENV}=provider=omp-primary;issue=SYM-103;cwd=/repo/shared\0"
+        );
+
+        assert!(!omp_acp_environ_matches_cleanup_owner(
+            issue_worktree,
+            "SYM-102",
+            &session,
+            other_issue_environ.as_bytes(),
+        ));
+
+        let owned_environ = format!(
+            "SYMPHONY_ISSUE_WORKTREE=/repo/shared\0{OMP_CLEANUP_MARKER_ENV}=provider=omp-primary;issue=SYM-102;cwd=/repo/shared\0"
+        );
+        assert!(omp_acp_environ_matches_cleanup_owner(
+            issue_worktree,
+            "SYM-102",
+            &session,
+            owned_environ.as_bytes(),
+        ));
+    }
 }

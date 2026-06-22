@@ -20,7 +20,7 @@ use crate::{
     },
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, GitRefRecord, IssueStateRecord,
-        LifecycleStage, OpenCodeStage, SelfDefectResolutionState,
+        LifecycleStage, OpenCodeStage, SelfDefectRelationMode, SelfDefectResolutionState,
     },
     storage::SqliteStore,
 };
@@ -1007,9 +1007,11 @@ async fn fail_runtime_defect(
     .await?;
     let mut terminating_session = session.clone();
     terminate_current_session_process(project, issue, &mut terminating_session).await?;
-    linear
-        .transition_issue(&issue.id, LinearTransition::Todo)
-        .await?;
+    let transition = match registry_record.relation_mode {
+        SelfDefectRelationMode::Blocking => LinearTransition::Todo,
+        SelfDefectRelationMode::RelatedOnly => LinearTransition::Backlog,
+    };
+    linear.transition_issue(&issue.id, transition).await?;
     let mut record = issue_record(
         project,
         issue,

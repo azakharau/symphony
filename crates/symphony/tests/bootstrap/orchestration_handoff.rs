@@ -1397,7 +1397,7 @@ async fn successful_handoff_with_worktree_outside_configured_root_is_parked_with
         .await
         .expect("orchestrate once");
 
-    assert_todo_transition(&client.transitions(), "completed");
+    assert_backlog_transition(&client.transitions(), "completed");
     assert!(outside.exists(), "outside path must not be removed");
     assert!(
         client
@@ -1467,7 +1467,7 @@ async fn successful_handoff_with_sibling_worktree_is_parked_without_cleanup() {
         .await
         .expect("orchestrate once");
 
-    assert_todo_transition(&client.transitions(), "completed");
+    assert_backlog_transition(&client.transitions(), "completed");
     assert!(active.exists(), "active worktree must not be removed");
     assert!(sibling.exists(), "sibling worktree must not be removed");
     assert!(client.evidence().iter().any(|(_, evidence)| {
@@ -1535,7 +1535,7 @@ async fn successful_handoff_with_whitespace_worktree_path_is_parked_without_clea
         .await
         .expect("orchestrate once");
 
-    assert_todo_transition(&client.transitions(), "completed");
+    assert_backlog_transition(&client.transitions(), "completed");
     assert!(active.exists(), "active worktree must not be removed");
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff"
@@ -1721,7 +1721,7 @@ async fn repeated_session_id_mismatch_hits_runtime_repair_threshold() {
         .expect("orchestrate once");
 
     assert!(opencode.repairs().is_empty());
-    assert_todo_transition(&client.transitions(), "session-mismatch");
+    assert_backlog_transition(&client.transitions(), "session-mismatch");
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff"
             && evidence.body.contains("reached bounded repair threshold")
@@ -1944,7 +1944,7 @@ async fn malformed_success_handoff_fails_fast_without_opencode_repair_or_owner_i
         .await
         .expect("orchestrate once");
 
-    assert_todo_transition(&client.transitions(), "malformed");
+    assert_backlog_transition(&client.transitions(), "malformed");
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff"
             && evidence
@@ -2050,7 +2050,7 @@ async fn malformed_handoff_sidecar_fails_fast_kills_process_tree_and_does_not_re
         stale_terminated,
         "malformed handoff must terminate the previous active ACP process"
     );
-    assert_todo_transition(&client.transitions(), "malformed-json");
+    assert_backlog_transition(&client.transitions(), "malformed-json");
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff"
             && evidence.body.contains("unknown field `next_action`")
@@ -2125,7 +2125,7 @@ async fn dead_in_progress_session_without_handoff_sidecar_fails_fast_instead_of_
         .await
         .expect("orchestrate once");
 
-    assert_todo_transition(&client.transitions(), "missing-sidecar");
+    assert_backlog_transition(&client.transitions(), "missing-sidecar");
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff"
             && evidence
@@ -2375,7 +2375,7 @@ async fn live_acp_process_with_stale_opencode_activity_fails_fast_without_resume
         stale_terminated,
         "stale live ACP process must be terminated instead of treated as active work"
     );
-    assert_todo_transition(&client.transitions(), "stale-live");
+    assert_backlog_transition(&client.transitions(), "stale-live");
     assert!(opencode.repairs().is_empty());
     let issue = store
         .issue("symphony", "stale-live")
@@ -2467,7 +2467,7 @@ async fn missing_handoff_after_local_commit_records_worktree_git_snapshot_and_pr
         .await
         .expect("orchestrate once");
 
-    assert_todo_transition(&client.transitions(), "missing-sidecar-commit");
+    assert_backlog_transition(&client.transitions(), "missing-sidecar-commit");
     let evidence = client
         .evidence()
         .into_iter()
@@ -2616,7 +2616,7 @@ async fn missing_handoff_after_no_diff_records_explicit_no_change_salvage_snapsh
     assert!(evidence.contains("salvage_state: no_local_changes"));
     assert!(evidence.contains("base_changed_files:\nnone"));
     assert!(evidence.contains("explicit no-change handoff instead of a fake commit"));
-    assert_todo_transition(&client.transitions(), "missing-sidecar-no-diff");
+    assert_backlog_transition(&client.transitions(), "missing-sidecar-no-diff");
     assert!(opencode.repairs().is_empty());
 }
 
@@ -2689,7 +2689,7 @@ async fn missing_handoff_after_unpushed_branch_records_unpushed_salvage_snapshot
     assert!(evidence.contains("unpushed_commits: 1"));
     assert!(evidence.contains(&head_sha));
     assert!(evidence.contains("artifact.txt"));
-    assert_todo_transition(&client.transitions(), "missing-sidecar-unpushed");
+    assert_backlog_transition(&client.transitions(), "missing-sidecar-unpushed");
     assert!(opencode.repairs().is_empty());
 }
 

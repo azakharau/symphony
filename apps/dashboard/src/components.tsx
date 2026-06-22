@@ -62,7 +62,7 @@ export function OverviewSurface({ dashboard, quota }: { dashboard: AggregateDash
       </section>
 
       <Panel title="Running now" action={<span>{running.length ? "live sessions" : "empty"}</span>}>
-        {running.length ? <RunningTable issues={running} /> : <EmptyState message="No OpenCode sessions are running. Project rows below still show idle reasons." />}
+        {running.length ? <RunningTable issues={running} /> : <EmptyState message="No runner sessions are running. Project rows below still show idle reasons." />}
       </Panel>
 
       <Panel title="Blockers and idle reasons">
@@ -315,13 +315,13 @@ function IssueTable({ issues, projectId }: { issues: IssueDetail[]; projectId: s
         </thead>
         <tbody className="divide-y divide-slate-100">
           {issues.map((issue) => {
-            const session = issue.opencode_sessions.at(-1);
+            const session = issue.runner_sessions.at(-1);
             return (
               <tr key={issue.issue_id}>
                 <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${projectId}/issues/${issue.issue_id}`}>{issue.identifier}</Link><div className="text-xs text-slate-500">{issue.title}</div></td>
                 <td className="px-3 py-3"><Badge tone={statusTone(issue.lifecycle_stage)}>{issue.display_status}</Badge></td>
                 <td className="px-3 py-3">{session?.active_agent ?? session?.agent ?? "—"}<div className="text-xs text-slate-500">{session?.active_model ?? session?.model ?? "model unknown"}</div></td>
-                <td className="px-3 py-3">{session ? <ProviderStateBlock providerMode={session.provider_mode} providerId={session.provider_id} sessionId={session.opencode_session_id} processId={session.process_id} processAlive={session.process_alive} runtimeFailureKind={session.runtime_failure_kind} acpFrameCount={session.acp_frame_count} evidenceCount={session.session_evidence_refs.length} silenceObserved={session.silence_observed} /> : "—"}</td>
+                <td className="px-3 py-3">{session ? <ProviderStateBlock providerMode={session.provider_mode} providerId={session.provider_id} sessionId={session.runner_session_id} processId={session.process_id} processAlive={session.process_alive} runtimeFailureKind={session.runtime_failure_kind} acpFrameCount={session.acp_frame_count} evidenceCount={session.session_evidence_refs.length} silenceObserved={session.silence_observed} /> : "—"}</td>
                 <td className="px-3 py-3">{session ? processStateLabel(session.process_id, session.process_alive) : "—"}</td>
                 <td className="px-3 py-3"><TokenCell total={session?.token_count ?? 0} cached={session?.cached_token_count} /></td>
                 <td className="px-3 py-3">{session?.activity?.running_tool_count ?? 0}/{session?.activity?.pending_tool_count ?? 0}</td>
@@ -513,7 +513,7 @@ function dotClass(tone: Tone): string {
 
 export function providerModeLabel(mode?: string | null): string {
   if (mode === "omp_acp") return "OMP ACP";
-  if (mode === "opencode_acp") return "OpenCode ACP";
+  if (mode === "acp") return "runner ACP";
   return "provider unavailable";
 }
 
@@ -535,7 +535,7 @@ export function processStateLabel(processId?: number | null, alive?: boolean | n
 }
 
 function isLiveIssue(issue: IssueDetail): boolean {
-  const session = issue.opencode_sessions.at(-1);
+  const session = issue.runner_sessions.at(-1);
   return issue.lifecycle_stage === "running" || session?.process_alive === true;
 }
 

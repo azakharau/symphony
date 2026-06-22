@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use crate::{
     config::ProjectConfig,
     linear::LinearIssue,
-    opencode::{OpenCodeEvalResult, OpenCodeHandoff},
+    runner::{RunnerEvalResult, RunnerHandoff},
     state::{BlockerRecord, CleanupStatus, GitRefRecord, IssueStateRecord, LifecycleStage},
 };
 
@@ -38,21 +38,21 @@ pub(super) fn issue_record(
 }
 
 pub(super) fn git_closure_evidence_body(
-    handoff: &OpenCodeHandoff,
-    git: &crate::opencode::GitClosureEvidence,
+    handoff: &RunnerHandoff,
+    git: &crate::runner::GitClosureEvidence,
     integrated_base: Option<&str>,
 ) -> String {
     let mut body = String::new();
-    let _ = writeln!(body, "## OpenCode Handoff Accepted\n");
+    let _ = writeln!(body, "## runner Handoff Accepted\n");
     if integrated_base.is_some() {
         let _ = writeln!(
             body,
-            "OpenCode completed the task, pushed the issue branch, and Symphony integrated it into the canonical branch.\n"
+            "runner completed the task, pushed the issue branch, and Symphony integrated it into the canonical branch.\n"
         );
     } else {
         let _ = writeln!(
             body,
-            "OpenCode completed the task and Symphony accepted a no-change git closure.\n"
+            "runner completed the task and Symphony accepted a no-change git closure.\n"
         );
     }
 
@@ -123,7 +123,7 @@ pub(super) fn git_closure_evidence_body(
     body
 }
 
-fn readable_eval(eval: &OpenCodeEvalResult) -> String {
+fn readable_eval(eval: &RunnerEvalResult) -> String {
     let status = if eval.passed { "passed" } else { "failed" };
     let mut line = format!("`{}` {status}", eval.suite);
     if let Some(details) = eval

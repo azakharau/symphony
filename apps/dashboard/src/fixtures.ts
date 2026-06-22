@@ -31,8 +31,8 @@ export const acceptanceDashboard: AggregateDashboard = {
       liveness: {
         status: "active",
         reason: "runtime polling normally",
-        primary_reason_code: "active_opencode_session",
-        primary_reason_detail: "two OpenCode sessions are executing",
+        primary_reason_code: "active_runner_session",
+        primary_reason_detail: "two runner sessions are executing",
         last_poll_at: "2026-06-19T14:12:00Z",
         last_successful_candidate_scan_at: "2026-06-19T14:10:00Z",
         capacity: baseCapacity,
@@ -50,8 +50,8 @@ export const acceptanceDashboard: AggregateDashboard = {
           title: "Build dashboard surfaces",
           display_status: "running",
           session_id: "oc-sym-97",
-          provider_mode: "opencode_acp",
-          provider_id: "opencode-primary",
+          provider_mode: "acp",
+          provider_id: "runner-primary",
           process_id: 4277,
           process_alive: true,
           lifecycle_stage: "running",
@@ -201,11 +201,11 @@ const sym97Issue: IssueDetail = {
   cleanup_status: "clean",
   stop_reason: null,
   last_runner_event: "component tests passed",
-  opencode_sessions: [
+  runner_sessions: [
     {
-      opencode_session_id: "oc-sym-97",
-      provider_mode: "opencode_acp",
-      provider_id: "opencode-primary",
+      runner_session_id: "oc-sym-97",
+      provider_mode: "acp",
+      provider_id: "runner-primary",
       agent: "build",
       model: "gpt-5.5",
       worktree_path: "/workspaces/symphony/SYM-97",
@@ -318,7 +318,7 @@ const blockedIssue: IssueDetail = {
   cleanup_status: "pending",
   stop_reason: "owner input required",
   last_runner_event: "provider quota exhausted",
-  opencode_sessions: [],
+  runner_sessions: [],
   eval_results: [],
 };
 
@@ -344,7 +344,7 @@ export const acceptanceProject: ProjectDetail = {
       title: "Foundation BFF routes",
       lifecycle_stage: "completed",
       display_status: "completed",
-      opencode_sessions: [],
+      runner_sessions: [],
       eval_results: [{ run_id: "eval-88", suite: "bun run build", status: "passed" }],
     },
   ],
@@ -378,10 +378,10 @@ export const failedProject: ProjectDetail = {
       },
       failure: { kind: "runtime", message: "process exited before handoff", fingerprint: "runtime-exit:atl-42", occurrence_count: 2 },
       last_runner_event: "runtime process exited",
-      opencode_sessions: [
+      runner_sessions: [
         {
-          ...sym97Issue.opencode_sessions[0],
-          opencode_session_id: "oc-atl-42",
+          ...sym97Issue.runner_sessions[0],
+          runner_session_id: "oc-atl-42",
           provider_mode: "omp_acp",
           provider_id: "omp-primary",
           process_id: 5321,

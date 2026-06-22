@@ -3,10 +3,10 @@ use std::path::PathBuf;
 
 use crate::{
     config::RootConfig,
-    opencode::{OpenCodeSessionTreeActivity, read_session_tree_activity},
+    runner::{RunnerSessionTreeActivity, read_session_tree_activity},
     state::{
         CleanupStatus, EvalRunRecord, GitRefRecord, IssueStateRecord, LifecycleStage,
-        OpenCodeSessionRecord, OpenCodeStage, ProjectRuntimeLivenessRecord, RuntimeLivenessStatus,
+        ProjectRuntimeLivenessRecord, RunnerSessionRecord, RunnerStage, RuntimeLivenessStatus,
     },
     storage::{SqliteStore, StorageError},
 };
@@ -149,7 +149,7 @@ pub struct ProjectReadModel {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct IssueReadModel {
     pub issue: IssueStateRecord,
-    pub opencode_sessions: Vec<OpenCodeSessionRecord>,
+    pub runner_sessions: Vec<RunnerSessionRecord>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -177,7 +177,7 @@ impl RuntimeDashboardApi {
                     project,
                     max_sessions,
                     config
-                        .opencode_storage
+                        .runner_archive
                         .as_ref()
                         .map(|storage| storage.database_path.clone()),
                 )
@@ -289,7 +289,7 @@ pub struct RunningIssueSummary {
     pub process_id: Option<u32>,
     pub process_alive: Option<bool>,
     pub lifecycle_stage: Option<LifecycleStage>,
-    pub stage: Option<OpenCodeStage>,
+    pub stage: Option<RunnerStage>,
     pub agent: Option<String>,
     pub model: Option<String>,
     pub active_agent: Option<String>,
@@ -416,7 +416,7 @@ impl ProjectDashboardResponse {
             .filter(|issue| {
                 issue.lifecycle_stage == LifecycleStage::Running
                     && issue
-                        .opencode_sessions
+                        .runner_sessions
                         .iter()
                         .any(session_is_active_for_display)
             })
@@ -478,7 +478,7 @@ fn running_issue_summary(
     project: &ProjectDashboardResponse,
     issue: &IssueDetailResponse,
 ) -> RunningIssueSummary {
-    let session = preferred_issue_session(&issue.opencode_sessions);
+    let session = preferred_issue_session(&issue.runner_sessions);
     let activity = session.and_then(|session| session.activity.as_ref());
 
     RunningIssueSummary {
@@ -488,7 +488,7 @@ fn running_issue_summary(
         identifier: issue.identifier.clone(),
         title: issue.title.clone(),
         display_status: issue.display_status.clone(),
-        session_id: session.map(|session| session.opencode_session_id.clone()),
+        session_id: session.map(|session| session.runner_session_id.clone()),
         provider_mode: session.map(|session| session.provider_mode),
         provider_id: session.and_then(|session| session.provider_id.clone()),
         process_id: session.and_then(|session| session.process_id),
@@ -523,7 +523,7 @@ fn running_issue_summary(
 
 fn issue_recorded_tokens(issue: &IssueDetailResponse) -> u64 {
     issue
-        .opencode_sessions
+        .runner_sessions
         .iter()
         .map(|session| session.token_count)
         .sum()
@@ -531,7 +531,7 @@ fn issue_recorded_tokens(issue: &IssueDetailResponse) -> u64 {
 
 fn issue_recorded_cost_micros(issue: &IssueDetailResponse) -> u64 {
     issue
-        .opencode_sessions
+        .runner_sessions
         .iter()
         .map(|session| session.cost_micros)
         .sum()
@@ -553,7 +553,7 @@ pub struct IssueDetailResponse {
     pub cleanup_status: CleanupStatus,
     pub stop_reason: Option<String>,
     pub last_runner_event: Option<String>,
-    pub opencode_sessions: Vec<OpenCodeSessionDetail>,
+    pub runner_sessions: Vec<RunnerSessionDetail>,
     pub eval_results: Vec<EvalRunRecord>,
 }
 
@@ -566,8 +566,8 @@ pub struct RuntimeDefectProjection {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct OpenCodeSessionDetail {
-    pub opencode_session_id: String,
+pub struct RunnerSessionDetail {
+    pub runner_session_id: String,
     pub provider_mode: crate::state::RuntimeProviderMode,
     pub provider_id: Option<String>,
     pub agent: String,
@@ -576,8 +576,8 @@ pub struct OpenCodeSessionDetail {
     pub process_id: Option<u32>,
     pub process_alive: Option<bool>,
     pub lifecycle_stage: LifecycleStage,
-    pub current_stage: OpenCodeStage,
-    pub stage_history: Vec<OpenCodeStage>,
+    pub current_stage: RunnerStage,
+    pub stage_history: Vec<RunnerStage>,
     pub active_agent: Option<String>,
     pub active_model: Option<String>,
     pub subagents_used: u64,
@@ -596,7 +596,7 @@ pub struct OpenCodeSessionDetail {
     pub acp_frame_count: u64,
     pub session_evidence_refs: Vec<String>,
     pub silence_observed: bool,
-    pub activity: Option<OpenCodeSessionTreeActivity>,
+    pub activity: Option<RunnerSessionTreeActivity>,
     pub activity_error: Option<String>,
 }
 
@@ -604,12 +604,12 @@ async fn issue_read_model(
     store: &SqliteStore,
     issue: IssueStateRecord,
 ) -> Result<IssueReadModel, StorageError> {
-    let opencode_sessions = store
-        .opencode_sessions_for_issue(&issue.project_id, &issue.issue_id)
+    let runner_sessions = store
+        .runner_sessions_for_issue(&issue.project_id, &issue.issue_id)
         .await?;
     Ok(IssueReadModel {
         issue,
-        opencode_sessions,
+        runner_sessions,
     })
 }
 
@@ -617,7 +617,7 @@ async fn project_dashboard_response(
     store: &SqliteStore,
     project: ProjectReadModel,
     max_sessions: u32,
-    opencode_database_path: Option<PathBuf>,
+    runner_archive_database_path: Option<PathBuf>,
 ) -> Result<ProjectDashboardResponse, StorageError> {
     let capacity = project_capacity(&project, max_sessions);
     let mut liveness = project_liveness_response(&project, &capacity);
@@ -625,7 +625,8 @@ async fn project_dashboard_response(
     let mut active_issues = Vec::new();
     let mut history_issues = Vec::new();
     for issue in project.issues {
-        let detail = issue_detail_response(store, issue, opencode_database_path.as_ref()).await?;
+        let detail =
+            issue_detail_response(store, issue, runner_archive_database_path.as_ref()).await?;
         if matches!(
             detail.lifecycle_stage,
             LifecycleStage::Completed | LifecycleStage::Canceled
@@ -712,12 +713,9 @@ fn project_capacity(project: &ProjectReadModel, max_sessions: u32) -> ProjectCap
 
 fn issue_has_running_execution(issue: &IssueReadModel) -> bool {
     issue.issue.lifecycle_stage == LifecycleStage::Running
-        || issue.opencode_sessions.iter().any(|session| {
+        || issue.runner_sessions.iter().any(|session| {
             session.lifecycle_stage == LifecycleStage::Running
-                && !matches!(
-                    session.stage,
-                    OpenCodeStage::Failed | OpenCodeStage::Completed
-                )
+                && !matches!(session.stage, RunnerStage::Failed | RunnerStage::Completed)
                 && session.process_id.is_some()
         })
 }
@@ -791,7 +789,7 @@ fn primary_execution_reason(
                 .failure
                 .as_ref()
                 .map(|failure| failure.message.clone())
-                .unwrap_or_else(|| "OpenCode worktree validation failed".into()),
+                .unwrap_or_else(|| "runner worktree validation failed".into()),
         );
     }
     if let Some(issue) = active_issues
@@ -804,7 +802,7 @@ fn primary_execution_reason(
                 .failure
                 .as_ref()
                 .map(|failure| failure.message.clone())
-                .unwrap_or_else(|| "OpenCode git closure validation failed".into()),
+                .unwrap_or_else(|| "runner git closure validation failed".into()),
         );
     }
     if let Some(issue) = active_issues.iter().find(|issue| {
@@ -830,19 +828,19 @@ fn primary_execution_reason(
     {
         return (
             "runner_dead",
-            "a running OpenCode session has no live runner process".into(),
+            "a running runner session has no live runner process".into(),
         );
     }
     if active_issues.iter().any(issue_waits_for_handoff) {
         return (
             "waiting_for_handoff",
-            "an active OpenCode session is waiting in handoff".into(),
+            "an active runner session is waiting in handoff".into(),
         );
     }
-    if active_issues.iter().any(issue_has_active_opencode_session) {
+    if active_issues.iter().any(issue_has_active_runner_session) {
         return (
-            "active_opencode_session",
-            "an OpenCode session is actively executing".into(),
+            "active_runner_session",
+            "an runner session is actively executing".into(),
         );
     }
     if liveness.capacity.available_sessions == 0 {
@@ -898,7 +896,7 @@ fn primary_execution_reason(
 fn issue_has_dead_runner(issue: &IssueDetailResponse) -> bool {
     issue.lifecycle_stage == LifecycleStage::Running
         && issue
-            .opencode_sessions
+            .runner_sessions
             .iter()
             .any(|session| session.process_alive == Some(false))
 }
@@ -922,21 +920,21 @@ fn issue_has_git_closure_failure(issue: &IssueDetailResponse) -> bool {
 fn issue_waits_for_handoff(issue: &IssueDetailResponse) -> bool {
     issue.lifecycle_stage == LifecycleStage::Running
         && issue
-            .opencode_sessions
+            .runner_sessions
             .iter()
-            .any(|session| session.current_stage == OpenCodeStage::Handoff)
+            .any(|session| session.current_stage == RunnerStage::Handoff)
 }
 
-fn issue_has_active_opencode_session(issue: &IssueDetailResponse) -> bool {
+fn issue_has_active_runner_session(issue: &IssueDetailResponse) -> bool {
     issue.lifecycle_stage == LifecycleStage::Running
-        && issue.opencode_sessions.iter().any(|session| {
+        && issue.runner_sessions.iter().any(|session| {
             matches!(
                 session.current_stage,
-                OpenCodeStage::Starting
-                    | OpenCodeStage::Running
-                    | OpenCodeStage::Eval
-                    | OpenCodeStage::Review
-                    | OpenCodeStage::Silent
+                RunnerStage::Starting
+                    | RunnerStage::Running
+                    | RunnerStage::Eval
+                    | RunnerStage::Review
+                    | RunnerStage::Silent
             )
         })
 }
@@ -967,14 +965,14 @@ fn issue_has_linear_blocker(issue: &IssueDetailResponse) -> bool {
 async fn issue_detail_response(
     store: &SqliteStore,
     issue: IssueReadModel,
-    opencode_database_path: Option<&PathBuf>,
+    runner_archive_database_path: Option<&PathBuf>,
 ) -> Result<IssueDetailResponse, StorageError> {
     let eval_results = store
         .eval_runs_for_issue(&issue.issue.project_id, &issue.issue.issue_id)
         .await?;
     let mut sessions = Vec::new();
-    for session in issue.opencode_sessions {
-        sessions.push(session_detail(store, session, opencode_database_path).await?);
+    for session in issue.runner_sessions {
+        sessions.push(session_detail(store, session, runner_archive_database_path).await?);
     }
     sessions.sort_by_key(session_display_priority);
     let preferred_session = preferred_issue_session(&sessions);
@@ -1014,19 +1012,19 @@ async fn issue_detail_response(
         cleanup_status: issue.issue.cleanup_status,
         stop_reason,
         last_runner_event,
-        opencode_sessions: sessions,
+        runner_sessions: sessions,
         eval_results,
     })
 }
 
-fn preferred_issue_session(sessions: &[OpenCodeSessionDetail]) -> Option<&OpenCodeSessionDetail> {
+fn preferred_issue_session(sessions: &[RunnerSessionDetail]) -> Option<&RunnerSessionDetail> {
     sessions
         .iter()
         .find(|session| session_is_active_for_display(session))
         .or_else(|| sessions.last())
 }
 
-fn session_display_priority(session: &OpenCodeSessionDetail) -> u8 {
+fn session_display_priority(session: &RunnerSessionDetail) -> u8 {
     if session_is_active_for_display(session) {
         0
     } else {
@@ -1034,16 +1032,16 @@ fn session_display_priority(session: &OpenCodeSessionDetail) -> u8 {
     }
 }
 
-fn session_is_active_for_display(session: &OpenCodeSessionDetail) -> bool {
+fn session_is_active_for_display(session: &RunnerSessionDetail) -> bool {
     session.lifecycle_stage == LifecycleStage::Running
         && matches!(
             session.current_stage,
-            OpenCodeStage::Starting
-                | OpenCodeStage::Running
-                | OpenCodeStage::Eval
-                | OpenCodeStage::Review
-                | OpenCodeStage::Handoff
-                | OpenCodeStage::Silent
+            RunnerStage::Starting
+                | RunnerStage::Running
+                | RunnerStage::Eval
+                | RunnerStage::Review
+                | RunnerStage::Handoff
+                | RunnerStage::Silent
         )
 }
 
@@ -1077,11 +1075,11 @@ fn runtime_defect_next_action(issue: &IssueStateRecord) -> &'static str {
 
 async fn session_detail(
     store: &SqliteStore,
-    session: OpenCodeSessionRecord,
-    opencode_database_path: Option<&PathBuf>,
-) -> Result<OpenCodeSessionDetail, StorageError> {
+    session: RunnerSessionRecord,
+    runner_archive_database_path: Option<&PathBuf>,
+) -> Result<RunnerSessionDetail, StorageError> {
     let stage_history = store
-        .opencode_stage_events_for_session(
+        .runner_stage_events_for_session(
             &session.project_id,
             &session.issue_id,
             &session.session_id,
@@ -1097,7 +1095,7 @@ async fn session_detail(
     };
     let process_id = session.process_id;
     let process_alive = process_alive(process_id).await;
-    let (activity, activity_error) = match opencode_database_path {
+    let (activity, activity_error) = match runner_archive_database_path {
         Some(path) => match read_session_tree_activity(path.clone(), &session.session_id, 40).await
         {
             Ok(activity) => (activity, None),
@@ -1110,8 +1108,8 @@ async fn session_detail(
     let started_at_ms = session_activity_started_at_ms(&session.session_id, activity.as_ref());
     let duration_ms = session_activity_duration_ms(&session.session_id, activity.as_ref());
 
-    Ok(OpenCodeSessionDetail {
-        opencode_session_id: session.session_id,
+    Ok(RunnerSessionDetail {
+        runner_session_id: session.session_id,
         provider_mode: session.provider_mode,
         provider_id: session.provider_id,
         agent: session.agent,
@@ -1154,7 +1152,7 @@ async fn process_alive(process_id: Option<u32>) -> Option<bool> {
     )
 }
 
-fn session_tree_cached_token_count(activity: &OpenCodeSessionTreeActivity) -> u64 {
+fn session_tree_cached_token_count(activity: &RunnerSessionTreeActivity) -> u64 {
     activity
         .sessions
         .iter()
@@ -1169,7 +1167,7 @@ fn session_tree_cached_token_count(activity: &OpenCodeSessionTreeActivity) -> u6
 
 fn session_activity_duration_ms(
     session_id: &str,
-    activity: Option<&OpenCodeSessionTreeActivity>,
+    activity: Option<&RunnerSessionTreeActivity>,
 ) -> Option<u64> {
     let activity = activity?;
     let root = session_activity_root(session_id, activity)?;
@@ -1190,15 +1188,15 @@ fn session_activity_duration_ms(
 
 fn session_activity_started_at_ms(
     session_id: &str,
-    activity: Option<&OpenCodeSessionTreeActivity>,
+    activity: Option<&RunnerSessionTreeActivity>,
 ) -> Option<u64> {
     session_activity_root(session_id, activity?).map(|session| session.time_created_ms)
 }
 
 fn session_activity_root<'a>(
     session_id: &str,
-    activity: &'a OpenCodeSessionTreeActivity,
-) -> Option<&'a crate::opencode::OpenCodeSessionActivity> {
+    activity: &'a RunnerSessionTreeActivity,
+) -> Option<&'a crate::runner::RunnerSessionActivity> {
     activity
         .sessions
         .iter()
@@ -1213,7 +1211,7 @@ fn session_activity_root<'a>(
 
 fn issue_display_status(
     issue: &IssueStateRecord,
-    latest_session: Option<&OpenCodeSessionDetail>,
+    latest_session: Option<&RunnerSessionDetail>,
 ) -> String {
     if runtime_defect_projection(issue).is_some() {
         return match issue.lifecycle_stage {
@@ -1243,7 +1241,7 @@ fn issue_display_status(
         if session.silence_observed {
             return "silence observed".into();
         }
-        if session.current_stage == OpenCodeStage::Eval {
+        if session.current_stage == RunnerStage::Eval {
             return "eval running".into();
         }
     }

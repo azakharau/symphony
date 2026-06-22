@@ -25,7 +25,7 @@ pub(super) fn stable_fingerprint(input: &str) -> String {
         .collect()
 }
 
-pub(super) fn recoverable_opencode_failure(failure: &FailureRecord) -> bool {
+pub(super) fn recoverable_runner_failure(failure: &FailureRecord) -> bool {
     failure.kind == "eval_failure"
         || failure.kind == "provider_blocker"
         || failure.fingerprint.as_deref() == Some("launch_failed")

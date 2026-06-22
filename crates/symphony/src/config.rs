@@ -3,7 +3,7 @@ use std::{collections::HashSet, path::PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{linear::LinearProjectConfig, opencode::OpenCodeRuntimeConfig};
+use crate::{linear::LinearProjectConfig, runner::RunnerRuntimeConfig};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -11,7 +11,7 @@ pub struct RootConfig {
     pub server: Option<ServerConfig>,
     #[serde(default)]
     pub cleanup: CleanupConfig,
-    pub opencode_storage: Option<OpenCodeStorageConfig>,
+    pub runner_archive: Option<RunnerArchiveConfig>,
     projects: Vec<ProjectConfig>,
 }
 
@@ -35,7 +35,7 @@ impl RootConfig {
             return Err(ConfigError::Validation("projects must not be empty".into()));
         }
         self.cleanup.validate()?;
-        if let Some(storage) = &self.opencode_storage {
+        if let Some(storage) = &self.runner_archive {
             storage.validate()?;
         }
 
@@ -64,9 +64,9 @@ impl RootConfig {
                     project.id
                 )));
             }
-            if project.opencode.agent.trim().is_empty() {
+            if project.runner.agent.trim().is_empty() {
                 return Err(ConfigError::Validation(format!(
-                    "project `{}` opencode.agent must not be empty",
+                    "project `{}` runner.agent must not be empty",
                     project.id
                 )));
             }
@@ -101,21 +101,21 @@ pub struct ServerConfig {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct OpenCodeStorageConfig {
+pub struct RunnerArchiveConfig {
     pub database_path: PathBuf,
     pub archive_root: PathBuf,
 }
 
-impl OpenCodeStorageConfig {
+impl RunnerArchiveConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         if self.database_path.as_os_str().is_empty() {
             return Err(ConfigError::Validation(
-                "opencode_storage.database_path must not be empty".into(),
+                "runner_archive.database_path must not be empty".into(),
             ));
         }
         if self.archive_root.as_os_str().is_empty() {
             return Err(ConfigError::Validation(
-                "opencode_storage.archive_root must not be empty".into(),
+                "runner_archive.archive_root must not be empty".into(),
             ));
         }
         Ok(())
@@ -184,7 +184,7 @@ pub struct ProjectConfig {
     pub repo_path: PathBuf,
     pub branch: BranchPolicy,
     pub linear: LinearProjectConfig,
-    pub opencode: OpenCodeRuntimeConfig,
+    pub runner: RunnerRuntimeConfig,
     #[serde(default)]
     pub omp_acp_providers: Vec<OhMyPiAcpProviderConfig>,
     pub eval: EvalDefaults,

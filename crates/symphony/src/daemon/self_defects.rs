@@ -7,7 +7,7 @@ use crate::{
         ManagedLinearIssueState, ManagedLinearRelation,
     },
     state::{
-        FailureRecord, OpenCodeSessionRecord, SelfDefectOccurrenceRecord, SelfDefectRecord,
+        FailureRecord, RunnerSessionRecord, SelfDefectOccurrenceRecord, SelfDefectRecord,
         SelfDefectRelationMode,
     },
     storage::SqliteStore,
@@ -140,7 +140,7 @@ async fn record_suppressed_duplicate_self_defect(
     store: &SqliteStore,
     issue: &LinearIssue,
     failure: &FailureRecord,
-    session: &OpenCodeSessionRecord,
+    session: &RunnerSessionRecord,
     summary: &str,
     existing: SelfDefectRecord,
 ) -> anyhow::Result<SelfDefectRecord> {
@@ -224,13 +224,13 @@ pub(super) struct RuntimeSelfDefectInput<'a> {
     pub evidence_kind: &'a str,
     pub message: &'a str,
     pub failure: &'a FailureRecord,
-    pub session: &'a OpenCodeSessionRecord,
+    pub session: &'a RunnerSessionRecord,
 }
 
 fn runtime_self_defect_summary(
     message: &str,
     failure: &FailureRecord,
-    session: &OpenCodeSessionRecord,
+    session: &RunnerSessionRecord,
     policy: ManagedSelfDefectPolicy,
 ) -> String {
     let fingerprint = failure
@@ -447,8 +447,8 @@ mod tests {
     use crate::{
         config::{BranchPolicy, ConcurrencyConfig, EvalDefaults},
         linear::{LinearBlocker, LinearClientError, LinearMilestone, LinearProjectConfig},
-        opencode::{OpenCodeRuntimeConfig, PermissionPolicy},
-        state::{LifecycleStage, OpenCodeStage, SelfDefectRecommendationConfidence},
+        runner::{PermissionPolicy, RunnerRuntimeConfig},
+        state::{LifecycleStage, RunnerStage, SelfDefectRecommendationConfidence},
     };
 
     use super::*;
@@ -475,18 +475,18 @@ mod tests {
                     fingerprint: Some("fingerprint-related".into()),
                     occurrence_count: 1,
                 },
-                session: &OpenCodeSessionRecord {
+                session: &RunnerSessionRecord {
                     project_id: project.id.clone(),
                     issue_id: issue.id.clone(),
                     session_id: "oc-session".into(),
-                    provider_mode: crate::state::RuntimeProviderMode::OpenCodeAcp,
+                    provider_mode: crate::state::RuntimeProviderMode::Acp,
                     provider_id: None,
                     agent: "rust-engineer".into(),
                     model: None,
                     worktree_path: "/tmp/worktree".into(),
                     process_id: Some(42),
                     lifecycle_stage: LifecycleStage::Failed,
-                    stage: OpenCodeStage::Failed,
+                    stage: RunnerStage::Failed,
                     active_agent: None,
                     active_model: None,
                     message_count: 0,
@@ -614,18 +614,18 @@ mod tests {
                     fingerprint: Some("missing_handoff_sidecar".into()),
                     occurrence_count: 1,
                 },
-                session: &OpenCodeSessionRecord {
+                session: &RunnerSessionRecord {
                     project_id: project.id.clone(),
                     issue_id: source.id.clone(),
                     session_id: "oc-session".into(),
-                    provider_mode: crate::state::RuntimeProviderMode::OpenCodeAcp,
+                    provider_mode: crate::state::RuntimeProviderMode::Acp,
                     provider_id: None,
                     agent: "build".into(),
                     model: None,
                     worktree_path: "/tmp/worktree".into(),
                     process_id: None,
                     lifecycle_stage: LifecycleStage::Failed,
-                    stage: OpenCodeStage::Failed,
+                    stage: RunnerStage::Failed,
                     active_agent: None,
                     active_model: None,
                     message_count: 0,
@@ -855,7 +855,7 @@ mod tests {
             RuntimeSelfDefectInput {
                 issue: &source,
                 evidence_kind: "runtime_defect",
-                message: "OpenCode launch failed after Linear transition",
+                message: "runner launch failed after Linear transition",
                 failure: &failure,
                 session: &session,
             },
@@ -1285,8 +1285,8 @@ mod tests {
                 team_key: "SYM".into(),
                 project_id: None,
             },
-            opencode: OpenCodeRuntimeConfig {
-                command: PathBuf::from("opencode"),
+            runner: RunnerRuntimeConfig {
+                command: PathBuf::from("runner"),
                 args: Vec::new(),
                 agent: "build".into(),
                 model: None,
@@ -1339,19 +1339,19 @@ mod tests {
         }
     }
 
-    fn session_record(project: &ProjectConfig, issue: &LinearIssue) -> OpenCodeSessionRecord {
-        OpenCodeSessionRecord {
+    fn session_record(project: &ProjectConfig, issue: &LinearIssue) -> RunnerSessionRecord {
+        RunnerSessionRecord {
             project_id: project.id.clone(),
             issue_id: issue.id.clone(),
             session_id: "oc-session".into(),
-            provider_mode: crate::state::RuntimeProviderMode::OpenCodeAcp,
+            provider_mode: crate::state::RuntimeProviderMode::Acp,
             provider_id: None,
             agent: "build".into(),
             model: None,
             worktree_path: "/tmp/worktree".into(),
             process_id: None,
             lifecycle_stage: LifecycleStage::Failed,
-            stage: OpenCodeStage::Failed,
+            stage: RunnerStage::Failed,
             active_agent: None,
             active_model: None,
             message_count: 0,

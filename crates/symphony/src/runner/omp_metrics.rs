@@ -4,13 +4,13 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use tokio::fs;
 
-use super::{OpenCodeError, OpenCodeSessionTreeMetrics};
+use super::{RunnerError, RunnerSessionTreeMetrics};
 
 const OMP_SESSION_DIR: &str = ".omp/agent/sessions";
 
 pub async fn read_omp_session_tree_metrics(
     session_id: &str,
-) -> Result<Option<OpenCodeSessionTreeMetrics>, OpenCodeError> {
+) -> Result<Option<RunnerSessionTreeMetrics>, RunnerError> {
     let Some(root) = std::env::var_os("HOME").map(PathBuf::from) else {
         return Ok(None);
     };
@@ -20,17 +20,17 @@ pub async fn read_omp_session_tree_metrics(
 pub async fn read_omp_session_tree_metrics_from_root(
     sessions_root: impl AsRef<Path>,
     session_id: &str,
-) -> Result<Option<OpenCodeSessionTreeMetrics>, OpenCodeError> {
+) -> Result<Option<RunnerSessionTreeMetrics>, RunnerError> {
     let Some(root_file) = find_omp_root_session_file(sessions_root.as_ref(), session_id).await?
     else {
         return Ok(None);
     };
 
-    let mut metrics = OpenCodeSessionTreeMetrics {
+    let mut metrics = RunnerSessionTreeMetrics {
         root_session_id: session_id.to_owned(),
         session_count: 1,
         active_agent: Some("build".into()),
-        ..OpenCodeSessionTreeMetrics::default()
+        ..RunnerSessionTreeMetrics::default()
     };
     ingest_jsonl_file(&root_file, &mut metrics).await?;
 
@@ -49,23 +49,23 @@ pub async fn read_omp_session_tree_metrics_from_root(
 async fn find_omp_root_session_file(
     sessions_root: &Path,
     session_id: &str,
-) -> Result<Option<PathBuf>, OpenCodeError> {
+) -> Result<Option<PathBuf>, RunnerError> {
     let mut projects = match fs::read_dir(sessions_root).await {
         Ok(projects) => projects,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(OpenCodeError::Io(error)),
+        Err(error) => return Err(RunnerError::Io(error)),
     };
     let suffix = format!("_{session_id}.jsonl");
-    while let Some(project) = projects.next_entry().await.map_err(OpenCodeError::Io)? {
-        let file_type = project.file_type().await.map_err(OpenCodeError::Io)?;
+    while let Some(project) = projects.next_entry().await.map_err(RunnerError::Io)? {
+        let file_type = project.file_type().await.map_err(RunnerError::Io)?;
         if !file_type.is_dir() {
             continue;
         }
         let mut entries = fs::read_dir(project.path())
             .await
-            .map_err(OpenCodeError::Io)?;
-        while let Some(entry) = entries.next_entry().await.map_err(OpenCodeError::Io)? {
-            let file_type = entry.file_type().await.map_err(OpenCodeError::Io)?;
+            .map_err(RunnerError::Io)?;
+        while let Some(entry) = entries.next_entry().await.map_err(RunnerError::Io)? {
+            let file_type = entry.file_type().await.map_err(RunnerError::Io)?;
             if !file_type.is_file() {
                 continue;
             }
@@ -83,16 +83,16 @@ async fn find_omp_root_session_file(
 
 async fn ingest_subagent_files(
     session_dir: &Path,
-    metrics: &mut OpenCodeSessionTreeMetrics,
-) -> Result<(), OpenCodeError> {
+    metrics: &mut RunnerSessionTreeMetrics,
+) -> Result<(), RunnerError> {
     let mut entries = match fs::read_dir(session_dir).await {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(OpenCodeError::Io(error)),
+        Err(error) => return Err(RunnerError::Io(error)),
     };
     let mut newest_subagent = None::<(u64, String)>;
-    while let Some(entry) = entries.next_entry().await.map_err(OpenCodeError::Io)? {
-        let file_type = entry.file_type().await.map_err(OpenCodeError::Io)?;
+    while let Some(entry) = entries.next_entry().await.map_err(RunnerError::Io)? {
+        let file_type = entry.file_type().await.map_err(RunnerError::Io)?;
         if !file_type.is_file() {
             continue;
         }
@@ -126,9 +126,9 @@ async fn ingest_subagent_files(
 
 async fn ingest_jsonl_file(
     path: &Path,
-    metrics: &mut OpenCodeSessionTreeMetrics,
-) -> Result<(), OpenCodeError> {
-    let content = fs::read_to_string(path).await.map_err(OpenCodeError::Io)?;
+    metrics: &mut RunnerSessionTreeMetrics,
+) -> Result<(), RunnerError> {
+    let content = fs::read_to_string(path).await.map_err(RunnerError::Io)?;
     for line in content.lines().filter(|line| !line.trim().is_empty()) {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -138,7 +138,7 @@ async fn ingest_jsonl_file(
     Ok(())
 }
 
-fn ingest_omp_jsonl_record(value: &Value, metrics: &mut OpenCodeSessionTreeMetrics) {
+fn ingest_omp_jsonl_record(value: &Value, metrics: &mut RunnerSessionTreeMetrics) {
     if value.get("type").and_then(Value::as_str) != Some("message") {
         return;
     }

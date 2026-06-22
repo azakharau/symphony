@@ -1,9 +1,7 @@
 use crate::{
     config::{ProjectConfig, RootConfig},
     linear::{LinearClient, LinearIssue},
-    state::{
-        FailureRecord, LifecycleStage, OpenCodeSessionRecord, OpenCodeStage, SelfDefectRecord,
-    },
+    state::{FailureRecord, LifecycleStage, RunnerSessionRecord, RunnerStage, SelfDefectRecord},
     storage::SqliteStore,
 };
 
@@ -85,19 +83,19 @@ fn acceptance_session_record(
     issue: &LinearIssue,
     session_id: &str,
     process_id: Option<u32>,
-) -> OpenCodeSessionRecord {
-    OpenCodeSessionRecord {
+) -> RunnerSessionRecord {
+    RunnerSessionRecord {
         project_id: project.id.clone(),
         issue_id: issue.id.clone(),
         session_id: session_id.into(),
-        provider_mode: crate::state::RuntimeProviderMode::OpenCodeAcp,
+        provider_mode: crate::state::RuntimeProviderMode::Acp,
         provider_id: None,
         agent: "acceptance-self-defect".into(),
         model: None,
         worktree_path: project.repo_path.to_string_lossy().into_owned(),
         process_id,
         lifecycle_stage: LifecycleStage::Failed,
-        stage: OpenCodeStage::Failed,
+        stage: RunnerStage::Failed,
         active_agent: None,
         active_model: None,
         message_count: 0,
@@ -126,7 +124,7 @@ mod tests {
             LinearClientError, LinearIssueEvidence, LinearMilestone, LinearProjectConfig,
             ManagedLinearRelation,
         },
-        opencode::{OpenCodeRuntimeConfig, PermissionPolicy},
+        runner::{PermissionPolicy, RunnerRuntimeConfig},
         state::SelfDefectRelationMode,
     };
 
@@ -350,8 +348,8 @@ worktree_root = "/tmp/worktrees"
 team_key = "SYM"
 project_id = "symphony-project"
 
-[projects.opencode]
-command = "opencode"
+[projects.runner]
+command = "runner"
 args = ["acp"]
 agent = "build"
 permission_policy = "reject"
@@ -379,8 +377,8 @@ max_sessions = 1
                 team_key: "SYM".into(),
                 project_id: Some("symphony-project".into()),
             },
-            opencode: OpenCodeRuntimeConfig {
-                command: PathBuf::from("opencode"),
+            runner: RunnerRuntimeConfig {
+                command: PathBuf::from("runner"),
                 args: vec!["acp".into()],
                 agent: "build".into(),
                 model: None,

@@ -7,9 +7,9 @@ use std::{
 use tokio::process::Command;
 use tracing::{debug, info};
 
-use super::{OpenCodeError, OpenCodeLaunchSpec};
+use super::{RunnerError, RunnerLaunchSpec};
 
-pub(super) async fn ensure_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), OpenCodeError> {
+pub(super) async fn ensure_worktree(spec: &RunnerLaunchSpec) -> Result<(), RunnerError> {
     validate_launch_worktree(spec)?;
 
     let Some(repo_path) = &spec.repo_path else {
@@ -31,7 +31,7 @@ pub(super) async fn ensure_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), Ope
     }
 
     if tokio::fs::try_exists(&spec.cwd).await? && directory_has_entries(&spec.cwd).await? {
-        return Err(OpenCodeError::InvalidWorktree(format!(
+        return Err(RunnerError::InvalidWorktree(format!(
             "target worktree {} exists but is not a git worktree",
             spec.cwd.display()
         )));
@@ -45,15 +45,13 @@ pub(super) async fn ensure_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), Ope
     create_git_worktree(spec, repo_path, &base_ref).await
 }
 
-pub(super) fn launch_uses_issue_worktree(spec: &OpenCodeLaunchSpec) -> bool {
+pub(super) fn launch_uses_issue_worktree(spec: &RunnerLaunchSpec) -> bool {
     spec.worktree_root
         .as_ref()
         .is_some_and(|root| spec.cwd == root.join(&spec.issue_identifier))
 }
 
-pub(super) async fn ensure_resumable_worktree(
-    spec: &OpenCodeLaunchSpec,
-) -> Result<(), OpenCodeError> {
+pub(super) async fn ensure_resumable_worktree(spec: &RunnerLaunchSpec) -> Result<(), RunnerError> {
     validate_launch_worktree(spec)?;
 
     let Some(repo_path) = &spec.repo_path else {
@@ -78,12 +76,12 @@ pub(super) async fn ensure_resumable_worktree(
 }
 
 async fn ensure_worktree_with_effective_base(
-    spec: &OpenCodeLaunchSpec,
+    spec: &RunnerLaunchSpec,
     repo_path: &Path,
     base_ref: &str,
-) -> Result<(), OpenCodeError> {
+) -> Result<(), RunnerError> {
     if tokio::fs::try_exists(&spec.cwd).await? && directory_has_entries(&spec.cwd).await? {
-        return Err(OpenCodeError::InvalidWorktree(format!(
+        return Err(RunnerError::InvalidWorktree(format!(
             "target worktree {} exists but is not a git worktree",
             spec.cwd.display()
         )));
@@ -97,21 +95,21 @@ async fn ensure_worktree_with_effective_base(
     create_git_worktree(spec, repo_path, base_ref).await
 }
 
-async fn worktree_git_metadata_usable(path: &Path) -> Result<bool, OpenCodeError> {
+async fn worktree_git_metadata_usable(path: &Path) -> Result<bool, RunnerError> {
     git_success(path, ["rev-parse", "--is-inside-work-tree"]).await
 }
 
 async fn archive_broken_git_worktree(
-    spec: &OpenCodeLaunchSpec,
+    spec: &RunnerLaunchSpec,
     repo_path: &Path,
-) -> Result<(), OpenCodeError> {
+) -> Result<(), RunnerError> {
     let archive_root = spec
         .worktree_root
         .as_deref()
         .or_else(|| spec.cwd.parent())
         .map(|root| root.join(".stale-worktrees"))
         .ok_or_else(|| {
-            OpenCodeError::InvalidWorktree(format!(
+            RunnerError::InvalidWorktree(format!(
                 "cannot archive broken worktree {} without a parent directory",
                 spec.cwd.display()
             ))
@@ -131,7 +129,7 @@ async fn archive_broken_git_worktree(
         issue = %spec.issue_identifier,
         cwd = %spec.cwd.display(),
         archive_path = %archive_path.display(),
-        "archiving broken OpenCode git worktree metadata before fresh launch"
+        "archiving broken runner git worktree metadata before fresh launch"
     );
     tokio::fs::rename(&spec.cwd, &archive_path).await?;
     prune_stale_worktree_entries(repo_path).await?;
@@ -139,10 +137,10 @@ async fn archive_broken_git_worktree(
 }
 
 async fn ensure_existing_git_worktree(
-    spec: &OpenCodeLaunchSpec,
+    spec: &RunnerLaunchSpec,
     repo_path: &Path,
     base_ref: &str,
-) -> Result<(), OpenCodeError> {
+) -> Result<(), RunnerError> {
     let current_branch = git_output(
         &spec.cwd,
         ["branch", "--show-current"],
@@ -158,7 +156,7 @@ async fn ensure_existing_git_worktree(
 
     let observed_branch = current_branch.trim();
     if observed_branch.is_empty() {
-        return Err(OpenCodeError::InvalidWorktree(format!(
+        return Err(RunnerError::InvalidWorktree(format!(
             "existing worktree {} has detached HEAD; expected branch {}",
             spec.cwd.display(),
             spec.branch_name
@@ -177,7 +175,7 @@ async fn ensure_existing_git_worktree(
             message.push_str("; dirty or untracked files: ");
             message.push_str(&dirty_evidence);
         }
-        return Err(OpenCodeError::InvalidWorktree(message));
+        return Err(RunnerError::InvalidWorktree(message));
     }
 
     if !status.trim().is_empty() {
@@ -186,7 +184,7 @@ async fn ensure_existing_git_worktree(
             cwd = %spec.cwd.display(),
             branch_name = %spec.branch_name,
             dirty_evidence = %dirty_or_untracked_evidence(&status),
-            "OpenCode worktree already contains preserved same-issue changes; launching repair in place"
+            "runner worktree already contains preserved same-issue changes; launching repair in place"
         );
         return Ok(());
     }
@@ -198,14 +196,14 @@ async fn ensure_existing_git_worktree(
         cwd = %spec.cwd.display(),
         branch_name = %spec.branch_name,
         base_ref,
-        "OpenCode worktree already exists on expected branch with clean status"
+        "runner worktree already exists on expected branch with clean status"
     );
     Ok(())
 }
 
 async fn ensure_existing_resumable_git_worktree(
-    spec: &OpenCodeLaunchSpec,
-) -> Result<(), OpenCodeError> {
+    spec: &RunnerLaunchSpec,
+) -> Result<(), RunnerError> {
     let current_branch = git_output(
         &spec.cwd,
         ["branch", "--show-current"],
@@ -221,7 +219,7 @@ async fn ensure_existing_resumable_git_worktree(
 
     let observed_branch = current_branch.trim();
     if observed_branch.is_empty() {
-        return Err(OpenCodeError::InvalidWorktree(format!(
+        return Err(RunnerError::InvalidWorktree(format!(
             "existing worktree {} has detached HEAD; expected branch {}",
             spec.cwd.display(),
             spec.branch_name
@@ -242,7 +240,7 @@ async fn ensure_existing_resumable_git_worktree(
             message.push_str("; dirty or untracked files: ");
             message.push_str(&dirty_evidence);
         }
-        return Err(OpenCodeError::InvalidWorktree(message));
+        return Err(RunnerError::InvalidWorktree(message));
     }
 
     if observed_branch != spec.branch_name {
@@ -252,7 +250,7 @@ async fn ensure_existing_resumable_git_worktree(
             observed_branch,
             expected_branch = %spec.branch_name,
             dirty = !status.trim().is_empty(),
-            "OpenCode resumable worktree accepted same-issue branch-name drift"
+            "runner resumable worktree accepted same-issue branch-name drift"
         );
     }
 
@@ -261,15 +259,15 @@ async fn ensure_existing_resumable_git_worktree(
         cwd = %spec.cwd.display(),
         branch_name = %spec.branch_name,
         dirty = !status.trim().is_empty(),
-        "OpenCode worktree is resumable on expected branch"
+        "runner worktree is resumable on expected branch"
     );
     Ok(())
 }
 
-async fn effective_base_ref(repo_path: &Path, base_ref: &str) -> Result<String, OpenCodeError> {
+async fn effective_base_ref(repo_path: &Path, base_ref: &str) -> Result<String, RunnerError> {
     let base_ref = base_ref.trim();
     if base_ref.is_empty() {
-        return Err(OpenCodeError::InvalidWorktree(
+        return Err(RunnerError::InvalidWorktree(
             "configured base ref must not be empty".into(),
         ));
     }
@@ -309,10 +307,10 @@ fn remote_refreshed_base_by_default(base_ref: &str) -> bool {
 }
 
 async fn align_existing_worktree_to_base(
-    spec: &OpenCodeLaunchSpec,
+    spec: &RunnerLaunchSpec,
     repo_path: &Path,
     base_ref: &str,
-) -> Result<(), OpenCodeError> {
+) -> Result<(), RunnerError> {
     let base_commit_ref = format!("{base_ref}^{{commit}}");
     let base_head = git_output(
         repo_path,
@@ -335,7 +333,7 @@ async fn align_existing_worktree_to_base(
         branch_name = %spec.branch_name,
         base_ref,
         base_head = %base_head.trim(),
-        "rebasing clean existing OpenCode worktree onto current base before launch"
+        "rebasing clean existing runner worktree onto current base before launch"
     );
     match git_status(&spec.cwd, ["rebase", base_head.trim()], "git rebase <base>").await {
         Ok(()) => {
@@ -348,7 +346,7 @@ async fn align_existing_worktree_to_base(
             if status.trim().is_empty() {
                 Ok(())
             } else {
-                Err(OpenCodeError::InvalidWorktree(format!(
+                Err(RunnerError::InvalidWorktree(format!(
                     "existing worktree {} was dirty after rebasing onto base {}: {}",
                     spec.cwd.display(),
                     base_ref,
@@ -369,10 +367,10 @@ fn dirty_or_untracked_evidence(status: &str) -> String {
 }
 
 async fn create_git_worktree(
-    spec: &OpenCodeLaunchSpec,
+    spec: &RunnerLaunchSpec,
     repo_path: &Path,
     base_ref: &str,
-) -> Result<(), OpenCodeError> {
+) -> Result<(), RunnerError> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_path)
@@ -390,11 +388,11 @@ async fn create_git_worktree(
             cwd = %spec.cwd.display(),
             base_ref,
             branch_name = %spec.branch_name,
-            "OpenCode worktree created"
+            "runner worktree created"
         );
         Ok(())
     } else {
-        Err(OpenCodeError::GitCommand {
+        Err(RunnerError::GitCommand {
             command: format!(
                 "git -C {} worktree add -B {} {} {}",
                 repo_path.display(),
@@ -407,7 +405,7 @@ async fn create_git_worktree(
     }
 }
 
-async fn prune_stale_worktree_entries(repo_path: &Path) -> Result<(), OpenCodeError> {
+async fn prune_stale_worktree_entries(repo_path: &Path) -> Result<(), RunnerError> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_path)
@@ -418,7 +416,7 @@ async fn prune_stale_worktree_entries(repo_path: &Path) -> Result<(), OpenCodeEr
     if output.status.success() {
         Ok(())
     } else {
-        Err(OpenCodeError::GitCommand {
+        Err(RunnerError::GitCommand {
             command: format!("git -C {} worktree prune", repo_path.display()),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
@@ -429,7 +427,7 @@ async fn git_status<const N: usize>(
     cwd: &Path,
     args: [&str; N],
     command: &str,
-) -> Result<(), OpenCodeError> {
+) -> Result<(), RunnerError> {
     let output = Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -439,7 +437,7 @@ async fn git_status<const N: usize>(
     if output.status.success() {
         Ok(())
     } else {
-        Err(OpenCodeError::GitCommand {
+        Err(RunnerError::GitCommand {
             command: format!("git -C {} {}", cwd.display(), git_subcommand_label(command)),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
@@ -450,7 +448,7 @@ async fn git_output<const N: usize>(
     cwd: &Path,
     args: [&str; N],
     command: &str,
-) -> Result<String, OpenCodeError> {
+) -> Result<String, RunnerError> {
     let output = Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -460,14 +458,14 @@ async fn git_output<const N: usize>(
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
-        Err(OpenCodeError::GitCommand {
+        Err(RunnerError::GitCommand {
             command: format!("git -C {} {}", cwd.display(), git_subcommand_label(command)),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
     }
 }
 
-async fn git_success<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<bool, OpenCodeError> {
+async fn git_success<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<bool, RunnerError> {
     let output = Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -481,21 +479,21 @@ fn git_subcommand_label(command: &str) -> &str {
     command.strip_prefix("git ").unwrap_or(command)
 }
 
-async fn directory_has_entries(path: &Path) -> Result<bool, OpenCodeError> {
+async fn directory_has_entries(path: &Path) -> Result<bool, RunnerError> {
     let mut entries = tokio::fs::read_dir(path).await?;
     Ok(entries.next_entry().await?.is_some())
 }
 
-fn validate_launch_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), OpenCodeError> {
+fn validate_launch_worktree(spec: &RunnerLaunchSpec) -> Result<(), RunnerError> {
     if !safe_worktree_name(&spec.issue_identifier) {
-        return Err(OpenCodeError::InvalidWorktree(format!(
+        return Err(RunnerError::InvalidWorktree(format!(
             "issue identifier `{}` is not a safe worktree path component",
             spec.issue_identifier
         )));
     }
     if !safe_branch_name(&spec.branch_name) {
-        return Err(OpenCodeError::InvalidWorktree(format!(
-            "branch `{}` is not safe for an OpenCode issue worktree",
+        return Err(RunnerError::InvalidWorktree(format!(
+            "branch `{}` is not safe for an runner issue worktree",
             spec.branch_name
         )));
     }
@@ -503,7 +501,7 @@ fn validate_launch_worktree(spec: &OpenCodeLaunchSpec) -> Result<(), OpenCodeErr
     if let Some(root) = &spec.worktree_root {
         let expected = root.join(&spec.issue_identifier);
         if spec.cwd != expected {
-            return Err(OpenCodeError::InvalidWorktree(format!(
+            return Err(RunnerError::InvalidWorktree(format!(
                 "worktree path {} does not match configured root plus issue identifier {}",
                 spec.cwd.display(),
                 expected.display()
@@ -542,18 +540,14 @@ fn same_issue_generated_branch(branch: &str, issue_identifier: &str) -> bool {
 }
 
 pub(super) fn handoff_sidecar_path(path: impl AsRef<Path>) -> PathBuf {
-    path.as_ref()
-        .join(".symphony")
-        .join("opencode-handoff.json")
+    path.as_ref().join(".symphony").join("runner-handoff.json")
 }
 
-pub(super) async fn remove_stale_handoff_sidecar(
-    worktree_path: &Path,
-) -> Result<(), OpenCodeError> {
+pub(super) async fn remove_stale_handoff_sidecar(worktree_path: &Path) -> Result<(), RunnerError> {
     let path = handoff_sidecar_path(worktree_path);
     match tokio::fs::remove_file(&path).await {
         Ok(()) => {
-            debug!(path = %path.display(), "removed stale OpenCode handoff sidecar");
+            debug!(path = %path.display(), "removed stale runner handoff sidecar");
             Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -585,7 +579,7 @@ mod tests {
     use std::{fs, process::Command as StdCommand};
 
     use super::*;
-    use crate::opencode::PermissionPolicy;
+    use crate::runner::PermissionPolicy;
 
     #[tokio::test]
     async fn existing_worktree_reuse_rejects_wrong_branch() {
@@ -597,7 +591,7 @@ mod tests {
             .expect_err("wrong branch must be rejected");
 
         assert!(
-            matches!(&error, OpenCodeError::InvalidWorktree(message) if message.contains("is on branch other/SYM-1 but expected symphony/SYM-1")),
+            matches!(&error, RunnerError::InvalidWorktree(message) if message.contains("is on branch other/SYM-1 but expected symphony/SYM-1")),
             "{error}"
         );
     }
@@ -612,7 +606,7 @@ mod tests {
             .expect_err("detached worktree must be rejected");
 
         assert!(
-            matches!(&error, OpenCodeError::InvalidWorktree(message) if message.contains("has detached HEAD")),
+            matches!(&error, RunnerError::InvalidWorktree(message) if message.contains("has detached HEAD")),
             "{error}"
         );
     }
@@ -650,7 +644,7 @@ mod tests {
             .expect_err("wrong branch must not be resumable");
 
         assert!(
-            matches!(&error, OpenCodeError::InvalidWorktree(message) if message.contains("is on branch other/SYM-1 but expected symphony/SYM-1")),
+            matches!(&error, RunnerError::InvalidWorktree(message) if message.contains("is on branch other/SYM-1 but expected symphony/SYM-1")),
             "{error}"
         );
     }
@@ -780,7 +774,7 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                OpenCodeError::GitCommand { command, .. }
+                RunnerError::GitCommand { command, .. }
                     if command == &format!(
                         "git -C {} branch --show-current",
                         fixture.root.display()
@@ -860,11 +854,11 @@ mod tests {
             }
         }
 
-        fn launch_spec(&self) -> OpenCodeLaunchSpec {
-            OpenCodeLaunchSpec {
-                provider_mode: crate::state::RuntimeProviderMode::OpenCodeAcp,
+        fn launch_spec(&self) -> RunnerLaunchSpec {
+            RunnerLaunchSpec {
+                provider_mode: crate::state::RuntimeProviderMode::Acp,
                 provider_id: None,
-                command: PathBuf::from("opencode"),
+                command: PathBuf::from("runner"),
                 args: Vec::new(),
                 cwd: self.worktree.clone(),
                 env_allowlist: Vec::new(),

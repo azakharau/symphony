@@ -2,11 +2,11 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::state::{OpenCodeStage, RuntimeProviderMode};
+use crate::state::{RunnerStage, RuntimeProviderMode};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct OpenCodeRuntimeConfig {
+pub struct RunnerRuntimeConfig {
     pub command: PathBuf,
     #[serde(default)]
     pub args: Vec<String>,
@@ -24,7 +24,7 @@ pub enum PermissionPolicy {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OpenCodeLaunchSpec {
+pub struct RunnerLaunchSpec {
     pub provider_mode: RuntimeProviderMode,
     pub provider_id: Option<String>,
     pub command: PathBuf,
@@ -46,7 +46,7 @@ pub struct OpenCodeLaunchSpec {
 
 pub(crate) const OMP_CLEANUP_MARKER_ENV: &str = "SYMPHONY_OMP_CLEANUP_MARKER";
 
-impl OpenCodeLaunchSpec {
+impl RunnerLaunchSpec {
     pub(crate) fn omp_cleanup_marker(&self) -> Option<String> {
         if self.provider_mode != RuntimeProviderMode::OmpAcp {
             return None;
@@ -61,7 +61,7 @@ impl OpenCodeLaunchSpec {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OpenCodeStartedSession {
+pub struct RunnerStartedSession {
     pub session_id: String,
     pub process_id: Option<u32>,
     pub acp_frame_count: u64,
@@ -69,19 +69,19 @@ pub struct OpenCodeStartedSession {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OpenCodeProcessStarted {
+pub struct RunnerProcessStarted {
     pub process_id: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OpenCodeSessionCreated {
+pub struct RunnerSessionCreated {
     pub session_id: String,
     pub process_id: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct OpenCodeSessionEvent {
-    pub stage: Option<OpenCodeStage>,
+pub struct RunnerSessionEvent {
+    pub stage: Option<RunnerStage>,
     pub active_agent: Option<String>,
     pub active_model: Option<String>,
     pub message_delta: u64,
@@ -97,20 +97,20 @@ pub struct OpenCodeSessionEvent {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct OpenCodeHandoff {
+pub struct RunnerHandoff {
     pub session_id: String,
-    pub lifecycle_stages: Vec<OpenCodeStage>,
+    pub lifecycle_stages: Vec<RunnerStage>,
     pub subagents: Vec<String>,
-    pub eval_results: Vec<OpenCodeEvalResult>,
+    pub eval_results: Vec<RunnerEvalResult>,
     pub changed_files: Vec<String>,
     pub git: Option<GitClosureEvidence>,
     pub risks: Vec<String>,
-    pub stop_reason: OpenCodeStopReason,
+    pub stop_reason: RunnerStopReason,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct OpenCodeEvalResult {
+pub struct RunnerEvalResult {
     pub suite: String,
     pub passed: bool,
     pub failure_fingerprint: Option<String>,
@@ -130,7 +130,7 @@ pub struct GitClosureEvidence {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
-pub enum OpenCodeStopReason {
+pub enum RunnerStopReason {
     Success,
     EvalFailed { failure_fingerprint: String },
     ProviderBlocker { message: String },

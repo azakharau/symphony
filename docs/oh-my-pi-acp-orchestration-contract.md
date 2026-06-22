@@ -3,7 +3,7 @@
 ## Objective
 
 Define how Symphony should orchestrate Oh My Pi ACP as a runtime integration
-surface. This is a research artifact for Symphony coding tasks; OpenCode should
+surface. This is a research artifact for Symphony coding tasks; runner should
 receive only implementation issues that reference this contract.
 
 ## Source-backed OMP surfaces
@@ -44,7 +44,7 @@ Symphony owns orchestration:
 Symphony does not own product-specific runtime policy inside Nervure, Recall,
 Neryva, or other configured projects. Project repos may expose their own
 adapter semantics, but Symphony must treat them as project code executed by the
-OpenCode/OMP runtime, not as Symphony roadmap authority.
+runner/OMP runtime, not as Symphony roadmap authority.
 
 ## Trust boundary
 
@@ -97,7 +97,7 @@ or explicit unsupported status.
 
 ## Implementation handoff rules
 
-OpenCode orchestrated coding tasks should receive the relevant Linear issue
+runner orchestrated coding tasks should receive the relevant Linear issue
 spec plus this document path as fixed context. They should not be asked to
 choose the global product direction, create new roadmap structure, or target
 named subagents. The orchestrator may decompose internally, but the Linear task

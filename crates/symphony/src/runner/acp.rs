@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
-use super::{OpenCodeError, PermissionPolicy};
+use super::{PermissionPolicy, RunnerError};
 
 pub(super) async fn set_session_config_option<R, W>(
     stdin: &mut W,
@@ -11,7 +11,7 @@ pub(super) async fn set_session_config_option<R, W>(
     session_id: &str,
     config_id: &str,
     value: Option<&str>,
-) -> Result<(), OpenCodeError>
+) -> Result<(), RunnerError>
 where
     R: AsyncBufRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
@@ -42,7 +42,7 @@ pub(super) async fn acp_request<R, W>(
     id: u64,
     method: &str,
     params: Value,
-) -> Result<Value, OpenCodeError>
+) -> Result<Value, RunnerError>
 where
     R: AsyncBufRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
@@ -57,7 +57,7 @@ pub(super) async fn read_acp_response<R, W>(
     permission_policy: &PermissionPolicy,
     id: u64,
     method: &str,
-) -> Result<Value, OpenCodeError>
+) -> Result<Value, RunnerError>
 where
     R: AsyncBufRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
@@ -66,17 +66,17 @@ where
         let mut line = String::new();
         let bytes = stdout.read_line(&mut line).await?;
         if bytes == 0 {
-            return Err(OpenCodeError::AcpProtocol(format!(
+            return Err(RunnerError::AcpProtocol(format!(
                 "ACP stdout closed before `{method}` response"
             )));
         }
         let message: Value = serde_json::from_str(&line).map_err(|error| {
-            OpenCodeError::AcpProtocol(format!("invalid ACP JSON `{line}`: {error}"))
+            RunnerError::AcpProtocol(format!("invalid ACP JSON `{line}`: {error}"))
         })?;
 
         if message.get("id").and_then(Value::as_u64) == Some(id) {
             if let Some(error) = message.get("error") {
-                return Err(OpenCodeError::AcpProtocol(format!(
+                return Err(RunnerError::AcpProtocol(format!(
                     "ACP `{method}` failed: {error}"
                 )));
             }
@@ -93,7 +93,7 @@ pub(super) async fn drain_acp_stream<R, W>(
     mut stdout: R,
     mut stdin: W,
     permission_policy: PermissionPolicy,
-) -> Result<(), OpenCodeError>
+) -> Result<(), RunnerError>
 where
     R: AsyncBufRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
@@ -105,7 +105,7 @@ where
             return Ok(());
         }
         let message: Value = serde_json::from_str(&line).map_err(|error| {
-            OpenCodeError::AcpProtocol(format!("invalid ACP JSON `{line}`: {error}"))
+            RunnerError::AcpProtocol(format!("invalid ACP JSON `{line}`: {error}"))
         })?;
         if message.get("id").is_some() && message.get("method").is_some() {
             respond_to_acp_request(&mut stdin, &permission_policy, &message).await?;
@@ -118,7 +118,7 @@ pub(super) async fn write_acp_request<W>(
     id: u64,
     method: &str,
     params: Value,
-) -> Result<(), OpenCodeError>
+) -> Result<(), RunnerError>
 where
     W: AsyncWrite + Unpin + Send,
 {
@@ -137,7 +137,7 @@ async fn respond_to_acp_request<W>(
     stdin: &mut W,
     permission_policy: &PermissionPolicy,
     request: &Value,
-) -> Result<(), OpenCodeError>
+) -> Result<(), RunnerError>
 where
     W: AsyncWrite + Unpin + Send,
 {
@@ -168,7 +168,7 @@ where
     Ok(())
 }
 
-pub(super) fn extract_session_id(result: &Value) -> Result<String, OpenCodeError> {
+pub(super) fn extract_session_id(result: &Value) -> Result<String, RunnerError> {
     result
         .get("sessionId")
         .or_else(|| result.get("id"))
@@ -176,7 +176,7 @@ pub(super) fn extract_session_id(result: &Value) -> Result<String, OpenCodeError
         .filter(|session_id| !session_id.trim().is_empty())
         .map(str::to_string)
         .ok_or_else(|| {
-            OpenCodeError::AcpProtocol(format!(
+            RunnerError::AcpProtocol(format!(
                 "ACP session/new response did not include session id: {result}"
             ))
         })

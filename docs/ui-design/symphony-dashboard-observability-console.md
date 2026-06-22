@@ -8,7 +8,7 @@ Move the dashboard experience out of the Rust runtime and define the product
 contract for a standalone `apps/dashboard` Next.js App Router console. Rust
 Symphony remains API/runtime-only. The dashboard is an operator console for
 seeing what is running, what is blocked, how quota is trending, and how
-OpenCode agents and subagents are behaving.
+runner agents and subagents are behaving.
 
 The dashboard must not show billing amounts. Rust API payloads may still contain legacy
 billing fields until later contract cleanup, but Next BFF responses and UI
@@ -38,7 +38,7 @@ Top-level tabs:
 Drilldowns:
 
 - Project detail: `/projects/[projectId]`
-- Issue detail / OpenCode session inspector:
+- Issue detail / runner session inspector:
   `/projects/[projectId]/issues/[issueId]`
 
 ## Page Contracts
@@ -118,7 +118,7 @@ issue | stage | active agent/model | process | tokens | tools | todos |
 last event | worktree
 ```
 
-### Issue Drilldown / OpenCode Session Inspector
+### Issue Drilldown / runner Session Inspector
 
 Purpose: replace raw HTML transcript walls with interactive operational views.
 
@@ -131,10 +131,10 @@ process state | last event | worktree | git branch/head
 
 Inspector tabs:
 
-- `Todos`: OpenCode todo list grouped by status and priority. Operators can
+- `Todos`: runner todo list grouped by status and priority. Operators can
   filter `pending`, `in_progress`, and `done`, and inspect updated time and
   owning session.
-- `Timeline`: compact event feed from OpenCode parts. Filter by root session,
+- `Timeline`: compact event feed from runner parts. Filter by root session,
   subagent, tool, kind, and status. Show summaries by default; raw payloads are
   hidden behind an explicit expand action.
 - `Agents`: root session and subagent tree. Show parent/child relation, title,
@@ -143,7 +143,7 @@ Inspector tabs:
   subagent, and token-heavy subagent.
 - `Tools`: running, pending, and recent tool events with status and summary.
 - `Messages`: searchable message history view. This is not the default first
-  view. It should support filtering and row expansion so long OpenCode text
+  view. It should support filtering and row expansion so long runner text
   does not dominate the page.
 - `Evidence`: blockers, failures, runtime defect, self-defect routing, eval
   results, git/worktree refs, and stop reason.
@@ -157,7 +157,7 @@ history.
 
 ### Quota
 
-Purpose: make OpenCode quota readable without exposing billing amounts.
+Purpose: make runner quota readable without exposing billing amounts.
 
 Data comes from Next BFF calling:
 

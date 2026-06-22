@@ -39,7 +39,7 @@ impl LinearClient for DoneRequiresStoppedProcessLinearClient {
     ) -> Result<(), LinearClientError> {
         if transition == LinearTransition::Done && test_process_is_alive(self.process_id) {
             return Err(LinearClientError::Message(
-                "Done transition happened before OpenCode process termination".into(),
+                "Done transition happened before runner process termination".into(),
             ));
         }
         self.transitions
@@ -63,13 +63,13 @@ impl LinearClient for DoneRequiresStoppedProcessLinearClient {
 }
 
 #[derive(Debug)]
-struct MismatchedHandoffOpenCodeLauncher {
-    handoff: OpenCodeHandoff,
+struct MismatchedHandoffRunnerLauncher {
+    handoff: RunnerHandoff,
     repairs: std::sync::Mutex<Vec<(String, String)>>,
 }
 
-impl MismatchedHandoffOpenCodeLauncher {
-    fn new(handoff: OpenCodeHandoff) -> Self {
+impl MismatchedHandoffRunnerLauncher {
+    fn new(handoff: RunnerHandoff) -> Self {
         Self {
             handoff,
             repairs: std::sync::Mutex::new(Vec::new()),
@@ -82,33 +82,33 @@ impl MismatchedHandoffOpenCodeLauncher {
 }
 
 #[async_trait::async_trait]
-impl OpenCodeLauncher for MismatchedHandoffOpenCodeLauncher {
+impl RunnerLauncher for MismatchedHandoffRunnerLauncher {
     async fn launch(
         &self,
-        _spec: &opencode::OpenCodeLaunchSpec,
-    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
-        unreachable!("mismatched handoff test should not launch OpenCode")
+        _spec: &runner::RunnerLaunchSpec,
+    ) -> Result<runner::RunnerStartedSession, runner::RunnerError> {
+        unreachable!("mismatched handoff test should not launch runner")
     }
 
     async fn latest_handoff(
         &self,
-        _session: &OpenCodeSessionRecord,
-    ) -> Result<Option<OpenCodeHandoff>, opencode::OpenCodeError> {
+        _session: &RunnerSessionRecord,
+    ) -> Result<Option<RunnerHandoff>, runner::RunnerError> {
         Ok(Some(self.handoff.clone()))
     }
 
     async fn continue_repair(
         &self,
-        _spec: &opencode::OpenCodeLaunchSpec,
-        session: &OpenCodeSessionRecord,
+        _spec: &runner::RunnerLaunchSpec,
+        session: &RunnerSessionRecord,
         failure_fingerprint: &str,
         _repair_message: &str,
-    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+    ) -> Result<runner::RunnerStartedSession, runner::RunnerError> {
         self.repairs
             .lock()
             .expect("repairs lock")
             .push((session.session_id.clone(), failure_fingerprint.to_string()));
-        Ok(opencode::OpenCodeStartedSession {
+        Ok(runner::RunnerStartedSession {
             session_id: session.session_id.clone(),
             process_id: session.process_id,
             acp_frame_count: 0,
@@ -201,7 +201,7 @@ async fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_wo
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session(test_session("symphony", "completed", "oc-80", &worktree))
+        .upsert_runner_session(test_session("symphony", "completed", "oc-80", &worktree))
         .await
         .expect("running session");
 
@@ -211,7 +211,7 @@ async fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_wo
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(Some(success_handoff(
+    let opencode = ScriptedRunnerLauncher::new(Some(success_handoff(
         "oc-80",
         &worktree,
         issue_branch,
@@ -229,11 +229,9 @@ async fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_wo
     let handoff_comment = client
         .evidence()
         .into_iter()
-        .find_map(|(_, evidence)| {
-            (evidence.kind == "opencode_git_closure").then_some(evidence.body)
-        })
+        .find_map(|(_, evidence)| (evidence.kind == "runner_git_closure").then_some(evidence.body))
         .expect("accepted handoff comment");
-    assert!(handoff_comment.contains("## OpenCode Handoff Accepted"));
+    assert!(handoff_comment.contains("## runner Handoff Accepted"));
     assert!(handoff_comment.contains("### Validation"));
     assert!(handoff_comment.contains("### Changed Files"));
     assert!(handoff_comment.contains(&head_sha));
@@ -276,12 +274,12 @@ async fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_wo
         "accepted handoff must unregister the git worktree"
     );
     let session = store
-        .opencode_session("symphony", "completed", "oc-80")
+        .runner_session("symphony", "completed", "oc-80")
         .await
         .expect("query completed session")
         .expect("completed session");
     assert_eq!(session.lifecycle_stage, LifecycleStage::Completed);
-    assert_eq!(session.stage, OpenCodeStage::Completed);
+    assert_eq!(session.stage, RunnerStage::Completed);
     assert_eq!(session.process_id, None);
     assert_eq!(
         session.lifecycle_marker.as_deref(),
@@ -388,21 +386,21 @@ async fn todo_issue_with_recoverable_failed_success_handoff_closes_without_new_l
     issue_record.lifecycle_stage = LifecycleStage::Failed;
     issue_record.failure = Some(FailureRecord {
         kind: "malformed_handoff".into(),
-        message: "eval `opencode-evaluation` did not pass".into(),
+        message: "eval `runner-evaluation` did not pass".into(),
         fingerprint: Some("incomplete_success_handoff".into()),
         occurrence_count: 2,
     });
     store.upsert_issue(issue_record).await.expect("issue");
     let mut session = test_session("symphony", "recoverable", "oc-211", &worktree);
     session.lifecycle_stage = LifecycleStage::Failed;
-    session.stage = OpenCodeStage::Failed;
+    session.stage = RunnerStage::Failed;
     session.lifecycle_marker = Some("failed:malformed_handoff".into());
     session.last_event = Some(format!(
         "failed:incomplete_success_handoff:git_head:{}",
         &head_sha[..12]
     ));
     store
-        .upsert_opencode_session(session)
+        .upsert_runner_session(session)
         .await
         .expect("failed session");
     store
@@ -431,7 +429,7 @@ async fn todo_issue_with_recoverable_failed_success_handoff_closes_without_new_l
         "Todo",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(Some(success_handoff(
+    let opencode = ScriptedRunnerLauncher::new(Some(success_handoff(
         "oc-211",
         &worktree,
         issue_branch,
@@ -551,10 +549,7 @@ async fn omp_handoff_with_semantic_session_id_closes_from_runtime_session() {
     let mut session = test_session("symphony", "omp-semantic", "omp-runtime-id", &worktree);
     session.provider_mode = RuntimeProviderMode::OmpAcp;
     session.provider_id = Some("omp-primary".into());
-    store
-        .upsert_opencode_session(session)
-        .await
-        .expect("session");
+    store.upsert_runner_session(session).await.expect("session");
     let handoff = success_handoff(
         "semantic-omp-handoff-id",
         &worktree,
@@ -567,7 +562,7 @@ async fn omp_handoff_with_semantic_session_id_closes_from_runtime_session() {
         "In Progress",
         Some(1),
     )]);
-    let opencode = MismatchedHandoffOpenCodeLauncher::new(handoff);
+    let opencode = MismatchedHandoffRunnerLauncher::new(handoff);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -666,7 +661,7 @@ async fn passing_handoff_closes_when_canonical_checkout_has_unrelated_dirty_file
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session(test_session(
+        .upsert_runner_session(test_session(
             "symphony",
             "dirty-canonical",
             "oc-83",
@@ -681,7 +676,7 @@ async fn passing_handoff_closes_when_canonical_checkout_has_unrelated_dirty_file
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(Some(success_handoff(
+    let opencode = ScriptedRunnerLauncher::new(Some(success_handoff(
         "oc-83",
         &worktree,
         issue_branch,
@@ -793,7 +788,7 @@ async fn passing_handoff_stops_process_before_done_and_removes_worktree_immediat
     let mut session = test_session("symphony", "close-order", "oc-90", &worktree);
     session.process_id = Some(process_id);
     store
-        .upsert_opencode_session(session)
+        .upsert_runner_session(session)
         .await
         .expect("running session");
 
@@ -801,7 +796,7 @@ async fn passing_handoff_stops_process_before_done_and_removes_worktree_immediat
         linear_issue("close-order", "SYM-90", "In Progress", Some(1)),
         process_id,
     );
-    let opencode = ScriptedOpenCodeLauncher::new(Some(success_handoff(
+    let opencode = ScriptedRunnerLauncher::new(Some(success_handoff(
         "oc-90",
         &worktree,
         issue_branch,
@@ -929,7 +924,7 @@ async fn passing_handoff_accepts_force_updated_issue_branch_after_repair() {
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session(test_session("symphony", "force-repair", "oc-88", &worktree))
+        .upsert_runner_session(test_session("symphony", "force-repair", "oc-88", &worktree))
         .await
         .expect("running session");
 
@@ -939,7 +934,7 @@ async fn passing_handoff_accepts_force_updated_issue_branch_after_repair() {
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(Some(success_handoff(
+    let opencode = ScriptedRunnerLauncher::new(Some(success_handoff(
         "oc-88",
         &worktree,
         issue_branch,
@@ -1063,7 +1058,7 @@ async fn passing_handoff_merges_pushed_issue_branch_when_base_advanced() {
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session(test_session("symphony", "stale-base", "oc-89", &worktree))
+        .upsert_runner_session(test_session("symphony", "stale-base", "oc-89", &worktree))
         .await
         .expect("running session");
 
@@ -1073,7 +1068,7 @@ async fn passing_handoff_merges_pushed_issue_branch_when_base_advanced() {
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(Some(success_handoff(
+    let opencode = ScriptedRunnerLauncher::new(Some(success_handoff(
         "oc-89",
         &worktree,
         issue_branch,
@@ -1172,7 +1167,7 @@ async fn successful_handoff_with_unpushed_issue_commit_does_not_close_or_cleanup
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session(test_session("symphony", "unpushed", "oc-81", &worktree))
+        .upsert_runner_session(test_session("symphony", "unpushed", "oc-81", &worktree))
         .await
         .expect("running session");
 
@@ -1182,7 +1177,7 @@ async fn successful_handoff_with_unpushed_issue_commit_does_not_close_or_cleanup
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(Some(success_handoff(
+    let opencode = ScriptedRunnerLauncher::new(Some(success_handoff(
         "oc-81",
         &worktree,
         "symphony/SYM-81",
@@ -1265,7 +1260,7 @@ async fn no_code_success_handoff_can_close_without_commit_sha() {
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session(test_session("symphony", "no-code", "oc-79", &worktree))
+        .upsert_runner_session(test_session("symphony", "no-code", "oc-79", &worktree))
         .await
         .expect("running session");
 
@@ -1275,15 +1270,15 @@ async fn no_code_success_handoff_can_close_without_commit_sha() {
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(Some(OpenCodeHandoff {
+    let opencode = ScriptedRunnerLauncher::new(Some(RunnerHandoff {
         session_id: "oc-79".into(),
         lifecycle_stages: vec![
-            OpenCodeStage::Running,
-            OpenCodeStage::Handoff,
-            OpenCodeStage::Completed,
+            RunnerStage::Running,
+            RunnerStage::Handoff,
+            RunnerStage::Completed,
         ],
         subagents: Vec::new(),
-        eval_results: vec![OpenCodeEvalResult {
+        eval_results: vec![RunnerEvalResult {
             suite: "symphony-smoke".into(),
             passed: true,
             failure_fingerprint: None,
@@ -1298,7 +1293,7 @@ async fn no_code_success_handoff_can_close_without_commit_sha() {
             worktree_path: worktree.display().to_string(),
         }),
         risks: Vec::new(),
-        stop_reason: OpenCodeStopReason::Success,
+        stop_reason: RunnerStopReason::Success,
     }));
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
@@ -1321,12 +1316,12 @@ async fn no_code_success_handoff_can_close_without_commit_sha() {
         None
     );
     let session = store
-        .opencode_session("symphony", "no-code", "oc-79")
+        .runner_session("symphony", "no-code", "oc-79")
         .await
         .expect("query no-code session")
         .expect("no-code session");
     assert_eq!(session.lifecycle_stage, LifecycleStage::Completed);
-    assert_eq!(session.stage, OpenCodeStage::Completed);
+    assert_eq!(session.stage, RunnerStage::Completed);
     assert_eq!(session.process_id, None);
     assert!(!worktree.exists(), "no-code success must remove worktree");
 }
@@ -1381,7 +1376,7 @@ async fn no_change_handoff_with_unreported_commit_does_not_close_or_cleanup() {
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session(test_session("symphony", "unreported", "oc-82", &worktree))
+        .upsert_runner_session(test_session("symphony", "unreported", "oc-82", &worktree))
         .await
         .expect("running session");
 
@@ -1391,15 +1386,15 @@ async fn no_change_handoff_with_unreported_commit_does_not_close_or_cleanup() {
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(Some(OpenCodeHandoff {
+    let opencode = ScriptedRunnerLauncher::new(Some(RunnerHandoff {
         session_id: "oc-82".into(),
         lifecycle_stages: vec![
-            OpenCodeStage::Running,
-            OpenCodeStage::Handoff,
-            OpenCodeStage::Completed,
+            RunnerStage::Running,
+            RunnerStage::Handoff,
+            RunnerStage::Completed,
         ],
         subagents: Vec::new(),
-        eval_results: vec![OpenCodeEvalResult {
+        eval_results: vec![RunnerEvalResult {
             suite: "symphony-smoke".into(),
             passed: true,
             failure_fingerprint: None,
@@ -1414,7 +1409,7 @@ async fn no_change_handoff_with_unreported_commit_does_not_close_or_cleanup() {
             worktree_path: worktree.display().to_string(),
         }),
         risks: Vec::new(),
-        stop_reason: OpenCodeStopReason::Success,
+        stop_reason: RunnerStopReason::Success,
     }));
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
@@ -1451,12 +1446,12 @@ async fn no_change_handoff_with_unreported_commit_does_not_close_or_cleanup() {
     );
     assert_eq!(failure.occurrence_count, 1);
     let session = store
-        .opencode_session("symphony", "unreported", "oc-82")
+        .runner_session("symphony", "unreported", "oc-82")
         .await
         .expect("query unreported session")
         .expect("unreported session");
     assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(session.stage, OpenCodeStage::Running);
+    assert_eq!(session.stage, RunnerStage::Running);
     assert_eq!(session.lifecycle_marker.as_deref(), Some("repair_prompted"));
     assert!(
         session
@@ -1489,7 +1484,7 @@ async fn successful_handoff_with_worktree_outside_configured_root_is_parked_with
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session(test_session("symphony", "completed", "oc-80", &outside))
+        .upsert_runner_session(test_session("symphony", "completed", "oc-80", &outside))
         .await
         .expect("running session");
 
@@ -1499,7 +1494,7 @@ async fn successful_handoff_with_worktree_outside_configured_root_is_parked_with
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(Some(success_handoff(
+    let opencode = ScriptedRunnerLauncher::new(Some(success_handoff(
         "oc-80",
         &outside,
         "agent-server/opencode-runner-extension",
@@ -1559,7 +1554,7 @@ async fn successful_handoff_with_sibling_worktree_is_parked_without_cleanup() {
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session(test_session("symphony", "completed", "oc-80", &active))
+        .upsert_runner_session(test_session("symphony", "completed", "oc-80", &active))
         .await
         .expect("running session");
 
@@ -1569,7 +1564,7 @@ async fn successful_handoff_with_sibling_worktree_is_parked_without_cleanup() {
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(Some(success_handoff(
+    let opencode = ScriptedRunnerLauncher::new(Some(success_handoff(
         "oc-80",
         &sibling,
         "agent-server/opencode-runner-extension",
@@ -1627,7 +1622,7 @@ async fn successful_handoff_with_whitespace_worktree_path_is_parked_without_clea
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session(test_session("symphony", "completed", "oc-80", &active))
+        .upsert_runner_session(test_session("symphony", "completed", "oc-80", &active))
         .await
         .expect("running session");
 
@@ -1637,7 +1632,7 @@ async fn successful_handoff_with_whitespace_worktree_path_is_parked_without_clea
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(Some(success_handoff(
+    let opencode = ScriptedRunnerLauncher::new(Some(success_handoff(
         "oc-80",
         PathBuf::from(format!("{} ", active.display())),
         "agent-server/opencode-runner-extension",
@@ -1685,7 +1680,7 @@ async fn eval_failure_stays_in_opencode_repair_loop_without_linear_churn() {
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session(test_session("symphony", "repair", "oc-81", &worktree))
+        .upsert_runner_session(test_session("symphony", "repair", "oc-81", &worktree))
         .await
         .expect("running session");
     let client = RecordingLinearClient::new(vec![linear_issue(
@@ -1694,8 +1689,7 @@ async fn eval_failure_stays_in_opencode_repair_loop_without_linear_churn() {
         "In Progress",
         Some(1),
     )]);
-    let opencode =
-        ScriptedOpenCodeLauncher::new(Some(eval_failed_handoff("oc-81", "fmt-check-7f")));
+    let opencode = ScriptedRunnerLauncher::new(Some(eval_failed_handoff("oc-81", "fmt-check-7f")));
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -1737,7 +1731,7 @@ async fn repeated_identical_eval_failure_parks_typed_blocker_with_typed_evidence
     });
     store.upsert_issue(issue).await.expect("running issue");
     store
-        .upsert_opencode_session(test_session("symphony", "repeat", "oc-82", &worktree))
+        .upsert_runner_session(test_session("symphony", "repeat", "oc-82", &worktree))
         .await
         .expect("running session");
     let client = RecordingLinearClient::new(vec![linear_issue(
@@ -1746,7 +1740,7 @@ async fn repeated_identical_eval_failure_parks_typed_blocker_with_typed_evidence
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(Some(eval_failed_handoff("oc-82", "lint-loop")));
+    let opencode = ScriptedRunnerLauncher::new(Some(eval_failed_handoff("oc-82", "lint-loop")));
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -1768,7 +1762,7 @@ async fn repeated_identical_eval_failure_parks_typed_blocker_with_typed_evidence
 
     let client =
         RecordingLinearClient::new(vec![linear_issue("repeat", "SYM-82", "Todo", Some(1))]);
-    let opencode = ScriptedOpenCodeLauncher::new(None);
+    let opencode = ScriptedRunnerLauncher::new(None);
 
     let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -1808,7 +1802,7 @@ async fn repeated_session_id_mismatch_hits_runtime_repair_threshold() {
     });
     store.upsert_issue(issue).await.expect("running issue");
     store
-        .upsert_opencode_session(test_session(
+        .upsert_runner_session(test_session(
             "symphony",
             "session-mismatch",
             "oc-83",
@@ -1822,7 +1816,7 @@ async fn repeated_session_id_mismatch_hits_runtime_repair_threshold() {
         "In Progress",
         Some(1),
     )]);
-    let opencode = MismatchedHandoffOpenCodeLauncher::new(success_handoff(
+    let opencode = MismatchedHandoffRunnerLauncher::new(success_handoff(
         "stale-oc-83",
         &worktree,
         "agent-server/opencode-runner-extension",
@@ -1879,7 +1873,7 @@ async fn provider_blocker_parks_without_need_owner_input() {
     thread::sleep(Duration::from_millis(100));
     let provider_process_id = provider_process.id();
     store
-        .upsert_opencode_session({
+        .upsert_runner_session({
             let mut session = test_session("symphony", issue_id, "oc-provider", &worktree);
             session.process_id = Some(provider_process_id);
             session
@@ -1892,15 +1886,15 @@ async fn provider_blocker_parks_without_need_owner_input() {
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(Some(OpenCodeHandoff {
+    let opencode = ScriptedRunnerLauncher::new(Some(RunnerHandoff {
         session_id: "oc-provider".into(),
-        lifecycle_stages: vec![OpenCodeStage::Running, OpenCodeStage::Failed],
+        lifecycle_stages: vec![RunnerStage::Running, RunnerStage::Failed],
         subagents: vec!["rust-engineer".into()],
         eval_results: Vec::new(),
         changed_files: Vec::new(),
         git: None,
         risks: vec!["provider quota exhausted".into()],
-        stop_reason: OpenCodeStopReason::ProviderBlocker {
+        stop_reason: RunnerStopReason::ProviderBlocker {
             message: "provider quota exhausted".into(),
         },
     }));
@@ -1934,14 +1928,14 @@ async fn provider_blocker_parks_without_need_owner_input() {
         "provider_blocker"
     );
     let parked_session = store
-        .opencode_session("symphony", issue_id, "oc-provider")
+        .runner_session("symphony", issue_id, "oc-provider")
         .await
         .expect("query parked session")
         .expect("parked session");
     assert_eq!(parked_session.process_id, None);
     assert!(
         !provider_process_still_alive,
-        "provider blocker parking must terminate the active OpenCode process tree"
+        "provider blocker parking must terminate the active runner process tree"
     );
 }
 
@@ -1962,7 +1956,7 @@ async fn owner_question_parks_with_owner_visible_question() {
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session(test_session("symphony", issue_id, "oc-owner", &worktree))
+        .upsert_runner_session(test_session("symphony", issue_id, "oc-owner", &worktree))
         .await
         .expect("running session");
     let client = RecordingLinearClient::new(vec![linear_issue(
@@ -1971,15 +1965,15 @@ async fn owner_question_parks_with_owner_visible_question() {
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(Some(OpenCodeHandoff {
+    let opencode = ScriptedRunnerLauncher::new(Some(RunnerHandoff {
         session_id: "oc-owner".into(),
-        lifecycle_stages: vec![OpenCodeStage::Running, OpenCodeStage::Handoff],
+        lifecycle_stages: vec![RunnerStage::Running, RunnerStage::Handoff],
         subagents: vec!["rust-engineer".into()],
         eval_results: Vec::new(),
         changed_files: Vec::new(),
         git: None,
         risks: Vec::new(),
-        stop_reason: OpenCodeStopReason::OwnerQuestion {
+        stop_reason: RunnerStopReason::OwnerQuestion {
             question: "Which branch should receive the PR?".into(),
         },
     }));
@@ -2022,7 +2016,7 @@ async fn malformed_success_handoff_fails_fast_without_opencode_repair_or_owner_i
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session(test_session(
+        .upsert_runner_session(test_session(
             "symphony",
             "malformed",
             "oc-malformed",
@@ -2036,11 +2030,11 @@ async fn malformed_success_handoff_fails_fast_without_opencode_repair_or_owner_i
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(Some(OpenCodeHandoff {
+    let opencode = ScriptedRunnerLauncher::new(Some(RunnerHandoff {
         session_id: "oc-malformed".into(),
-        lifecycle_stages: vec![OpenCodeStage::Eval, OpenCodeStage::Handoff],
+        lifecycle_stages: vec![RunnerStage::Eval, RunnerStage::Handoff],
         subagents: vec!["rust-engineer".into()],
-        eval_results: vec![OpenCodeEvalResult {
+        eval_results: vec![RunnerEvalResult {
             suite: "cargo test".into(),
             passed: true,
             failure_fingerprint: None,
@@ -2050,7 +2044,7 @@ async fn malformed_success_handoff_fails_fast_without_opencode_repair_or_owner_i
         changed_files: vec!["crates/symphony/src/opencode.rs".into()],
         git: None,
         risks: Vec::new(),
-        stop_reason: OpenCodeStopReason::Success,
+        stop_reason: RunnerStopReason::Success,
     }));
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
@@ -2080,12 +2074,12 @@ async fn malformed_success_handoff_fails_fast_without_opencode_repair_or_owner_i
         Some("incomplete_success_handoff")
     );
     let session = store
-        .opencode_session("symphony", "malformed", "oc-malformed")
+        .runner_session("symphony", "malformed", "oc-malformed")
         .await
         .expect("query session")
         .expect("session");
     assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
-    assert_eq!(session.stage, OpenCodeStage::Failed);
+    assert_eq!(session.stage, RunnerStage::Failed);
     assert_eq!(session.process_id, None);
     assert_eq!(
         session.lifecycle_marker.as_deref(),
@@ -2122,7 +2116,7 @@ async fn malformed_handoff_sidecar_fails_fast_kills_process_tree_and_does_not_re
     thread::sleep(Duration::from_millis(100));
     let stale_process_id = stale_process.id();
     store
-        .upsert_opencode_session({
+        .upsert_runner_session({
             let mut session = test_session("symphony", "malformed-json", "oc-86", &worktree);
             session.process_id = Some(stale_process_id);
             session
@@ -2135,8 +2129,8 @@ async fn malformed_handoff_sidecar_fails_fast_kills_process_tree_and_does_not_re
         "In Progress",
         Some(1),
     )]);
-    let opencode = MalformedHandoffOpenCodeLauncher::new(
-        "opencode-handoff.json: unknown field `next_action`, expected `session_id`",
+    let opencode = MalformedHandoffRunnerLauncher::new(
+        "runner-handoff.json: unknown field `next_action`, expected `session_id`",
     );
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
@@ -2191,12 +2185,12 @@ async fn malformed_handoff_sidecar_fails_fast_kills_process_tree_and_does_not_re
         vec![("oc-86".into(), "malformed_handoff_sidecar".into())]
     );
     let session = store
-        .opencode_session("symphony", "malformed-json", "oc-86")
+        .runner_session("symphony", "malformed-json", "oc-86")
         .await
         .expect("query session")
         .expect("session");
     assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(session.stage, OpenCodeStage::Running);
+    assert_eq!(session.stage, RunnerStage::Running);
     assert_eq!(session.process_id, Some(stale_process_id));
     assert_eq!(session.lifecycle_marker.as_deref(), Some("repair_prompted"));
     assert_eq!(
@@ -2220,7 +2214,7 @@ async fn dead_in_progress_session_without_handoff_sidecar_fails_fast_instead_of_
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session({
+        .upsert_runner_session({
             let mut session = test_session("symphony", "missing-sidecar", "oc-87", &worktree);
             session.process_id = None;
             session
@@ -2233,7 +2227,7 @@ async fn dead_in_progress_session_without_handoff_sidecar_fails_fast_instead_of_
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(None);
+    let opencode = ScriptedRunnerLauncher::new(None);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -2248,7 +2242,7 @@ async fn dead_in_progress_session_without_handoff_sidecar_fails_fast_instead_of_
         evidence.kind == "malformed_handoff"
             && evidence
                 .body
-                .contains(".symphony/opencode-handoff.json was not produced")
+                .contains(".symphony/runner-handoff.json was not produced")
     }));
     assert_eq!(
         opencode.repairs(),
@@ -2265,12 +2259,12 @@ async fn dead_in_progress_session_without_handoff_sidecar_fails_fast_instead_of_
         Some("missing_handoff_sidecar")
     );
     let session = store
-        .opencode_session("symphony", "missing-sidecar", "oc-87")
+        .runner_session("symphony", "missing-sidecar", "oc-87")
         .await
         .expect("query session")
         .expect("session");
     assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(session.stage, OpenCodeStage::Running);
+    assert_eq!(session.stage, RunnerStage::Running);
     assert_eq!(session.process_id, None);
     assert_eq!(session.lifecycle_marker.as_deref(), Some("repair_prompted"));
     assert_eq!(
@@ -2288,7 +2282,7 @@ async fn dead_acp_process_with_active_opencode_child_session_resumes_instead_of_
     let config = RootConfig::from_toml_str(&valid_config_toml().replacen(
         "[[projects]]",
         &format!(
-            "[opencode_storage]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]",
+            "[runner_archive]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]",
             opencode_db_path.display(),
             dir.path().join("archives").display()
         ),
@@ -2305,7 +2299,7 @@ async fn dead_acp_process_with_active_opencode_child_session_resumes_instead_of_
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session({
+        .upsert_runner_session({
             let mut session = test_session("symphony", "active-child", "ses-root", &worktree);
             session.process_id = None;
             session
@@ -2318,7 +2312,7 @@ async fn dead_acp_process_with_active_opencode_child_session_resumes_instead_of_
         "In Progress",
         Some(1),
     )]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+    let opencode = ResumeRecordingRunnerLauncher::new(4242);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -2326,7 +2320,7 @@ async fn dead_acp_process_with_active_opencode_child_session_resumes_instead_of_
 
     assert!(
         client.evidence().is_empty(),
-        "fresh OpenCode child activity must not be reported as missing handoff"
+        "fresh runner child activity must not be reported as missing handoff"
     );
     assert!(opencode.repairs().is_empty());
     assert_eq!(
@@ -2341,23 +2335,23 @@ async fn dead_acp_process_with_active_opencode_child_session_resumes_instead_of_
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
     assert!(issue.failure.is_none());
     let session = store
-        .opencode_session("symphony", "active-child", "ses-root")
+        .runner_session("symphony", "active-child", "ses-root")
         .await
         .expect("query session")
         .expect("session");
     assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(session.stage, OpenCodeStage::Running);
+    assert_eq!(session.stage, RunnerStage::Running);
     assert_eq!(session.process_id, Some(4242));
     assert_eq!(session.subagent_count, 1);
     assert_eq!(
         session.lifecycle_marker.as_deref(),
-        Some("opencode_db_activity")
+        Some("runner_archive_activity")
     );
     assert!(
         session
             .last_event
             .as_deref()
-            .is_some_and(|event| event.starts_with("opencode_db_updated")),
+            .is_some_and(|event| event.starts_with("runner_archive_updated")),
         "last_event={:?}",
         session.last_event
     );
@@ -2372,7 +2366,7 @@ async fn live_acp_process_with_fresh_opencode_activity_keeps_process_id_without_
     let config = RootConfig::from_toml_str(&valid_config_toml().replacen(
         "[[projects]]",
         &format!(
-            "[opencode_storage]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]",
+            "[runner_archive]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]",
             opencode_db_path.display(),
             dir.path().join("archives").display()
         ),
@@ -2396,7 +2390,7 @@ async fn live_acp_process_with_fresh_opencode_activity_keeps_process_id_without_
     thread::sleep(Duration::from_millis(100));
     let live_process_id = live_process.id();
     store
-        .upsert_opencode_session({
+        .upsert_runner_session({
             let mut session = test_session("symphony", "fresh-live", "ses-root", &worktree);
             session.process_id = Some(live_process_id);
             session
@@ -2409,7 +2403,7 @@ async fn live_acp_process_with_fresh_opencode_activity_keeps_process_id_without_
         "In Progress",
         Some(1),
     )]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(4243);
+    let opencode = ResumeRecordingRunnerLauncher::new(4243);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -2417,12 +2411,12 @@ async fn live_acp_process_with_fresh_opencode_activity_keeps_process_id_without_
 
     assert!(opencode.continuations().is_empty());
     let session = store
-        .opencode_session("symphony", "fresh-live", "ses-root")
+        .runner_session("symphony", "fresh-live", "ses-root")
         .await
         .expect("query session")
         .expect("session");
     assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(session.stage, OpenCodeStage::Running);
+    assert_eq!(session.stage, RunnerStage::Running);
     assert_eq!(session.process_id, Some(live_process_id));
 
     let _ = live_process.kill();
@@ -2434,11 +2428,11 @@ async fn live_acp_process_with_stale_opencode_activity_fails_fast_without_resume
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let opencode_db_path = dir.path().join("opencode.sqlite3");
-    super::opencode_runtime::seed_stale_active_opencode_session_tree(&opencode_db_path).await;
+    super::opencode_runtime::seed_stale_active_runner_session_tree(&opencode_db_path).await;
     let config = RootConfig::from_toml_str(&valid_config_toml().replacen(
         "[[projects]]",
         &format!(
-            "[opencode_storage]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]",
+            "[runner_archive]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]",
             opencode_db_path.display(),
             dir.path().join("archives").display()
         ),
@@ -2462,7 +2456,7 @@ async fn live_acp_process_with_stale_opencode_activity_fails_fast_without_resume
     thread::sleep(Duration::from_millis(100));
     let stale_process_id = stale_process.id();
     store
-        .upsert_opencode_session({
+        .upsert_runner_session({
             let mut session = test_session("symphony", "stale-live", "ses-root", &worktree);
             session.process_id = Some(stale_process_id);
             session
@@ -2475,7 +2469,7 @@ async fn live_acp_process_with_stale_opencode_activity_fails_fast_without_resume
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(None);
+    let opencode = ScriptedRunnerLauncher::new(None);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -2521,12 +2515,12 @@ async fn live_acp_process_with_stale_opencode_activity_fails_fast_without_resume
         Some("missing_handoff_sidecar")
     );
     let session = store
-        .opencode_session("symphony", "stale-live", "ses-root")
+        .runner_session("symphony", "stale-live", "ses-root")
         .await
         .expect("query session")
         .expect("session");
     assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(session.stage, OpenCodeStage::Running);
+    assert_eq!(session.stage, RunnerStage::Running);
     assert_eq!(session.lifecycle_marker.as_deref(), Some("repair_prompted"));
     assert_eq!(
         session.last_event.as_deref(),
@@ -2584,7 +2578,7 @@ async fn missing_handoff_after_local_commit_records_worktree_git_snapshot_and_pr
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session({
+        .upsert_runner_session({
             let mut session =
                 test_session("symphony", "missing-sidecar-commit", "oc-88", &worktree);
             session.process_id = Some(u32::MAX);
@@ -2598,7 +2592,7 @@ async fn missing_handoff_after_local_commit_records_worktree_git_snapshot_and_pr
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(None);
+    let opencode = ScriptedRunnerLauncher::new(None);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -2615,7 +2609,7 @@ async fn missing_handoff_after_local_commit_records_worktree_git_snapshot_and_pr
         .find(|(_, evidence)| evidence.kind == "malformed_handoff")
         .map(|(_, evidence)| evidence.body)
         .expect("runtime defect evidence");
-    assert!(evidence.contains(".symphony/opencode-handoff.json was not produced"));
+    assert!(evidence.contains(".symphony/runner-handoff.json was not produced"));
     assert!(evidence.contains("git_snapshot:"));
     assert!(evidence.contains("process_id: 4294967295"));
     assert!(evidence.contains("docs/architecture/context-bundles/wcb-boundary-audit.md"));
@@ -2642,12 +2636,12 @@ async fn missing_handoff_after_local_commit_records_worktree_git_snapshot_and_pr
     );
 
     let session = store
-        .opencode_session("symphony", "missing-sidecar-commit", "oc-88")
+        .runner_session("symphony", "missing-sidecar-commit", "oc-88")
         .await
         .expect("query session")
         .expect("session");
     assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(session.stage, OpenCodeStage::Running);
+    assert_eq!(session.stage, RunnerStage::Running);
     assert_eq!(session.process_id, Some(u32::MAX));
     assert_eq!(session.lifecycle_marker.as_deref(), Some("repair_prompted"));
     assert_eq!(
@@ -2680,7 +2674,7 @@ async fn missing_handoff_after_dirty_worktree_records_dirty_salvage_snapshot() {
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session(test_session(
+        .upsert_runner_session(test_session(
             "symphony",
             "missing-sidecar-dirty",
             "oc-89",
@@ -2694,7 +2688,7 @@ async fn missing_handoff_after_dirty_worktree_records_dirty_salvage_snapshot() {
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(None);
+    let opencode = ScriptedRunnerLauncher::new(None);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -2739,7 +2733,7 @@ async fn missing_handoff_after_no_diff_records_explicit_no_change_salvage_snapsh
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session(test_session(
+        .upsert_runner_session(test_session(
             "symphony",
             "missing-sidecar-no-diff",
             "oc-91",
@@ -2753,7 +2747,7 @@ async fn missing_handoff_after_no_diff_records_explicit_no_change_salvage_snapsh
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(None);
+    let opencode = ScriptedRunnerLauncher::new(None);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -2818,7 +2812,7 @@ async fn missing_handoff_after_unpushed_branch_records_unpushed_salvage_snapshot
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session(test_session(
+        .upsert_runner_session(test_session(
             "symphony",
             "missing-sidecar-unpushed",
             "oc-92",
@@ -2832,7 +2826,7 @@ async fn missing_handoff_after_unpushed_branch_records_unpushed_salvage_snapshot
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(None);
+    let opencode = ScriptedRunnerLauncher::new(None);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await

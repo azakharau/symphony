@@ -7,17 +7,16 @@ async fn opencode_session_archive_preserves_session_tree_before_deleting_sqlite_
     seed_opencode_session_tree(&db_path).await;
     let archive_root = dir.path().join("archives");
 
-    let report =
-        opencode::archive_and_delete_session_tree(opencode::OpenCodeSessionArchiveRequest {
-            opencode_database_path: db_path.clone(),
-            archive_root: archive_root.clone(),
-            project_id: "recall".into(),
-            issue_id: "issue-100".into(),
-            issue_identifier: "MNE-100".into(),
-            root_session_id: "ses-root".into(),
-        })
-        .await
-        .expect("archive session tree");
+    let report = runner::archive_and_delete_session_tree(runner::RunnerSessionArchiveRequest {
+        runner_archive_database_path: db_path.clone(),
+        archive_root: archive_root.clone(),
+        project_id: "recall".into(),
+        issue_id: "issue-100".into(),
+        issue_identifier: "MNE-100".into(),
+        root_session_id: "ses-root".into(),
+    })
+    .await
+    .expect("archive session tree");
 
     assert_eq!(report.sessions_archived, 2);
     assert_eq!(report.messages_archived, 2);
@@ -31,8 +30,8 @@ async fn opencode_session_archive_preserves_session_tree_before_deleting_sqlite_
 
     let manifest =
         fs::read_to_string(report.artifact_root.join("manifest.json")).expect("manifest archived");
-    assert!(manifest.contains("symphony.opencode_session_archive.v1"));
-    assert!(manifest.contains("OpenCode SQLite session tables across root and child sessions"));
+    assert!(manifest.contains("symphony.runner_session_archive.v1"));
+    assert!(manifest.contains("runner SQLite session tables across root and child sessions"));
     assert!(manifest.contains("\"raw_transcripts_retained_locally\": true"));
     assert!(report.artifact_root.join("sessions.json").exists());
     assert!(report.artifact_root.join("raw").join("parts.json").exists());
@@ -53,7 +52,7 @@ async fn opencode_session_tree_metrics_count_subagent_activity_and_tokens() {
     let db_path = dir.path().join("opencode.db");
     seed_opencode_session_tree(&db_path).await;
 
-    let metrics = opencode::read_session_tree_metrics(&db_path, "ses-root")
+    let metrics = runner::read_session_tree_metrics(&db_path, "ses-root")
         .await
         .expect("read metrics")
         .expect("session tree exists");
@@ -81,7 +80,7 @@ async fn opencode_session_tree_activity_exposes_subagents_todos_and_recent_event
     let db_path = dir.path().join("opencode.db");
     seed_opencode_session_tree(&db_path).await;
 
-    let activity = opencode::read_session_tree_activity(&db_path, "ses-root", 8)
+    let activity = runner::read_session_tree_activity(&db_path, "ses-root", 8)
         .await
         .expect("read activity")
         .expect("activity exists");
@@ -166,7 +165,7 @@ async fn opencode_session_tree_activity_uses_global_bounded_timeline_ordering() 
         .expect("insert extra part");
     }
 
-    let activity = opencode::read_session_tree_activity(&db_path, "ses-root", 3)
+    let activity = runner::read_session_tree_activity(&db_path, "ses-root", 3)
         .await
         .expect("read activity")
         .expect("activity exists");
@@ -193,7 +192,7 @@ async fn dashboard_issue_detail_embeds_live_opencode_activity_from_sqlite() {
     let config_toml = valid_config_toml().replacen(
         "[[projects]]",
         &format!(
-            "[opencode_storage]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]",
+            "[runner_archive]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]",
             opencode_db_path.display(),
             dir.path().join("archives").display()
         ),
@@ -215,10 +214,7 @@ async fn dashboard_issue_detail_embeds_live_opencode_activity_from_sqlite() {
         "/home/agent/.symphony/workspaces/opencode/symphony/SYM-120",
     );
     session.process_id = None;
-    store
-        .upsert_opencode_session(session)
-        .await
-        .expect("session");
+    store.upsert_runner_session(session).await.expect("session");
 
     let api = RuntimeDashboardApi::from_store(&config, &store)
         .await
@@ -227,7 +223,7 @@ async fn dashboard_issue_detail_embeds_live_opencode_activity_from_sqlite() {
         .issue_detail("symphony", "activity")
         .expect("issue detail")
         .expect("issue exists");
-    let session = &detail.opencode_sessions[0];
+    let session = &detail.runner_sessions[0];
 
     assert_eq!(session.process_id, None);
     assert_eq!(session.process_alive, None);
@@ -251,11 +247,11 @@ async fn dashboard_issue_detail_embeds_live_opencode_activity_from_sqlite() {
 }
 
 #[tokio::test]
-async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_issue_prompt() {
+async fn acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_issue_prompt() {
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
     let mut issue = linear_issue("issue-27", "SYM-27", "Todo", Some(1))
-        .with_description("Implement the OpenCode ACP lifecycle runner with stage telemetry.");
+        .with_description("Implement the runner ACP lifecycle runner with stage telemetry.");
     issue.upstream_context.push(LinearUpstreamContext {
         id: "upstream-55".into(),
         identifier: "NER-55".into(),
@@ -265,12 +261,12 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         branch_name: Some("feature/ner-55-canon-source-authority-map".into()),
         accepted_artifacts: vec!["docs/canon-source-authority-map.md".into()],
         handoff_summary: Some(
-            "## OpenCode Handoff Accepted\nCommitted 61f216d docs: add canon source authority map"
+            "## runner Handoff Accepted\nCommitted 61f216d docs: add canon source authority map"
                 .into(),
         ),
     });
 
-    let spec = opencode::build_acp_launch_spec(project, &issue);
+    let spec = runner::build_acp_launch_spec(project, &issue);
 
     assert_eq!(spec.command, PathBuf::from("/usr/local/bin/opencode"));
     assert_eq!(spec.args, vec!["acp"]);
@@ -280,9 +276,9 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
     );
     assert_eq!(spec.recall_workspace_root, None);
     assert!(spec.prompt.contains("SYM-27"), "{}", spec.prompt);
-    assert!(!spec.prompt.contains("Run OpenCode ACP"), "{}", spec.prompt);
+    assert!(!spec.prompt.contains("Run runner ACP"), "{}", spec.prompt);
     assert!(
-        !spec.prompt.contains("OpenCode ACP session id"),
+        !spec.prompt.contains("runner ACP session id"),
         "{}",
         spec.prompt
     );
@@ -470,7 +466,7 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
         spec.prompt
     );
     for fragment in [
-        "Symphony accepts OpenCode orchestrator field names",
+        "Symphony accepts runner orchestrator field names",
         "subagents_used",
         "\"stop_reason\": \"accepted\"",
     ] {
@@ -497,7 +493,7 @@ async fn opencode_acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_
     );
     assert!(
         spec.prompt
-            .contains("Implement the OpenCode ACP lifecycle runner"),
+            .contains("Implement the runner ACP lifecycle runner"),
         "{}",
         spec.prompt
     );
@@ -538,7 +534,7 @@ inverse_bridge_reference = true
         handoff_summary: Some("Accepted upstream artifact".into()),
     });
 
-    let spec = opencode::build_acp_launch_spec(project, &issue);
+    let spec = runner::build_acp_launch_spec(project, &issue);
 
     assert_eq!(spec.provider_mode, RuntimeProviderMode::OmpAcp);
     assert_eq!(spec.provider_id.as_deref(), Some("omp-primary"));
@@ -608,7 +604,7 @@ for line in sys.stdin:
     fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod");
     let worktree = dir.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let spec = opencode::OpenCodeLaunchSpec {
+    let spec = runner::RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::OmpAcp,
         provider_id: Some("omp-primary".into()),
         command: command.clone(),
@@ -632,7 +628,7 @@ for line in sys.stdin:
         permission_policy: PermissionPolicy::Reject,
     };
 
-    let started = opencode::StdioOpenCodeLauncher
+    let started = runner::StdioRunnerLauncher
         .launch(&spec)
         .await
         .expect("mock OMP launch");
@@ -747,7 +743,7 @@ for line in sys.stdin:
     fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod");
     let worktree = dir.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let spec = opencode::OpenCodeLaunchSpec {
+    let spec = runner::RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::OmpAcp,
         provider_id: Some("omp-primary".into()),
         command,
@@ -767,12 +763,12 @@ for line in sys.stdin:
         permission_policy: PermissionPolicy::Reject,
     };
 
-    let err = opencode::StdioOpenCodeLauncher
+    let err = runner::StdioRunnerLauncher
         .launch(&spec)
         .await
         .expect_err("prompt error fails OMP launch");
 
-    let opencode::OpenCodeError::AcpSetupFailed {
+    let runner::RunnerError::AcpSetupFailed {
         process_id,
         session_id,
         reason,
@@ -831,7 +827,7 @@ for line in sys.stdin:
     fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod");
     let worktree = dir.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let spec = opencode::OpenCodeLaunchSpec {
+    let spec = runner::RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::OmpAcp,
         provider_id: Some("omp-primary".into()),
         command,
@@ -850,7 +846,7 @@ for line in sys.stdin:
         prompt: "Implement MNE-235".into(),
         permission_policy: PermissionPolicy::Reject,
     };
-    let session = OpenCodeSessionRecord {
+    let session = RunnerSessionRecord {
         project_id: "recall".into(),
         issue_id: "issue-mne-235".into(),
         session_id: "omp-session-existing".into(),
@@ -861,7 +857,7 @@ for line in sys.stdin:
         worktree_path: worktree.display().to_string(),
         process_id: None,
         lifecycle_stage: LifecycleStage::Failed,
-        stage: OpenCodeStage::Failed,
+        stage: RunnerStage::Failed,
         active_agent: None,
         active_model: None,
         message_count: 0,
@@ -879,7 +875,7 @@ for line in sys.stdin:
         silence_observed: false,
     };
 
-    let started = opencode::StdioOpenCodeLauncher
+    let started = runner::StdioRunnerLauncher
         .continue_repair(
             &spec,
             &session,
@@ -887,7 +883,7 @@ for line in sys.stdin:
             "sidecar was missing",
         )
         .await
-        .expect("OMP repair starts without OpenCode config options");
+        .expect("OMP repair starts without runner config options");
 
     assert_eq!(started.session_id, "omp-session-existing");
     assert!(started.process_id.is_some());
@@ -945,7 +941,7 @@ for line in sys.stdin:
     fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod");
     let worktree = dir.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let spec = opencode::OpenCodeLaunchSpec {
+    let spec = runner::RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::OmpAcp,
         provider_id: Some("omp-primary".into()),
         command,
@@ -965,7 +961,7 @@ for line in sys.stdin:
         permission_policy: PermissionPolicy::Reject,
     };
 
-    let started = opencode::StdioOpenCodeLauncher
+    let started = runner::StdioRunnerLauncher
         .launch(&spec)
         .await
         .expect("mock OMP launch");
@@ -1006,7 +1002,7 @@ for line in sys.stdin:
     fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod");
     let repo = dir.path().join("repo");
     fs::create_dir_all(&repo).expect("repo");
-    let spec = opencode::OpenCodeLaunchSpec {
+    let spec = runner::RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::OmpAcp,
         provider_id: Some("omp-primary".into()),
         command,
@@ -1026,7 +1022,7 @@ for line in sys.stdin:
         permission_policy: PermissionPolicy::Reject,
     };
 
-    let started = opencode::StdioOpenCodeLauncher
+    let started = runner::StdioRunnerLauncher
         .launch(&spec)
         .await
         .expect("mock OMP project repo launch");
@@ -1059,7 +1055,7 @@ for line in sys.stdin:
     fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod");
     let worktree_root = dir.path().join("worktrees");
     let worktree = worktree_root.join("SYM-102");
-    let spec = opencode::OpenCodeLaunchSpec {
+    let spec = runner::RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::OmpAcp,
         provider_id: Some("omp-primary".into()),
         command,
@@ -1079,7 +1075,7 @@ for line in sys.stdin:
         permission_policy: PermissionPolicy::Reject,
     };
 
-    let started = opencode::StdioOpenCodeLauncher
+    let started = runner::StdioRunnerLauncher
         .launch(&spec)
         .await
         .expect("mock OMP launch");
@@ -1100,7 +1096,7 @@ async fn malformed_omp_acp_frame_is_typed_and_cleans_process_tree() {
     fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod");
     let worktree = dir.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let spec = opencode::OpenCodeLaunchSpec {
+    let spec = runner::RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::OmpAcp,
         provider_id: Some("omp-primary".into()),
         command,
@@ -1120,12 +1116,12 @@ async fn malformed_omp_acp_frame_is_typed_and_cleans_process_tree() {
         permission_policy: PermissionPolicy::Reject,
     };
 
-    let err = opencode::StdioOpenCodeLauncher
+    let err = runner::StdioRunnerLauncher
         .launch(&spec)
         .await
         .expect_err("malformed ACP frame fails");
 
-    let opencode::OpenCodeError::AcpSetupFailed {
+    let runner::RunnerError::AcpSetupFailed {
         reason,
         termination,
         ..
@@ -1144,7 +1140,7 @@ async fn malformed_omp_acp_frame_is_typed_and_cleans_process_tree() {
 #[tokio::test]
 async fn missing_omp_acp_binary_is_typed_runtime_failure() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let spec = opencode::OpenCodeLaunchSpec {
+    let spec = runner::RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::OmpAcp,
         provider_id: Some("omp-primary".into()),
         command: dir.path().join("missing-omp"),
@@ -1164,12 +1160,12 @@ async fn missing_omp_acp_binary_is_typed_runtime_failure() {
         permission_policy: PermissionPolicy::Reject,
     };
 
-    let err = opencode::StdioOpenCodeLauncher
+    let err = runner::StdioRunnerLauncher
         .launch(&spec)
         .await
         .expect_err("missing OMP binary fails");
 
-    let opencode::OpenCodeError::RuntimeFailure { kind, .. } = err else {
+    let runner::RunnerError::RuntimeFailure { kind, .. } = err else {
         panic!("expected typed runtime failure");
     };
     assert_eq!(kind, RuntimeFailureKind::MissingBinary);
@@ -1191,7 +1187,7 @@ time.sleep(30)
     )
     .expect("write mock");
     fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).expect("chmod");
-    let spec = opencode::OpenCodeLaunchSpec {
+    let spec = runner::RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::OmpAcp,
         provider_id: Some("omp-primary".into()),
         command,
@@ -1211,12 +1207,12 @@ time.sleep(30)
         permission_policy: PermissionPolicy::Reject,
     };
 
-    let err = opencode::StdioOpenCodeLauncher
+    let err = runner::StdioRunnerLauncher
         .launch(&spec)
         .await
         .expect_err("unsupported OMP ACP version fails");
 
-    let opencode::OpenCodeError::AcpSetupFailed {
+    let runner::RunnerError::AcpSetupFailed {
         reason,
         termination,
         ..
@@ -1249,7 +1245,7 @@ async fn runtime_api_surfaces_omp_acp_provider_mode_and_session_telemetry() {
     session.session_evidence_refs = vec!["sdk:one".into()];
     session.silence_observed = true;
     store
-        .upsert_opencode_session(&session)
+        .upsert_runner_session(&session)
         .await
         .expect("session");
 
@@ -1260,7 +1256,7 @@ async fn runtime_api_surfaces_omp_acp_provider_mode_and_session_telemetry() {
         .issue_detail("symphony", "issue-102")
         .expect("issue detail")
         .expect("issue exists");
-    let session = &detail.opencode_sessions[0];
+    let session = &detail.runner_sessions[0];
 
     assert_eq!(session.provider_mode, RuntimeProviderMode::OmpAcp);
     assert_eq!(session.provider_id.as_deref(), Some("omp-primary"));
@@ -1293,8 +1289,8 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
     let transcript_path = dir.path().join("acp-transcript.jsonl");
     let script_path = write_fake_acp_script(dir.path(), &transcript_path);
     let worktree = dir.path().join("worktree");
-    let spec = opencode::OpenCodeLaunchSpec {
-        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+    let spec = runner::RunnerLaunchSpec {
+        provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
         command: script_path,
         args: Vec::new(),
@@ -1312,7 +1308,7 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
         prompt: "Full Linear issue spec with eval defaults".into(),
         permission_policy: PermissionPolicy::Reject,
     };
-    let launcher = opencode::StdioOpenCodeLauncher;
+    let launcher = runner::StdioRunnerLauncher;
 
     let started = launcher.launch(&spec).await.expect("launch stdio child");
 
@@ -1358,10 +1354,10 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
                 "{transcript}"
             );
             assert!(
-                !transcript.contains("OpenCode ACP session id"),
+                !transcript.contains("runner ACP session id"),
                 "{transcript}"
             );
-            assert!(!transcript.contains("Run OpenCode ACP"), "{transcript}");
+            assert!(!transcript.contains("Run runner ACP"), "{transcript}");
             assert!(
                 !transcript.contains("SYMPHONY_RECALL_WORKSPACE_ROOT"),
                 "{transcript}"
@@ -1381,7 +1377,7 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
                 .expect("handoff read")
                 .expect("fake acp handoff");
             assert_eq!(handoff.session_id, "ses-test");
-            assert_eq!(handoff.stop_reason, OpenCodeStopReason::Success);
+            assert_eq!(handoff.stop_reason, RunnerStopReason::Success);
             return;
         }
         thread::sleep(Duration::from_millis(20));
@@ -1400,8 +1396,8 @@ async fn stdio_launcher_kills_process_tree_when_setup_fails_before_session_attac
     let script_path = write_failing_acp_setup_script(dir.path(), &child_pid_path);
     let worktree = dir.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let spec = opencode::OpenCodeLaunchSpec {
-        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+    let spec = runner::RunnerLaunchSpec {
+        provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
         command: script_path,
         args: Vec::new(),
@@ -1420,7 +1416,7 @@ async fn stdio_launcher_kills_process_tree_when_setup_fails_before_session_attac
         permission_policy: PermissionPolicy::Reject,
     };
 
-    let error = opencode::StdioOpenCodeLauncher
+    let error = runner::StdioRunnerLauncher
         .launch(&spec)
         .await
         .expect_err("setup failure must be returned");
@@ -1431,7 +1427,7 @@ async fn stdio_launcher_kills_process_tree_when_setup_fails_before_session_attac
         .parse::<u32>()
         .expect("child pid number");
     match error {
-        opencode::OpenCodeError::AcpSetupFailed {
+        runner::RunnerError::AcpSetupFailed {
             issue_identifier,
             process_id,
             session_id,
@@ -1459,7 +1455,7 @@ async fn handoff_sidecar_accepts_eval_result_evidence_ref() {
     let sidecar_dir = worktree.join(".symphony");
     fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
     fs::write(
-        sidecar_dir.join("opencode-handoff.json"),
+        sidecar_dir.join("runner-handoff.json"),
         r#"{
   "session_id": "ses-evidence-ref",
   "lifecycle_stages": ["running", "eval", "handoff", "completed"],
@@ -1472,7 +1468,7 @@ async fn handoff_sidecar_accepts_eval_result_evidence_ref() {
 }"#,
     )
     .expect("handoff fixture");
-    let launcher = opencode::StdioOpenCodeLauncher;
+    let launcher = runner::StdioRunnerLauncher;
     let session = test_session("symphony", "issue-evidence", "ses-evidence-ref", &worktree);
 
     let handoff = launcher
@@ -1494,7 +1490,7 @@ async fn handoff_sidecar_normalizes_null_string_fields_from_opencode() {
     let sidecar_dir = worktree.join(".symphony");
     fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
     fs::write(
-        sidecar_dir.join("opencode-handoff.json"),
+        sidecar_dir.join("runner-handoff.json"),
         r#"{
   "session_id": "ses-null-fields",
   "lifecycle_stages": ["running", "eval", "handoff", "completed"],
@@ -1508,7 +1504,7 @@ async fn handoff_sidecar_normalizes_null_string_fields_from_opencode() {
     )
     .expect("handoff fixture");
 
-    let handoff = opencode::StdioOpenCodeLauncher
+    let handoff = runner::StdioRunnerLauncher
         .latest_handoff(&test_session(
             "recall",
             "issue-mne-226",
@@ -1516,10 +1512,10 @@ async fn handoff_sidecar_normalizes_null_string_fields_from_opencode() {
             &worktree,
         ))
         .await
-        .expect("OpenCode null string fields should be normalized")
+        .expect("runner null string fields should be normalized")
         .expect("handoff present");
 
-    assert_eq!(handoff.eval_results[0].suite, "opencode-evaluation");
+    assert_eq!(handoff.eval_results[0].suite, "runner-evaluation");
     assert!(handoff.eval_results[0].failure_fingerprint.is_none());
     assert!(handoff.eval_results[0].details.is_none());
     assert!(handoff.eval_results[0].evidence_ref.is_none());
@@ -1535,12 +1531,12 @@ async fn handoff_sidecar_ignores_harmless_status_marker() {
     let sidecar_dir = worktree.join(".symphony");
     fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
     fs::write(
-        sidecar_dir.join("opencode-handoff.json"),
+        sidecar_dir.join("runner-handoff.json"),
         r#"{"status":"implemented","session_id":"ses-markdown-fields","lifecycle_stages":["running","handoff","completed"],"subagents":[],"eval_results":[],"changed_files":[],"git":null,"risks":[],"stop_reason":{"type":"success"}}"#,
     )
     .expect("handoff fixture");
 
-    let handoff = opencode::StdioOpenCodeLauncher
+    let handoff = runner::StdioRunnerLauncher
         .latest_handoff(&test_session(
             "symphony",
             "issue-status-marker",
@@ -1554,18 +1550,18 @@ async fn handoff_sidecar_ignores_harmless_status_marker() {
     assert_eq!(handoff.session_id, "ses-markdown-fields");
     assert!(matches!(
         handoff.stop_reason,
-        opencode::OpenCodeStopReason::Success
+        runner::RunnerStopReason::Success
     ));
 }
 
 #[tokio::test]
-async fn handoff_sidecar_normalizes_opencode_acp_shape() {
+async fn handoff_sidecar_normalizes_acp_shape() {
     let dir = tempfile::tempdir().expect("tempdir");
     let worktree = dir.path().join("worktree");
     let sidecar_dir = worktree.join(".symphony");
     fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
     fs::write(
-        sidecar_dir.join("opencode-handoff.json"),
+        sidecar_dir.join("runner-handoff.json"),
         r#"{
   "status": "completed",
   "session_id": "ses_12805fdb5ffevWVN8GOADoEkPu",
@@ -1624,7 +1620,7 @@ async fn handoff_sidecar_normalizes_opencode_acp_shape() {
     )
     .expect("handoff fixture");
 
-    let handoff = opencode::StdioOpenCodeLauncher
+    let handoff = runner::StdioRunnerLauncher
         .latest_handoff(&test_session(
             "recall",
             "issue-mne-188",
@@ -1632,7 +1628,7 @@ async fn handoff_sidecar_normalizes_opencode_acp_shape() {
             &worktree,
         ))
         .await
-        .expect("OpenCode ACP-shaped handoff should parse")
+        .expect("runner ACP-shaped handoff should parse")
         .expect("handoff present");
 
     assert_eq!(handoff.session_id, "ses_12805fdb5ffevWVN8GOADoEkPu");
@@ -1643,22 +1639,22 @@ async fn handoff_sidecar_normalizes_opencode_acp_shape() {
     assert_eq!(
         handoff.lifecycle_stages,
         vec![
-            OpenCodeStage::Running,
-            OpenCodeStage::Running,
-            OpenCodeStage::Running,
-            OpenCodeStage::Running,
-            OpenCodeStage::Eval,
-            OpenCodeStage::Review,
-            OpenCodeStage::Eval,
-            OpenCodeStage::Running,
-            OpenCodeStage::Running,
-            OpenCodeStage::Running,
-            OpenCodeStage::Running,
-            OpenCodeStage::Handoff,
+            RunnerStage::Running,
+            RunnerStage::Running,
+            RunnerStage::Running,
+            RunnerStage::Running,
+            RunnerStage::Eval,
+            RunnerStage::Review,
+            RunnerStage::Eval,
+            RunnerStage::Running,
+            RunnerStage::Running,
+            RunnerStage::Running,
+            RunnerStage::Running,
+            RunnerStage::Handoff,
         ]
     );
     assert_eq!(handoff.eval_results.len(), 1);
-    assert_eq!(handoff.eval_results[0].suite, "opencode-evaluation");
+    assert_eq!(handoff.eval_results[0].suite, "runner-evaluation");
     assert!(handoff.eval_results[0].passed);
     assert_eq!(
         handoff.eval_results[0].evidence_ref.as_deref(),
@@ -1675,7 +1671,7 @@ async fn handoff_sidecar_normalizes_opencode_acp_shape() {
     );
     assert!(matches!(
         handoff.stop_reason,
-        opencode::OpenCodeStopReason::Success
+        runner::RunnerStopReason::Success
     ));
 }
 
@@ -1686,7 +1682,7 @@ async fn handoff_sidecar_normalizes_provider_neutral_blocker_reasons() {
     let sidecar_dir = worktree.join(".symphony");
     fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
     fs::write(
-        sidecar_dir.join("opencode-handoff.json"),
+        sidecar_dir.join("runner-handoff.json"),
         r#"{
   "session_id":"ses-provider-blocker",
   "lifecycle_stages":["running","failed"],
@@ -1700,7 +1696,7 @@ async fn handoff_sidecar_normalizes_provider_neutral_blocker_reasons() {
     )
     .expect("handoff fixture");
 
-    let handoff = opencode::StdioOpenCodeLauncher
+    let handoff = runner::StdioRunnerLauncher
         .latest_handoff(&test_session(
             "symphony",
             "issue-provider-blocker",
@@ -1713,7 +1709,7 @@ async fn handoff_sidecar_normalizes_provider_neutral_blocker_reasons() {
 
     assert!(matches!(
         handoff.stop_reason,
-        opencode::OpenCodeStopReason::ProviderBlocker { ref message }
+        runner::RunnerStopReason::ProviderBlocker { ref message }
             if message == "provider quota exhausted"
     ));
 }
@@ -1725,7 +1721,7 @@ async fn handoff_sidecar_normalizes_unsupported_omp_surface_as_non_success() {
     let sidecar_dir = worktree.join(".symphony");
     fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
     fs::write(
-        sidecar_dir.join("opencode-handoff.json"),
+        sidecar_dir.join("runner-handoff.json"),
         r#"{
   "session_id":"ses-unsupported",
   "lifecycle_stages":["running","failed"],
@@ -1740,7 +1736,7 @@ async fn handoff_sidecar_normalizes_unsupported_omp_surface_as_non_success() {
     )
     .expect("handoff fixture");
 
-    let handoff = opencode::StdioOpenCodeLauncher
+    let handoff = runner::StdioRunnerLauncher
         .latest_handoff(&test_session(
             "symphony",
             "issue-unsupported",
@@ -1753,7 +1749,7 @@ async fn handoff_sidecar_normalizes_unsupported_omp_surface_as_non_success() {
 
     assert!(matches!(
         handoff.stop_reason,
-        opencode::OpenCodeStopReason::UnsupportedOmpSurface { ref message }
+        runner::RunnerStopReason::UnsupportedOmpSurface { ref message }
             if message.contains("unsupported tool surface")
     ));
 }
@@ -1765,7 +1761,7 @@ async fn handoff_sidecar_fills_missing_git_worktree_path_from_session() {
     let sidecar_dir = worktree.join(".symphony");
     fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
     fs::write(
-        sidecar_dir.join("opencode-handoff.json"),
+        sidecar_dir.join("runner-handoff.json"),
         r#"{
   "session_id":"ses-missing-worktree",
   "lifecycle_stages":["running","handoff"],
@@ -1779,7 +1775,7 @@ async fn handoff_sidecar_fills_missing_git_worktree_path_from_session() {
     )
     .expect("handoff fixture");
 
-    let handoff = opencode::StdioOpenCodeLauncher
+    let handoff = runner::StdioRunnerLauncher
         .latest_handoff(&test_session(
             "symphony",
             "issue-missing-worktree",
@@ -1803,7 +1799,7 @@ async fn handoff_sidecar_normalizes_final_review_lifecycle_alias() {
     let sidecar_dir = worktree.join(".symphony");
     fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
     fs::write(
-        sidecar_dir.join("opencode-handoff.json"),
+        sidecar_dir.join("runner-handoff.json"),
         r#"{
   "session_id":"ses-final-review",
   "lifecycle_stages":["running","final_review","final_evaluation","final_handoff","completed"],
@@ -1817,7 +1813,7 @@ async fn handoff_sidecar_normalizes_final_review_lifecycle_alias() {
     )
     .expect("handoff fixture");
 
-    let handoff = opencode::StdioOpenCodeLauncher
+    let handoff = runner::StdioRunnerLauncher
         .latest_handoff(&test_session(
             "nervure",
             "issue-nrv-12",
@@ -1831,17 +1827,17 @@ async fn handoff_sidecar_normalizes_final_review_lifecycle_alias() {
     assert_eq!(
         handoff.lifecycle_stages,
         vec![
-            OpenCodeStage::Running,
-            OpenCodeStage::Review,
-            OpenCodeStage::Eval,
-            OpenCodeStage::Handoff,
-            OpenCodeStage::Completed,
+            RunnerStage::Running,
+            RunnerStage::Review,
+            RunnerStage::Eval,
+            RunnerStage::Handoff,
+            RunnerStage::Completed,
         ]
     );
     assert!(handoff.eval_results[0].passed);
     assert!(matches!(
         handoff.stop_reason,
-        opencode::OpenCodeStopReason::Success
+        runner::RunnerStopReason::Success
     ));
 }
 
@@ -1852,12 +1848,12 @@ async fn malformed_handoff_sidecar_rejects_markdown_acp_fields() {
     let sidecar_dir = worktree.join(".symphony");
     fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
     fs::write(
-        sidecar_dir.join("opencode-handoff.json"),
+        sidecar_dir.join("runner-handoff.json"),
         r#"{"session_id":"ses-markdown-fields","next_action":"continue","lifecycle_stages":["running","handoff","completed"],"subagents":[],"eval_results":[],"changed_files":[],"git":null,"risks":[],"stop_reason":{"type":"success"}}"#,
     )
     .expect("handoff fixture");
 
-    let error = opencode::StdioOpenCodeLauncher
+    let error = runner::StdioRunnerLauncher
         .latest_handoff(&test_session(
             "symphony",
             "issue-markdown-fields",
@@ -1868,7 +1864,7 @@ async fn malformed_handoff_sidecar_rejects_markdown_acp_fields() {
         .expect_err("Markdown ACP fields must not be accepted in the sidecar JSON");
 
     assert!(
-        matches!(error, opencode::OpenCodeError::MalformedHandoff(_)),
+        matches!(error, runner::RunnerError::MalformedHandoff(_)),
         "unexpected error: {error:?}"
     );
     assert!(
@@ -1885,15 +1881,15 @@ async fn stdio_launcher_removes_stale_handoff_before_prompting_new_session() {
     let worktree_root = dir.path().join("worktrees");
     let worktree = worktree_root.join("SYM-201");
     let sidecar_dir = worktree.join(".symphony");
-    let sidecar_path = sidecar_dir.join("opencode-handoff.json");
+    let sidecar_path = sidecar_dir.join("runner-handoff.json");
     fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
     fs::write(
         &sidecar_path,
         r#"{"session_id":"stale-session","stop_reason":{"type":"success"}}"#,
     )
     .expect("stale handoff");
-    let spec = opencode::OpenCodeLaunchSpec {
-        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+    let spec = runner::RunnerLaunchSpec {
+        provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
         command: script_path,
         args: Vec::new(),
@@ -1911,7 +1907,7 @@ async fn stdio_launcher_removes_stale_handoff_before_prompting_new_session() {
         prompt: "Full Linear issue spec with eval defaults".into(),
         permission_policy: PermissionPolicy::Reject,
     };
-    let launcher = opencode::StdioOpenCodeLauncher;
+    let launcher = runner::StdioRunnerLauncher;
 
     let started = launcher.launch(&spec).await.expect("launch stdio child");
 
@@ -1942,8 +1938,8 @@ async fn stdio_launcher_resumes_existing_session_without_replaying_prompt() {
     let script_path = write_fake_acp_resume_script(dir.path(), &transcript_path);
     let worktree = dir.path().join("worktree");
     fs::create_dir_all(&worktree).expect("worktree");
-    let spec = opencode::OpenCodeLaunchSpec {
-        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+    let spec = runner::RunnerLaunchSpec {
+        provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
         command: script_path,
         args: Vec::new(),
@@ -1963,7 +1959,7 @@ async fn stdio_launcher_resumes_existing_session_without_replaying_prompt() {
     };
     let mut session = test_session("symphony", "issue-202", "ses-existing", &worktree);
     session.process_id = None;
-    let launcher = opencode::StdioOpenCodeLauncher;
+    let launcher = runner::StdioRunnerLauncher;
 
     let resumed = launcher
         .resume(&spec, &session)
@@ -2024,8 +2020,8 @@ async fn stdio_launcher_continues_existing_session_from_dirty_resumable_worktree
         ],
     );
     fs::write(worktree.join("in-flight.txt"), "uncommitted work\n").expect("dirty file");
-    let spec = opencode::OpenCodeLaunchSpec {
-        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+    let spec = runner::RunnerLaunchSpec {
+        provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
         command: script_path,
         args: Vec::new(),
@@ -2045,7 +2041,7 @@ async fn stdio_launcher_continues_existing_session_from_dirty_resumable_worktree
     };
     let mut session = test_session("symphony", "issue-203", "ses-existing", &worktree);
     session.process_id = None;
-    let launcher = opencode::StdioOpenCodeLauncher;
+    let launcher = runner::StdioRunnerLauncher;
 
     let continued = launcher
         .continue_session(&spec, &session, "continue after process restart")
@@ -2126,8 +2122,8 @@ async fn stdio_launcher_continues_dirty_same_issue_worktree_after_branch_title_d
         ],
     );
     fs::write(worktree.join("in-flight.txt"), "uncommitted work\n").expect("dirty file");
-    let spec = opencode::OpenCodeLaunchSpec {
-        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+    let spec = runner::RunnerLaunchSpec {
+        provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
         command: script_path,
         args: Vec::new(),
@@ -2147,7 +2143,7 @@ async fn stdio_launcher_continues_dirty_same_issue_worktree_after_branch_title_d
     };
     let mut session = test_session("nervure", "issue-48", "ses-existing", &worktree);
     session.process_id = None;
-    let launcher = opencode::StdioOpenCodeLauncher;
+    let launcher = runner::StdioRunnerLauncher;
 
     let continued = launcher
         .continue_session(&spec, &session, "continue after issue title changed")
@@ -2184,9 +2180,9 @@ async fn stdio_launcher_continues_dirty_same_issue_worktree_after_branch_title_d
 }
 
 #[tokio::test]
-async fn installed_opencode_acp_supports_ndjson_config_options_without_prompting() {
+async fn installed_acp_supports_ndjson_config_options_without_prompting() {
     if std::env::var("SYMPHONY_LIVE_OPENCODE_ACP").ok().as_deref() != Some("1") {
-        eprintln!("set SYMPHONY_LIVE_OPENCODE_ACP=1 to run installed OpenCode ACP smoke");
+        eprintln!("set SYMPHONY_LIVE_OPENCODE_ACP=1 to run installed runner ACP smoke");
         return;
     }
 
@@ -2529,8 +2525,8 @@ async fn stdio_launcher_creates_git_worktree_from_project_repo_and_base_ref() {
     let worktree = dir.path().join("worktrees").join("SYM-200");
     let transcript_path = dir.path().join("acp-transcript.jsonl");
     let script_path = write_fake_acp_script(dir.path(), &transcript_path);
-    let spec = opencode::OpenCodeLaunchSpec {
-        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+    let spec = runner::RunnerLaunchSpec {
+        provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
         command: script_path,
         args: Vec::new(),
@@ -2548,7 +2544,7 @@ async fn stdio_launcher_creates_git_worktree_from_project_repo_and_base_ref() {
         prompt: "Full Linear issue spec with eval defaults".into(),
         permission_policy: PermissionPolicy::Reject,
     };
-    let launcher = opencode::StdioOpenCodeLauncher;
+    let launcher = runner::StdioRunnerLauncher;
 
     let started = launcher.launch(&spec).await.expect("launch stdio child");
 
@@ -2581,8 +2577,8 @@ async fn stdio_launcher_rejects_issue_identifier_path_separators_before_worktree
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("worktrees");
     let nested = root.join("SYM").join("200");
-    let spec = opencode::OpenCodeLaunchSpec {
-        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+    let spec = runner::RunnerLaunchSpec {
+        provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
         command: PathBuf::from("/bin/false"),
         args: Vec::new(),
@@ -2600,7 +2596,7 @@ async fn stdio_launcher_rejects_issue_identifier_path_separators_before_worktree
         prompt: "Full Linear issue spec with eval defaults".into(),
         permission_policy: PermissionPolicy::Reject,
     };
-    let launcher = opencode::StdioOpenCodeLauncher;
+    let launcher = runner::StdioRunnerLauncher;
 
     let error = launcher
         .launch(&spec)
@@ -2608,7 +2604,7 @@ async fn stdio_launcher_rejects_issue_identifier_path_separators_before_worktree
         .expect_err("unsafe identifier must be rejected before spawn");
 
     assert!(
-        matches!(error, opencode::OpenCodeError::InvalidWorktree(_)),
+        matches!(error, runner::RunnerError::InvalidWorktree(_)),
         "{error:?}"
     );
     assert!(
@@ -2622,11 +2618,11 @@ async fn opencode_event_ingestion_updates_stage_telemetry_without_losing_session
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
     let issue = linear_issue("issue-27", "SYM-27", "In Progress", Some(1));
-    let spec = opencode::build_acp_launch_spec(project, &issue);
-    let mut session = opencode::new_session_record(
+    let spec = runner::build_acp_launch_spec(project, &issue);
+    let mut session = runner::new_session_record(
         project,
         &issue,
-        opencode::OpenCodeStartedSession {
+        runner::RunnerStartedSession {
             session_id: "oc-session-27".into(),
             process_id: None,
             acp_frame_count: 0,
@@ -2635,10 +2631,10 @@ async fn opencode_event_ingestion_updates_stage_telemetry_without_losing_session
         &spec,
     );
 
-    opencode::ingest_session_event(
+    runner::ingest_session_event(
         &mut session,
-        OpenCodeSessionEvent {
-            stage: Some(OpenCodeStage::Eval),
+        RunnerSessionEvent {
+            stage: Some(RunnerStage::Eval),
             active_agent: Some("evaluator".into()),
             active_model: Some("gpt-5".into()),
             message_delta: 2,
@@ -2654,7 +2650,7 @@ async fn opencode_event_ingestion_updates_stage_telemetry_without_losing_session
     );
 
     assert_eq!(session.session_id, "oc-session-27");
-    assert_eq!(session.stage, OpenCodeStage::Eval);
+    assert_eq!(session.stage, RunnerStage::Eval);
     assert_eq!(session.active_agent.as_deref(), Some("evaluator"));
     assert_eq!(session.active_model.as_deref(), Some("gpt-5"));
     assert_eq!(session.message_count, 2);
@@ -2673,11 +2669,11 @@ async fn opencode_silence_is_observable_without_marking_session_failed() {
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
     let issue = linear_issue("issue-27", "SYM-27", "In Progress", Some(1));
-    let spec = opencode::build_acp_launch_spec(project, &issue);
-    let mut session = opencode::new_session_record(
+    let spec = runner::build_acp_launch_spec(project, &issue);
+    let mut session = runner::new_session_record(
         project,
         &issue,
-        opencode::OpenCodeStartedSession {
+        runner::RunnerStartedSession {
             session_id: "oc-session-27".into(),
             process_id: None,
             acp_frame_count: 0,
@@ -2686,10 +2682,10 @@ async fn opencode_silence_is_observable_without_marking_session_failed() {
         &spec,
     );
 
-    opencode::mark_session_silence(&mut session, "read_timeout_without_acp_event");
+    runner::mark_session_silence(&mut session, "read_timeout_without_acp_event");
 
     assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(session.stage, OpenCodeStage::Silent);
+    assert_eq!(session.stage, RunnerStage::Silent);
     assert_eq!(
         session.last_event.as_deref(),
         Some("silence:read_timeout_without_acp_event")
@@ -2707,10 +2703,10 @@ fn unchanged_opencode_db_snapshot_preserves_control_marker() {
         "/home/agent/.symphony/workspaces/opencode/symphony/SYM-67",
     );
     session.lifecycle_marker = Some("repair_prompted".into());
-    session.last_event = Some("opencode_db_updated:2000".into());
+    session.last_event = Some("runner_archive_updated:2000".into());
     let previous_last_event = session.last_event.clone();
     let previous_marker = session.lifecycle_marker.clone();
-    let metrics = opencode::OpenCodeSessionTreeMetrics {
+    let metrics = runner::RunnerSessionTreeMetrics {
         root_session_id: session.session_id.clone(),
         session_count: 1,
         subagent_count: 0,
@@ -2729,7 +2725,7 @@ fn unchanged_opencode_db_snapshot_preserves_control_marker() {
         last_updated_ms: Some(2000),
     };
 
-    opencode::apply_session_tree_metrics_preserving_marker(
+    runner::apply_session_tree_metrics_preserving_marker(
         &mut session,
         &metrics,
         previous_last_event.as_deref(),
@@ -2739,7 +2735,7 @@ fn unchanged_opencode_db_snapshot_preserves_control_marker() {
     assert_eq!(session.lifecycle_marker.as_deref(), Some("repair_prompted"));
     assert_eq!(
         session.last_event.as_deref(),
-        Some("opencode_db_updated:2000")
+        Some("runner_archive_updated:2000")
     );
 }
 
@@ -2908,7 +2904,7 @@ pub(super) async fn seed_opencode_session_tree(path: &std::path::Path) {
         .expect("insert todo");
 }
 
-pub(super) async fn seed_stale_active_opencode_session_tree(path: &std::path::Path) {
+pub(super) async fn seed_stale_active_runner_session_tree(path: &std::path::Path) {
     seed_opencode_session_tree(path).await;
     let stale_ms = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3095,8 +3091,8 @@ async fn stdio_launcher_rejects_clean_existing_worktree_on_wrong_branch() {
     );
     let transcript_path = dir.path().join("acp-transcript.jsonl");
     let script_path = write_fake_acp_script(dir.path(), &transcript_path);
-    let spec = opencode::OpenCodeLaunchSpec {
-        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+    let spec = runner::RunnerLaunchSpec {
+        provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
         command: script_path,
         args: Vec::new(),
@@ -3115,13 +3111,13 @@ async fn stdio_launcher_rejects_clean_existing_worktree_on_wrong_branch() {
         permission_policy: PermissionPolicy::Reject,
     };
 
-    let error = opencode::StdioOpenCodeLauncher
+    let error = runner::StdioRunnerLauncher
         .launch(&spec)
         .await
         .expect_err("clean wrong-branch worktree must be rejected");
 
     assert!(
-        matches!(error, opencode::OpenCodeError::InvalidWorktree(ref message) if message.contains("is on branch stale-branch but expected feature/sym-204")),
+        matches!(error, runner::RunnerError::InvalidWorktree(ref message) if message.contains("is on branch stale-branch but expected feature/sym-204")),
         "{error:?}"
     );
     assert_eq!(
@@ -3158,8 +3154,8 @@ async fn stdio_launcher_rejects_existing_worktree_on_wrong_branch() {
         ],
     );
     fs::write(worktree.join("dirty.txt"), "local work").expect("dirty file");
-    let spec = opencode::OpenCodeLaunchSpec {
-        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+    let spec = runner::RunnerLaunchSpec {
+        provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
         command: PathBuf::from("/bin/false"),
         args: Vec::new(),
@@ -3178,17 +3174,17 @@ async fn stdio_launcher_rejects_existing_worktree_on_wrong_branch() {
         permission_policy: PermissionPolicy::Reject,
     };
 
-    let error = opencode::StdioOpenCodeLauncher
+    let error = runner::StdioRunnerLauncher
         .launch(&spec)
         .await
         .expect_err("dirty stale worktree must be rejected");
 
     assert!(
-        matches!(error, opencode::OpenCodeError::InvalidWorktree(ref message) if message.contains("is on branch stale-branch but expected feature/sym-205")),
+        matches!(error, runner::RunnerError::InvalidWorktree(ref message) if message.contains("is on branch stale-branch but expected feature/sym-205")),
         "{error:?}"
     );
     assert!(
-        matches!(error, opencode::OpenCodeError::InvalidWorktree(ref message) if message.contains("dirty or untracked files") && message.contains("dirty.txt")),
+        matches!(error, runner::RunnerError::InvalidWorktree(ref message) if message.contains("dirty or untracked files") && message.contains("dirty.txt")),
         "{error:?}"
     );
     assert_eq!(

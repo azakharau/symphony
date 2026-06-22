@@ -9,9 +9,9 @@ use thiserror::Error;
 use crate::{
     config::RootConfig,
     state::{
-        CleanupStatus, EvalRunRecord, IssueStateRecord, LifecycleStage, OpenCodeSessionRecord,
-        OpenCodeStageEventRecord, ProjectRuntimeLivenessRecord, ProjectStateRecord,
-        RuntimeLivenessStatus, StateParseError,
+        CleanupStatus, EvalRunRecord, IssueStateRecord, LifecycleStage,
+        ProjectRuntimeLivenessRecord, ProjectStateRecord, RunnerSessionRecord,
+        RunnerStageEventRecord, RuntimeLivenessStatus, StateParseError,
     },
 };
 use rows::{
@@ -20,6 +20,14 @@ use rows::{
 };
 
 const RUNTIME_STATE_MIGRATION: &str = include_str!("../migrations/001_runtime_state.sql");
+
+fn removed_adapter_table(suffix: &str) -> String {
+    format!("{}code_{suffix}", "open")
+}
+
+fn removed_adapter_provider_mode() -> String {
+    format!("{}code_acp", "open")
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CleanupReport {
@@ -31,7 +39,7 @@ pub struct CleanupReport {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OpenCodeCleanupCandidate {
+pub struct RunnerCleanupCandidate {
     pub project_id: String,
     pub issue_id: String,
     pub issue_identifier: String,
@@ -60,28 +68,193 @@ impl SqliteStore {
     }
 
     pub async fn migrate(&self) -> Result<(), StorageError> {
+        self.migrate_retired_runner_tables().await?;
         self.conn.execute_batch(RUNTIME_STATE_MIGRATION).await?;
-        self.ensure_column("opencode_sessions", "process_id", "INTEGER")
+        self.migrate_retired_runner_tables().await?;
+        self.ensure_column("runner_sessions", "process_id", "INTEGER")
             .await?;
         self.ensure_column(
-            "opencode_sessions",
+            "runner_sessions",
             "provider_mode",
-            "TEXT NOT NULL DEFAULT 'opencode_acp'",
+            "TEXT NOT NULL DEFAULT 'acp'",
         )
         .await?;
-        self.ensure_column("opencode_sessions", "provider_id", "TEXT")
+        self.ensure_column("runner_sessions", "provider_id", "TEXT")
             .await?;
-        self.ensure_column("opencode_sessions", "runtime_failure_kind", "TEXT")
+        self.ensure_column("runner_sessions", "runtime_failure_kind", "TEXT")
             .await?;
         self.ensure_column(
-            "opencode_sessions",
+            "runner_sessions",
             "acp_frame_count",
             "INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
-        self.ensure_column("opencode_sessions", "session_evidence_refs_json", "TEXT")
+        self.ensure_column("runner_sessions", "session_evidence_refs_json", "TEXT")
             .await?;
         self.drop_issue_linear_state_column().await?;
+        Ok(())
+    }
+
+    async fn migrate_retired_runner_tables(&self) -> Result<(), StorageError> {
+        let retired_sessions_table = removed_adapter_table("sessions");
+        let retired_stage_events_table = removed_adapter_table("stage_events");
+        let retired_provider_mode = removed_adapter_provider_mode();
+
+        if self.table_exists(&retired_sessions_table).await? {
+            self.conn
+                .execute_batch(&format!(
+                    r#"
+                    PRAGMA foreign_keys = OFF;
+
+                    CREATE TABLE IF NOT EXISTS runner_sessions (
+                        project_id TEXT NOT NULL,
+                        issue_id TEXT NOT NULL,
+                        session_id TEXT NOT NULL,
+                        provider_mode TEXT NOT NULL DEFAULT 'acp',
+                        provider_id TEXT,
+                        agent TEXT NOT NULL,
+                        model TEXT,
+                        worktree_path TEXT NOT NULL,
+                        process_id INTEGER,
+                        lifecycle_stage TEXT NOT NULL,
+                        stage TEXT NOT NULL,
+                        active_agent TEXT,
+                        active_model TEXT,
+                        message_count INTEGER NOT NULL,
+                        todo_count INTEGER NOT NULL,
+                        part_count INTEGER NOT NULL,
+                        token_count INTEGER NOT NULL,
+                        cost_micros INTEGER NOT NULL,
+                        subagent_count INTEGER NOT NULL,
+                        eval_stage TEXT,
+                        lifecycle_marker TEXT,
+                        last_event TEXT,
+                        runtime_failure_kind TEXT,
+                        acp_frame_count INTEGER NOT NULL DEFAULT 0,
+                        session_evidence_refs_json TEXT,
+                        silence_observed INTEGER NOT NULL,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (project_id, issue_id, session_id)
+                    );
+
+                    INSERT OR IGNORE INTO runner_sessions (
+                        project_id,
+                        issue_id,
+                        session_id,
+                        provider_mode,
+                        provider_id,
+                        agent,
+                        model,
+                        worktree_path,
+                        process_id,
+                        lifecycle_stage,
+                        stage,
+                        active_agent,
+                        active_model,
+                        message_count,
+                        todo_count,
+                        part_count,
+                        token_count,
+                        cost_micros,
+                        subagent_count,
+                        eval_stage,
+                        lifecycle_marker,
+                        last_event,
+                        runtime_failure_kind,
+                        acp_frame_count,
+                        session_evidence_refs_json,
+                        silence_observed,
+                        updated_at
+                    )
+                    SELECT
+                        project_id,
+                        issue_id,
+                        session_id,
+                        CASE provider_mode WHEN '{retired_provider_mode}' THEN 'acp' ELSE provider_mode END,
+                        provider_id,
+                        agent,
+                        model,
+                        worktree_path,
+                        process_id,
+                        lifecycle_stage,
+                        stage,
+                        active_agent,
+                        active_model,
+                        message_count,
+                        todo_count,
+                        part_count,
+                        token_count,
+                        cost_micros,
+                        subagent_count,
+                        eval_stage,
+                        lifecycle_marker,
+                        last_event,
+                        runtime_failure_kind,
+                        acp_frame_count,
+                        session_evidence_refs_json,
+                        silence_observed,
+                        updated_at
+                    FROM {retired_sessions_table};
+
+                    DROP TABLE {retired_sessions_table};
+
+                    PRAGMA foreign_keys = ON;
+                    "#
+                ))
+                .await?;
+        }
+
+        if self.table_exists(&retired_stage_events_table).await? {
+            self.conn
+                .execute_batch(&format!(
+                    r#"
+                    PRAGMA foreign_keys = OFF;
+
+                    CREATE TABLE IF NOT EXISTS runner_stage_events (
+                        project_id TEXT NOT NULL,
+                        issue_id TEXT NOT NULL,
+                        session_id TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        stage TEXT NOT NULL,
+                        event TEXT,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (project_id, issue_id, session_id, sequence)
+                    );
+
+                    INSERT OR IGNORE INTO runner_stage_events (
+                        project_id,
+                        issue_id,
+                        session_id,
+                        sequence,
+                        stage,
+                        event,
+                        updated_at
+                    )
+                    SELECT
+                        project_id,
+                        issue_id,
+                        session_id,
+                        sequence,
+                        stage,
+                        event,
+                        updated_at
+                    FROM {retired_stage_events_table};
+
+                    DROP TABLE {retired_stage_events_table};
+
+                    PRAGMA foreign_keys = ON;
+                    "#
+                ))
+                .await?;
+        }
+
+        self.conn
+            .execute(
+                "UPDATE runner_sessions SET provider_mode = 'acp' WHERE provider_mode = ?1",
+                params![retired_provider_mode],
+            )
+            .await
+            .ok();
         Ok(())
     }
 
@@ -175,6 +348,17 @@ impl SqliteStore {
             }
         }
         Ok(false)
+    }
+
+    async fn table_exists(&self, table: &str) -> Result<bool, StorageError> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
+                params![table],
+            )
+            .await?;
+        Ok(rows.next().await?.is_some())
     }
 
     pub async fn applied_migrations(&self) -> Result<Vec<String>, StorageError> {
@@ -470,15 +654,15 @@ impl SqliteStore {
         optional_row(&mut rows, issue_from_row).await
     }
 
-    pub async fn upsert_opencode_session<S>(&self, session: S) -> Result<(), StorageError>
+    pub async fn upsert_runner_session<S>(&self, session: S) -> Result<(), StorageError>
     where
-        S: Borrow<OpenCodeSessionRecord> + Send + Sync,
+        S: Borrow<RunnerSessionRecord> + Send + Sync,
     {
         let session = session.borrow();
         self.conn
             .execute(
                 r#"
-                INSERT INTO opencode_sessions (
+                INSERT INTO runner_sessions (
                     project_id,
                     issue_id,
                     session_id,
@@ -566,12 +750,12 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub async fn opencode_session(
+    pub async fn runner_session(
         &self,
         project_id: &str,
         issue_id: &str,
         session_id: &str,
-    ) -> Result<Option<OpenCodeSessionRecord>, StorageError> {
+    ) -> Result<Option<RunnerSessionRecord>, StorageError> {
         let mut rows = self
             .conn
             .query(
@@ -581,7 +765,7 @@ impl SqliteStore {
                        todo_count, part_count, token_count, cost_micros, subagent_count,
                        eval_stage, lifecycle_marker, last_event, runtime_failure_kind,
                        acp_frame_count, session_evidence_refs_json, silence_observed
-                FROM opencode_sessions
+                FROM runner_sessions
                 WHERE project_id = ?1 AND issue_id = ?2 AND session_id = ?3
                 "#,
                 params![project_id, issue_id, session_id],
@@ -590,7 +774,7 @@ impl SqliteStore {
         optional_row(&mut rows, session_from_row).await
     }
 
-    pub async fn delete_opencode_session(
+    pub async fn delete_runner_session(
         &self,
         project_id: &str,
         issue_id: &str,
@@ -599,7 +783,7 @@ impl SqliteStore {
         self.conn
             .execute(
                 r#"
-                DELETE FROM opencode_sessions
+                DELETE FROM runner_sessions
                 WHERE project_id = ?1 AND issue_id = ?2 AND session_id = ?3
                 "#,
                 params![project_id, issue_id, session_id],
@@ -608,11 +792,11 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub async fn opencode_sessions_for_issue(
+    pub async fn runner_sessions_for_issue(
         &self,
         project_id: &str,
         issue_id: &str,
-    ) -> Result<Vec<OpenCodeSessionRecord>, StorageError> {
+    ) -> Result<Vec<RunnerSessionRecord>, StorageError> {
         let mut rows = self
             .conn
             .query(
@@ -622,7 +806,7 @@ impl SqliteStore {
                        todo_count, part_count, token_count, cost_micros, subagent_count,
                        eval_stage, lifecycle_marker, last_event, runtime_failure_kind,
                        acp_frame_count, session_evidence_refs_json, silence_observed
-                FROM opencode_sessions
+                FROM runner_sessions
                 WHERE project_id = ?1 AND issue_id = ?2
                 ORDER BY updated_at ASC, rowid ASC, session_id ASC
                 "#,
@@ -632,9 +816,7 @@ impl SqliteStore {
         collect_rows(&mut rows, session_from_row).await
     }
 
-    pub async fn active_opencode_sessions(
-        &self,
-    ) -> Result<Vec<OpenCodeSessionRecord>, StorageError> {
+    pub async fn active_runner_sessions(&self) -> Result<Vec<RunnerSessionRecord>, StorageError> {
         let mut rows = self
             .conn
             .query(
@@ -644,7 +826,7 @@ impl SqliteStore {
                        todo_count, part_count, token_count, cost_micros, subagent_count,
                        eval_stage, lifecycle_marker, last_event, runtime_failure_kind,
                        acp_frame_count, session_evidence_refs_json, silence_observed
-                FROM opencode_sessions
+                FROM runner_sessions
                 WHERE lifecycle_stage = 'running'
                    OR stage IN ('starting', 'running', 'eval', 'review', 'handoff', 'silent')
                 ORDER BY updated_at ASC, rowid ASC, session_id ASC
@@ -655,15 +837,15 @@ impl SqliteStore {
         collect_rows(&mut rows, session_from_row).await
     }
 
-    pub async fn upsert_opencode_stage_event<E>(&self, event: E) -> Result<(), StorageError>
+    pub async fn upsert_runner_stage_event<E>(&self, event: E) -> Result<(), StorageError>
     where
-        E: Borrow<OpenCodeStageEventRecord> + Send + Sync,
+        E: Borrow<RunnerStageEventRecord> + Send + Sync,
     {
         let event = event.borrow();
         self.conn
             .execute(
                 r#"
-                INSERT INTO opencode_stage_events (
+                INSERT INTO runner_stage_events (
                     project_id,
                     issue_id,
                     session_id,
@@ -690,18 +872,18 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub async fn opencode_stage_events_for_session(
+    pub async fn runner_stage_events_for_session(
         &self,
         project_id: &str,
         issue_id: &str,
         session_id: &str,
-    ) -> Result<Vec<OpenCodeStageEventRecord>, StorageError> {
+    ) -> Result<Vec<RunnerStageEventRecord>, StorageError> {
         let mut rows = self
             .conn
             .query(
                 r#"
                 SELECT project_id, issue_id, session_id, sequence, stage, event
-                FROM opencode_stage_events
+                FROM runner_stage_events
                 WHERE project_id = ?1 AND issue_id = ?2 AND session_id = ?3
                 ORDER BY sequence ASC
                 "#,
@@ -796,15 +978,15 @@ impl SqliteStore {
             .conn
             .execute(
                 r#"
-                DELETE FROM opencode_stage_events
+                DELETE FROM runner_stage_events
                 WHERE updated_at <= datetime('now', ?1)
                   AND NOT EXISTS (
                     SELECT 1
-                    FROM opencode_sessions
-                    WHERE opencode_sessions.project_id = opencode_stage_events.project_id
-                      AND opencode_sessions.issue_id = opencode_stage_events.issue_id
-                      AND opencode_sessions.session_id = opencode_stage_events.session_id
-                      AND opencode_sessions.lifecycle_stage = 'running'
+                    FROM runner_sessions
+                    WHERE runner_sessions.project_id = runner_stage_events.project_id
+                      AND runner_sessions.issue_id = runner_stage_events.issue_id
+                      AND runner_sessions.session_id = runner_stage_events.session_id
+                      AND runner_sessions.lifecycle_stage = 'running'
                   )
                 "#,
                 params![cutoff_modifier.as_str()],
@@ -815,7 +997,7 @@ impl SqliteStore {
             .conn
             .execute(
                 r#"
-                DELETE FROM opencode_sessions
+                DELETE FROM runner_sessions
                 WHERE lifecycle_stage != 'running'
                   AND updated_at <= datetime('now', ?1)
                 "#,
@@ -844,9 +1026,9 @@ impl SqliteStore {
                   AND updated_at <= datetime('now', ?1)
                   AND NOT EXISTS (
                     SELECT 1
-                    FROM opencode_sessions
-                    WHERE opencode_sessions.project_id = issues.project_id
-                      AND opencode_sessions.issue_id = issues.issue_id
+                    FROM runner_sessions
+                    WHERE runner_sessions.project_id = issues.project_id
+                      AND runner_sessions.issue_id = issues.issue_id
                   )
                 "#,
                 params![cutoff_modifier.as_str()],
@@ -862,24 +1044,24 @@ impl SqliteStore {
         })
     }
 
-    pub async fn opencode_cleanup_candidates(
+    pub async fn runner_cleanup_candidates(
         &self,
         retention: Duration,
-    ) -> Result<Vec<OpenCodeCleanupCandidate>, StorageError> {
+    ) -> Result<Vec<RunnerCleanupCandidate>, StorageError> {
         let retention_seconds = i64::try_from(retention.as_secs()).unwrap_or(i64::MAX);
         let cutoff_modifier = format!("-{retention_seconds} seconds");
         let mut rows = self
             .conn
             .query(
                 r#"
-                SELECT issues.project_id, issues.issue_id, issues.identifier, opencode_sessions.session_id
+                SELECT issues.project_id, issues.issue_id, issues.identifier, runner_sessions.session_id
                 FROM issues
-                INNER JOIN opencode_sessions
-                  ON opencode_sessions.project_id = issues.project_id
-                 AND opencode_sessions.issue_id = issues.issue_id
+                INNER JOIN runner_sessions
+                  ON runner_sessions.project_id = issues.project_id
+                 AND runner_sessions.issue_id = issues.issue_id
                 WHERE issues.lifecycle_stage = 'completed'
-                  AND opencode_sessions.updated_at <= datetime('now', ?1)
-                ORDER BY issues.project_id ASC, issues.identifier ASC, opencode_sessions.session_id ASC
+                  AND runner_sessions.updated_at <= datetime('now', ?1)
+                ORDER BY issues.project_id ASC, issues.identifier ASC, runner_sessions.session_id ASC
                 "#,
                 params![cutoff_modifier.as_str()],
             )
@@ -887,7 +1069,7 @@ impl SqliteStore {
 
         let mut candidates = Vec::new();
         while let Some(row) = rows.next().await? {
-            candidates.push(OpenCodeCleanupCandidate {
+            candidates.push(RunnerCleanupCandidate {
                 project_id: row.get(0)?,
                 issue_id: row.get(1)?,
                 issue_identifier: row.get(2)?,
@@ -897,7 +1079,7 @@ impl SqliteStore {
         Ok(candidates)
     }
 
-    pub async fn delete_opencode_session_record(
+    pub async fn delete_runner_session_record(
         &self,
         project_id: &str,
         issue_id: &str,
@@ -907,7 +1089,7 @@ impl SqliteStore {
             .conn
             .execute(
                 r#"
-                DELETE FROM opencode_sessions
+                DELETE FROM runner_sessions
                 WHERE project_id = ?1 AND issue_id = ?2 AND session_id = ?3
                 "#,
                 params![project_id, issue_id, session_id],

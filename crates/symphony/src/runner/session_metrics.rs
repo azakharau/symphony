@@ -1,9 +1,9 @@
-use crate::state::{OpenCodeSessionRecord, OpenCodeStage};
+use crate::state::{RunnerSessionRecord, RunnerStage};
 
-use super::archive::OpenCodeSessionTreeMetrics;
-use super::types::OpenCodeSessionEvent;
+use super::archive::RunnerSessionTreeMetrics;
+use super::types::RunnerSessionEvent;
 
-pub fn ingest_session_event(session: &mut OpenCodeSessionRecord, event: OpenCodeSessionEvent) {
+pub fn ingest_session_event(session: &mut RunnerSessionRecord, event: RunnerSessionEvent) {
     if let Some(stage) = event.stage {
         session.stage = stage;
     }
@@ -32,12 +32,12 @@ pub fn ingest_session_event(session: &mut OpenCodeSessionRecord, event: OpenCode
 }
 
 pub fn apply_session_tree_metrics(
-    session: &mut OpenCodeSessionRecord,
-    metrics: &OpenCodeSessionTreeMetrics,
+    session: &mut RunnerSessionRecord,
+    metrics: &RunnerSessionTreeMetrics,
 ) {
     if metrics.message_count > 0 || metrics.part_count > 0 || metrics.todo_count > 0 {
         session.stage = match session.stage {
-            OpenCodeStage::Starting | OpenCodeStage::Silent => OpenCodeStage::Running,
+            RunnerStage::Starting | RunnerStage::Silent => RunnerStage::Running,
             stage => stage,
         };
         session.silence_observed = false;
@@ -56,16 +56,16 @@ pub fn apply_session_tree_metrics(
     session.token_count = metrics.tokens_total;
     session.cost_micros = metrics.cost_micros;
     session.subagent_count = metrics.subagent_count;
-    session.lifecycle_marker = Some("opencode_db_activity".into());
+    session.lifecycle_marker = Some("runner_archive_activity".into());
     session.last_event = metrics
         .last_updated_ms
-        .map(|updated| format!("opencode_db_updated:{updated}"))
-        .or_else(|| Some("opencode_db_snapshot".into()));
+        .map(|updated| format!("runner_archive_updated:{updated}"))
+        .or_else(|| Some("runner_archive_snapshot".into()));
 }
 
 pub fn apply_session_tree_metrics_preserving_marker(
-    session: &mut OpenCodeSessionRecord,
-    metrics: &OpenCodeSessionTreeMetrics,
+    session: &mut RunnerSessionRecord,
+    metrics: &RunnerSessionTreeMetrics,
     previous_last_event: Option<&str>,
     previous_marker: Option<&str>,
 ) {
@@ -76,8 +76,8 @@ pub fn apply_session_tree_metrics_preserving_marker(
 }
 
 pub fn apply_omp_session_tree_metrics(
-    session: &mut OpenCodeSessionRecord,
-    metrics: &OpenCodeSessionTreeMetrics,
+    session: &mut RunnerSessionRecord,
+    metrics: &RunnerSessionTreeMetrics,
 ) {
     apply_session_tree_metrics(session, metrics);
     session.lifecycle_marker = Some("omp_session_activity".into());
@@ -87,8 +87,8 @@ pub fn apply_omp_session_tree_metrics(
         .or_else(|| Some("omp_jsonl_snapshot".into()));
 }
 
-pub fn mark_session_silence(session: &mut OpenCodeSessionRecord, reason: &str) {
-    session.stage = OpenCodeStage::Silent;
+pub fn mark_session_silence(session: &mut RunnerSessionRecord, reason: &str) {
+    session.stage = RunnerStage::Silent;
     session.silence_observed = true;
     session.last_event = Some(format!("silence:{reason}"));
 }

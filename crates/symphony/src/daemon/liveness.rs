@@ -17,15 +17,15 @@ pub(super) async fn project_liveness_projection(
     if let Some(status) = project_runner_problem(store, &project.id).await? {
         let reason = match status {
             RuntimeLivenessStatus::RunnerSetupFailed => {
-                "at least one OpenCode session failed ACP setup before session attachment"
+                "at least one runner session failed ACP setup before session attachment"
             }
             RuntimeLivenessStatus::RunnerStaleKilled => {
-                "at least one stale OpenCode process tree was terminated before continuation"
+                "at least one stale runner process tree was terminated before continuation"
             }
             RuntimeLivenessStatus::RunnerProcessDead => {
-                "at least one running OpenCode session has no live runner process"
+                "at least one running runner session has no live runner process"
             }
-            _ => "OpenCode runner is not healthy",
+            _ => "runner runner is not healthy",
         };
         return Ok((status, reason.into()));
     }
@@ -59,7 +59,7 @@ async fn project_runner_problem(
 ) -> anyhow::Result<Option<RuntimeLivenessStatus>> {
     for issue in store.issues_for_project(project_id).await? {
         let sessions = store
-            .opencode_sessions_for_issue(project_id, &issue.issue_id)
+            .runner_sessions_for_issue(project_id, &issue.issue_id)
             .await?;
         let Some(session) = sessions.into_iter().next_back() else {
             continue;

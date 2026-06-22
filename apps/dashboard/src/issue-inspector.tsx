@@ -8,12 +8,12 @@ import type { IssueDetail, SessionActivity, TimelineEvent, TodoActivity } from "
 
 const tabs = ["Todos", "Timeline", "Agents", "Tools", "Evidence"] as const;
 const DEFAULT_LINEAR_WORKSPACE_SLUG = "alexey-zakharov";
-const DEFAULT_OPENCODE_WEB_BASE = "https://opencode.vestalink.net";
+const DEFAULT_RUNNER_WEB_BASE = "https://runner.vestalink.net";
 type Tab = (typeof tabs)[number];
 
 export function IssueInspector({ issue }: { issue: IssueDetail }) {
   const [activeTab, setActiveTab] = useState<Tab>("Todos");
-  const session = issue.opencode_sessions.at(-1);
+  const session = issue.runner_sessions.at(-1);
   const activity = session?.activity;
   const timeline = activity?.timeline ?? [];
   const toolEvents = timeline.filter((event) => event.kind === "tool" || event.tool);
@@ -26,8 +26,8 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
   };
   const sessionTokens = tokenBreakdown(session?.token_count ?? 0, session?.cached_token_count);
   const linearUrl = linearIssueUrl(issue.identifier);
-  const opencodeDirectory = session ? opencodeSessionDirectory(session) : undefined;
-  const opencodeUrl = session && opencodeDirectory ? opencodeSessionUrl(session.opencode_session_id, opencodeDirectory) : undefined;
+  const runnerDirectory = session ? runnerSessionDirectory(session) : undefined;
+  const runnerUrl = session && runnerDirectory ? runnerSessionUrl(session.runner_session_id, runnerDirectory) : undefined;
 
   return (
     <div className="flex flex-col gap-5">
@@ -45,9 +45,9 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
               <a className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700" href={linearUrl} target="_blank" rel="noreferrer">
                 Open in Linear
               </a>
-              {opencodeUrl ? (
-                <a className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 shadow-sm hover:border-blue-300 hover:text-blue-700" href={opencodeUrl} target="_blank" rel="noreferrer">
-                  Open in OpenCode
+              {runnerUrl ? (
+                <a className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 shadow-sm hover:border-blue-300 hover:text-blue-700" href={runnerUrl} target="_blank" rel="noreferrer">
+                  Open in runner
                 </a>
               ) : null}
             </div>
@@ -55,7 +55,7 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
               <KeyValue label="active agent" value={session?.active_agent ?? session?.agent ?? "unavailable"} />
               <KeyValue label="model" value={session?.active_model ?? session?.model ?? "unavailable"} />
               <KeyValue label="provider" value={providerModeLabel(session?.provider_mode)} detail={session?.provider_id ? `provider ${session.provider_id}` : "provider id unavailable"} />
-              <KeyValue label="session" value={session?.opencode_session_id ?? "unavailable"} detail={session ? processStateLabel(session.process_id, session.process_alive) : "process not checked"} mono />
+              <KeyValue label="session" value={session?.runner_session_id ?? "unavailable"} detail={session ? processStateLabel(session.process_id, session.process_alive) : "process not checked"} mono />
               <KeyValue label="failure taxonomy" value={runtimeFailureText(session?.runtime_failure_kind)} detail={session?.silence_observed ? "session is quiet or stale" : "no silence marker"} />
               <KeyValue label="ACP telemetry" value={`${session?.acp_frame_count ?? 0} frames`} detail={sessionEvidenceSummary(session?.session_evidence_refs)} />
               <KeyValue label="tokens" value={formatCompactNumber(sessionTokens.net)} detail={`${formatCompactNumber(sessionTokens.cached)} cached`} />
@@ -74,7 +74,7 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
         <Summary value={summary.events} label="timeline events" />
       </section>
 
-      <Panel title="OpenCode session inspector" action={session?.opencode_session_id ?? "no session"}>
+      <Panel title="runner session inspector" action={session?.runner_session_id ?? "no session"}>
         <div className="mb-4 flex gap-2 overflow-x-auto">
           {tabs.map((tab) => (
             <button
@@ -98,7 +98,7 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
 }
 
 function TodosTab({ issue }: { issue: IssueDetail }) {
-  const session = issue.opencode_sessions.at(-1);
+  const session = issue.runner_sessions.at(-1);
   const todos = session?.activity?.todos ?? [];
   if (!todos.length) return <Limited message={session?.activity_error ?? "Todo details are unavailable; only aggregate todo counts are exposed."} />;
   return (
@@ -169,7 +169,7 @@ export function ActivityTimeline({ events }: { events: TimelineEvent[] }) {
 
 export function ToolsByAgent({ issue, events }: { issue: IssueDetail; events: TimelineEvent[] }) {
   if (!events.length) return <Limited message="No running, pending, or recent tool events were reported." />;
-  const activity = issue.opencode_sessions.at(-1)?.activity;
+  const activity = issue.runner_sessions.at(-1)?.activity;
   const agents = (activity?.sessions ?? []).concat(activity?.subagents ?? []);
   const agentsById = new Map(agents.map((agent) => [agent.session_id, agent]));
   const eventsBySession = new Map<string, TimelineEvent[]>();
@@ -229,7 +229,7 @@ function AgentsTab({ issue }: { issue: IssueDetail }) {
 }
 
 export function AgentsTree({ issue }: { issue: IssueDetail }) {
-  const activity = issue.opencode_sessions.at(-1)?.activity;
+  const activity = issue.runner_sessions.at(-1)?.activity;
   const agents = (activity?.sessions ?? []).concat(activity?.subagents ?? []);
   if (!agents.length) return <Limited message="Agent tree is unavailable for this session." />;
   const activeSessionIds = new Set(
@@ -237,8 +237,8 @@ export function AgentsTree({ issue }: { issue: IssueDetail }) {
       .filter((event) => isActiveStatus(event.status))
       .map((event) => event.session_id),
   );
-  const session = issue.opencode_sessions.at(-1);
-  if (!activeSessionIds.size && session?.process_alive) activeSessionIds.add(session.opencode_session_id);
+  const session = issue.runner_sessions.at(-1);
+  if (!activeSessionIds.size && session?.process_alive) activeSessionIds.add(session.runner_session_id);
   const tree = buildAgentTree(agents);
   return (
     <ul className="grid gap-2">
@@ -317,15 +317,15 @@ function linearIssueUrl(identifier: string): string {
   return `https://linear.app/${encodeURIComponent(workspace)}/issue/${encodeURIComponent(identifier)}`;
 }
 
-function opencodeSessionUrl(sessionId: string, directory: string): string {
-  const base = process.env.NEXT_PUBLIC_OPENCODE_WEB_BASE || DEFAULT_OPENCODE_WEB_BASE;
+function runnerSessionUrl(sessionId: string, directory: string): string {
+  const base = process.env.NEXT_PUBLIC_RUNNER_WEB_BASE || DEFAULT_RUNNER_WEB_BASE;
   return `${base.replace(/\/+$/, "")}/${base64UrlEncodeUtf8(directory)}/session/${encodeURIComponent(sessionId)}`;
 }
 
-function opencodeSessionDirectory(session: NonNullable<IssueDetail["opencode_sessions"][number]>): string | undefined {
+function runnerSessionDirectory(session: NonNullable<IssueDetail["runner_sessions"][number]>): string | undefined {
   const activity = session.activity;
   const rootSession = activity?.sessions.find((item) => item.session_id === activity.root_session_id);
-  const currentSession = activity?.sessions.find((item) => item.session_id === session.opencode_session_id);
+  const currentSession = activity?.sessions.find((item) => item.session_id === session.runner_session_id);
   return currentSession?.directory || rootSession?.directory || session.worktree_path || undefined;
 }
 
@@ -368,7 +368,7 @@ function EvidenceTab({ issue }: { issue: IssueDetail }) {
       <Evidence label="blocker" value={issue.blocker ? `${issue.blocker.kind}: ${issue.blocker.message}` : "none"} />
       <Evidence label="failure" value={issue.failure ? `${issue.failure.kind}: ${issue.failure.message}` : "none"} />
       <Evidence label="runtime defect" value={issue.runtime_defect ? `${issue.runtime_defect.classification}: ${issue.runtime_defect.next_action}` : "none"} />
-      <Evidence label="session evidence refs" value={issue.opencode_sessions.at(-1)?.session_evidence_refs.length ? issue.opencode_sessions.at(-1)!.session_evidence_refs.join("; ") : "none"} />
+      <Evidence label="session evidence refs" value={issue.runner_sessions.at(-1)?.session_evidence_refs.length ? issue.runner_sessions.at(-1)!.session_evidence_refs.join("; ") : "none"} />
       <Evidence label="self-defect routing" value={issue.self_defect_routing ? `${issue.self_defect_routing.fingerprint ?? "fingerprint unavailable"}: ${issue.self_defect_routing.next_action ?? "inspect"}` : "none"} />
       <Evidence label="evals" value={issue.eval_results.length ? issue.eval_results.map((item) => `${item.suite} ${item.status}`).join("; ") : "none"} />
       <Evidence label="stop reason" value={issue.stop_reason ?? "none"} />

@@ -3,14 +3,14 @@ use serde::{Deserialize, Serialize};
 use crate::{
     api::{
         AggregateDashboardResponse, AggregateDashboardTotals, CandidateSuppressionResponse,
-        DASHBOARD_EVENTS_ENDPOINT, IssueDetailResponse, OpenCodeSessionDetail, ProjectCapacity,
-        ProjectDashboardCard, ProjectDashboardResponse, ProjectRuntimeLivenessResponse,
+        DASHBOARD_EVENTS_ENDPOINT, IssueDetailResponse, ProjectCapacity, ProjectDashboardCard,
+        ProjectDashboardResponse, ProjectRuntimeLivenessResponse, RunnerSessionDetail,
         RunningIssueSummary, RuntimeDashboardApi, RuntimeDefectProjection,
         SelectedCandidateResponse, SelfDefectRouteSummary, SelfDefectRoutingProjection,
         UI_AGGREGATE_DASHBOARD_ENDPOINT,
     },
-    opencode::{OpenCodeSessionActivity, OpenCodeSessionTreeActivity},
-    state::{CleanupStatus, EvalRunRecord, GitRefRecord, LifecycleStage, OpenCodeStage},
+    runner::{RunnerSessionActivity, RunnerSessionTreeActivity},
+    state::{CleanupStatus, EvalRunRecord, GitRefRecord, LifecycleStage, RunnerStage},
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -72,7 +72,7 @@ pub struct UiRunningIssueSummary {
     pub process_id: Option<u32>,
     pub process_alive: Option<bool>,
     pub lifecycle_stage: Option<LifecycleStage>,
-    pub stage: Option<OpenCodeStage>,
+    pub stage: Option<RunnerStage>,
     pub agent: Option<String>,
     pub model: Option<String>,
     pub active_agent: Option<String>,
@@ -126,13 +126,13 @@ pub struct UiIssueDetailResponse {
     pub cleanup_status: CleanupStatus,
     pub stop_reason: Option<String>,
     pub last_runner_event: Option<String>,
-    pub opencode_sessions: Vec<UiOpenCodeSessionDetail>,
+    pub runner_sessions: Vec<UiRunnerSessionDetail>,
     pub eval_results: Vec<EvalRunRecord>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct UiOpenCodeSessionDetail {
-    pub opencode_session_id: String,
+pub struct UiRunnerSessionDetail {
+    pub runner_session_id: String,
     pub provider_mode: crate::state::RuntimeProviderMode,
     pub provider_id: Option<String>,
     pub agent: String,
@@ -141,8 +141,8 @@ pub struct UiOpenCodeSessionDetail {
     pub process_id: Option<u32>,
     pub process_alive: Option<bool>,
     pub lifecycle_stage: LifecycleStage,
-    pub current_stage: OpenCodeStage,
-    pub stage_history: Vec<OpenCodeStage>,
+    pub current_stage: RunnerStage,
+    pub stage_history: Vec<RunnerStage>,
     pub active_agent: Option<String>,
     pub active_model: Option<String>,
     pub subagents_used: u64,
@@ -159,24 +159,24 @@ pub struct UiOpenCodeSessionDetail {
     pub acp_frame_count: u64,
     pub session_evidence_refs: Vec<String>,
     pub silence_observed: bool,
-    pub activity: Option<UiOpenCodeSessionTreeActivity>,
+    pub activity: Option<UiRunnerSessionTreeActivity>,
     pub activity_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct UiOpenCodeSessionTreeActivity {
+pub struct UiRunnerSessionTreeActivity {
     pub root_session_id: String,
-    pub sessions: Vec<UiOpenCodeSessionActivity>,
-    pub subagents: Vec<UiOpenCodeSessionActivity>,
-    pub todos: Vec<crate::opencode::OpenCodeTodoActivity>,
-    pub timeline: Vec<crate::opencode::OpenCodeTimelineEvent>,
+    pub sessions: Vec<UiRunnerSessionActivity>,
+    pub subagents: Vec<UiRunnerSessionActivity>,
+    pub todos: Vec<crate::runner::RunnerTodoActivity>,
+    pub timeline: Vec<crate::runner::RunnerTimelineEvent>,
     pub running_tool_count: u64,
     pub pending_tool_count: u64,
     pub last_updated_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct UiOpenCodeSessionActivity {
+pub struct UiRunnerSessionActivity {
     pub session_id: String,
     pub parent_session_id: Option<String>,
     pub title: String,
@@ -358,20 +358,20 @@ impl From<&IssueDetailResponse> for UiIssueDetailResponse {
             cleanup_status: issue.cleanup_status,
             stop_reason: issue.stop_reason.clone(),
             last_runner_event: issue.last_runner_event.clone(),
-            opencode_sessions: issue
-                .opencode_sessions
+            runner_sessions: issue
+                .runner_sessions
                 .iter()
-                .map(UiOpenCodeSessionDetail::from)
+                .map(UiRunnerSessionDetail::from)
                 .collect(),
             eval_results: issue.eval_results.clone(),
         }
     }
 }
 
-impl From<&OpenCodeSessionDetail> for UiOpenCodeSessionDetail {
-    fn from(session: &OpenCodeSessionDetail) -> Self {
+impl From<&RunnerSessionDetail> for UiRunnerSessionDetail {
+    fn from(session: &RunnerSessionDetail) -> Self {
         Self {
-            opencode_session_id: session.opencode_session_id.clone(),
+            runner_session_id: session.runner_session_id.clone(),
             provider_mode: session.provider_mode,
             provider_id: session.provider_id.clone(),
             agent: session.agent.clone(),
@@ -401,25 +401,25 @@ impl From<&OpenCodeSessionDetail> for UiOpenCodeSessionDetail {
             activity: session
                 .activity
                 .as_ref()
-                .map(UiOpenCodeSessionTreeActivity::from),
+                .map(UiRunnerSessionTreeActivity::from),
             activity_error: session.activity_error.clone(),
         }
     }
 }
 
-impl From<&OpenCodeSessionTreeActivity> for UiOpenCodeSessionTreeActivity {
-    fn from(activity: &OpenCodeSessionTreeActivity) -> Self {
+impl From<&RunnerSessionTreeActivity> for UiRunnerSessionTreeActivity {
+    fn from(activity: &RunnerSessionTreeActivity) -> Self {
         Self {
             root_session_id: activity.root_session_id.clone(),
             sessions: activity
                 .sessions
                 .iter()
-                .map(UiOpenCodeSessionActivity::from)
+                .map(UiRunnerSessionActivity::from)
                 .collect(),
             subagents: activity
                 .subagents
                 .iter()
-                .map(UiOpenCodeSessionActivity::from)
+                .map(UiRunnerSessionActivity::from)
                 .collect(),
             todos: activity.todos.clone(),
             timeline: activity.timeline.clone(),
@@ -430,8 +430,8 @@ impl From<&OpenCodeSessionTreeActivity> for UiOpenCodeSessionTreeActivity {
     }
 }
 
-impl From<&OpenCodeSessionActivity> for UiOpenCodeSessionActivity {
-    fn from(activity: &OpenCodeSessionActivity) -> Self {
+impl From<&RunnerSessionActivity> for UiRunnerSessionActivity {
+    fn from(activity: &RunnerSessionActivity) -> Self {
         Self {
             session_id: activity.session_id.clone(),
             parent_session_id: activity.parent_session_id.clone(),

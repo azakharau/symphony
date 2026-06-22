@@ -36,7 +36,7 @@ pub(super) fn build_issue_prompt(
          {handoff_path}\n\n\
          The handoff file must be valid JSON with durable execution evidence, not a Markdown result packet:\n\
          Use the sidecar JSON contract below for {handoff_path}; keep chat summaries separate from this file.\n\
-         Symphony accepts OpenCode orchestrator field names such as status, schema_version, subagents_used, object eval_results, and git.pushed, then normalizes them before strict validation.\n\
+         Symphony accepts runner orchestrator field names such as status, schema_version, subagents_used, object eval_results, and git.pushed, then normalizes them before strict validation.\n\
          {{\n\
            \"session_id\": \"{session_id}\",\n\
            \"lifecycle_stages\": [\"starting\", \"running\", \"eval\", \"review\", \"handoff\", \"completed\"],\n\

@@ -1,7 +1,7 @@
 # Symphony
 
 Symphony turns project work into isolated implementation runs. The active Symphony runtime is the Rust
-`symphony` service, which schedules Linear issues and runs OpenCode ACP in per-issue
+`symphony` service, which schedules Linear issues and runs runner ACP in per-issue
 worktrees.
 
 [![Symphony demo video preview](.github/media/symphony-demo-poster.jpg)](https://player.vimeo.com/video/1186371009?h=5626e4b899)
@@ -18,7 +18,7 @@ The Rust workspace contains:
 
 - Typed multiproject config loading.
 - Linear project and milestone scoping.
-- OpenCode-only ACP launch configuration with nd-JSON stdio, `session/set_config_option` model and
+- runner-only ACP launch configuration with nd-JSON stdio, `session/set_config_option` model and
   effort selection, and per-issue git worktrees.
 - SQLite runtime state bootstrap and restart-safe state queries.
 - Issue orchestration for `Todo`, `In Progress`, `Need Owner Input`, backlog, blockers, terminal
@@ -48,7 +48,7 @@ the key in project workflow files.
 
 ## Validation
 
-Default validation does not start OpenCode, mutate Linear, or restart systemd:
+Default validation does not start runner, mutate Linear, or restart systemd:
 
 ```bash
 cargo fmt --all -- --check
@@ -60,7 +60,7 @@ Live cutover validation requires host credentials and operator control:
 
 ```bash
 SYMPHONY_LIVE_OPENCODE_ACP=1 cargo test -p symphony --test bootstrap \
-  installed_opencode_acp_supports_ndjson_config_options_without_prompting -- --nocapture
+  installed_acp_supports_ndjson_config_options_without_prompting -- --nocapture
 cargo build --release -p symphony
 /usr/local/bin/opencode acp
 systemctl --user status symphony.service
@@ -71,7 +71,7 @@ curl -fsS http://127.0.0.1:4115/api/projects/recall
 
 ## Runtime Contract
 
-See [SPEC.md](SPEC.md) for the Rust/OpenCode-only Symphony service contract.
+See [SPEC.md](SPEC.md) for the Rust/runner-only Symphony service contract.
 
 ## License
 

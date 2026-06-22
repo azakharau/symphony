@@ -40,11 +40,11 @@ CREATE TABLE IF NOT EXISTS issues (
     FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS opencode_sessions (
+CREATE TABLE IF NOT EXISTS runner_sessions (
     project_id TEXT NOT NULL,
     issue_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
-    provider_mode TEXT NOT NULL DEFAULT 'opencode_acp',
+    provider_mode TEXT NOT NULL DEFAULT 'acp',
     provider_id TEXT,
     agent TEXT NOT NULL,
     model TEXT,
@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS opencode_sessions (
     FOREIGN KEY (project_id, issue_id) REFERENCES issues(project_id, issue_id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS opencode_stage_events (
+CREATE TABLE IF NOT EXISTS runner_stage_events (
     project_id TEXT NOT NULL,
     issue_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS opencode_stage_events (
     event TEXT,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (project_id, issue_id, session_id, sequence),
-    FOREIGN KEY (project_id, issue_id, session_id) REFERENCES opencode_sessions(project_id, issue_id, session_id) ON DELETE CASCADE
+    FOREIGN KEY (project_id, issue_id, session_id) REFERENCES runner_sessions(project_id, issue_id, session_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS eval_runs (

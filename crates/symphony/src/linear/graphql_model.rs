@@ -233,7 +233,7 @@ fn latest_handoff_comment(comments: &[LinearCommentNode]) -> Option<&LinearComme
             comment
                 .body
                 .as_deref()
-                .is_some_and(|body| body.to_lowercase().contains("opencode handoff accepted"))
+                .is_some_and(|body| body.to_lowercase().contains("runner handoff accepted"))
         })
         .max_by_key(|comment| comment.created_at.as_deref().unwrap_or_default())
 }
@@ -330,16 +330,16 @@ fn machine_generated_owner_input_comment(body: &str) -> bool {
 
     [
         "<!-- symphony:",
-        "## opencode handoff",
-        "## opencode session attached",
+        "## runner handoff",
+        "## runner session attached",
         "## symphony stop rule",
         "## benchmark",
         "## validation",
         "## changed files",
         "```text\nstatus:",
         "symphony stop rule",
-        "opencode handoff",
-        "opencode session attached",
+        "runner handoff",
+        "runner session attached",
         "changed files",
         "validation results",
     ]

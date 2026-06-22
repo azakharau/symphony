@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, bail};
 use tokio::process::Command;
 
-use crate::{config::ProjectConfig, opencode::GitClosureEvidence};
+use crate::{config::ProjectConfig, runner::GitClosureEvidence};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum GitClosureResult {

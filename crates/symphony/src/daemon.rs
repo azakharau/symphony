@@ -17,21 +17,20 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    config::{OpenCodeStorageConfig, ProjectConfig, RootConfig},
+    config::{ProjectConfig, RootConfig, RunnerArchiveConfig},
     linear::{
         EmptyLinearClient, LinearClient, LinearGraphqlClient, LinearIssue, LinearIssueEvidence,
         LinearTransition, ReqwestGraphqlTransport,
     },
-    opencode::{
-        DeterministicOpenCodeLauncher, OpenCodeLaunchObserver, OpenCodeLauncher,
-        OpenCodeProcessStarted, OpenCodeSessionCreated, OpenCodeStartedSession,
-        ProcessTreeTerminationEvidence, StdioOpenCodeLauncher,
-        apply_session_tree_metrics_preserving_marker, build_acp_launch_spec, new_session_record,
-        read_latest_session_tree_error, read_session_tree_metrics,
+    runner::{
+        DeterministicRunnerLauncher, ProcessTreeTerminationEvidence, RunnerLaunchObserver,
+        RunnerLauncher, RunnerProcessStarted, RunnerSessionCreated, RunnerStartedSession,
+        StdioRunnerLauncher, apply_session_tree_metrics_preserving_marker, build_acp_launch_spec,
+        new_session_record, read_latest_session_tree_error, read_session_tree_metrics,
     },
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, IssueStateRecord, LifecycleStage,
-        OpenCodeSessionRecord, OpenCodeStage, RuntimeLivenessStatus, SelfDefectResolutionState,
+        RunnerSessionRecord, RunnerStage, RuntimeLivenessStatus, SelfDefectResolutionState,
     },
     storage::SqliteStore,
 };
@@ -53,7 +52,7 @@ use session::{
     has_reusable_existing_session, latest_running_session_for_issue, mark_existing_session_blocked,
     mark_existing_session_failed_for_unresolved_runtime_defect, mark_existing_session_queued,
     mark_existing_session_resume_failed, mark_existing_session_waiting_for_project_owner_input,
-    mark_historical_sessions_ignored, mark_issue_sessions_terminal, resume_stale_opencode_session,
+    mark_historical_sessions_ignored, mark_issue_sessions_terminal, resume_stale_runner_session,
     session_has_live_process, unresolved_runtime_defect,
 };
 use task_selection::{
@@ -99,7 +98,7 @@ pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
     store.reconcile_projects(&config).await?;
 
     if options.once {
-        run_once_with_clients(&config, &store, &EmptyLinearClient, &StdioOpenCodeLauncher).await?;
+        run_once_with_clients(&config, &store, &EmptyLinearClient, &StdioRunnerLauncher).await?;
         return Ok(());
     }
 
@@ -166,14 +165,14 @@ pub async fn run_once_with_linear_client(
     store: &SqliteStore,
     linear: &impl LinearClient,
 ) -> anyhow::Result<OrchestrationReport> {
-    run_once_with_clients(config, store, linear, &DeterministicOpenCodeLauncher).await
+    run_once_with_clients(config, store, linear, &DeterministicRunnerLauncher).await
 }
 
 pub async fn run_once_with_clients(
     config: &RootConfig,
     store: &SqliteStore,
     linear: &impl LinearClient,
-    opencode: &impl OpenCodeLauncher,
+    runner: &impl RunnerLauncher,
 ) -> anyhow::Result<OrchestrationReport> {
     store.reconcile_projects(config).await?;
 
@@ -197,10 +196,10 @@ pub async fn run_once_with_clients(
             project,
             ReconcileContext {
                 self_defect_project,
-                opencode_storage: config.opencode_storage.as_ref(),
+                runner_archive: config.runner_archive.as_ref(),
                 store,
                 linear,
-                opencode,
+                runner,
             },
             &mut report,
             &mut dispatch_queue,
@@ -219,7 +218,7 @@ pub async fn run_once_with_clients(
                 self_defect_project,
                 store,
                 linear,
-                opencode,
+                runner,
                 selection.candidate,
                 &mut report,
             )
@@ -269,7 +268,7 @@ async fn running_execution_count(store: &SqliteStore, project_id: &str) -> anyho
         .map(|issue| issue.issue_id)
         .collect::<HashSet<_>>();
 
-    for session in store.active_opencode_sessions().await? {
+    for session in store.active_runner_sessions().await? {
         if session.project_id == project_id && session_has_live_process(&session).await {
             issue_ids.insert(session.issue_id);
         }
@@ -280,25 +279,25 @@ async fn running_execution_count(store: &SqliteStore, project_id: &str) -> anyho
 
 struct ReconcileContext<'a, L, O> {
     self_defect_project: &'a ProjectConfig,
-    opencode_storage: Option<&'a OpenCodeStorageConfig>,
+    runner_archive: Option<&'a RunnerArchiveConfig>,
     store: &'a SqliteStore,
     linear: &'a L,
-    opencode: &'a O,
+    runner: &'a O,
 }
 
 async fn reconcile_project(
     project_index: usize,
     project: &ProjectConfig,
-    context: ReconcileContext<'_, impl LinearClient, impl OpenCodeLauncher>,
+    context: ReconcileContext<'_, impl LinearClient, impl RunnerLauncher>,
     report: &mut OrchestrationReport,
     dispatch_queue: &mut Vec<DispatchSelection>,
 ) -> anyhow::Result<()> {
     let ReconcileContext {
         self_defect_project,
-        opencode_storage,
+        runner_archive,
         store,
         linear,
-        opencode,
+        runner,
     } = context;
     let mut eligible = Vec::new();
     let mut issues = linear.fetch_candidate_issues(project).await?;
@@ -489,7 +488,7 @@ async fn reconcile_project(
                 debug!(
                     project_id = %project.id,
                     issue = %issue.identifier,
-                    "checking in-progress OpenCode handoff"
+                    "checking in-progress runner handoff"
                 );
                 let existing = store.issue(&project.id, &issue.id).await?;
                 let should_requeue_retained_blocker = existing
@@ -525,7 +524,7 @@ async fn reconcile_project(
                         project_id = %project.id,
                         issue = %issue.identifier,
                         reason = "missing_active_session",
-                        "In Progress issue has no active OpenCode session; returning to Todo for fresh dispatch"
+                        "In Progress issue has no active runner session; returning to Todo for fresh dispatch"
                     );
                     linear
                         .transition_issue(&issue.id, LinearTransition::Todo)
@@ -542,8 +541,8 @@ async fn reconcile_project(
                     mark_historical_sessions_ignored(store, project, &issue).await?;
                     continue;
                 }
-                if let Some(storage) = opencode_storage
-                    && park_opencode_provider_error_if_present(
+                if let Some(storage) = runner_archive
+                    && park_runner_provider_error_if_present(
                         storage, project, store, linear, &issue,
                     )
                     .await?
@@ -554,10 +553,10 @@ async fn reconcile_project(
                 if process_in_progress_handoff(
                     project,
                     self_defect_project,
-                    opencode_storage,
+                    runner_archive,
                     store,
                     linear,
-                    opencode,
+                    runner,
                     &issue,
                     existing,
                 )
@@ -565,16 +564,16 @@ async fn reconcile_project(
                 {
                     continue;
                 }
-                resume_stale_opencode_session(project, store, opencode, &issue).await?;
-                if let Some(storage) = opencode_storage
+                resume_stale_runner_session(project, store, runner, &issue).await?;
+                if let Some(storage) = runner_archive
                     && let Err(error) =
-                        refresh_opencode_session_metrics(storage, store, project, &issue).await
+                        refresh_runner_session_metrics(storage, store, project, &issue).await
                 {
                     warn!(
                         project_id = %project.id,
                         issue = %issue.identifier,
                         error = %error,
-                        "OpenCode persisted session metric refresh failed"
+                        "runner persisted session metric refresh failed"
                     );
                 }
                 store.upsert_issue(&record).await?;
@@ -670,7 +669,7 @@ async fn reconcile_project(
                     self_defect_project,
                     store,
                     linear,
-                    opencode,
+                    runner,
                     &issue,
                     existing.clone(),
                 )
@@ -744,7 +743,7 @@ async fn reconcile_project(
                     info!(
                         project_id = %project.id,
                         issue = %issue.identifier,
-                        "existing OpenCode session found; queued for capacity-gated resume"
+                        "existing runner session found; queued for capacity-gated resume"
                     );
                     let mut record = issue_record(
                         project,
@@ -929,7 +928,7 @@ async fn dispatch_candidate(
     self_defect_project: &ProjectConfig,
     store: &SqliteStore,
     linear: &impl LinearClient,
-    opencode: &impl OpenCodeLauncher,
+    runner: &impl RunnerLauncher,
     candidate: DispatchCandidate,
     report: &mut OrchestrationReport,
 ) -> anyhow::Result<()> {
@@ -937,7 +936,7 @@ async fn dispatch_candidate(
     info!(
         project_id = %project.id,
         issue = %issue.identifier,
-        "dispatching issue to OpenCode"
+        "dispatching issue to runner"
     );
     linear
         .transition_issue(&issue.id, LinearTransition::InProgress)
@@ -960,7 +959,7 @@ async fn dispatch_candidate(
     match candidate {
         DispatchCandidate::New(issue) => {
             let observer = RuntimeLaunchObserver::new(project, &issue, &launch_spec, store);
-            match opencode.launch_observed(&launch_spec, &observer).await {
+            match runner.launch_observed(&launch_spec, &observer).await {
                 Ok(started) => {
                     let session = new_session_record(project, &issue, started, &launch_spec);
                     info!(
@@ -968,7 +967,7 @@ async fn dispatch_candidate(
                         issue = %issue.identifier,
                         session_id = %session.session_id,
                         worktree_path = %session.worktree_path,
-                        "OpenCode session recorded"
+                        "runner session recorded"
                     );
                     upsert_observed_launch_session(store, session).await?;
                     report.dispatched.push(issue.identifier);
@@ -988,15 +987,15 @@ async fn dispatch_candidate(
             }
         }
         DispatchCandidate::ExistingSession(issue) => {
-            if let Err(error) = resume_stale_opencode_session(project, store, opencode, &issue)
+            if let Err(error) = resume_stale_runner_session(project, store, runner, &issue)
                 .await
-                .context("continue existing OpenCode session")
+                .context("continue existing runner session")
             {
                 let failure_reason = error_chain(error.as_ref());
                 mark_existing_session_resume_failed(store, project, &issue, &failure_reason)
                     .await?;
                 let observer = RuntimeLaunchObserver::new(project, &issue, &launch_spec, store);
-                match opencode.launch_observed(&launch_spec, &observer).await {
+                match runner.launch_observed(&launch_spec, &observer).await {
                     Ok(started) => {
                         let session = new_session_record(project, &issue, started, &launch_spec);
                         info!(
@@ -1005,7 +1004,7 @@ async fn dispatch_candidate(
                             session_id = %session.session_id,
                             worktree_path = %session.worktree_path,
                             previous_failure_reason = %failure_reason,
-                            "fresh OpenCode session recorded after failed resume"
+                            "fresh runner session recorded after failed resume"
                         );
                         upsert_observed_launch_session(store, session).await?;
                         report.dispatched.push(issue.identifier);
@@ -1018,7 +1017,7 @@ async fn dispatch_candidate(
                             linear,
                             &issue,
                             &launch_spec,
-                            crate::opencode::OpenCodeError::InvalidWorktree(format!(
+                            crate::runner::RunnerError::InvalidWorktree(format!(
                                 "{failure_reason}; fresh launch also failed: {error}"
                             )),
                         )
@@ -1029,7 +1028,7 @@ async fn dispatch_candidate(
                 info!(
                     project_id = %project.id,
                     issue = %issue.identifier,
-                    "existing OpenCode session continued without duplicate launch"
+                    "existing runner session continued without duplicate launch"
                 );
             }
         }
@@ -1039,10 +1038,10 @@ async fn dispatch_candidate(
 
 async fn upsert_observed_launch_session(
     store: &SqliteStore,
-    mut session: OpenCodeSessionRecord,
+    mut session: RunnerSessionRecord,
 ) -> anyhow::Result<()> {
     if let Some(existing) = store
-        .opencode_session(&session.project_id, &session.issue_id, &session.session_id)
+        .runner_session(&session.project_id, &session.issue_id, &session.session_id)
         .await?
         && is_observed_launch_marker(existing.lifecycle_marker.as_deref())
     {
@@ -1050,7 +1049,7 @@ async fn upsert_observed_launch_session(
         session.last_event = existing.last_event;
     }
 
-    store.upsert_opencode_session(&session).await?;
+    store.upsert_runner_session(&session).await?;
     Ok(())
 }
 
@@ -1061,7 +1060,7 @@ fn is_observed_launch_marker(marker: Option<&str>) -> bool {
 struct RuntimeLaunchObserver<'a> {
     project: &'a ProjectConfig,
     issue: &'a LinearIssue,
-    launch_spec: &'a crate::opencode::OpenCodeLaunchSpec,
+    launch_spec: &'a crate::runner::RunnerLaunchSpec,
     store: &'a SqliteStore,
     provisional_session_id: Mutex<Option<String>>,
 }
@@ -1070,7 +1069,7 @@ impl<'a> RuntimeLaunchObserver<'a> {
     fn new(
         project: &'a ProjectConfig,
         issue: &'a LinearIssue,
-        launch_spec: &'a crate::opencode::OpenCodeLaunchSpec,
+        launch_spec: &'a crate::runner::RunnerLaunchSpec,
         store: &'a SqliteStore,
     ) -> Self {
         Self {
@@ -1084,11 +1083,11 @@ impl<'a> RuntimeLaunchObserver<'a> {
 }
 
 #[async_trait::async_trait]
-impl OpenCodeLaunchObserver for RuntimeLaunchObserver<'_> {
+impl RunnerLaunchObserver for RuntimeLaunchObserver<'_> {
     async fn process_started(
         &self,
-        event: OpenCodeProcessStarted,
-    ) -> Result<(), crate::opencode::OpenCodeError> {
+        event: RunnerProcessStarted,
+    ) -> Result<(), crate::runner::RunnerError> {
         let session_id = provisional_session_id(self.issue, event.process_id);
         {
             let mut provisional_session_id = self.provisional_session_id.lock().await;
@@ -1098,7 +1097,7 @@ impl OpenCodeLaunchObserver for RuntimeLaunchObserver<'_> {
         let mut session = new_session_record(
             self.project,
             self.issue,
-            OpenCodeStartedSession {
+            RunnerStartedSession {
                 session_id,
                 process_id: event.process_id,
                 acp_frame_count: 0,
@@ -1114,32 +1113,30 @@ impl OpenCodeLaunchObserver for RuntimeLaunchObserver<'_> {
                 .unwrap_or_else(|| "acp_process_started:no_pid".into()),
         );
         self.store
-            .upsert_opencode_session(&session)
+            .upsert_runner_session(&session)
             .await
-            .map_err(|error| crate::opencode::OpenCodeError::LaunchObserver(error.to_string()))
+            .map_err(|error| crate::runner::RunnerError::LaunchObserver(error.to_string()))
     }
 
     async fn session_created(
         &self,
-        event: OpenCodeSessionCreated,
-    ) -> Result<(), crate::opencode::OpenCodeError> {
+        event: RunnerSessionCreated,
+    ) -> Result<(), crate::runner::RunnerError> {
         let provisional_session_id = {
             let mut provisional_session_id = self.provisional_session_id.lock().await;
             provisional_session_id.take()
         };
         if let Some(session_id) = provisional_session_id {
             self.store
-                .delete_opencode_session(&self.project.id, &self.issue.id, &session_id)
+                .delete_runner_session(&self.project.id, &self.issue.id, &session_id)
                 .await
-                .map_err(|error| {
-                    crate::opencode::OpenCodeError::LaunchObserver(error.to_string())
-                })?;
+                .map_err(|error| crate::runner::RunnerError::LaunchObserver(error.to_string()))?;
         }
 
         let mut session = new_session_record(
             self.project,
             self.issue,
-            OpenCodeStartedSession {
+            RunnerStartedSession {
                 session_id: event.session_id,
                 process_id: event.process_id,
                 acp_frame_count: 0,
@@ -1155,9 +1152,9 @@ impl OpenCodeLaunchObserver for RuntimeLaunchObserver<'_> {
                 .unwrap_or_else(|| "acp_session_attached:no_pid".into()),
         );
         self.store
-            .upsert_opencode_session(&session)
+            .upsert_runner_session(&session)
             .await
-            .map_err(|error| crate::opencode::OpenCodeError::LaunchObserver(error.to_string()))
+            .map_err(|error| crate::runner::RunnerError::LaunchObserver(error.to_string()))
     }
 }
 
@@ -1273,8 +1270,8 @@ async fn handle_launch_failure(
     store: &SqliteStore,
     linear: &impl LinearClient,
     issue: &LinearIssue,
-    launch_spec: &crate::opencode::OpenCodeLaunchSpec,
-    error: crate::opencode::OpenCodeError,
+    launch_spec: &crate::runner::RunnerLaunchSpec,
+    error: crate::runner::RunnerError,
 ) -> anyhow::Result<()> {
     let failure_reason = error_chain(&error);
     let occurrence_count = launch_failure_occurrence_count(store, project, issue).await?;
@@ -1285,7 +1282,7 @@ async fn handle_launch_failure(
         worktree_path = %launch_spec.cwd.display(),
         expected_branch = %launch_spec.branch_name,
         failure_reason = %failure_reason,
-        "OpenCode launch failed after Linear transition"
+        "runner launch failed after Linear transition"
     );
     linear
         .record_issue_evidence(
@@ -1309,7 +1306,7 @@ async fn handle_launch_failure(
         LifecycleStage::Failed,
         Some(BlockerRecord {
             kind: "runtime_defect".into(),
-            message: "OpenCode launch failed after Linear transition".into(),
+            message: "runner launch failed after Linear transition".into(),
             observed_at: issue.updated_at.clone(),
         }),
         CleanupStatus::Clean,
@@ -1325,7 +1322,7 @@ async fn handle_launch_failure(
         RuntimeSelfDefectInput {
             issue,
             evidence_kind: "runtime_defect",
-            message: "OpenCode launch failed after Linear transition",
+            message: "runner launch failed after Linear transition",
             failure: &failure,
             session: &session,
         },
@@ -1337,9 +1334,9 @@ async fn handle_launch_failure(
     if matches!(
         launch_spec.provider_mode,
         crate::state::RuntimeProviderMode::OmpAcp
-    ) || matches!(error, crate::opencode::OpenCodeError::AcpSetupFailed { .. })
+    ) || matches!(error, crate::runner::RunnerError::AcpSetupFailed { .. })
     {
-        store.upsert_opencode_session(&session).await?;
+        store.upsert_runner_session(&session).await?;
     }
     Ok(())
 }
@@ -1362,11 +1359,11 @@ async fn launch_failure_occurrence_count(
 fn launch_failure_session(
     project: &ProjectConfig,
     issue: &LinearIssue,
-    launch_spec: &crate::opencode::OpenCodeLaunchSpec,
-    error: &crate::opencode::OpenCodeError,
-) -> OpenCodeSessionRecord {
+    launch_spec: &crate::runner::RunnerLaunchSpec,
+    error: &crate::runner::RunnerError,
+) -> RunnerSessionRecord {
     setup_failure_session(project, issue, launch_spec, error).unwrap_or_else(|| {
-        OpenCodeSessionRecord {
+        RunnerSessionRecord {
             project_id: project.id.clone(),
             issue_id: issue.id.clone(),
             session_id: format!("launch-failed:{}", issue.identifier),
@@ -1377,7 +1374,7 @@ fn launch_failure_session(
             worktree_path: launch_spec.cwd.display().to_string(),
             process_id: None,
             lifecycle_stage: LifecycleStage::Failed,
-            stage: OpenCodeStage::Failed,
+            stage: RunnerStage::Failed,
             active_agent: Some(launch_spec.agent.clone()),
             active_model: launch_spec.model.clone(),
             message_count: 0,
@@ -1400,10 +1397,10 @@ fn launch_failure_session(
 fn setup_failure_session(
     project: &ProjectConfig,
     issue: &LinearIssue,
-    launch_spec: &crate::opencode::OpenCodeLaunchSpec,
-    error: &crate::opencode::OpenCodeError,
-) -> Option<OpenCodeSessionRecord> {
-    let crate::opencode::OpenCodeError::AcpSetupFailed {
+    launch_spec: &crate::runner::RunnerLaunchSpec,
+    error: &crate::runner::RunnerError,
+) -> Option<RunnerSessionRecord> {
+    let crate::runner::RunnerError::AcpSetupFailed {
         process_id,
         session_id,
         reason,
@@ -1416,7 +1413,7 @@ fn setup_failure_session(
     let session_id = session_id
         .clone()
         .unwrap_or_else(|| format!("setup-failed:{}", issue.identifier));
-    Some(OpenCodeSessionRecord {
+    Some(RunnerSessionRecord {
         project_id: project.id.clone(),
         issue_id: issue.id.clone(),
         session_id,
@@ -1427,7 +1424,7 @@ fn setup_failure_session(
         worktree_path: launch_spec.cwd.display().to_string(),
         process_id: *process_id,
         lifecycle_stage: LifecycleStage::Failed,
-        stage: OpenCodeStage::Failed,
+        stage: RunnerStage::Failed,
         active_agent: Some(launch_spec.agent.clone()),
         active_model: launch_spec.model.clone(),
         message_count: 0,
@@ -1441,7 +1438,7 @@ fn setup_failure_session(
         last_event: Some(setup_failure_last_event(*process_id, termination)),
         runtime_failure_kind: (launch_spec.provider_mode
             == crate::state::RuntimeProviderMode::OmpAcp)
-            .then(|| crate::opencode::classify_omp_acp_failure_kind(reason)),
+            .then(|| crate::runner::classify_omp_acp_failure_kind(reason)),
         acp_frame_count: 0,
         session_evidence_refs: Vec::new(),
         silence_observed: false,
@@ -1449,11 +1446,11 @@ fn setup_failure_session(
 }
 
 fn launch_failure_kind(
-    error: &crate::opencode::OpenCodeError,
+    error: &crate::runner::RunnerError,
 ) -> Option<crate::state::RuntimeFailureKind> {
     match error {
-        crate::opencode::OpenCodeError::RuntimeFailure { kind, .. } => Some(kind.clone()),
-        crate::opencode::OpenCodeError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
+        crate::runner::RunnerError::RuntimeFailure { kind, .. } => Some(kind.clone()),
+        crate::runner::RunnerError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
             Some(crate::state::RuntimeFailureKind::MissingBinary)
         }
         _ => None,
@@ -1475,7 +1472,7 @@ fn setup_failure_last_event(
 
 fn launch_failure_evidence_body(
     issue: &LinearIssue,
-    launch_spec: &crate::opencode::OpenCodeLaunchSpec,
+    launch_spec: &crate::runner::RunnerLaunchSpec,
     failure_reason: &str,
 ) -> String {
     format!(
@@ -1498,14 +1495,14 @@ fn error_chain(error: &(dyn StdError + 'static)) -> String {
     parts.join(": ")
 }
 
-async fn refresh_opencode_session_metrics(
-    storage: &OpenCodeStorageConfig,
+async fn refresh_runner_session_metrics(
+    storage: &RunnerArchiveConfig,
     store: &SqliteStore,
     project: &ProjectConfig,
     issue: &LinearIssue,
 ) -> anyhow::Result<()> {
     let Some(mut session) = store
-        .opencode_sessions_for_issue(&project.id, &issue.id)
+        .runner_sessions_for_issue(&project.id, &issue.id)
         .await?
         .pop()
     else {
@@ -1518,7 +1515,7 @@ async fn refresh_opencode_session_metrics(
             project_id = %project.id,
             issue = %issue.identifier,
             session_id = %session.session_id,
-            "OpenCode persisted session tree was not found during metric refresh"
+            "runner persisted session tree was not found during metric refresh"
         );
         return Ok(());
     };
@@ -1544,22 +1541,22 @@ async fn refresh_opencode_session_metrics(
             cost_micros = metrics.cost_micros,
             active_agent = metrics.active_agent.as_deref().unwrap_or("unknown"),
             active_model = metrics.active_model.as_deref().unwrap_or("unknown"),
-            "OpenCode persisted session metrics refreshed"
+            "runner persisted session metrics refreshed"
         );
     }
-    store.upsert_opencode_session(&session).await?;
+    store.upsert_runner_session(&session).await?;
     Ok(())
 }
 
-async fn park_opencode_provider_error_if_present(
-    storage: &OpenCodeStorageConfig,
+async fn park_runner_provider_error_if_present(
+    storage: &RunnerArchiveConfig,
     project: &ProjectConfig,
     store: &SqliteStore,
     linear: &impl LinearClient,
     issue: &LinearIssue,
 ) -> anyhow::Result<bool> {
     let Some(session) = store
-        .opencode_sessions_for_issue(&project.id, &issue.id)
+        .runner_sessions_for_issue(&project.id, &issue.id)
         .await?
         .pop()
     else {
@@ -1573,12 +1570,12 @@ async fn park_opencode_provider_error_if_present(
     else {
         return Ok(false);
     };
-    if !opencode_error_is_provider_blocker(&error.name, &error.message) {
+    if !runner_error_is_provider_blocker(&error.name, &error.message) {
         return Ok(false);
     }
     if let Some(metrics) =
         read_session_tree_metrics(&storage.database_path, &session.session_id).await?
-        && opencode_provider_error_is_stale(&error, &metrics)
+        && runner_provider_error_is_stale(&error, &metrics)
     {
         debug!(
             project_id = %project.id,
@@ -1588,14 +1585,14 @@ async fn park_opencode_provider_error_if_present(
             error_updated_ms = error.time_updated_ms,
             last_updated_ms = metrics.last_updated_ms,
             tokens = metrics.tokens_total,
-            "ignoring stale OpenCode provider error after newer session activity"
+            "ignoring stale runner provider error after newer session activity"
         );
         return Ok(false);
     }
 
     let provider = error.provider_id.as_deref().unwrap_or("unknown");
     let message = format!(
-        "OpenCode provider error `{name}` from provider `{provider}`: {detail}",
+        "runner provider error `{name}` from provider `{provider}`: {detail}",
         name = error.name,
         detail = error.message
     );
@@ -1606,7 +1603,7 @@ async fn park_opencode_provider_error_if_present(
         message_id = %error.message_id,
         error_name = %error.name,
         provider = provider,
-        "OpenCode provider error parked issue"
+        "runner provider error parked issue"
     );
     park_typed_blocker(
         project,
@@ -1617,7 +1614,7 @@ async fn park_opencode_provider_error_if_present(
         false,
         "provider_blocker",
         format!(
-            "{message}\n\nsession_id: {session_id}\nmessage_id: {message_id}\ntime_updated_ms: {time_updated_ms}\n\nThis is a provider/runtime configuration blocker, not active implementation work. Symphony killed the OpenCode ACP process tree and freed project capacity.",
+            "{message}\n\nsession_id: {session_id}\nmessage_id: {message_id}\ntime_updated_ms: {time_updated_ms}\n\nThis is a provider/runtime configuration blocker, not active implementation work. Symphony killed the runner ACP process tree and freed project capacity.",
             session_id = session.session_id,
             message_id = error.message_id,
             time_updated_ms = error.time_updated_ms,
@@ -1625,7 +1622,7 @@ async fn park_opencode_provider_error_if_present(
         Some(FailureRecord {
             kind: "provider_blocker".into(),
             message,
-            fingerprint: Some(opencode_provider_error_fingerprint(&error.name, &error.message)),
+            fingerprint: Some(runner_provider_error_fingerprint(&error.name, &error.message)),
             occurrence_count: 1,
         }),
     )
@@ -1633,13 +1630,13 @@ async fn park_opencode_provider_error_if_present(
     Ok(true)
 }
 
-fn opencode_error_is_provider_blocker(name: &str, message: &str) -> bool {
+fn runner_error_is_provider_blocker(name: &str, message: &str) -> bool {
     matches!(name, "ProviderAuthError" | "ProviderError")
         || message.contains("API key is missing")
         || message.contains("Rate limit exceeded")
 }
 
-fn opencode_provider_error_fingerprint(name: &str, message: &str) -> String {
+fn runner_provider_error_fingerprint(name: &str, message: &str) -> String {
     let detail = if message.contains("API key is missing") {
         "api_key_missing"
     } else if message.contains("Rate limit exceeded") {
@@ -1647,12 +1644,12 @@ fn opencode_provider_error_fingerprint(name: &str, message: &str) -> String {
     } else {
         "provider_error"
     };
-    format!("opencode_{}_{}", name.to_ascii_lowercase(), detail)
+    format!("runner_{}_{}", name.to_ascii_lowercase(), detail)
 }
 
-fn opencode_provider_error_is_stale(
-    error: &crate::opencode::OpenCodeSessionMessageError,
-    metrics: &crate::opencode::OpenCodeSessionTreeMetrics,
+fn runner_provider_error_is_stale(
+    error: &crate::runner::RunnerSessionMessageError,
+    metrics: &crate::runner::RunnerSessionTreeMetrics,
 ) -> bool {
     metrics
         .last_updated_ms

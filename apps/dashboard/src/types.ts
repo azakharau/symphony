@@ -205,8 +205,8 @@ export type SessionTreeActivity = {
   last_updated_ms?: number | null;
 };
 
-export type OpenCodeSession = {
-  opencode_session_id: string;
+export type RunnerSession = {
+  runner_session_id: string;
   provider_mode: string;
   provider_id?: string | null;
   agent: string;
@@ -270,7 +270,7 @@ export type IssueDetail = {
   cleanup_status: string;
   stop_reason?: string | null;
   last_runner_event?: string | null;
-  opencode_sessions: OpenCodeSession[];
+  runner_sessions: RunnerSession[];
   eval_results: EvalRun[];
 };
 

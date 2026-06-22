@@ -81,7 +81,7 @@ async fn orchestration_records_no_eligible_liveness_without_launching_opencode()
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
     let client = RecordingLinearClient::new(Vec::new());
-    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+    let opencode = ResumeRecordingRunnerLauncher::new(4242);
 
     let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -225,13 +225,10 @@ async fn orchestration_schedules_repair_for_dead_running_session_without_handoff
         "/home/agent/.symphony/workspaces/opencode/symphony/SYM-65",
     );
     session.process_id = Some(u32::MAX);
-    store
-        .upsert_opencode_session(session)
-        .await
-        .expect("session");
+    store.upsert_runner_session(session).await.expect("session");
     let client =
         RecordingLinearClient::new(vec![linear_issue("work", "SYM-65", "In Progress", Some(1))]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+    let opencode = ResumeRecordingRunnerLauncher::new(4242);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -525,7 +522,7 @@ async fn orchestration_dispatches_without_recall_workspace_root() {
         "Todo",
         Some(1),
     )]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+    let opencode = ResumeRecordingRunnerLauncher::new(4242);
 
     let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -582,7 +579,7 @@ inverse_bridge_reference = false
         "Todo",
         Some(1),
     )]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+    let opencode = ResumeRecordingRunnerLauncher::new(4242);
 
     let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -795,7 +792,7 @@ async fn orchestration_keeps_owner_input_parked_and_blocks_manual_todo_dispatch(
         .await
         .expect("manual issue");
     store
-        .upsert_opencode_session({
+        .upsert_runner_session({
             let mut session = test_session(
                 "symphony",
                 "manual",
@@ -837,13 +834,13 @@ async fn orchestration_keeps_owner_input_parked_and_blocks_manual_todo_dispatch(
         LifecycleStage::Queued
     );
     let manual_session = store
-        .opencode_session("symphony", "manual", "ses-manual")
+        .runner_session("symphony", "manual", "ses-manual")
         .await
         .expect("query manual session")
         .expect("manual session");
     assert_eq!(manual_session.process_id, None);
     assert_eq!(manual_session.lifecycle_stage, LifecycleStage::Queued);
-    assert_eq!(manual_session.stage, OpenCodeStage::Silent);
+    assert_eq!(manual_session.stage, RunnerStage::Silent);
     assert_eq!(
         manual_session.lifecycle_marker.as_deref(),
         Some("waiting_for_project_owner_input")
@@ -1010,7 +1007,7 @@ async fn orchestration_reconciles_terminal_issues_and_avoids_duplicate_dispatch_
     assert_eq!(finished.cleanup_status, CleanupStatus::Pending);
     assert_eq!(
         store
-            .opencode_sessions_for_issue("symphony", "new-work")
+            .runner_sessions_for_issue("symphony", "new-work")
             .await
             .expect("sessions")
             .len(),
@@ -1019,7 +1016,7 @@ async fn orchestration_reconciles_terminal_issues_and_avoids_duplicate_dispatch_
 }
 
 #[tokio::test]
-async fn orchestration_refreshes_active_opencode_session_metrics_from_persisted_database() {
+async fn orchestration_refreshes_active_runner_session_metrics_from_persisted_database() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let opencode_db_path = dir.path().join("opencode.db");
@@ -1027,7 +1024,7 @@ async fn orchestration_refreshes_active_opencode_session_metrics_from_persisted_
     let config_toml = valid_config_toml().replace(
         "[[projects]]\n",
         &format!(
-            "[opencode_storage]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]\n",
+            "[runner_archive]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]\n",
             opencode_db_path.display(),
             dir.path().join("archives").display()
         ),
@@ -1047,7 +1044,7 @@ async fn orchestration_refreshes_active_opencode_session_metrics_from_persisted_
         .expect("spawn active opencode-shaped process");
     thread::sleep(Duration::from_millis(100));
     store
-        .upsert_opencode_session({
+        .upsert_runner_session({
             let mut session = test_session(
                 "symphony",
                 "work",
@@ -1067,11 +1064,11 @@ async fn orchestration_refreshes_active_opencode_session_metrics_from_persisted_
         .expect("orchestrate once");
 
     let session = store
-        .opencode_session("symphony", "work", "ses-root")
+        .runner_session("symphony", "work", "ses-root")
         .await
         .expect("query session")
         .expect("session");
-    assert_eq!(session.stage, OpenCodeStage::Running);
+    assert_eq!(session.stage, RunnerStage::Running);
     assert_eq!(session.message_count, 2);
     assert_eq!(session.part_count, 2);
     assert_eq!(session.todo_count, 1);
@@ -1081,11 +1078,11 @@ async fn orchestration_refreshes_active_opencode_session_metrics_from_persisted_
     assert_eq!(session.active_model.as_deref(), Some("gpt-5.5"));
     assert_eq!(
         session.lifecycle_marker.as_deref(),
-        Some("opencode_db_activity")
+        Some("runner_archive_activity")
     );
     assert_eq!(
         session.last_event.as_deref(),
-        Some("opencode_db_updated:2000")
+        Some("runner_archive_updated:2000")
     );
     assert!(!session.silence_observed);
     let _ = active_process.kill();
@@ -1101,7 +1098,7 @@ async fn orchestration_parks_opencode_provider_auth_error_without_false_running(
     let config_toml = valid_config_toml().replace(
         "[[projects]]\n",
         &format!(
-            "[opencode_storage]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]\n",
+            "[runner_archive]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]\n",
             opencode_db_path.display(),
             dir.path().join("archives").display()
         ),
@@ -1121,7 +1118,7 @@ async fn orchestration_parks_opencode_provider_auth_error_without_false_running(
         .expect("spawn active opencode-shaped process");
     thread::sleep(Duration::from_millis(100));
     store
-        .upsert_opencode_session({
+        .upsert_runner_session({
             let mut session = test_session(
                 "symphony",
                 "work",
@@ -1158,7 +1155,7 @@ async fn orchestration_parks_opencode_provider_auth_error_without_false_running(
         Some("provider_blocker")
     );
     let session = store
-        .opencode_session("symphony", "work", "ses-root")
+        .runner_session("symphony", "work", "ses-root")
         .await
         .expect("query session")
         .expect("session");
@@ -1181,7 +1178,7 @@ async fn orchestration_ignores_stale_provider_auth_error_after_new_tokens() {
     let config_toml = valid_config_toml().replace(
         "[[projects]]\n",
         &format!(
-            "[opencode_storage]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]\n",
+            "[runner_archive]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]\n",
             opencode_db_path.display(),
             dir.path().join("archives").display()
         ),
@@ -1201,7 +1198,7 @@ async fn orchestration_ignores_stale_provider_auth_error_after_new_tokens() {
         .expect("spawn active opencode-shaped process");
     thread::sleep(Duration::from_millis(100));
     store
-        .upsert_opencode_session({
+        .upsert_runner_session({
             let mut session = test_session(
                 "symphony",
                 "work",
@@ -1230,7 +1227,7 @@ async fn orchestration_ignores_stale_provider_auth_error_after_new_tokens() {
     assert_eq!(record.lifecycle_stage, LifecycleStage::Running);
     assert!(record.blocker.is_none());
     let session = store
-        .opencode_session("symphony", "work", "ses-root")
+        .runner_session("symphony", "work", "ses-root")
         .await
         .expect("query session")
         .expect("session");
@@ -1239,7 +1236,7 @@ async fn orchestration_ignores_stale_provider_auth_error_after_new_tokens() {
     assert!(session.token_count > 0);
     assert_eq!(
         session.last_event.as_deref(),
-        Some("opencode_db_updated:4001")
+        Some("runner_archive_updated:4001")
     );
     assert!(active_process.try_wait().expect("process wait").is_none());
     let _ = active_process.kill();
@@ -1265,16 +1262,13 @@ async fn orchestration_repairs_stale_in_progress_session_without_handoff_sidecar
         "/home/agent/.symphony/workspaces/opencode/symphony/SYM-65",
     );
     session.process_id = None;
-    session.stage = OpenCodeStage::Starting;
+    session.stage = RunnerStage::Starting;
     session.lifecycle_marker = Some("acp_started".into());
     session.last_event = Some("acp_process_started".into());
-    store
-        .upsert_opencode_session(session)
-        .await
-        .expect("session");
+    store.upsert_runner_session(session).await.expect("session");
     let client =
         RecordingLinearClient::new(vec![linear_issue("work", "SYM-65", "In Progress", Some(1))]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+    let opencode = ResumeRecordingRunnerLauncher::new(4242);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -1296,18 +1290,18 @@ async fn orchestration_repairs_stale_in_progress_session_without_handoff_sidecar
         evidence.kind == "malformed_handoff"
             && evidence
                 .body
-                .contains(".symphony/opencode-handoff.json was not produced")
+                .contains(".symphony/runner-handoff.json was not produced")
             && evidence
                 .body
                 .contains("fingerprint: missing_handoff_sidecar")
     }));
     let failed = store
-        .opencode_session("symphony", "work", "ses-existing")
+        .runner_session("symphony", "work", "ses-existing")
         .await
         .expect("query session")
         .expect("session");
     assert_eq!(failed.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(failed.stage, OpenCodeStage::Running);
+    assert_eq!(failed.stage, RunnerStage::Running);
     assert_eq!(failed.process_id, Some(4242));
     assert_eq!(failed.lifecycle_marker.as_deref(), Some("repair_prompted"));
     assert_eq!(
@@ -1328,7 +1322,7 @@ async fn orchestration_reissues_repair_prompt_for_stale_malformed_handoff_sessio
     let mut issue = test_issue("symphony", "repair-stale", "SYM-66");
     issue.failure = Some(FailureRecord {
         kind: "malformed_handoff".into(),
-        message: "opencode-handoff.json: unknown variant `planning`".into(),
+        message: "runner-handoff.json: unknown variant `planning`".into(),
         fingerprint: Some("malformed_handoff_sidecar".into()),
         occurrence_count: 1,
     });
@@ -1342,17 +1336,14 @@ async fn orchestration_reissues_repair_prompt_for_stale_malformed_handoff_sessio
     session.process_id = None;
     session.lifecycle_marker = Some("repair_prompted".into());
     session.last_event = Some("repair_prompted:malformed_handoff_sidecar".into());
-    store
-        .upsert_opencode_session(session)
-        .await
-        .expect("session");
+    store.upsert_runner_session(session).await.expect("session");
     let client = RecordingLinearClient::new(vec![linear_issue(
         "repair-stale",
         "SYM-66",
         "In Progress",
         Some(1),
     )]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+    let opencode = ResumeRecordingRunnerLauncher::new(4242);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -1383,7 +1374,7 @@ async fn orchestration_reissues_repair_prompt_for_stale_malformed_handoff_sessio
     assert_eq!(failure.occurrence_count, 1);
 
     let failed = store
-        .opencode_session("symphony", "repair-stale", "ses-repair-stale")
+        .runner_session("symphony", "repair-stale", "ses-repair-stale")
         .await
         .expect("query session")
         .expect("session");
@@ -1392,7 +1383,7 @@ async fn orchestration_reissues_repair_prompt_for_stale_malformed_handoff_sessio
         Some("repair_prompted:missing_handoff_sidecar")
     );
     assert_eq!(failed.lifecycle_marker.as_deref(), Some("repair_prompted"));
-    assert_eq!(failed.stage, OpenCodeStage::Running);
+    assert_eq!(failed.stage, RunnerStage::Running);
     assert_eq!(failed.process_id, Some(4242));
 }
 
@@ -1427,16 +1418,13 @@ async fn orchestration_continues_requeued_provider_blocker_when_todo_is_unblocke
     );
     session.process_id = None;
     session.lifecycle_stage = LifecycleStage::Blocked;
-    session.stage = OpenCodeStage::Failed;
+    session.stage = RunnerStage::Failed;
     session.lifecycle_marker = Some("parked".into());
     session.last_event = Some("parked:provider_blocker".into());
-    store
-        .upsert_opencode_session(session)
-        .await
-        .expect("session");
+    store.upsert_runner_session(session).await.expect("session");
     let client =
         RecordingLinearClient::new(vec![linear_issue("answered", "SYM-67", "Todo", Some(1))]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+    let opencode = ResumeRecordingRunnerLauncher::new(4242);
 
     let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -1454,12 +1442,12 @@ async fn orchestration_continues_requeued_provider_blocker_when_todo_is_unblocke
         vec![("answered".into(), LinearTransition::InProgress)]
     );
     let continued = store
-        .opencode_session("symphony", "answered", "ses-owner-input")
+        .runner_session("symphony", "answered", "ses-owner-input")
         .await
         .expect("query continued provider blocker session")
         .expect("continued session");
     assert_eq!(continued.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(continued.stage, OpenCodeStage::Running);
+    assert_eq!(continued.stage, RunnerStage::Running);
     assert_eq!(continued.process_id, Some(4242));
     assert_eq!(
         continued.lifecycle_marker.as_deref(),
@@ -1491,7 +1479,7 @@ async fn orchestration_recovers_retired_provider_blocker_session_after_launch_fa
     issue.lifecycle_stage = LifecycleStage::Failed;
     issue.blocker = Some(BlockerRecord {
         kind: "runtime_defect".into(),
-        message: "OpenCode launch failed after Linear transition".into(),
+        message: "runner launch failed after Linear transition".into(),
         observed_at: Some("2026-06-18T19:20:58Z".into()),
     });
     issue.failure = Some(FailureRecord {
@@ -1510,13 +1498,10 @@ async fn orchestration_recovers_retired_provider_blocker_session_after_launch_fa
     );
     session.process_id = None;
     session.lifecycle_stage = LifecycleStage::Canceled;
-    session.stage = OpenCodeStage::Failed;
+    session.stage = RunnerStage::Failed;
     session.lifecycle_marker = Some("retry_retired_provider_blocker".into());
     session.last_event = Some("stale_provider_blocker_session_retired_for_todo_retry".into());
-    store
-        .upsert_opencode_session(session)
-        .await
-        .expect("session");
+    store.upsert_runner_session(session).await.expect("session");
 
     let client = RecordingLinearClient::new(vec![linear_issue(
         "answered-dirty",
@@ -1524,7 +1509,7 @@ async fn orchestration_recovers_retired_provider_blocker_session_after_launch_fa
         "Todo",
         Some(1),
     )]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(4268);
+    let opencode = ResumeRecordingRunnerLauncher::new(4268);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -1542,12 +1527,12 @@ async fn orchestration_recovers_retired_provider_blocker_session_after_launch_fa
     );
 
     let session = store
-        .opencode_session("symphony", "answered-dirty", "ses-retired-provider")
+        .runner_session("symphony", "answered-dirty", "ses-retired-provider")
         .await
         .expect("query recovered session")
         .expect("recovered session");
     assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(session.stage, OpenCodeStage::Running);
+    assert_eq!(session.stage, RunnerStage::Running);
     assert_eq!(session.process_id, Some(4268));
     assert_eq!(session.lifecycle_marker.as_deref(), Some("repair_prompted"));
     assert_eq!(
@@ -1577,7 +1562,7 @@ async fn terminal_reconciliation_marks_cleanup_complete_when_worktree_is_already
     let mut stale_session = test_session("symphony", "closed", "oc-63", &missing_worktree);
     stale_session.process_id = Some(4242);
     store
-        .upsert_opencode_session(stale_session)
+        .upsert_runner_session(stale_session)
         .await
         .expect("stale session");
 
@@ -1601,12 +1586,12 @@ async fn terminal_reconciliation_marks_cleanup_complete_when_worktree_is_already
         missing_worktree.display().to_string()
     );
     let session = store
-        .opencode_session("symphony", "closed", "oc-63")
+        .runner_session("symphony", "closed", "oc-63")
         .await
         .expect("query reconciled session")
         .expect("reconciled session");
     assert_eq!(session.lifecycle_stage, LifecycleStage::Completed);
-    assert_eq!(session.stage, OpenCodeStage::Completed);
+    assert_eq!(session.stage, RunnerStage::Completed);
     assert_eq!(session.process_id, None);
     assert_eq!(
         session.lifecycle_marker.as_deref(),
@@ -1643,9 +1628,9 @@ async fn terminal_reconciliation_terminates_live_opencode_process_tree() {
     let mut live_session = test_session("symphony", "closed-live", "oc-69", &missing_worktree);
     live_session.process_id = Some(process_id);
     live_session.lifecycle_stage = LifecycleStage::Running;
-    live_session.stage = OpenCodeStage::Running;
+    live_session.stage = RunnerStage::Running;
     store
-        .upsert_opencode_session(live_session)
+        .upsert_runner_session(live_session)
         .await
         .expect("live session");
 
@@ -1673,12 +1658,12 @@ async fn terminal_reconciliation_terminates_live_opencode_process_tree() {
         .expect("issue");
     assert_eq!(closed.lifecycle_stage, LifecycleStage::Canceled);
     let session = store
-        .opencode_session("symphony", "closed-live", "oc-69")
+        .runner_session("symphony", "closed-live", "oc-69")
         .await
         .expect("query session")
         .expect("session");
     assert_eq!(session.lifecycle_stage, LifecycleStage::Canceled);
-    assert_eq!(session.stage, OpenCodeStage::Completed);
+    assert_eq!(session.stage, RunnerStage::Completed);
     assert_eq!(session.process_id, None);
     assert!(
         session
@@ -1721,9 +1706,9 @@ async fn terminal_reconciliation_does_not_terminate_unidentified_omp_pid() {
     live_session.provider_id = Some("omp-primary".into());
     live_session.process_id = Some(process_id);
     live_session.lifecycle_stage = LifecycleStage::Running;
-    live_session.stage = OpenCodeStage::Running;
+    live_session.stage = RunnerStage::Running;
     store
-        .upsert_opencode_session(live_session)
+        .upsert_runner_session(live_session)
         .await
         .expect("live session");
 
@@ -1746,7 +1731,7 @@ async fn terminal_reconciliation_does_not_terminate_unidentified_omp_pid() {
     unrelated_process.kill().expect("kill unrelated process");
     let _ = unrelated_process.wait();
     let session = store
-        .opencode_session("symphony", "closed-omp", "omp-70")
+        .runner_session("symphony", "closed-omp", "omp-70")
         .await
         .expect("query session")
         .expect("session");
@@ -1779,12 +1764,12 @@ async fn terminal_reconciliation_skips_unchanged_issue_and_session_rows() {
     let mut terminal_session = test_session("symphony", "closed-quiet", "oc-68", &missing_worktree);
     terminal_session.process_id = None;
     terminal_session.lifecycle_stage = LifecycleStage::Completed;
-    terminal_session.stage = OpenCodeStage::Completed;
+    terminal_session.stage = RunnerStage::Completed;
     terminal_session.lifecycle_marker = Some("linear_terminal_reconciled".into());
     terminal_session.last_event = Some("linear_terminal_reconciled".into());
     terminal_session.silence_observed = false;
     store
-        .upsert_opencode_session(terminal_session)
+        .upsert_runner_session(terminal_session)
         .await
         .expect("terminal session");
     set_issue_and_session_updated_at(&db_path, "closed-quiet", "oc-68", "2000-01-01 00:00:00")
@@ -1829,7 +1814,7 @@ async fn set_issue_and_session_updated_at(
     .await
     .expect("set issue updated_at");
     conn.execute(
-        "UPDATE opencode_sessions SET updated_at = ?1 WHERE project_id = 'symphony' AND issue_id = ?2 AND session_id = ?3",
+        "UPDATE runner_sessions SET updated_at = ?1 WHERE project_id = 'symphony' AND issue_id = ?2 AND session_id = ?3",
         libsql::params![updated_at, issue_id, session_id],
     )
     .await
@@ -1862,7 +1847,7 @@ async fn issue_and_session_updated_at(
         .expect("issue updated_at");
     let mut session_rows = conn
         .query(
-            "SELECT updated_at FROM opencode_sessions WHERE project_id = 'symphony' AND issue_id = ?1 AND session_id = ?2",
+            "SELECT updated_at FROM runner_sessions WHERE project_id = 'symphony' AND issue_id = ?1 AND session_id = ?2",
             libsql::params![issue_id, session_id],
         )
         .await
@@ -1928,7 +1913,7 @@ async fn orchestration_restores_requeued_issue_with_existing_session_without_dup
         .await
         .expect("running issue");
     store
-        .upsert_opencode_session(test_session("symphony", "requeued", "oc-62", &worktree))
+        .upsert_runner_session(test_session("symphony", "requeued", "oc-62", &worktree))
         .await
         .expect("running session");
 
@@ -1950,7 +1935,7 @@ async fn orchestration_restores_requeued_issue_with_existing_session_without_dup
         .expect("requeued");
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
     let sessions = store
-        .opencode_sessions_for_issue("symphony", "requeued")
+        .runner_sessions_for_issue("symphony", "requeued")
         .await
         .expect("sessions");
     assert_eq!(sessions.len(), 1);
@@ -1977,7 +1962,7 @@ async fn orchestration_does_not_repair_again_when_recoverable_issue_already_has_
             issue.lifecycle_stage = LifecycleStage::Queued;
             issue.failure = Some(FailureRecord {
                 kind: "malformed_handoff".into(),
-                message: ".symphony/opencode-handoff.json was not produced".into(),
+                message: ".symphony/runner-handoff.json was not produced".into(),
                 fingerprint: Some("missing_handoff_sidecar".into()),
                 occurrence_count: 1,
             });
@@ -1986,10 +1971,10 @@ async fn orchestration_does_not_repair_again_when_recoverable_issue_already_has_
         .await
         .expect("queued issue");
     store
-        .upsert_opencode_session({
+        .upsert_runner_session({
             let mut failed = test_session("symphony", "requeued", "oc-failed", &worktree);
             failed.lifecycle_stage = LifecycleStage::Failed;
-            failed.stage = OpenCodeStage::Failed;
+            failed.stage = RunnerStage::Failed;
             failed.process_id = None;
             failed.lifecycle_marker = Some("failed:malformed_handoff".into());
             failed.last_event = Some("failed:missing_handoff_sidecar".into());
@@ -2005,13 +1990,13 @@ async fn orchestration_does_not_repair_again_when_recoverable_issue_already_has_
         .expect("spawn live OMP-shaped process");
     thread::sleep(Duration::from_millis(100));
     store
-        .upsert_opencode_session({
+        .upsert_runner_session({
             let mut running = test_session("symphony", "requeued", "omp-running", &worktree);
             running.provider_mode = RuntimeProviderMode::OmpAcp;
             running.provider_id = Some("omp-primary".into());
             running.process_id = Some(live_process.id());
             running.lifecycle_stage = LifecycleStage::Running;
-            running.stage = OpenCodeStage::Running;
+            running.stage = RunnerStage::Running;
             running.lifecycle_marker = Some("repair_prompted".into());
             running.last_event = Some("repair_prompted:missing_handoff_sidecar".into());
             running
@@ -2021,7 +2006,7 @@ async fn orchestration_does_not_repair_again_when_recoverable_issue_already_has_
 
     let client =
         RecordingLinearClient::new(vec![linear_issue("requeued", "SYM-62", "Todo", Some(1))]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+    let opencode = ResumeRecordingRunnerLauncher::new(4242);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -2037,7 +2022,7 @@ async fn orchestration_does_not_repair_again_when_recoverable_issue_already_has_
         .expect("requeued");
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
     let sessions = store
-        .opencode_sessions_for_issue("symphony", "requeued")
+        .runner_sessions_for_issue("symphony", "requeued")
         .await
         .expect("sessions");
     assert_eq!(sessions.len(), 2);
@@ -2068,7 +2053,7 @@ async fn orchestration_starts_fresh_session_after_failed_handoff_blocker_release
             issue.lifecycle_stage = LifecycleStage::Failed;
             issue.failure = Some(FailureRecord {
                 kind: "malformed_handoff".into(),
-                message: ".symphony/opencode-handoff.json was not produced".into(),
+                message: ".symphony/runner-handoff.json was not produced".into(),
                 fingerprint: Some("missing_handoff_sidecar".into()),
                 occurrence_count: 1,
             });
@@ -2077,10 +2062,10 @@ async fn orchestration_starts_fresh_session_after_failed_handoff_blocker_release
         .await
         .expect("failed runtime-defect issue");
     store
-        .upsert_opencode_session({
+        .upsert_runner_session({
             let mut session = test_session("symphony", "requeued", "oc-62", &worktree);
             session.lifecycle_stage = LifecycleStage::Failed;
-            session.stage = OpenCodeStage::Failed;
+            session.stage = RunnerStage::Failed;
             session.process_id = None;
             session.lifecycle_marker = Some("failed:stale_session_retired_for_fresh_retry".into());
             session.last_event = Some("failed:stale_session_retired_for_fresh_retry".into());
@@ -2091,7 +2076,7 @@ async fn orchestration_starts_fresh_session_after_failed_handoff_blocker_release
 
     let client =
         RecordingLinearClient::new(vec![linear_issue("requeued", "SYM-62", "Todo", Some(1))]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+    let opencode = ResumeRecordingRunnerLauncher::new(4242);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -2105,16 +2090,16 @@ async fn orchestration_starts_fresh_session_after_failed_handoff_blocker_release
     assert!(opencode.continuations().is_empty());
     assert!(opencode.repairs().is_empty());
     let sessions = store
-        .opencode_sessions_for_issue("symphony", "requeued")
+        .runner_sessions_for_issue("symphony", "requeued")
         .await
         .expect("sessions");
     assert_eq!(sessions.len(), 2);
     assert_eq!(sessions[0].session_id, "oc-62");
     assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Failed);
-    assert_eq!(sessions[0].stage, OpenCodeStage::Failed);
+    assert_eq!(sessions[0].stage, RunnerStage::Failed);
     assert_eq!(sessions[1].session_id, "new:SYM-62");
     assert_eq!(sessions[1].lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(sessions[1].stage, OpenCodeStage::Starting);
+    assert_eq!(sessions[1].stage, RunnerStage::Starting);
     assert!(matches!(
         sessions[1].lifecycle_marker.as_deref(),
         Some("acp_process_started" | "acp_session_attached")
@@ -2141,7 +2126,7 @@ async fn orchestration_records_process_while_acp_session_new_is_still_pending() 
         "Todo",
         Some(1),
     )]);
-    let opencode = opencode::StdioOpenCodeLauncher;
+    let opencode = runner::StdioRunnerLauncher;
     let poll = daemon::run_once_with_clients(&config, &store, &client, &opencode);
     tokio::pin!(poll);
 
@@ -2161,14 +2146,14 @@ async fn orchestration_records_process_while_acp_session_new_is_still_pending() 
         .expect("issue row");
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
     let sessions = store
-        .opencode_sessions_for_issue("symphony", "pending-session-new")
+        .runner_sessions_for_issue("symphony", "pending-session-new")
         .await
         .expect("sessions");
     assert_eq!(sessions.len(), 1);
     let session = sessions.last().expect("provisional session");
     assert!(session.session_id.starts_with("starting:SYM-161:"));
     assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(session.stage, OpenCodeStage::Starting);
+    assert_eq!(session.stage, RunnerStage::Starting);
     assert_eq!(
         session.lifecycle_marker.as_deref(),
         Some("acp_process_started")
@@ -2201,11 +2186,8 @@ async fn orchestration_blocks_in_progress_issue_when_linear_blocker_is_not_done(
     let mut session = test_session("symphony", "blocked-running", "oc-116", &worktree);
     session.process_id = None;
     session.lifecycle_stage = LifecycleStage::Running;
-    session.stage = OpenCodeStage::Running;
-    store
-        .upsert_opencode_session(session)
-        .await
-        .expect("session");
+    session.stage = RunnerStage::Running;
+    store.upsert_runner_session(session).await.expect("session");
 
     let blocked =
         linear_issue("blocked-running", "SYM-116", "In Progress", Some(1)).blocked_by(vec![
@@ -2216,7 +2198,7 @@ async fn orchestration_blocks_in_progress_issue_when_linear_blocker_is_not_done(
             },
         ]);
     let client = RecordingLinearClient::new(vec![blocked]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(4242);
+    let opencode = ResumeRecordingRunnerLauncher::new(4242);
 
     let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -2241,7 +2223,7 @@ async fn orchestration_blocks_in_progress_issue_when_linear_blocker_is_not_done(
         "MNE-115 is In Progress"
     );
     let sessions = store
-        .opencode_sessions_for_issue("symphony", "blocked-running")
+        .runner_sessions_for_issue("symphony", "blocked-running")
         .await
         .expect("sessions");
     assert_eq!(sessions.len(), 1);
@@ -2275,7 +2257,7 @@ async fn orchestration_capacity_gates_requeued_issue_with_existing_session() {
     requeued.lifecycle_stage = LifecycleStage::Queued;
     store.upsert_issue(requeued).await.expect("requeued issue");
     store
-        .upsert_opencode_session(test_session("symphony", "requeued", "oc-65", &worktree))
+        .upsert_runner_session(test_session("symphony", "requeued", "oc-65", &worktree))
         .await
         .expect("running session");
 
@@ -2295,7 +2277,7 @@ async fn orchestration_capacity_gates_requeued_issue_with_existing_session() {
         .expect("requeued");
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Queued);
     let sessions = store
-        .opencode_sessions_for_issue("symphony", "requeued")
+        .runner_sessions_for_issue("symphony", "requeued")
         .await
         .expect("sessions");
     assert_eq!(sessions.len(), 1);
@@ -2386,10 +2368,7 @@ async fn orchestration_cancels_runtime_issue_missing_from_linear_candidates() {
         "/home/agent/.symphony/workspaces/opencode/symphony/SYM-999",
     );
     session.process_id = None;
-    store
-        .upsert_opencode_session(session)
-        .await
-        .expect("session");
+    store.upsert_runner_session(session).await.expect("session");
     let client = RecordingLinearClient::new(Vec::new());
 
     let report = daemon::run_once_with_linear_client(&config, &store, &client)
@@ -2404,12 +2383,12 @@ async fn orchestration_cancels_runtime_issue_missing_from_linear_candidates() {
         .expect("issue");
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Canceled);
     let session = store
-        .opencode_session("symphony", "trashed-runtime", "ses-trashed")
+        .runner_session("symphony", "trashed-runtime", "ses-trashed")
         .await
         .expect("query session")
         .expect("session");
     assert_eq!(session.lifecycle_stage, LifecycleStage::Canceled);
-    assert_eq!(session.stage, OpenCodeStage::Completed);
+    assert_eq!(session.stage, RunnerStage::Completed);
 }
 
 #[tokio::test]
@@ -2472,7 +2451,7 @@ async fn orchestration_records_launch_failure_without_aborting_poll_or_owner_inp
         linear_issue("launch-fails", "SYM-201", "Todo", Some(1)),
         linear_issue("still-runs", "SYM-202", "Todo", Some(2)),
     ]);
-    let opencode = FailingLaunchOpenCodeLauncher::new("existing worktree is dirty");
+    let opencode = FailingLaunchRunnerLauncher::new("existing worktree is dirty");
 
     let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -2572,7 +2551,7 @@ async fn orchestration_suppresses_repeated_launch_failure_and_dispatches_next_ca
         linear_issue("launch-fails", "SYM-201", "Todo", Some(1)),
         linear_issue("still-runs", "SYM-202", "Todo", Some(2)),
     ]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(6202);
+    let opencode = ResumeRecordingRunnerLauncher::new(6202);
 
     let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -2612,17 +2591,17 @@ async fn orchestration_persists_setup_failure_session_for_liveness_projection() 
         Some(1),
     )]);
 
-    daemon::run_once_with_clients(&config, &store, &client, &SetupFailingOpenCodeLauncher)
+    daemon::run_once_with_clients(&config, &store, &client, &SetupFailingRunnerLauncher)
         .await
         .expect("setup failure must not abort poll");
 
     let sessions = store
-        .opencode_sessions_for_issue("symphony", "setup-fails")
+        .runner_sessions_for_issue("symphony", "setup-fails")
         .await
         .expect("sessions");
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Failed);
-    assert_eq!(sessions[0].stage, OpenCodeStage::Failed);
+    assert_eq!(sessions[0].stage, RunnerStage::Failed);
     assert_eq!(sessions[0].process_id, Some(4242));
     assert_eq!(
         sessions[0].lifecycle_marker.as_deref(),
@@ -2674,25 +2653,22 @@ async fn orchestration_persists_stale_killed_session_event_through_continuation(
         "/home/agent/.symphony/workspaces/opencode/symphony/SYM-211",
     );
     session.process_id = Some(stale_process.id());
-    store
-        .upsert_opencode_session(session)
-        .await
-        .expect("session");
+    store.upsert_runner_session(session).await.expect("session");
     let client =
         RecordingLinearClient::new(vec![linear_issue("stale-live", "SYM-211", "Todo", Some(1))]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(5151);
+    let opencode = ResumeRecordingRunnerLauncher::new(5151);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
         .expect("orchestrate stale continuation");
 
     let resumed = store
-        .opencode_session("symphony", "stale-live", "ses-stale-live")
+        .runner_session("symphony", "stale-live", "ses-stale-live")
         .await
         .expect("query session")
         .expect("session");
     assert_eq!(resumed.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(resumed.stage, OpenCodeStage::Running);
+    assert_eq!(resumed.stage, RunnerStage::Running);
     assert_eq!(
         resumed.lifecycle_marker.as_deref(),
         Some("continuation_prompted")
@@ -2735,10 +2711,10 @@ async fn orchestration_ignores_historical_failed_session_for_in_progress_reconci
     issue.lifecycle_stage = LifecycleStage::Running;
     store.upsert_issue(issue).await.expect("issue");
     store
-        .upsert_opencode_session({
+        .upsert_runner_session({
             let mut session = test_session("symphony", "historical", "zz-failed", &worktree);
             session.lifecycle_stage = LifecycleStage::Failed;
-            session.stage = OpenCodeStage::Failed;
+            session.stage = RunnerStage::Failed;
             session.lifecycle_marker = Some("failed:malformed_handoff".into());
             session.last_event = Some("failed:missing_handoff_sidecar".into());
             session
@@ -2751,7 +2727,7 @@ async fn orchestration_ignores_historical_failed_session_for_in_progress_reconci
         "In Progress",
         Some(1),
     )]);
-    let opencode = ScriptedOpenCodeLauncher::new(Some(success_handoff(
+    let opencode = ScriptedRunnerLauncher::new(Some(success_handoff(
         "zz-failed",
         &worktree,
         "feature/sym-203",
@@ -2773,7 +2749,7 @@ async fn orchestration_ignores_historical_failed_session_for_in_progress_reconci
     assert!(issue.failure.is_none());
     assert!(issue.blocker.is_none());
     let sessions = store
-        .opencode_sessions_for_issue("symphony", "historical")
+        .runner_sessions_for_issue("symphony", "historical")
         .await
         .expect("sessions");
     assert_eq!(sessions[0].process_id, None);
@@ -2798,11 +2774,11 @@ async fn orchestration_does_not_reuse_failed_launch_session_for_todo_dispatch() 
     store.upsert_issue(issue).await.expect("issue");
     let mut failed = test_session("symphony", "failed-requeue", "ses-failed", &worktree);
     failed.lifecycle_stage = LifecycleStage::Queued;
-    failed.stage = OpenCodeStage::Failed;
+    failed.stage = RunnerStage::Failed;
     failed.lifecycle_marker = Some("launch_failed".into());
     failed.last_event = Some("launch_failed".into());
     store
-        .upsert_opencode_session(failed)
+        .upsert_runner_session(failed)
         .await
         .expect("failed session");
     let client = RecordingLinearClient::new(vec![linear_issue(
@@ -2811,7 +2787,7 @@ async fn orchestration_does_not_reuse_failed_launch_session_for_todo_dispatch() 
         "Todo",
         Some(1),
     )]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(6204);
+    let opencode = ResumeRecordingRunnerLauncher::new(6204);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -2820,16 +2796,16 @@ async fn orchestration_does_not_reuse_failed_launch_session_for_todo_dispatch() 
     assert_eq!(opencode.launches(), vec!["SYM-204"]);
     assert!(opencode.continuations().is_empty());
     let sessions = store
-        .opencode_sessions_for_issue("symphony", "failed-requeue")
+        .runner_sessions_for_issue("symphony", "failed-requeue")
         .await
         .expect("sessions");
     assert_eq!(sessions.len(), 2);
     assert_eq!(sessions[0].session_id, "ses-failed");
     assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Queued);
-    assert_eq!(sessions[0].stage, OpenCodeStage::Failed);
+    assert_eq!(sessions[0].stage, RunnerStage::Failed);
     assert_eq!(sessions[1].session_id, "new:SYM-204");
     assert_eq!(sessions[1].lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(sessions[1].stage, OpenCodeStage::Starting);
+    assert_eq!(sessions[1].stage, RunnerStage::Starting);
 }
 
 #[tokio::test]
@@ -2852,12 +2828,9 @@ async fn orchestration_existing_session_continue_failure_does_not_leave_running_
         &worktree,
     );
     session.lifecycle_stage = LifecycleStage::Queued;
-    session.stage = OpenCodeStage::Silent;
+    session.stage = RunnerStage::Silent;
     session.process_id = None;
-    store
-        .upsert_opencode_session(session)
-        .await
-        .expect("session");
+    store.upsert_runner_session(session).await.expect("session");
     let client = RecordingLinearClient::new(vec![linear_issue(
         "existing-continue-fails",
         "SYM-209",
@@ -2866,7 +2839,7 @@ async fn orchestration_existing_session_continue_failure_does_not_leave_running_
     )]);
 
     let report =
-        daemon::run_once_with_clients(&config, &store, &client, &FailingContinueOpenCodeLauncher)
+        daemon::run_once_with_clients(&config, &store, &client, &FailingContinueRunnerLauncher)
             .await
             .expect("poll");
 
@@ -2885,12 +2858,12 @@ async fn orchestration_existing_session_continue_failure_does_not_leave_running_
         .expect("issue");
     assert_eq!(record.lifecycle_stage, LifecycleStage::Running);
     let session = store
-        .opencode_session("symphony", "existing-continue-fails", "ses-existing")
+        .runner_session("symphony", "existing-continue-fails", "ses-existing")
         .await
         .expect("query session")
         .expect("session");
     assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
-    assert_eq!(session.stage, OpenCodeStage::Failed);
+    assert_eq!(session.stage, RunnerStage::Failed);
     assert_eq!(session.process_id, None);
     assert_eq!(
         session.lifecycle_marker.as_deref(),
@@ -2904,12 +2877,12 @@ async fn orchestration_existing_session_continue_failure_does_not_leave_running_
             .contains("continue failed")
     );
     let fresh = store
-        .opencode_session("symphony", "existing-continue-fails", "new:SYM-209")
+        .runner_session("symphony", "existing-continue-fails", "new:SYM-209")
         .await
         .expect("query fresh session")
         .expect("fresh session");
     assert_eq!(fresh.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(fresh.stage, OpenCodeStage::Starting);
+    assert_eq!(fresh.stage, RunnerStage::Starting);
 }
 
 #[tokio::test]
@@ -2931,18 +2904,18 @@ async fn orchestration_releases_runtime_defect_with_fresh_session_after_linear_b
     });
     issue.failure = Some(FailureRecord {
         kind: "malformed_handoff".into(),
-        message: ".symphony/opencode-handoff.json was not produced".into(),
+        message: ".symphony/runner-handoff.json was not produced".into(),
         fingerprint: Some("missing_handoff_sidecar".into()),
         occurrence_count: 1,
     });
     store.upsert_issue(issue).await.expect("issue");
     let mut failed = test_session("symphony", "runtime-released", "ses-failed", &worktree);
     failed.lifecycle_stage = LifecycleStage::Failed;
-    failed.stage = OpenCodeStage::Failed;
+    failed.stage = RunnerStage::Failed;
     failed.lifecycle_marker = Some("failed:malformed_handoff".into());
     failed.last_event = Some("failed:missing_handoff_sidecar".into());
     store
-        .upsert_opencode_session(failed)
+        .upsert_runner_session(failed)
         .await
         .expect("failed session");
 
@@ -2952,7 +2925,7 @@ async fn orchestration_releases_runtime_defect_with_fresh_session_after_linear_b
         "Todo",
         Some(1),
     )]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(6206);
+    let opencode = ResumeRecordingRunnerLauncher::new(6206);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -2977,13 +2950,13 @@ async fn orchestration_releases_runtime_defect_with_fresh_session_after_linear_b
     assert_eq!(record.lifecycle_stage, LifecycleStage::Running);
     assert!(record.blocker.is_none());
     let sessions = store
-        .opencode_sessions_for_issue("symphony", "runtime-released")
+        .runner_sessions_for_issue("symphony", "runtime-released")
         .await
         .expect("sessions");
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].session_id, "ses-failed");
     assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(sessions[0].stage, OpenCodeStage::Running);
+    assert_eq!(sessions[0].stage, RunnerStage::Running);
     assert_eq!(sessions[0].process_id, Some(6206));
 }
 
@@ -3001,23 +2974,23 @@ async fn orchestration_retains_runtime_defect_while_managed_self_defect_is_open(
     issue.lifecycle_stage = LifecycleStage::Failed;
     issue.blocker = Some(BlockerRecord {
         kind: "runtime_defect".into(),
-        message: "OpenCode launch failed after Linear transition".into(),
+        message: "runner launch failed after Linear transition".into(),
         observed_at: None,
     });
     issue.failure = Some(FailureRecord {
         kind: "runtime_defect".into(),
-        message: "OpenCode launch failed after Linear transition".into(),
+        message: "runner launch failed after Linear transition".into(),
         fingerprint: Some("launch_failed".into()),
         occurrence_count: 1,
     });
     store.upsert_issue(issue).await.expect("issue");
     let mut failed = test_session("symphony", "runtime-held", "ses-failed", &worktree);
     failed.lifecycle_stage = LifecycleStage::Failed;
-    failed.stage = OpenCodeStage::Failed;
+    failed.stage = RunnerStage::Failed;
     failed.lifecycle_marker = Some("failed:launch_failed".into());
     failed.last_event = Some("failed:launch_failed".into());
     store
-        .upsert_opencode_session(failed)
+        .upsert_runner_session(failed)
         .await
         .expect("failed session");
     store
@@ -3046,7 +3019,7 @@ async fn orchestration_retains_runtime_defect_while_managed_self_defect_is_open(
         "Todo",
         Some(1),
     )]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(6208);
+    let opencode = ResumeRecordingRunnerLauncher::new(6208);
 
     let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -3086,18 +3059,18 @@ async fn orchestration_does_not_self_block_managed_runtime_defect_issue() {
     });
     issue.failure = Some(FailureRecord {
         kind: "malformed_handoff".into(),
-        message: ".symphony/opencode-handoff.json was not produced".into(),
+        message: ".symphony/runner-handoff.json was not produced".into(),
         fingerprint: Some("missing_handoff_sidecar".into()),
         occurrence_count: 1,
     });
     store.upsert_issue(issue).await.expect("issue");
     let mut failed = test_session("symphony", "managed-self", "ses-failed", &worktree);
     failed.lifecycle_stage = LifecycleStage::Failed;
-    failed.stage = OpenCodeStage::Failed;
+    failed.stage = RunnerStage::Failed;
     failed.lifecycle_marker = Some("failed:malformed_handoff".into());
     failed.last_event = Some("failed:missing_handoff_sidecar".into());
     store
-        .upsert_opencode_session(failed)
+        .upsert_runner_session(failed)
         .await
         .expect("failed session");
     store
@@ -3126,7 +3099,7 @@ async fn orchestration_does_not_self_block_managed_runtime_defect_issue() {
         "Todo",
         Some(1),
     )]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(6210);
+    let opencode = ResumeRecordingRunnerLauncher::new(6210);
 
     let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -3152,13 +3125,13 @@ async fn orchestration_does_not_self_block_managed_runtime_defect_issue() {
     assert_eq!(record.lifecycle_stage, LifecycleStage::Running);
     assert!(record.blocker.is_none());
     let sessions = store
-        .opencode_sessions_for_issue("symphony", "managed-self")
+        .runner_sessions_for_issue("symphony", "managed-self")
         .await
         .expect("sessions");
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].session_id, "ses-failed");
     assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(sessions[0].stage, OpenCodeStage::Running);
+    assert_eq!(sessions[0].stage, RunnerStage::Running);
     assert_eq!(sessions[0].process_id, Some(6210));
 }
 
@@ -3176,23 +3149,23 @@ async fn orchestration_retains_in_progress_runtime_defect_without_todo_requeue()
     issue.lifecycle_stage = LifecycleStage::Failed;
     issue.blocker = Some(BlockerRecord {
         kind: "runtime_defect".into(),
-        message: "OpenCode launch failed after Linear transition".into(),
+        message: "runner launch failed after Linear transition".into(),
         observed_at: None,
     });
     issue.failure = Some(FailureRecord {
         kind: "runtime_defect".into(),
-        message: "OpenCode launch failed after Linear transition".into(),
+        message: "runner launch failed after Linear transition".into(),
         fingerprint: Some("launch_failed".into()),
         occurrence_count: 1,
     });
     store.upsert_issue(issue).await.expect("issue");
     let mut failed = test_session("symphony", "runtime-held-progress", "ses-failed", &worktree);
     failed.lifecycle_stage = LifecycleStage::Failed;
-    failed.stage = OpenCodeStage::Failed;
+    failed.stage = RunnerStage::Failed;
     failed.lifecycle_marker = Some("failed:launch_failed".into());
     failed.last_event = Some("failed:launch_failed".into());
     store
-        .upsert_opencode_session(failed)
+        .upsert_runner_session(failed)
         .await
         .expect("failed session");
     store
@@ -3221,7 +3194,7 @@ async fn orchestration_retains_in_progress_runtime_defect_without_todo_requeue()
         "In Progress",
         Some(1),
     )]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(6209);
+    let opencode = ResumeRecordingRunnerLauncher::new(6209);
 
     let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -3257,7 +3230,7 @@ async fn orchestration_dispatches_managed_self_defect_without_milestone() {
     issue.description = Some("<!-- symphony:managed-self-bug fingerprint=launch_failed -->".into());
     issue.project_milestone = None;
     let client = RecordingLinearClient::new(vec![issue]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(6207);
+    let opencode = ResumeRecordingRunnerLauncher::new(6207);
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -3285,11 +3258,11 @@ async fn orchestration_blocker_does_not_reactivate_failed_session() {
     store.upsert_issue(issue).await.expect("issue");
     let mut failed = test_session("symphony", "blocked-failed", "ses-failed", &worktree);
     failed.lifecycle_stage = LifecycleStage::Queued;
-    failed.stage = OpenCodeStage::Failed;
+    failed.stage = RunnerStage::Failed;
     failed.lifecycle_marker = Some("failed:launch_failed".into());
     failed.last_event = Some("failed:launch_failed".into());
     store
-        .upsert_opencode_session(failed)
+        .upsert_runner_session(failed)
         .await
         .expect("failed session");
     let blocked = linear_issue("blocked-failed", "SYM-205", "Todo", Some(1)).blocked_by(vec![
@@ -3300,7 +3273,7 @@ async fn orchestration_blocker_does_not_reactivate_failed_session() {
         },
     ]);
     let client = RecordingLinearClient::new(vec![blocked]);
-    let opencode = ResumeRecordingOpenCodeLauncher::new(6205);
+    let opencode = ResumeRecordingRunnerLauncher::new(6205);
 
     let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
@@ -3311,12 +3284,12 @@ async fn orchestration_blocker_does_not_reactivate_failed_session() {
     assert!(opencode.launches().is_empty());
     assert!(opencode.continuations().is_empty());
     let session = store
-        .opencode_session("symphony", "blocked-failed", "ses-failed")
+        .runner_session("symphony", "blocked-failed", "ses-failed")
         .await
         .expect("query session")
         .expect("session");
     assert_eq!(session.lifecycle_stage, LifecycleStage::Queued);
-    assert_eq!(session.stage, OpenCodeStage::Failed);
+    assert_eq!(session.stage, RunnerStage::Failed);
     assert_eq!(
         session.lifecycle_marker.as_deref(),
         Some("failed:launch_failed")

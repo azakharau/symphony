@@ -2,7 +2,7 @@ use crate::{
     config::ProjectConfig,
     linear::LinearIssue,
     state::{
-        FailureRecord, OpenCodeSessionRecord, SelfDefectRecommendationConfidence,
+        FailureRecord, RunnerSessionRecord, SelfDefectRecommendationConfidence,
         SelfDefectRecommendationRecord, SelfDefectRecord, SelfDefectRelationMode,
         SelfDefectResolutionState,
     },
@@ -15,7 +15,7 @@ pub(super) async fn record_ambiguous_self_defect_recommendation(
     fingerprint: &str,
     message: &str,
     failure: &FailureRecord,
-    session: &OpenCodeSessionRecord,
+    session: &RunnerSessionRecord,
     issue: &LinearIssue,
 ) -> anyhow::Result<SelfDefectRecord> {
     let recommendation =
@@ -52,7 +52,7 @@ fn classify_ambiguous_self_defect(
     fingerprint: &str,
     message: &str,
     failure: &FailureRecord,
-    session: &OpenCodeSessionRecord,
+    session: &RunnerSessionRecord,
     issue: &LinearIssue,
 ) -> SelfDefectRecommendationRecord {
     let evidence_fingerprint = ambiguous_evidence_fingerprint(fingerprint, failure, session, issue);
@@ -132,7 +132,7 @@ fn ambiguous_recommendation_fields(
 fn ambiguous_evidence_fingerprint(
     fingerprint: &str,
     failure: &FailureRecord,
-    session: &OpenCodeSessionRecord,
+    session: &RunnerSessionRecord,
     issue: &LinearIssue,
 ) -> String {
     stable_hash(&format!(

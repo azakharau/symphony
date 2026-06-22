@@ -4,13 +4,13 @@ use serde_json::{Value, json};
 
 use crate::state::RuntimeProviderMode;
 
-use super::OpenCodeLaunchSpec;
+use super::RunnerLaunchSpec;
 
 const OMP_PROMPT_STARTUP_PROBE: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum AgentExecutionAdapter {
-    OpenCodeAcp,
+    Acp,
     OmpAcp,
 }
 
@@ -23,18 +23,18 @@ pub(super) struct AcpConfigOption<'a> {
 impl AgentExecutionAdapter {
     pub(super) const fn for_provider_mode(provider_mode: RuntimeProviderMode) -> Self {
         match provider_mode {
-            RuntimeProviderMode::OpenCodeAcp => Self::OpenCodeAcp,
+            RuntimeProviderMode::Acp => Self::Acp,
             RuntimeProviderMode::OmpAcp => Self::OmpAcp,
         }
     }
 
-    pub(super) fn for_spec(spec: &OpenCodeLaunchSpec) -> Self {
+    pub(super) fn for_spec(spec: &RunnerLaunchSpec) -> Self {
         Self::for_provider_mode(spec.provider_mode)
     }
 
-    pub(super) fn initialize_params(self, spec: &OpenCodeLaunchSpec) -> Value {
+    pub(super) fn initialize_params(self, spec: &RunnerLaunchSpec) -> Value {
         match self {
-            Self::OpenCodeAcp => json!({
+            Self::Acp => json!({
                 "protocolVersion": 1,
                 "agent": spec.agent,
                 "model": spec.model,
@@ -47,10 +47,10 @@ impl AgentExecutionAdapter {
         }
     }
 
-    pub(super) fn session_new_params(self, spec: &OpenCodeLaunchSpec) -> Value {
+    pub(super) fn session_new_params(self, spec: &RunnerLaunchSpec) -> Value {
         let title = spec.prompt.lines().next().unwrap_or("Symphony agent issue");
         match self {
-            Self::OpenCodeAcp => json!({
+            Self::Acp => json!({
                 "cwd": spec.cwd,
                 "title": title,
                 "agent": spec.agent,
@@ -64,13 +64,9 @@ impl AgentExecutionAdapter {
         }
     }
 
-    pub(super) fn session_resume_params(
-        self,
-        spec: &OpenCodeLaunchSpec,
-        session_id: &str,
-    ) -> Value {
+    pub(super) fn session_resume_params(self, spec: &RunnerLaunchSpec, session_id: &str) -> Value {
         match self {
-            Self::OpenCodeAcp | Self::OmpAcp => json!({
+            Self::Acp | Self::OmpAcp => json!({
                 "sessionId": session_id,
                 "cwd": spec.cwd,
                 "mcpServers": [],
@@ -78,12 +74,9 @@ impl AgentExecutionAdapter {
         }
     }
 
-    pub(super) fn config_options<'a>(
-        self,
-        spec: &'a OpenCodeLaunchSpec,
-    ) -> Vec<AcpConfigOption<'a>> {
+    pub(super) fn config_options<'a>(self, spec: &'a RunnerLaunchSpec) -> Vec<AcpConfigOption<'a>> {
         match self {
-            Self::OpenCodeAcp => vec![
+            Self::Acp => vec![
                 AcpConfigOption {
                     id: "mode",
                     value: Some(spec.agent.as_str()),
@@ -103,7 +96,7 @@ impl AgentExecutionAdapter {
 
     pub(super) const fn prompt_startup_probe(self) -> Option<Duration> {
         match self {
-            Self::OpenCodeAcp => None,
+            Self::Acp => None,
             Self::OmpAcp => Some(OMP_PROMPT_STARTUP_PROBE),
         }
     }

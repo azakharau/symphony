@@ -5,8 +5,8 @@ use tracing::info;
 use crate::state::RuntimeFailureKind;
 
 use super::{
-    OpenCodeError, OpenCodeLaunchObserver, OpenCodeLaunchSpec, OpenCodeProcessStarted,
-    OpenCodeSessionCreated, OpenCodeStartedSession,
+    RunnerError, RunnerLaunchObserver, RunnerLaunchSpec, RunnerProcessStarted,
+    RunnerSessionCreated, RunnerStartedSession,
     acp::{acp_request, extract_session_id, write_acp_request},
     adapter::AgentExecutionAdapter,
     ensure_worktree, launch_uses_issue_worktree,
@@ -26,9 +26,9 @@ pub struct OmpAcpTelemetry {
 impl StdioOmpAcpLauncher {
     pub async fn launch_observed(
         &self,
-        spec: &OpenCodeLaunchSpec,
-        observer: &dyn OpenCodeLaunchObserver,
-    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
+        spec: &RunnerLaunchSpec,
+        observer: &dyn RunnerLaunchObserver,
+    ) -> Result<RunnerStartedSession, RunnerError> {
         info!(
             issue = %spec.issue_identifier,
             cwd = %spec.cwd.display(),
@@ -41,10 +41,10 @@ impl StdioOmpAcpLauncher {
             remove_stale_handoff_sidecar(&spec.cwd).await?;
         }
         let mut child = AcpChildLifecycle::spawn(spec).await.map_err(|error| {
-            if let OpenCodeError::Io(io) = &error
+            if let RunnerError::Io(io) = &error
                 && io.kind() == std::io::ErrorKind::NotFound
             {
-                return OpenCodeError::RuntimeFailure {
+                return RunnerError::RuntimeFailure {
                     kind: RuntimeFailureKind::MissingBinary,
                     message: format!("OMP ACP binary not found: {}", spec.command.display()),
                 };
@@ -53,7 +53,7 @@ impl StdioOmpAcpLauncher {
         })?;
         let process_id = child.process_id();
         if let Err(error) = observer
-            .process_started(OpenCodeProcessStarted { process_id })
+            .process_started(RunnerProcessStarted { process_id })
             .await
         {
             return Err(child
@@ -92,12 +92,12 @@ impl StdioOmpAcpLauncher {
             let session_id = extract_session_id(&session_result)?;
             next_id += 1;
             observer
-                .session_created(OpenCodeSessionCreated {
+                .session_created(RunnerSessionCreated {
                     session_id: session_id.clone(),
                     process_id,
                 })
                 .await?;
-            Ok::<String, OpenCodeError>(session_id)
+            Ok::<String, RunnerError>(session_id)
         }
         .await;
         let session_id = match setup {
@@ -167,7 +167,7 @@ impl StdioOmpAcpLauncher {
             }
         }
 
-        Ok(OpenCodeStartedSession {
+        Ok(RunnerStartedSession {
             session_id,
             process_id,
             acp_frame_count: telemetry.frame_count,
@@ -179,18 +179,18 @@ impl StdioOmpAcpLauncher {
 async fn omp_acp_request(
     child: &mut AcpChildLifecycle,
     telemetry: &mut OmpAcpTelemetry,
-    spec: &OpenCodeLaunchSpec,
+    spec: &RunnerLaunchSpec,
     id: u64,
     method: &str,
     params: Value,
-) -> Result<Value, OpenCodeError> {
+) -> Result<Value, RunnerError> {
     let (stdin, stdout) = child.io();
     let response = acp_request(stdin, stdout, &spec.permission_policy, id, method, params).await;
     telemetry.frame_count = telemetry.frame_count.saturating_add(2);
     response.map_err(classify_protocol_error)
 }
 
-fn ensure_supported_version(value: &Value) -> Result<(), OpenCodeError> {
+fn ensure_supported_version(value: &Value) -> Result<(), RunnerError> {
     let version = value
         .get("protocolVersion")
         .or_else(|| value.get("protocol_version"))
@@ -199,18 +199,18 @@ fn ensure_supported_version(value: &Value) -> Result<(), OpenCodeError> {
     if version == 1 {
         return Ok(());
     }
-    Err(OpenCodeError::RuntimeFailure {
+    Err(RunnerError::RuntimeFailure {
         kind: RuntimeFailureKind::UnsupportedOmpVersion,
         message: format!("unsupported OMP ACP protocol version {version}"),
     })
 }
 
-fn classify_protocol_error(error: OpenCodeError) -> OpenCodeError {
-    let OpenCodeError::AcpProtocol(message) = error else {
+fn classify_protocol_error(error: RunnerError) -> RunnerError {
+    let RunnerError::AcpProtocol(message) = error else {
         return error;
     };
     let kind = classify_omp_acp_failure_kind(&message);
-    OpenCodeError::RuntimeFailure { kind, message }
+    RunnerError::RuntimeFailure { kind, message }
 }
 
 pub fn classify_omp_acp_failure_kind(message: &str) -> RuntimeFailureKind {

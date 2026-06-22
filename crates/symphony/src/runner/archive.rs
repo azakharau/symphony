@@ -6,11 +6,11 @@ use serde_json::{Value, json};
 use tokio::fs;
 use tracing::info;
 
-use crate::opencode::OpenCodeError;
+use crate::runner::RunnerError;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OpenCodeSessionArchiveRequest {
-    pub opencode_database_path: PathBuf,
+pub struct RunnerSessionArchiveRequest {
+    pub runner_archive_database_path: PathBuf,
     pub archive_root: PathBuf,
     pub project_id: String,
     pub issue_id: String,
@@ -19,7 +19,7 @@ pub struct OpenCodeSessionArchiveRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OpenCodeSessionArchiveReport {
+pub struct RunnerSessionArchiveReport {
     pub artifact_root: PathBuf,
     pub sessions_archived: u64,
     pub messages_archived: u64,
@@ -29,7 +29,7 @@ pub struct OpenCodeSessionArchiveReport {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct OpenCodeSessionTreeMetrics {
+pub struct RunnerSessionTreeMetrics {
     pub root_session_id: String,
     pub session_count: u64,
     pub subagent_count: u64,
@@ -49,19 +49,19 @@ pub struct OpenCodeSessionTreeMetrics {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct OpenCodeSessionTreeActivity {
+pub struct RunnerSessionTreeActivity {
     pub root_session_id: String,
-    pub sessions: Vec<OpenCodeSessionActivity>,
-    pub subagents: Vec<OpenCodeSessionActivity>,
-    pub todos: Vec<OpenCodeTodoActivity>,
-    pub timeline: Vec<OpenCodeTimelineEvent>,
+    pub sessions: Vec<RunnerSessionActivity>,
+    pub subagents: Vec<RunnerSessionActivity>,
+    pub todos: Vec<RunnerTodoActivity>,
+    pub timeline: Vec<RunnerTimelineEvent>,
     pub running_tool_count: u64,
     pub pending_tool_count: u64,
     pub last_updated_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct OpenCodeSessionActivity {
+pub struct RunnerSessionActivity {
     pub session_id: String,
     pub parent_session_id: Option<String>,
     pub title: String,
@@ -80,7 +80,7 @@ pub struct OpenCodeSessionActivity {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct OpenCodeTodoActivity {
+pub struct RunnerTodoActivity {
     pub session_id: String,
     pub content: String,
     pub status: String,
@@ -90,7 +90,7 @@ pub struct OpenCodeTodoActivity {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct OpenCodeTimelineEvent {
+pub struct RunnerTimelineEvent {
     pub session_id: String,
     pub part_id: String,
     pub time_created_ms: u64,
@@ -103,7 +103,7 @@ pub struct OpenCodeTimelineEvent {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct OpenCodeSessionMessageError {
+pub struct RunnerSessionMessageError {
     pub session_id: String,
     pub message_id: String,
     pub name: String,
@@ -171,7 +171,7 @@ struct TodoRow {
 }
 
 struct ArchivePayload<'a> {
-    metrics: &'a OpenCodeSessionTreeMetrics,
+    metrics: &'a RunnerSessionTreeMetrics,
     sessions: &'a [SessionRow],
     messages: &'a [MessageRow],
     parts: &'a [PartRow],
@@ -180,10 +180,10 @@ struct ArchivePayload<'a> {
 }
 
 pub async fn read_session_tree_metrics(
-    opencode_database_path: impl Into<PathBuf>,
+    runner_archive_database_path: impl Into<PathBuf>,
     root_session_id: &str,
-) -> Result<Option<OpenCodeSessionTreeMetrics>, OpenCodeError> {
-    let conn = open_opencode_database(opencode_database_path.into()).await?;
+) -> Result<Option<RunnerSessionTreeMetrics>, RunnerError> {
+    let conn = open_runner_archive_database(runner_archive_database_path.into()).await?;
     let sessions = session_tree(&conn, root_session_id).await?;
     if sessions.is_empty() {
         return Ok(None);
@@ -202,11 +202,11 @@ pub async fn read_session_tree_metrics(
 }
 
 pub async fn read_session_tree_activity(
-    opencode_database_path: impl Into<PathBuf>,
+    runner_archive_database_path: impl Into<PathBuf>,
     root_session_id: &str,
     timeline_limit: usize,
-) -> Result<Option<OpenCodeSessionTreeActivity>, OpenCodeError> {
-    let conn = open_opencode_database(opencode_database_path.into()).await?;
+) -> Result<Option<RunnerSessionTreeActivity>, RunnerError> {
+    let conn = open_runner_archive_database(runner_archive_database_path.into()).await?;
     let sessions = session_tree(&conn, root_session_id).await?;
     if sessions.is_empty() {
         return Ok(None);
@@ -238,7 +238,7 @@ pub async fn read_session_tree_activity(
         .chain(todos.iter().map(|todo| todo.time_updated))
         .max();
 
-    Ok(Some(OpenCodeSessionTreeActivity {
+    Ok(Some(RunnerSessionTreeActivity {
         root_session_id: root_session_id.into(),
         sessions: session_activity,
         subagents,
@@ -251,10 +251,10 @@ pub async fn read_session_tree_activity(
 }
 
 pub async fn read_latest_session_tree_error(
-    opencode_database_path: impl Into<PathBuf>,
+    runner_archive_database_path: impl Into<PathBuf>,
     root_session_id: &str,
-) -> Result<Option<OpenCodeSessionMessageError>, OpenCodeError> {
-    let conn = open_opencode_database(opencode_database_path.into()).await?;
+) -> Result<Option<RunnerSessionMessageError>, RunnerError> {
+    let conn = open_runner_archive_database(runner_archive_database_path.into()).await?;
     let messages = message_rows(&conn, root_session_id).await?;
     Ok(messages
         .into_iter()
@@ -267,9 +267,9 @@ pub async fn read_latest_session_tree_error(
 }
 
 pub async fn archive_and_delete_session_tree(
-    request: OpenCodeSessionArchiveRequest,
-) -> Result<OpenCodeSessionArchiveReport, OpenCodeError> {
-    let conn = open_opencode_database(request.opencode_database_path.clone()).await?;
+    request: RunnerSessionArchiveRequest,
+) -> Result<RunnerSessionArchiveReport, RunnerError> {
+    let conn = open_runner_archive_database(request.runner_archive_database_path.clone()).await?;
     let sessions = session_tree(&conn, &request.root_session_id).await?;
     let artifact_root = request
         .archive_root
@@ -277,7 +277,7 @@ pub async fn archive_and_delete_session_tree(
         .join(safe_path_segment(&request.issue_identifier))
         .join(safe_path_segment(&request.root_session_id));
     if sessions.is_empty() {
-        return Ok(OpenCodeSessionArchiveReport {
+        return Ok(RunnerSessionArchiveReport {
             artifact_root,
             sessions_archived: 0,
             messages_archived: 0,
@@ -322,9 +322,9 @@ pub async fn archive_and_delete_session_tree(
         root_session_id = %request.root_session_id,
         artifact_root = %artifact_root.display(),
         sessions_deleted,
-        "archived and deleted OpenCode session tree"
+        "archived and deleted runner session tree"
     );
-    Ok(OpenCodeSessionArchiveReport {
+    Ok(RunnerSessionArchiveReport {
         artifact_root,
         sessions_archived: sessions.len() as u64,
         messages_archived: messages.len() as u64,
@@ -334,7 +334,7 @@ pub async fn archive_and_delete_session_tree(
     })
 }
 
-async fn open_opencode_database(path: PathBuf) -> Result<Connection, OpenCodeError> {
+async fn open_runner_archive_database(path: PathBuf) -> Result<Connection, RunnerError> {
     let database = Builder::new_local(path.display().to_string())
         .build()
         .await?;
@@ -352,7 +352,7 @@ async fn open_opencode_database(path: PathBuf) -> Result<Connection, OpenCodeErr
 async fn session_tree(
     conn: &Connection,
     root_session_id: &str,
-) -> Result<Vec<SessionRow>, OpenCodeError> {
+) -> Result<Vec<SessionRow>, RunnerError> {
     let mut rows = conn
         .query(
             r#"
@@ -392,10 +392,10 @@ async fn count_rows_by_session(
     conn: &Connection,
     table: &str,
     root_session_id: &str,
-) -> Result<u64, OpenCodeError> {
+) -> Result<u64, RunnerError> {
     if !matches!(table, "message" | "part" | "todo") {
-        return Err(OpenCodeError::Archive(format!(
-            "unsupported OpenCode session table `{table}`"
+        return Err(RunnerError::Archive(format!(
+            "unsupported runner session table `{table}`"
         )));
     }
     let mut rows = conn
@@ -422,7 +422,7 @@ async fn count_rows_by_session(
 async fn message_rows(
     conn: &Connection,
     root_session_id: &str,
-) -> Result<Vec<MessageRow>, OpenCodeError> {
+) -> Result<Vec<MessageRow>, RunnerError> {
     let mut values = Vec::new();
     let mut rows = conn
         .query(
@@ -449,10 +449,7 @@ async fn message_rows(
     Ok(values)
 }
 
-async fn part_rows(
-    conn: &Connection,
-    root_session_id: &str,
-) -> Result<Vec<PartRow>, OpenCodeError> {
+async fn part_rows(conn: &Connection, root_session_id: &str) -> Result<Vec<PartRow>, RunnerError> {
     let mut values = Vec::new();
     let mut rows = conn
         .query(
@@ -483,7 +480,7 @@ async fn part_rows(
 async fn session_message_rows(
     conn: &Connection,
     root_session_id: &str,
-) -> Result<Vec<SessionMessageRow>, OpenCodeError> {
+) -> Result<Vec<SessionMessageRow>, RunnerError> {
     let mut values = Vec::new();
     let mut rows = conn
         .query(
@@ -511,10 +508,7 @@ async fn session_message_rows(
     Ok(values)
 }
 
-async fn todo_rows(
-    conn: &Connection,
-    root_session_id: &str,
-) -> Result<Vec<TodoRow>, OpenCodeError> {
+async fn todo_rows(conn: &Connection, root_session_id: &str) -> Result<Vec<TodoRow>, RunnerError> {
     let mut values = Vec::new();
     let mut rows = conn
         .query(
@@ -547,7 +541,7 @@ async fn timeline_events(
     conn: &Connection,
     root_session_id: &str,
     timeline_limit: usize,
-) -> Result<Vec<OpenCodeTimelineEvent>, OpenCodeError> {
+) -> Result<Vec<RunnerTimelineEvent>, RunnerError> {
     if timeline_limit == 0 {
         return Ok(Vec::new());
     }
@@ -590,8 +584,8 @@ fn metrics_from_rows(
     message_count: u64,
     part_count: u64,
     todo_count: u64,
-) -> OpenCodeSessionTreeMetrics {
-    let mut metrics = OpenCodeSessionTreeMetrics {
+) -> RunnerSessionTreeMetrics {
+    let mut metrics = RunnerSessionTreeMetrics {
         root_session_id: root_session_id.into(),
         session_count: sessions.len() as u64,
         subagent_count: sessions
@@ -601,7 +595,7 @@ fn metrics_from_rows(
         message_count,
         part_count,
         todo_count,
-        ..OpenCodeSessionTreeMetrics::default()
+        ..RunnerSessionTreeMetrics::default()
     };
 
     for session in sessions {
@@ -637,8 +631,8 @@ fn metrics_from_rows(
     metrics
 }
 
-fn session_activity_from_row(session: &SessionRow) -> OpenCodeSessionActivity {
-    OpenCodeSessionActivity {
+fn session_activity_from_row(session: &SessionRow) -> RunnerSessionActivity {
+    RunnerSessionActivity {
         session_id: session.id.clone(),
         parent_session_id: session.parent_id.clone(),
         title: session.title.clone(),
@@ -657,8 +651,8 @@ fn session_activity_from_row(session: &SessionRow) -> OpenCodeSessionActivity {
     }
 }
 
-fn todo_activity_from_row(todo: TodoRow) -> OpenCodeTodoActivity {
-    OpenCodeTodoActivity {
+fn todo_activity_from_row(todo: TodoRow) -> RunnerTodoActivity {
+    RunnerTodoActivity {
         session_id: todo.session_id,
         content: todo.content,
         status: todo.status,
@@ -668,7 +662,7 @@ fn todo_activity_from_row(todo: TodoRow) -> OpenCodeTodoActivity {
     }
 }
 
-fn message_error_from_row(row: MessageRow) -> Option<OpenCodeSessionMessageError> {
+fn message_error_from_row(row: MessageRow) -> Option<RunnerSessionMessageError> {
     let error = row.data.get("error")?;
     let name = json_string(error, "name")?;
     let data = error.get("data");
@@ -679,7 +673,7 @@ fn message_error_from_row(row: MessageRow) -> Option<OpenCodeSessionMessageError
         .and_then(|data| json_string(data, "message"))
         .or_else(|| json_string(error, "message"))
         .unwrap_or_else(|| name.clone());
-    Some(OpenCodeSessionMessageError {
+    Some(RunnerSessionMessageError {
         session_id: row.session_id,
         message_id: row.id,
         name,
@@ -695,7 +689,7 @@ fn timeline_event_from_part(
     time_created_ms: u64,
     time_updated_ms: u64,
     data: &Value,
-) -> OpenCodeTimelineEvent {
+) -> RunnerTimelineEvent {
     let kind = json_string(data, "type").unwrap_or_else(|| "unknown".into());
     let tool = json_string(data, "tool");
     let status = data
@@ -706,7 +700,7 @@ fn timeline_event_from_part(
     let title = json_string(data, "title").filter(|title| !title.trim().is_empty());
     let summary = timeline_summary(data, &kind, tool.as_deref(), status.as_deref());
 
-    OpenCodeTimelineEvent {
+    RunnerTimelineEvent {
         session_id,
         part_id,
         time_created_ms,
@@ -761,20 +755,20 @@ fn truncate_summary(input: &str) -> String {
 
 async fn write_archive(
     artifact_root: &Path,
-    request: &OpenCodeSessionArchiveRequest,
+    request: &RunnerSessionArchiveRequest,
     payload: ArchivePayload<'_>,
-) -> Result<(), OpenCodeError> {
+) -> Result<(), RunnerError> {
     let raw_root = artifact_root.join("raw");
     fs::create_dir_all(&raw_root).await?;
     let manifest = json!({
-        "schema_version": "symphony.opencode_session_archive.v1",
-        "run_id": format!("opencode-session-{}", request.root_session_id),
+        "schema_version": "symphony.runner_session_archive.v1",
+        "run_id": format!("runner-session-{}", request.root_session_id),
         "artifact_root": artifact_root.display().to_string(),
         "project_id": request.project_id,
         "issue_id": request.issue_id,
         "issue_identifier": request.issue_identifier,
         "source": {
-            "metrics_basis": "OpenCode SQLite session tables across root and child sessions",
+            "metrics_basis": "runner SQLite session tables across root and child sessions",
             "raw_transcripts_retained_locally": true,
             "raw_transcripts_committed": false
         },
@@ -801,7 +795,7 @@ async fn write_archive(
     Ok(())
 }
 
-async fn write_json<T>(path: PathBuf, value: &T) -> Result<(), OpenCodeError>
+async fn write_json<T>(path: PathBuf, value: &T) -> Result<(), RunnerError>
 where
     T: Serialize + Sync + ?Sized,
 {
@@ -810,10 +804,7 @@ where
     Ok(())
 }
 
-async fn delete_session_tree(
-    conn: &Connection,
-    session_ids: &[&str],
-) -> Result<u64, OpenCodeError> {
+async fn delete_session_tree(conn: &Connection, session_ids: &[&str]) -> Result<u64, RunnerError> {
     let mut deleted = 0_u64;
     conn.execute_batch("BEGIN IMMEDIATE").await?;
     for session_id in session_ids {
@@ -843,8 +834,8 @@ async fn delete_session_tree(
     Ok(deleted)
 }
 
-fn parse_json_cell(input: String) -> Result<Value, OpenCodeError> {
-    serde_json::from_str(&input).map_err(OpenCodeError::from)
+fn parse_json_cell(input: String) -> Result<Value, RunnerError> {
+    serde_json::from_str(&input).map_err(RunnerError::from)
 }
 
 fn model_id(model: Option<&str>) -> Option<String> {
@@ -868,7 +859,7 @@ fn safe_path_segment(input: &str) -> String {
         .collect()
 }
 
-fn get_u64(row: &libsql::Row, index: i32) -> Result<u64, OpenCodeError> {
+fn get_u64(row: &libsql::Row, index: i32) -> Result<u64, RunnerError> {
     let value: i64 = row.get(index)?;
     Ok(value.max(0) as u64)
 }

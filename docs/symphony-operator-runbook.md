@@ -6,7 +6,7 @@ Symphony runs as two independent user services on the host:
 
 | Unit | Process | Port | Purpose |
 | --- | --- | --- | --- |
-| `symphony.service` | Rust `symphony daemon` | `127.0.0.1:4115` | API, SSE, Linear polling, OpenCode orchestration |
+| `symphony.service` | Rust `symphony daemon` | `127.0.0.1:4115` | API, SSE, Linear polling, runner orchestration |
 | `symphony-dashboard.service` | Next production server from `apps/dashboard` | `127.0.0.1:4120` | Operator dashboard UI and BFF routes |
 
 The Rust service no longer serves dashboard HTML. The only supported UI is the Next dashboard.
@@ -190,7 +190,7 @@ OMP ACP dashboard expectations:
 - The configured project should show `provider_mode` as `omp_acp` on running issue/session rows.
 - `provider_id`, `process_id`, `acp_frame_count`, and `session_evidence_refs` should be present when a session starts.
 - Auth, malformed-frame, missing-binary, and unsupported-version failures should appear as typed runtime failures rather than owner-input blockers.
-- Unrelated projects should continue to show their existing OpenCode provider mode and should not inherit the OMP provider block.
+- Unrelated projects should continue to show their existing runner provider mode and should not inherit the OMP provider block.
 
 ## OMP ACP cutover and cleanup
 
@@ -220,4 +220,4 @@ systemctl --user restart symphony.service
 ```
 
 If the Rust service cannot run, leave active issues parked in Linear and recover from the SQLite store
-plus per-issue OpenCode worktrees. Do not restore removed legacy UI routes.
+plus per-issue runner worktrees. Do not restore removed legacy UI routes.

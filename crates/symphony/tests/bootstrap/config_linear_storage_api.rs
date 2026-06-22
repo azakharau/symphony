@@ -1,5 +1,51 @@
 use super::*;
 
+#[test]
+fn production_source_uses_runner_neutral_vocabulary() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("workspace root")
+        .to_path_buf();
+    let source_roots = [
+        repo_root.join("crates/symphony/src"),
+        repo_root.join("apps/dashboard/src"),
+    ];
+
+    let mut leaks = Vec::new();
+    for root in source_roots {
+        collect_adapter_wording_leaks(&root, &mut leaks);
+    }
+
+    assert!(
+        leaks.is_empty(),
+        "production source must keep runner-neutral core/API wording; unexpected OpenCode wording in:\n{}",
+        leaks.join("\n")
+    );
+}
+
+fn collect_adapter_wording_leaks(path: &Path, leaks: &mut Vec<String>) {
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path).expect("read source directory") {
+            let entry = entry.expect("read source directory entry");
+            collect_adapter_wording_leaks(&entry.path(), leaks);
+        }
+        return;
+    }
+
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+        return;
+    };
+    if !matches!(extension, "rs" | "ts" | "tsx") {
+        return;
+    }
+
+    let source = std::fs::read_to_string(path).expect("read source file");
+    if source.to_ascii_lowercase().contains("opencode") {
+        leaks.push(path.display().to_string());
+    }
+}
+
 #[tokio::test]
 async fn multiproject_toml_config_loads_deterministically_and_validates_required_fields() {
     let first = RootConfig::from_toml_str(valid_config_toml()).expect("valid root config");
@@ -11,15 +57,15 @@ async fn multiproject_toml_config_loads_deterministically_and_validates_required
     let project = first.project("symphony").expect("project lookup");
     assert_eq!(project.linear.team_key, "SYM");
     assert_eq!(
-        project.opencode.command,
+        project.runner.command,
         PathBuf::from("/usr/local/bin/opencode")
     );
-    assert_eq!(project.opencode.args, vec!["acp"]);
+    assert_eq!(project.runner.args, vec!["acp"]);
     assert_eq!(project.concurrency.max_sessions, 2);
     assert!(first.cleanup.enabled);
     assert_eq!(first.cleanup.interval_secs, 300);
     assert_eq!(first.cleanup.retention_secs, 86_400);
-    assert!(first.opencode_storage.is_none());
+    assert!(first.runner_archive.is_none());
 
     let missing_required =
         valid_config_toml().replace("repo_path = \"/home/agent/proj/symphony\"\n", "");
@@ -28,7 +74,7 @@ async fn multiproject_toml_config_loads_deterministically_and_validates_required
 }
 
 #[tokio::test]
-async fn omp_acp_provider_config_loads_capabilities_without_changing_opencode_runtime() {
+async fn omp_acp_provider_config_loads_capabilities_without_changing_default_runner() {
     let configured = valid_config_toml().replace(
         "[projects.eval]\n",
         r#"[[projects.omp_acp_providers]]
@@ -56,10 +102,10 @@ inverse_bridge_reference = true
     let config = RootConfig::from_toml_str(&configured).expect("OMP ACP provider config");
     let project = config.project("symphony").expect("project");
     assert_eq!(
-        project.opencode.command,
+        project.runner.command,
         PathBuf::from("/usr/local/bin/opencode")
     );
-    assert_eq!(project.opencode.args, vec!["acp"]);
+    assert_eq!(project.runner.args, vec!["acp"]);
 
     let provider = project.omp_acp_providers.first().expect("OMP ACP provider");
     assert_eq!(provider.id, "omp-primary");
@@ -140,13 +186,13 @@ inverse_bridge_reference = true
 }
 
 #[tokio::test]
-async fn opencode_storage_config_loads_and_validates_archive_paths() {
+async fn runner_archive_config_loads_and_validates_archive_paths() {
     let configured = valid_config_toml().replace(
         "[[projects]]\n",
-        "[opencode_storage]\ndatabase_path = \"/home/agent/.local/share/opencode/opencode.db\"\narchive_root = \"/home/agent/recall-benchmark-runs/symphony-opencode-session-archives\"\n\n[[projects]]\n",
+        "[runner_archive]\ndatabase_path = \"/home/agent/.local/share/opencode/opencode.db\"\narchive_root = \"/home/agent/recall-benchmark-runs/symphony-runner-session-archives\"\n\n[[projects]]\n",
     );
     let config = RootConfig::from_toml_str(&configured).expect("opencode storage config");
-    let storage = config.opencode_storage.expect("storage config");
+    let storage = config.runner_archive.expect("storage config");
 
     assert_eq!(
         storage.database_path,
@@ -154,17 +200,16 @@ async fn opencode_storage_config_loads_and_validates_archive_paths() {
     );
     assert_eq!(
         storage.archive_root,
-        PathBuf::from("/home/agent/recall-benchmark-runs/symphony-opencode-session-archives")
+        PathBuf::from("/home/agent/recall-benchmark-runs/symphony-runner-session-archives")
     );
 
     let invalid = configured.replace(
         "database_path = \"/home/agent/.local/share/opencode/opencode.db\"",
         "database_path = \"\"",
     );
-    let err =
-        RootConfig::from_toml_str(&invalid).expect_err("empty OpenCode database path rejected");
+    let err = RootConfig::from_toml_str(&invalid).expect_err("empty runner database path rejected");
     assert!(
-        err.to_string().contains("opencode_storage.database_path"),
+        err.to_string().contains("runner_archive.database_path"),
         "{err}"
     );
 }
@@ -212,7 +257,7 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
                             "comments": {
                                 "nodes": [
                                     {
-                                        "body": "## OpenCode Handoff\nrepair handoff for SYM-100",
+                                        "body": "## runner Handoff\nrepair handoff for SYM-100",
                                         "parent": null,
                                         "createdAt": "2026-06-10T00:01:00Z"
                                     }
@@ -233,7 +278,7 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
                                             "comments": {
                                                 "nodes": [
                                                     {
-                                                        "body": "## OpenCode Handoff Accepted\nRecall task_id: `task-upstream`\n### Changed Files\n- `src/upstream.rs:1-10`",
+                                                        "body": "## runner Handoff Accepted\nRecall task_id: `task-upstream`\n### Changed Files\n- `src/upstream.rs:1-10`",
                                                         "createdAt": "2026-06-10T00:02:00Z"
                                                     }
                                                 ]
@@ -284,7 +329,7 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
                                         "createdAt": "2026-06-10T00:03:00Z"
                                     },
                                     {
-                                        "body": "## OpenCode Handoff\nmachine status update",
+                                        "body": "## runner Handoff\nmachine status update",
                                         "parent": { "id": "owner-comment-thread" },
                                         "createdAt": "2026-06-10T00:04:00Z"
                                     },
@@ -380,7 +425,7 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
         upstream
             .handoff_summary
             .as_deref()
-            .is_some_and(|summary| summary.contains("OpenCode Handoff Accepted"))
+            .is_some_and(|summary| summary.contains("runner Handoff Accepted"))
     );
     assert!(!issues[0].has_new_owner_answer);
     assert_eq!(issues[1].identifier, "SYM-101");
@@ -787,7 +832,7 @@ async fn migration_removes_legacy_issue_state_without_losing_sessions() {
         )
         VALUES ('symphony', 'issue-1', 'SYM-1', 'Legacy issue', 'In Progress', 'running', 'clean');
 
-        CREATE TABLE opencode_sessions (
+        CREATE TABLE runner_sessions (
             project_id TEXT NOT NULL,
             issue_id TEXT NOT NULL,
             session_id TEXT NOT NULL,
@@ -813,7 +858,7 @@ async fn migration_removes_legacy_issue_state_without_losing_sessions() {
             PRIMARY KEY (project_id, issue_id, session_id),
             FOREIGN KEY (project_id, issue_id) REFERENCES issues(project_id, issue_id) ON DELETE CASCADE
         );
-        INSERT INTO opencode_sessions (
+        INSERT INTO runner_sessions (
             project_id, issue_id, session_id, agent, worktree_path, lifecycle_stage, stage,
             message_count, todo_count, part_count, token_count, cost_micros, subagent_count,
             silence_observed
@@ -844,7 +889,7 @@ async fn migration_removes_legacy_issue_state_without_losing_sessions() {
         .expect("issue preserved");
     assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
     let session = store
-        .opencode_session("symphony", "issue-1", "session-1")
+        .runner_session("symphony", "issue-1", "session-1")
         .await
         .expect("query session")
         .expect("session preserved");
@@ -895,18 +940,18 @@ async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
             .await
             .expect("issue");
         store
-            .upsert_opencode_session(OpenCodeSessionRecord {
+            .upsert_runner_session(RunnerSessionRecord {
                 project_id: "symphony".into(),
                 issue_id: "0af8ad67-37b9-412a-9869-82ca96b418e1".into(),
                 session_id: "oc-session-1".into(),
-                provider_mode: RuntimeProviderMode::OpenCodeAcp,
+                provider_mode: RuntimeProviderMode::Acp,
                 provider_id: None,
                 agent: "build".into(),
                 model: None,
                 worktree_path: "/home/agent/.symphony/workspaces/opencode/symphony/SYM-25".into(),
                 process_id: None,
                 lifecycle_stage: LifecycleStage::Running,
-                stage: OpenCodeStage::Running,
+                stage: RunnerStage::Running,
                 active_agent: Some("rust-engineer".into()),
                 active_model: Some("claude-sonnet-4".into()),
                 message_count: 2,
@@ -956,7 +1001,7 @@ async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
     assert_eq!(issue.cleanup_status, CleanupStatus::Pending);
 
     let session = reloaded
-        .opencode_session(
+        .runner_session(
             "symphony",
             "0af8ad67-37b9-412a-9869-82ca96b418e1",
             "oc-session-1",
@@ -965,7 +1010,7 @@ async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
         .expect("query session")
         .expect("session row");
     assert_eq!(session.agent, "build");
-    assert_eq!(session.stage, OpenCodeStage::Running);
+    assert_eq!(session.stage, RunnerStage::Running);
     assert_eq!(
         session.worktree_path,
         "/home/agent/.symphony/workspaces/opencode/symphony/SYM-25"
@@ -978,11 +1023,11 @@ async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
         .expect("read model");
     assert_eq!(read_model.projects[0].project_id, "symphony");
     assert_eq!(
-        read_model.projects[0].issues[0].opencode_sessions[0].session_id,
+        read_model.projects[0].issues[0].runner_sessions[0].session_id,
         "oc-session-1"
     );
     assert_eq!(
-        read_model.projects[0].issues[0].opencode_sessions[0]
+        read_model.projects[0].issues[0].runner_sessions[0]
             .eval_stage
             .as_deref(),
         Some("unit")
@@ -990,7 +1035,7 @@ async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
 }
 
 #[tokio::test]
-async fn opencode_sessions_for_issue_orders_by_runtime_update_not_session_id() {
+async fn runner_sessions_for_issue_orders_by_runtime_update_not_session_id() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
@@ -1006,13 +1051,13 @@ async fn opencode_sessions_for_issue_orders_by_runtime_update_not_session_id() {
     let fresh_worktree = dir.path().join("SYM-161-fresh");
     let mut stale = test_session("symphony", "runtime-order", "zz-stale", &stale_worktree);
     stale.lifecycle_stage = LifecycleStage::Failed;
-    stale.stage = OpenCodeStage::Failed;
+    stale.stage = RunnerStage::Failed;
     store
-        .upsert_opencode_session(stale)
+        .upsert_runner_session(stale)
         .await
         .expect("stale session");
     store
-        .upsert_opencode_session(test_session(
+        .upsert_runner_session(test_session(
             "symphony",
             "runtime-order",
             "aa-fresh",
@@ -1022,7 +1067,7 @@ async fn opencode_sessions_for_issue_orders_by_runtime_update_not_session_id() {
         .expect("fresh session");
 
     let sessions = store
-        .opencode_sessions_for_issue("symphony", "runtime-order")
+        .runner_sessions_for_issue("symphony", "runtime-order")
         .await
         .expect("sessions");
 
@@ -1033,7 +1078,7 @@ async fn opencode_sessions_for_issue_orders_by_runtime_update_not_session_id() {
 }
 
 #[tokio::test]
-async fn dashboard_api_orders_active_opencode_session_before_stale_failures() {
+async fn dashboard_api_orders_active_runner_session_before_stale_failures() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
@@ -1049,10 +1094,10 @@ async fn dashboard_api_orders_active_opencode_session_before_stale_failures() {
     let running_worktree = dir.path().join("SYM-233-running");
     let mut failed = test_session("symphony", "mixed-sessions", "zz-failed", &failed_worktree);
     failed.lifecycle_stage = LifecycleStage::Failed;
-    failed.stage = OpenCodeStage::Failed;
+    failed.stage = RunnerStage::Failed;
     failed.last_event = Some("failed:missing_handoff_sidecar".into());
     store
-        .upsert_opencode_session(failed)
+        .upsert_runner_session(failed)
         .await
         .expect("failed session");
 
@@ -1063,10 +1108,10 @@ async fn dashboard_api_orders_active_opencode_session_before_stale_failures() {
         &running_worktree,
     );
     running.lifecycle_stage = LifecycleStage::Running;
-    running.stage = OpenCodeStage::Running;
-    running.last_event = Some("opencode_db_updated:123".into());
+    running.stage = RunnerStage::Running;
+    running.last_event = Some("runner_archive_updated:123".into());
     store
-        .upsert_opencode_session(running)
+        .upsert_runner_session(running)
         .await
         .expect("running session");
 
@@ -1088,12 +1133,12 @@ async fn dashboard_api_orders_active_opencode_session_before_stale_failures() {
         .find(|project| project.project_id == "symphony")
         .expect("project card");
 
-    assert_eq!(issue.opencode_sessions[0].opencode_session_id, "aa-running");
+    assert_eq!(issue.runner_sessions[0].runner_session_id, "aa-running");
     assert_eq!(
-        issue.opencode_sessions[0].last_event.as_deref(),
-        Some("opencode_db_updated:123")
+        issue.runner_sessions[0].last_event.as_deref(),
+        Some("runner_archive_updated:123")
     );
-    assert_eq!(issue.opencode_sessions[1].opencode_session_id, "zz-failed");
+    assert_eq!(issue.runner_sessions[1].runner_session_id, "zz-failed");
     assert_eq!(card.runner_health, "active");
     assert_eq!(
         card.running_issues[0].session_id.as_deref(),
@@ -1101,7 +1146,7 @@ async fn dashboard_api_orders_active_opencode_session_before_stale_failures() {
     );
     assert_eq!(
         card.running_issues[0].last_event.as_deref(),
-        Some("opencode_db_updated:123")
+        Some("runner_archive_updated:123")
     );
 }
 
@@ -1125,10 +1170,10 @@ async fn dashboard_api_does_not_surface_stale_starting_session_as_running() {
         dir.path().join("SYM-234"),
     );
     stale.lifecycle_stage = LifecycleStage::Failed;
-    stale.stage = OpenCodeStage::Starting;
+    stale.stage = RunnerStage::Starting;
     stale.last_event = Some("failed:missing_handoff_sidecar".into());
     store
-        .upsert_opencode_session(stale)
+        .upsert_runner_session(stale)
         .await
         .expect("stale session");
 
@@ -1147,7 +1192,7 @@ async fn dashboard_api_does_not_surface_stale_starting_session_as_running() {
 }
 
 #[tokio::test]
-async fn active_opencode_sessions_excludes_terminal_sessions_for_metrics_polling() {
+async fn active_runner_sessions_excludes_terminal_sessions_for_metrics_polling() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
@@ -1176,9 +1221,9 @@ async fn active_opencode_sessions_excludes_terminal_sessions_for_metrics_polling
         dir.path().join("done"),
     );
     completed.lifecycle_stage = LifecycleStage::Completed;
-    completed.stage = OpenCodeStage::Completed;
+    completed.stage = RunnerStage::Completed;
     store
-        .upsert_opencode_session(completed)
+        .upsert_runner_session(completed)
         .await
         .expect("completed session");
 
@@ -1189,7 +1234,7 @@ async fn active_opencode_sessions_excludes_terminal_sessions_for_metrics_polling
         dir.path().join("running"),
     );
     store
-        .upsert_opencode_session(running)
+        .upsert_runner_session(running)
         .await
         .expect("running session");
 
@@ -1200,14 +1245,14 @@ async fn active_opencode_sessions_excludes_terminal_sessions_for_metrics_polling
         dir.path().join("starting"),
     );
     starting.lifecycle_stage = LifecycleStage::Blocked;
-    starting.stage = OpenCodeStage::Starting;
+    starting.stage = RunnerStage::Starting;
     store
-        .upsert_opencode_session(starting)
+        .upsert_runner_session(starting)
         .await
         .expect("starting session");
 
     let sessions = store
-        .active_opencode_sessions()
+        .active_runner_sessions()
         .await
         .expect("active sessions");
     let session_ids = sessions
@@ -1249,18 +1294,18 @@ async fn runtime_cleanup_removes_stale_completed_rows_and_keeps_active_state() {
         "/home/agent/.symphony/workspaces/opencode/symphony/SYM-1",
     );
     completed_session.lifecycle_stage = LifecycleStage::Completed;
-    completed_session.stage = OpenCodeStage::Completed;
+    completed_session.stage = RunnerStage::Completed;
     store
-        .upsert_opencode_session(completed_session)
+        .upsert_runner_session(completed_session)
         .await
         .expect("completed session");
     store
-        .upsert_opencode_stage_event(OpenCodeStageEventRecord {
+        .upsert_runner_stage_event(RunnerStageEventRecord {
             project_id: "symphony".into(),
             issue_id: "done".into(),
             session_id: "session-done".into(),
             sequence: 1,
-            stage: OpenCodeStage::Completed,
+            stage: RunnerStage::Completed,
             event: Some("handoff accepted".into()),
         })
         .await
@@ -1280,7 +1325,7 @@ async fn runtime_cleanup_removes_stale_completed_rows_and_keeps_active_state() {
     let running = test_issue("symphony", "running", "SYM-2");
     store.upsert_issue(running).await.expect("running issue");
     store
-        .upsert_opencode_session(test_session(
+        .upsert_runner_session(test_session(
             "symphony",
             "running",
             "session-running",
@@ -1318,7 +1363,7 @@ async fn runtime_cleanup_removes_stale_completed_rows_and_keeps_active_state() {
     );
     assert!(
         store
-            .opencode_session("symphony", "running", "session-running")
+            .runner_session("symphony", "running", "session-running")
             .await
             .expect("running session")
             .is_some()
@@ -1455,7 +1500,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
         "oc-repair",
         "/home/agent/.symphony/workspaces/opencode/symphony/SYM-91",
     );
-    session.stage = OpenCodeStage::Eval;
+    session.stage = RunnerStage::Eval;
     session.active_agent = Some("evaluator".into());
     session.active_model = Some("gpt-5".into());
     session.token_count = 4096;
@@ -1464,28 +1509,25 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
     session.eval_stage = Some("cargo clippy".into());
     session.lifecycle_marker = Some("repair_loop".into());
     session.last_event = Some("eval_failed:clippy-needless-collect".into());
+    store.upsert_runner_session(session).await.expect("session");
     store
-        .upsert_opencode_session(session)
-        .await
-        .expect("session");
-    store
-        .upsert_opencode_stage_event(OpenCodeStageEventRecord {
+        .upsert_runner_stage_event(RunnerStageEventRecord {
             project_id: "symphony".into(),
             issue_id: "repair".into(),
             session_id: "oc-repair".into(),
             sequence: 1,
-            stage: OpenCodeStage::Running,
+            stage: RunnerStage::Running,
             event: Some("implementation_started".into()),
         })
         .await
         .expect("running stage event");
     store
-        .upsert_opencode_stage_event(OpenCodeStageEventRecord {
+        .upsert_runner_stage_event(RunnerStageEventRecord {
             project_id: "symphony".into(),
             issue_id: "repair".into(),
             session_id: "oc-repair".into(),
             sequence: 2,
-            stage: OpenCodeStage::Eval,
+            stage: RunnerStage::Eval,
             event: Some("eval_failed:clippy-needless-collect".into()),
         })
         .await
@@ -1551,8 +1593,8 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
       "liveness": {
         "status": "inactive_runtime",
         "reason": "runtime has not reported a poll for this enabled project",
-        "primary_reason_code": "active_opencode_session",
-        "primary_reason_detail": "an OpenCode session is actively executing",
+        "primary_reason_code": "active_runner_session",
+        "primary_reason_detail": "an runner session is actively executing",
         "last_poll_at": null,
         "last_successful_candidate_scan_at": null,
         "capacity": {
@@ -1576,7 +1618,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
           "title": "Test issue",
           "display_status": "repair loop",
           "session_id": "oc-repair",
-          "provider_mode": "open_code_acp",
+          "provider_mode": "acp",
           "provider_id": null,
           "process_id": null,
           "process_alive": null,
@@ -1610,10 +1652,10 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
     );
     assert!(project_json.contains(r#""display_status": "provider/infra blocker""#));
     assert!(project_json.contains(r#""history_issues""#));
-    assert!(issue_json.contains(r#""opencode_session_id": "oc-repair""#));
+    assert!(issue_json.contains(r#""runner_session_id": "oc-repair""#));
     assert_eq!(
-        issue_detail.opencode_sessions[0].stage_history,
-        vec![OpenCodeStage::Running, OpenCodeStage::Eval]
+        issue_detail.runner_sessions[0].stage_history,
+        vec![RunnerStage::Running, RunnerStage::Eval]
     );
     assert!(issue_json.contains(r#""subagents_used": 2"#));
     assert!(issue_json.contains(r#""eval_results""#));
@@ -1658,11 +1700,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
     assert!(ui_project.body.contains(r#""active_issues""#));
     assert!(ui_aggregate.body.contains(r#""running_cached_tokens":0"#));
     assert!(ui_aggregate.body.contains(r#""duration_ms":null"#));
-    assert!(
-        ui_issue
-            .body
-            .contains(r#""opencode_session_id":"oc-repair""#)
-    );
+    assert!(ui_issue.body.contains(r#""runner_session_id":"oc-repair""#));
     assert!(ui_issue.body.contains(r#""cached_token_count":0"#));
     assert!(ui_issue.body.contains(r#""duration_ms":null"#));
     assert!(events.body.starts_with("event: dashboard.snapshot\ndata: "));
@@ -1770,7 +1808,7 @@ async fn dashboard_surfaces_managed_self_defect_routing_projection() {
     issue.lifecycle_stage = LifecycleStage::Failed;
     issue.failure = Some(FailureRecord {
         kind: "runtime_defect".into(),
-        message: "OpenCode launch failed after Linear transition".into(),
+        message: "runner launch failed after Linear transition".into(),
         fingerprint: Some("launch_failed".into()),
         occurrence_count: 2,
     });
@@ -1942,7 +1980,7 @@ async fn dashboard_does_not_surface_stale_stop_reason_for_running_issue() {
     issue.lifecycle_stage = LifecycleStage::Running;
     issue.failure = Some(FailureRecord {
         kind: "provider_blocker".into(),
-        message: "stale OpenCode provider auth failure".into(),
+        message: "stale runner provider auth failure".into(),
         fingerprint: Some("opencode_providerautherror_api_key_missing".into()),
         occurrence_count: 1,
     });

@@ -6,9 +6,9 @@ use serde::{Serialize, de::DeserializeOwned};
 use crate::{
     state::{
         BlockerRecord, CleanupStatus, EvalRunRecord, FailureRecord, GitRefRecord, IssueStateRecord,
-        LifecycleStage, OpenCodeSessionRecord, OpenCodeStage, OpenCodeStageEventRecord,
-        ProjectRuntimeLivenessRecord, ProjectStateRecord, RuntimeFailureKind,
-        RuntimeLivenessStatus, RuntimeProviderMode,
+        LifecycleStage, ProjectRuntimeLivenessRecord, ProjectStateRecord, RunnerSessionRecord,
+        RunnerStage, RunnerStageEventRecord, RuntimeFailureKind, RuntimeLivenessStatus,
+        RuntimeProviderMode,
     },
     storage::StorageError,
 };
@@ -77,7 +77,7 @@ pub(super) fn liveness_from_row(row: &Row) -> Result<ProjectRuntimeLivenessRecor
     })
 }
 
-pub(super) fn session_from_row(row: &Row) -> Result<OpenCodeSessionRecord, StorageError> {
+pub(super) fn session_from_row(row: &Row) -> Result<RunnerSessionRecord, StorageError> {
     let provider_mode: String = row.get(3)?;
     let lifecycle_stage: String = row.get(9)?;
     let stage: String = row.get(10)?;
@@ -86,7 +86,7 @@ pub(super) fn session_from_row(row: &Row) -> Result<OpenCodeSessionRecord, Stora
         .and_then(|value| u32::try_from(value).ok());
     let runtime_failure_kind: Option<String> = row.get(22)?;
     let session_evidence_refs_json: Option<String> = row.get(24)?;
-    Ok(OpenCodeSessionRecord {
+    Ok(RunnerSessionRecord {
         project_id: row.get(0)?,
         issue_id: row.get(1)?,
         session_id: row.get(2)?,
@@ -98,7 +98,7 @@ pub(super) fn session_from_row(row: &Row) -> Result<OpenCodeSessionRecord, Stora
         worktree_path: row.get(7)?,
         process_id,
         lifecycle_stage: parse_lifecycle(&lifecycle_stage)?,
-        stage: parse_opencode_stage(&stage)?,
+        stage: parse_runner_stage(&stage)?,
         active_agent: row.get(11)?,
         active_model: row.get(12)?,
         message_count: get_u64(row, 13)?,
@@ -124,14 +124,14 @@ pub(super) fn session_from_row(row: &Row) -> Result<OpenCodeSessionRecord, Stora
     })
 }
 
-pub(super) fn stage_event_from_row(row: &Row) -> Result<OpenCodeStageEventRecord, StorageError> {
+pub(super) fn stage_event_from_row(row: &Row) -> Result<RunnerStageEventRecord, StorageError> {
     let stage: String = row.get(4)?;
-    Ok(OpenCodeStageEventRecord {
+    Ok(RunnerStageEventRecord {
         project_id: row.get(0)?,
         issue_id: row.get(1)?,
         session_id: row.get(2)?,
         sequence: get_u64(row, 3)?,
-        stage: parse_opencode_stage(&stage)?,
+        stage: parse_runner_stage(&stage)?,
         event: row.get(5)?,
     })
 }
@@ -172,8 +172,8 @@ fn parse_cleanup(input: &str) -> Result<CleanupStatus, StorageError> {
     CleanupStatus::from_str(input).map_err(StorageError::State)
 }
 
-fn parse_opencode_stage(input: &str) -> Result<OpenCodeStage, StorageError> {
-    OpenCodeStage::from_str(input).map_err(StorageError::State)
+fn parse_runner_stage(input: &str) -> Result<RunnerStage, StorageError> {
+    RunnerStage::from_str(input).map_err(StorageError::State)
 }
 
 fn parse_liveness_status(input: &str) -> Result<RuntimeLivenessStatus, StorageError> {

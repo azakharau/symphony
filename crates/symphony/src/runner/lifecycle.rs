@@ -6,7 +6,7 @@ use tokio::{
 };
 use tracing::warn;
 
-use super::{OpenCodeError, OpenCodeLaunchSpec};
+use super::{RunnerError, RunnerLaunchSpec};
 
 pub(super) struct AcpChildLifecycle {
     child: Child,
@@ -27,7 +27,7 @@ pub struct ProcessTreeTerminationEvidence {
 }
 
 impl AcpChildLifecycle {
-    pub(super) async fn spawn(spec: &OpenCodeLaunchSpec) -> Result<Self, OpenCodeError> {
+    pub(super) async fn spawn(spec: &RunnerLaunchSpec) -> Result<Self, RunnerError> {
         let mut command = Command::new(&spec.command);
         command
             .args(&spec.args)
@@ -54,9 +54,9 @@ impl AcpChildLifecycle {
         }
         let mut child = command.spawn()?;
         let process_id = child.id();
-        let stdin = child.stdin.take().ok_or(OpenCodeError::MissingStdin)?;
-        let stdout = child.stdout.take().ok_or(OpenCodeError::MissingStdout)?;
-        let stderr = child.stderr.take().ok_or(OpenCodeError::MissingStderr)?;
+        let stdin = child.stdin.take().ok_or(RunnerError::MissingStdin)?;
+        let stdout = child.stdout.take().ok_or(RunnerError::MissingStdout)?;
+        let stderr = child.stderr.take().ok_or(RunnerError::MissingStderr)?;
         let stderr_drain = drain_stderr(stderr);
         Ok(Self {
             child,
@@ -88,7 +88,7 @@ impl AcpChildLifecycle {
         issue_identifier: &str,
         session_id: Option<String>,
         reason: String,
-    ) -> OpenCodeError {
+    ) -> RunnerError {
         let termination = match self.process_id {
             Some(process_id) => terminate_process_tree(process_id, reason.as_str())
                 .await
@@ -112,7 +112,7 @@ impl AcpChildLifecycle {
         let _ = self.child.kill().await;
         let _ = self.child.wait().await;
         self.stderr_drain.abort();
-        OpenCodeError::AcpSetupFailed {
+        RunnerError::AcpSetupFailed {
             issue_identifier: issue_identifier.to_owned(),
             process_id: self.process_id,
             session_id,
@@ -130,7 +130,7 @@ fn drain_stderr(mut stderr: ChildStderr) -> JoinHandle<()> {
                 Ok(0) => break,
                 Ok(_) => {}
                 Err(error) => {
-                    warn!(error = %error, "OpenCode ACP stderr drain ended with error");
+                    warn!(error = %error, "runner ACP stderr drain ended with error");
                     break;
                 }
             }
@@ -141,7 +141,7 @@ fn drain_stderr(mut stderr: ChildStderr) -> JoinHandle<()> {
 pub(crate) async fn terminate_process_tree(
     root_process_id: u32,
     reason: &str,
-) -> Result<ProcessTreeTerminationEvidence, OpenCodeError> {
+) -> Result<ProcessTreeTerminationEvidence, RunnerError> {
     if !process_exists(root_process_id).await {
         return Ok(ProcessTreeTerminationEvidence {
             root_process_id,
@@ -207,7 +207,7 @@ pub(crate) async fn terminate_process_tree(
     })
 }
 
-async fn terminate_processes(process_ids: &[u32], signal: &str) -> Result<(), OpenCodeError> {
+async fn terminate_processes(process_ids: &[u32], signal: &str) -> Result<(), RunnerError> {
     for process_id in process_ids {
         if !process_exists(*process_id).await {
             continue;
@@ -222,14 +222,14 @@ async fn terminate_processes(process_ids: &[u32], signal: &str) -> Result<(), Op
                 process_id,
                 signal,
                 status = %status,
-                "failed to signal OpenCode process tree member"
+                "failed to signal runner process tree member"
             );
         }
     }
     Ok(())
 }
 
-async fn terminate_process_group(process_group_id: u32, signal: &str) -> Result<(), OpenCodeError> {
+async fn terminate_process_group(process_group_id: u32, signal: &str) -> Result<(), RunnerError> {
     let status = Command::new("kill")
         .arg(signal)
         .arg("--")
@@ -241,7 +241,7 @@ async fn terminate_process_group(process_group_id: u32, signal: &str) -> Result<
             process_group_id,
             signal,
             status = %status,
-            "failed to signal OpenCode process group"
+            "failed to signal runner process group"
         );
     }
     Ok(())
@@ -257,7 +257,7 @@ async fn process_exists(process_id: u32) -> bool {
     !after_command.1.starts_with("Z ")
 }
 
-async fn descendant_process_ids(root_process_id: u32) -> Result<Vec<u32>, OpenCodeError> {
+async fn descendant_process_ids(root_process_id: u32) -> Result<Vec<u32>, RunnerError> {
     let mut children = std::collections::BTreeMap::<u32, Vec<u32>>::new();
     let mut entries = tokio::fs::read_dir("/proc").await?;
     while let Some(entry) = entries.next_entry().await? {
@@ -282,10 +282,10 @@ async fn descendant_process_ids(root_process_id: u32) -> Result<Vec<u32>, OpenCo
     Ok(descendants)
 }
 
-async fn read_process_group_id(process_id: u32) -> Result<u32, OpenCodeError> {
+async fn read_process_group_id(process_id: u32) -> Result<u32, RunnerError> {
     let stat = tokio::fs::read_to_string(format!("/proc/{process_id}/stat")).await?;
     let Some(after_command) = stat.rsplit_once(") ") else {
-        return Err(OpenCodeError::ProcessTree(format!(
+        return Err(RunnerError::ProcessTree(format!(
             "invalid proc stat for pid {process_id}"
         )));
     };
@@ -293,32 +293,32 @@ async fn read_process_group_id(process_id: u32) -> Result<u32, OpenCodeError> {
     let _state = fields.next();
     let _parent_pid = fields.next();
     let Some(process_group_id) = fields.next() else {
-        return Err(OpenCodeError::ProcessTree(format!(
+        return Err(RunnerError::ProcessTree(format!(
             "missing process group id for pid {process_id}"
         )));
     };
     process_group_id
         .parse::<u32>()
-        .map_err(|error| OpenCodeError::ProcessTree(error.to_string()))
+        .map_err(|error| RunnerError::ProcessTree(error.to_string()))
 }
 
-async fn read_parent_process_id(process_id: u32) -> Result<u32, OpenCodeError> {
+async fn read_parent_process_id(process_id: u32) -> Result<u32, RunnerError> {
     let stat = tokio::fs::read_to_string(format!("/proc/{process_id}/stat")).await?;
     let Some(after_command) = stat.rsplit_once(") ") else {
-        return Err(OpenCodeError::ProcessTree(format!(
+        return Err(RunnerError::ProcessTree(format!(
             "invalid proc stat for pid {process_id}"
         )));
     };
     let mut fields = after_command.1.split_whitespace();
     let _state = fields.next();
     let Some(parent_pid) = fields.next() else {
-        return Err(OpenCodeError::ProcessTree(format!(
+        return Err(RunnerError::ProcessTree(format!(
             "missing parent pid for pid {process_id}"
         )));
     };
     parent_pid
         .parse::<u32>()
-        .map_err(|error| OpenCodeError::ProcessTree(error.to_string()))
+        .map_err(|error| RunnerError::ProcessTree(error.to_string()))
 }
 
 #[cfg(test)]
@@ -344,7 +344,7 @@ mod tests {
             }
             sleep(Duration::from_millis(20)).await;
         }
-        let evidence = terminate_process_tree(root, "stale_opencode_process_tree")
+        let evidence = terminate_process_tree(root, "stale_runner_process_tree")
             .await
             .expect("terminate process tree");
         let _ = child.wait().await;
@@ -352,7 +352,7 @@ mod tests {
         assert_eq!(evidence.root_process_id, root);
         assert!(!evidence.descendant_process_ids.is_empty());
         assert!(evidence.term_signal_sent);
-        assert_eq!(evidence.reason, "stale_opencode_process_tree");
+        assert_eq!(evidence.reason, "stale_runner_process_tree");
         assert!(!evidence.still_alive);
     }
 
@@ -375,14 +375,14 @@ mod tests {
         let orphan_pid = wait_for_pid_file(&orphan_pid_path).await;
         assert_ne!(orphan_pid, root);
 
-        let evidence = terminate_process_tree(root, "stale_opencode_process_group")
+        let evidence = terminate_process_tree(root, "stale_runner_process_group")
             .await
             .expect("terminate process group");
         let _ = child.wait().await;
 
         assert_eq!(evidence.root_process_id, root);
         assert!(evidence.term_signal_sent);
-        assert_eq!(evidence.reason, "stale_opencode_process_group");
+        assert_eq!(evidence.reason, "stale_runner_process_group");
         assert!(!evidence.still_alive);
         for _ in 0..20 {
             if !process_exists(orphan_pid).await {

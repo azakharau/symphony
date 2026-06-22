@@ -90,7 +90,7 @@ pub struct IssueStateRecord {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct OpenCodeSessionRecord {
+pub struct RunnerSessionRecord {
     pub project_id: String,
     pub issue_id: String,
     pub session_id: String,
@@ -101,7 +101,7 @@ pub struct OpenCodeSessionRecord {
     pub worktree_path: String,
     pub process_id: Option<u32>,
     pub lifecycle_stage: LifecycleStage,
-    pub stage: OpenCodeStage,
+    pub stage: RunnerStage,
     pub active_agent: Option<String>,
     pub active_model: Option<String>,
     pub message_count: u64,
@@ -122,14 +122,14 @@ pub struct OpenCodeSessionRecord {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeProviderMode {
-    OpenCodeAcp,
+    Acp,
     OmpAcp,
 }
 
 impl RuntimeProviderMode {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::OpenCodeAcp => "opencode_acp",
+            Self::Acp => "acp",
             Self::OmpAcp => "omp_acp",
         }
     }
@@ -146,7 +146,7 @@ impl FromStr for RuntimeProviderMode {
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         match input {
-            "opencode_acp" => Ok(Self::OpenCodeAcp),
+            "acp" => Ok(Self::Acp),
             "omp_acp" => Ok(Self::OmpAcp),
             other => Err(StateParseError::RuntimeProviderMode(other.into())),
         }
@@ -194,16 +194,16 @@ impl FromStr for RuntimeFailureKind {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct OpenCodeStageEventRecord {
+pub struct RunnerStageEventRecord {
     pub project_id: String,
     pub issue_id: String,
     pub session_id: String,
     pub sequence: u64,
-    pub stage: OpenCodeStage,
+    pub stage: RunnerStage,
     pub event: Option<String>,
 }
 
-impl OpenCodeSessionRecord {
+impl RunnerSessionRecord {
     pub fn failure_marker(&self) -> Option<&str> {
         if self.lifecycle_stage == LifecycleStage::Failed {
             self.lifecycle_marker.as_deref()
@@ -376,7 +376,7 @@ pub enum LifecycleStage {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OpenCodeStage {
+pub enum RunnerStage {
     Starting,
     Running,
     Eval,
@@ -387,7 +387,7 @@ pub enum OpenCodeStage {
     Failed,
 }
 
-impl OpenCodeStage {
+impl RunnerStage {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Starting => "starting",
@@ -402,13 +402,13 @@ impl OpenCodeStage {
     }
 }
 
-impl fmt::Display for OpenCodeStage {
+impl fmt::Display for RunnerStage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
 }
 
-impl FromStr for OpenCodeStage {
+impl FromStr for RunnerStage {
     type Err = StateParseError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
@@ -421,7 +421,7 @@ impl FromStr for OpenCodeStage {
             "silent" => Ok(Self::Silent),
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
-            other => Err(StateParseError::OpenCodeStage(other.into())),
+            other => Err(StateParseError::RunnerStage(other.into())),
         }
     }
 }
@@ -508,8 +508,8 @@ impl FromStr for CleanupStatus {
 pub enum StateParseError {
     #[error("unknown lifecycle stage `{0}`")]
     LifecycleStage(String),
-    #[error("unknown OpenCode stage `{0}`")]
-    OpenCodeStage(String),
+    #[error("unknown runner stage `{0}`")]
+    RunnerStage(String),
     #[error("unknown cleanup status `{0}`")]
     CleanupStatus(String),
     #[error("unknown runtime liveness status `{0}`")]

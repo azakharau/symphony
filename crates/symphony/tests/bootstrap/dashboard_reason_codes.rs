@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn dashboard_api_surfaces_primary_execution_reason_codes_and_root_is_json_404() {
     async fn project_for(
-        configure: impl FnOnce(&mut IssueStateRecord, &mut Option<OpenCodeSessionRecord>),
+        configure: impl FnOnce(&mut IssueStateRecord, &mut Option<RunnerSessionRecord>),
         liveness: Option<(RuntimeLivenessStatus, &'static str, u32, u32)>,
     ) -> symphony::api::ProjectDashboardResponse {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -17,10 +17,7 @@ async fn dashboard_api_surfaces_primary_execution_reason_codes_and_root_is_json_
         configure(&mut issue, &mut session);
         store.upsert_issue(issue).await.expect("issue");
         if let Some(session) = session {
-            store
-                .upsert_opencode_session(session)
-                .await
-                .expect("session");
+            store.upsert_runner_session(session).await.expect("session");
         }
         if let Some((status, reason, max_sessions, running_sessions)) = liveness {
             store
@@ -147,12 +144,12 @@ async fn dashboard_api_surfaces_primary_execution_reason_codes_and_root_is_json_
             issue.lifecycle_stage = LifecycleStage::Blocked;
             issue.blocker = Some(BlockerRecord {
                 kind: "provider_blocker".into(),
-                message: "OpenCode ProviderAuthError".into(),
+                message: "runner ProviderAuthError".into(),
                 observed_at: None,
             });
             issue.failure = Some(FailureRecord {
                 kind: "provider_blocker".into(),
-                message: "OpenCode provider auth failed".into(),
+                message: "runner provider auth failed".into(),
                 fingerprint: Some("opencode_providerautherror_api_key_missing".into()),
                 occurrence_count: 1,
             });
@@ -201,7 +198,7 @@ async fn dashboard_api_surfaces_primary_execution_reason_codes_and_root_is_json_
     .await;
     assert_eq!(
         active_session.liveness.primary_reason_code,
-        "active_opencode_session"
+        "active_runner_session"
     );
 
     let runner_dead = project_for(
@@ -217,7 +214,7 @@ async fn dashboard_api_surfaces_primary_execution_reason_codes_and_root_is_json_
         },
         Some((
             RuntimeLivenessStatus::RunnerProcessDead,
-            "at least one running OpenCode session has no live runner process",
+            "at least one running runner session has no live runner process",
             2,
             1,
         )),
@@ -233,7 +230,7 @@ async fn dashboard_api_surfaces_primary_execution_reason_codes_and_root_is_json_
                 "oc-handoff",
                 "/tmp/symphony-handoff",
             );
-            handoff.stage = OpenCodeStage::Handoff;
+            handoff.stage = RunnerStage::Handoff;
             *session = Some(handoff);
         },
         Some((
@@ -272,9 +269,8 @@ async fn dashboard_api_surfaces_primary_execution_reason_codes_and_root_is_json_
             issue.lifecycle_stage = LifecycleStage::Failed;
             issue.failure = Some(FailureRecord {
                 kind: "runtime_launch_failed".into(),
-                message:
-                    "OpenCode worktree validation failed: existing worktree is on wrong branch"
-                        .into(),
+                message: "runner worktree validation failed: existing worktree is on wrong branch"
+                    .into(),
                 fingerprint: Some("launch_failed".into()),
                 occurrence_count: 1,
             });
@@ -303,7 +299,7 @@ async fn dashboard_api_surfaces_primary_execution_reason_codes_and_root_is_json_
             issue.lifecycle_stage = LifecycleStage::Failed;
             issue.failure = Some(FailureRecord {
                 kind: "handoff_git_closure_failed".into(),
-                message: "OpenCode git closure validation failed: missing pushed branch evidence"
+                message: "runner git closure validation failed: missing pushed branch evidence"
                     .into(),
                 fingerprint: Some("git_closure_unverified".into()),
                 occurrence_count: 1,
@@ -373,7 +369,7 @@ async fn dashboard_api_surfaces_primary_execution_reason_codes_and_root_is_json_
             issue.lifecycle_stage = LifecycleStage::Running;
             issue.failure = Some(FailureRecord {
                 kind: "malformed_handoff".into(),
-                message: "repairing malformed handoff from previous OpenCode session".into(),
+                message: "repairing malformed handoff from previous runner session".into(),
                 fingerprint: Some("session_id_mismatch".into()),
                 occurrence_count: 2,
             });
@@ -394,7 +390,7 @@ async fn dashboard_api_surfaces_primary_execution_reason_codes_and_root_is_json_
     .await;
     assert_eq!(
         active_runtime_repair.liveness.primary_reason_code,
-        "active_opencode_session"
+        "active_runner_session"
     );
     assert_eq!(
         active_runtime_repair.active_issues[0]
@@ -417,13 +413,13 @@ async fn dashboard_api_surfaces_primary_execution_reason_codes_and_root_is_json_
                 "oc-stale-killed",
                 "/tmp/symphony-stale",
             );
-            stale.stage = OpenCodeStage::Silent;
+            stale.stage = RunnerStage::Silent;
             stale.process_id = Some(u32::MAX);
             *session = Some(stale);
         },
         Some((
             RuntimeLivenessStatus::RunnerStaleKilled,
-            "stale OpenCode session was killed",
+            "stale runner session was killed",
             2,
             1,
         )),

@@ -11,16 +11,16 @@ use super::session::{
     process_elapsed_seconds, session_has_live_process, terminate_current_session_process,
 };
 use crate::{
-    config::{OpenCodeStorageConfig, ProjectConfig},
+    config::{ProjectConfig, RunnerArchiveConfig},
     linear::{LinearClient, LinearIssue, LinearIssueEvidence, LinearTransition},
-    opencode::{
-        OpenCodeError, OpenCodeHandoff, OpenCodeLauncher, OpenCodeSessionTreeActivity,
-        OpenCodeStopReason, apply_session_tree_metrics_preserving_marker, build_acp_launch_spec,
+    runner::{
+        RunnerError, RunnerHandoff, RunnerLauncher, RunnerSessionTreeActivity, RunnerStopReason,
+        apply_session_tree_metrics_preserving_marker, build_acp_launch_spec,
         read_session_tree_activity, read_session_tree_metrics, worktree_path_allowed,
     },
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, GitRefRecord, IssueStateRecord,
-        LifecycleStage, OpenCodeStage, RuntimeProviderMode, SelfDefectRelationMode,
+        LifecycleStage, RunnerStage, RuntimeProviderMode, SelfDefectRelationMode,
         SelfDefectResolutionState,
     },
     storage::SqliteStore,
@@ -34,7 +34,7 @@ use super::{
     self_defects::{RuntimeSelfDefectInput, record_runtime_self_defect},
 };
 
-const OPENCODE_DB_ACTIVE_FRESHNESS_MS: u64 = 10 * 60 * 1000;
+const RUNNER_ARCHIVE_ACTIVE_FRESHNESS_MS: u64 = 10 * 60 * 1000;
 const PLAUSIBLE_EPOCH_MS: u64 = 1_600_000_000_000;
 
 #[expect(
@@ -44,10 +44,10 @@ const PLAUSIBLE_EPOCH_MS: u64 = 1_600_000_000_000;
 pub(super) async fn process_in_progress_handoff(
     project: &ProjectConfig,
     self_defect_project: &ProjectConfig,
-    opencode_storage: Option<&OpenCodeStorageConfig>,
+    runner_archive: Option<&RunnerArchiveConfig>,
     store: &SqliteStore,
     linear: &impl LinearClient,
-    opencode: &impl OpenCodeLauncher,
+    runner: &impl RunnerLauncher,
     issue: &LinearIssue,
     existing_issue: Option<IssueStateRecord>,
 ) -> anyhow::Result<bool> {
@@ -56,46 +56,45 @@ pub(super) async fn process_in_progress_handoff(
             project_id = %project.id,
             issue = %issue.identifier,
             reason = "missing_active_session",
-            "in-progress issue has no active OpenCode session yet"
+            "in-progress issue has no active runner session yet"
         );
         return Ok(false);
     };
-    let handoff = match opencode.latest_handoff(&session).await {
+    let handoff = match runner.latest_handoff(&session).await {
         Ok(Some(handoff)) => handoff,
         Ok(None) => {
             let tree_state =
-                session_opencode_tree_state(opencode_storage, store, project, issue, &session)
-                    .await?;
+                session_runner_tree_state(runner_archive, store, project, issue, &session).await?;
             match tree_state {
-                OpenCodeTreeState::FreshActive => return Ok(false),
-                OpenCodeTreeState::StaleActive | OpenCodeTreeState::Inactive => {}
+                RunnerTreeState::FreshActive => return Ok(false),
+                RunnerTreeState::StaleActive | RunnerTreeState::Inactive => {}
             }
             if session_has_live_process(&session).await
-                && tree_state != OpenCodeTreeState::StaleActive
+                && tree_state != RunnerTreeState::StaleActive
             {
                 debug!(
                     project_id = %project.id,
                     issue = %issue.identifier,
                     session_id = %session.session_id,
-                    "OpenCode handoff not available yet"
+                    "runner handoff not available yet"
                 );
                 return Ok(false);
             }
 
-            let message = ".symphony/opencode-handoff.json was not produced before the OpenCode ACP process ended".to_string();
+            let message = ".symphony/runner-handoff.json was not produced before the runner ACP process ended".to_string();
             warn!(
                 project_id = %project.id,
                 issue = %issue.identifier,
                 session_id = %session.session_id,
                 process_id = session.process_id,
                 message,
-                "OpenCode session ended without handoff sidecar"
+                "runner session ended without handoff sidecar"
             );
-            request_opencode_repair(
+            request_runner_repair(
                 project,
                 self_defect_project,
                 store,
-                opencode,
+                runner,
                 linear,
                 issue,
                 existing_issue.as_ref(),
@@ -112,19 +111,19 @@ pub(super) async fn process_in_progress_handoff(
             .await?;
             return Ok(true);
         }
-        Err(OpenCodeError::MalformedHandoff(message)) => {
+        Err(RunnerError::MalformedHandoff(message)) => {
             warn!(
                 project_id = %project.id,
                 issue = %issue.identifier,
                 session_id = %session.session_id,
                 message,
-                "OpenCode handoff sidecar failed validation"
+                "runner handoff sidecar failed validation"
             );
-            request_opencode_repair(
+            request_runner_repair(
                 project,
                 self_defect_project,
                 store,
-                opencode,
+                runner,
                 linear,
                 issue,
                 existing_issue.as_ref(),
@@ -148,7 +147,7 @@ pub(super) async fn process_in_progress_handoff(
         issue = %issue.identifier,
         session_id = %session.session_id,
         stop_reason = ?handoff.stop_reason,
-        "OpenCode handoff observed"
+        "runner handoff observed"
     );
 
     if handoff_session_id_mismatch_is_fatal(&session, &handoff) {
@@ -157,13 +156,13 @@ pub(super) async fn process_in_progress_handoff(
             issue = %issue.identifier,
             expected_session_id = %session.session_id,
             handoff_session_id = %handoff.session_id,
-            "malformed OpenCode handoff session mismatch"
+            "malformed runner handoff session mismatch"
         );
-        request_opencode_repair(
+        request_runner_repair(
             project,
             self_defect_project,
             store,
-            opencode,
+            runner,
             linear,
             issue,
             existing_issue.as_ref(),
@@ -185,13 +184,13 @@ pub(super) async fn process_in_progress_handoff(
     }
 
     match &handoff.stop_reason {
-        OpenCodeStopReason::Success => {
+        RunnerStopReason::Success => {
             close_successful_handoff(
                 SuccessfulHandoffContext {
                     project,
                     self_defect_project,
                     store,
-                    opencode,
+                    runner,
                     linear,
                     issue,
                     existing_issue: existing_issue.as_ref(),
@@ -201,13 +200,13 @@ pub(super) async fn process_in_progress_handoff(
             )
             .await?;
         }
-        OpenCodeStopReason::EvalFailed {
+        RunnerStopReason::EvalFailed {
             failure_fingerprint,
         } => {
             handle_eval_failure(
                 project,
                 store,
-                opencode,
+                runner,
                 linear,
                 issue,
                 &session,
@@ -216,12 +215,12 @@ pub(super) async fn process_in_progress_handoff(
             )
             .await?;
         }
-        OpenCodeStopReason::ProviderBlocker { message } => {
+        RunnerStopReason::ProviderBlocker { message } => {
             warn!(
                 project_id = %project.id,
                 issue = %issue.identifier,
                 session_id = %session.session_id,
-                "OpenCode provider blocker parked issue"
+                "runner provider blocker parked issue"
             );
             park_typed_blocker(
                 project,
@@ -241,12 +240,12 @@ pub(super) async fn process_in_progress_handoff(
             )
             .await?;
         }
-        OpenCodeStopReason::AuthBlocker { message } => {
+        RunnerStopReason::AuthBlocker { message } => {
             warn!(
                 project_id = %project.id,
                 issue = %issue.identifier,
                 session_id = %session.session_id,
-                "OpenCode auth blocker parked issue"
+                "runner auth blocker parked issue"
             );
             park_typed_blocker(
                 project,
@@ -266,7 +265,7 @@ pub(super) async fn process_in_progress_handoff(
             )
             .await?;
         }
-        OpenCodeStopReason::UnsupportedOmpSurface { message } => {
+        RunnerStopReason::UnsupportedOmpSurface { message } => {
             warn!(
                 project_id = %project.id,
                 issue = %issue.identifier,
@@ -291,12 +290,12 @@ pub(super) async fn process_in_progress_handoff(
             )
             .await?;
         }
-        OpenCodeStopReason::OwnerQuestion { question } => {
+        RunnerStopReason::OwnerQuestion { question } => {
             warn!(
                 project_id = %project.id,
                 issue = %issue.identifier,
                 session_id = %session.session_id,
-                "OpenCode owner question parked issue"
+                "runner owner question parked issue"
             );
             park_need_owner_input(
                 project,
@@ -316,8 +315,8 @@ pub(super) async fn process_in_progress_handoff(
 }
 
 fn handoff_session_id_mismatch_is_fatal(
-    session: &crate::state::OpenCodeSessionRecord,
-    handoff: &OpenCodeHandoff,
+    session: &crate::state::RunnerSessionRecord,
+    handoff: &RunnerHandoff,
 ) -> bool {
     handoff.session_id != session.session_id && session.provider_mode != RuntimeProviderMode::OmpAcp
 }
@@ -327,7 +326,7 @@ pub(super) async fn process_recoverable_failed_handoff(
     self_defect_project: &ProjectConfig,
     store: &SqliteStore,
     linear: &impl LinearClient,
-    opencode: &impl OpenCodeLauncher,
+    runner: &impl RunnerLauncher,
     issue: &LinearIssue,
     existing_issue: Option<IssueStateRecord>,
 ) -> anyhow::Result<bool> {
@@ -358,19 +357,19 @@ pub(super) async fn process_recoverable_failed_handoff(
         return Ok(true);
     }
 
-    let handoff = match opencode.latest_handoff(&session).await {
+    let handoff = match runner.latest_handoff(&session).await {
         Ok(Some(handoff)) => handoff,
         Ok(None) => {
-            request_opencode_repair(
+            request_runner_repair(
                 project,
                 self_defect_project,
                 store,
-                opencode,
+                runner,
                 linear,
                 issue,
                 existing_issue.as_ref(),
                 "malformed_handoff",
-                ".symphony/opencode-handoff.json was not produced before the OpenCode ACP process ended".to_string(),
+                ".symphony/runner-handoff.json was not produced before the runner ACP process ended".to_string(),
                 FailureRecord {
                     kind: "malformed_handoff".into(),
                     message: "missing handoff sidecar".into(),
@@ -382,12 +381,12 @@ pub(super) async fn process_recoverable_failed_handoff(
             .await?;
             return Ok(true);
         }
-        Err(OpenCodeError::MalformedHandoff(message)) => {
-            request_opencode_repair(
+        Err(RunnerError::MalformedHandoff(message)) => {
+            request_runner_repair(
                 project,
                 self_defect_project,
                 store,
-                opencode,
+                runner,
                 linear,
                 issue,
                 existing_issue.as_ref(),
@@ -407,7 +406,7 @@ pub(super) async fn process_recoverable_failed_handoff(
         Err(error) => return Err(error.into()),
     };
 
-    if !matches!(handoff.stop_reason, OpenCodeStopReason::Success) {
+    if !matches!(handoff.stop_reason, RunnerStopReason::Success) {
         return Ok(false);
     }
 
@@ -415,14 +414,14 @@ pub(super) async fn process_recoverable_failed_handoff(
         project_id = %project.id,
         issue = %issue.identifier,
         session_id = %session.session_id,
-        "recovering previously failed OpenCode handoff sidecar"
+        "recovering previously failed runner handoff sidecar"
     );
     close_successful_handoff(
         SuccessfulHandoffContext {
             project,
             self_defect_project,
             store,
-            opencode,
+            runner,
             linear,
             issue,
             existing_issue: existing_issue.as_ref(),
@@ -448,40 +447,40 @@ pub(super) async fn process_recoverable_failed_handoff(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OpenCodeTreeState {
+enum RunnerTreeState {
     Inactive,
     FreshActive,
     StaleActive,
 }
 
-async fn session_opencode_tree_state(
-    opencode_storage: Option<&OpenCodeStorageConfig>,
+async fn session_runner_tree_state(
+    runner_archive: Option<&RunnerArchiveConfig>,
     store: &SqliteStore,
     project: &ProjectConfig,
     issue: &LinearIssue,
-    session: &crate::state::OpenCodeSessionRecord,
-) -> anyhow::Result<OpenCodeTreeState> {
-    let Some(storage) = opencode_storage else {
-        return Ok(OpenCodeTreeState::Inactive);
+    session: &crate::state::RunnerSessionRecord,
+) -> anyhow::Result<RunnerTreeState> {
+    let Some(storage) = runner_archive else {
+        return Ok(RunnerTreeState::Inactive);
     };
     let Some(activity) =
         read_session_tree_activity(&storage.database_path, &session.session_id, 40).await?
     else {
-        return Ok(OpenCodeTreeState::Inactive);
+        return Ok(RunnerTreeState::Inactive);
     };
-    if !opencode_tree_has_active_work(&activity) {
-        return Ok(OpenCodeTreeState::Inactive);
+    if !runner_tree_has_active_work(&activity) {
+        return Ok(RunnerTreeState::Inactive);
     }
-    if !opencode_tree_activity_is_fresh(activity.last_updated_ms) {
+    if !runner_tree_activity_is_fresh(activity.last_updated_ms) {
         warn!(
             project_id = %project.id,
             issue = %issue.identifier,
             session_id = %session.session_id,
             last_updated_ms = activity.last_updated_ms,
-            freshness_ms = OPENCODE_DB_ACTIVE_FRESHNESS_MS,
-            "OpenCode persisted session tree is stale after ACP process exit"
+            freshness_ms = RUNNER_ARCHIVE_ACTIVE_FRESHNESS_MS,
+            "runner persisted session tree is stale after ACP process exit"
         );
-        return Ok(OpenCodeTreeState::StaleActive);
+        return Ok(RunnerTreeState::StaleActive);
     }
 
     let previous_last_event = session.last_event.clone();
@@ -503,14 +502,14 @@ async fn session_opencode_tree_state(
         None
     };
     active_session.lifecycle_stage = LifecycleStage::Running;
-    active_session.stage = OpenCodeStage::Running;
-    active_session.lifecycle_marker = Some("opencode_db_active".into());
+    active_session.stage = RunnerStage::Running;
+    active_session.lifecycle_marker = Some("runner_archive_active".into());
     active_session.last_event = Some(activity.last_updated_ms.map_or_else(
-        || "opencode_db_active_subtask".into(),
-        |updated| format!("opencode_db_active_subtask:{updated}"),
+        || "runner_archive_active_subtask".into(),
+        |updated| format!("runner_archive_active_subtask:{updated}"),
     ));
     active_session.silence_observed = false;
-    store.upsert_opencode_session(&active_session).await?;
+    store.upsert_runner_session(&active_session).await?;
     info!(
         project_id = %project.id,
         issue = %issue.identifier,
@@ -518,12 +517,12 @@ async fn session_opencode_tree_state(
         subagents = activity.subagents.len(),
         running_tools = activity.running_tool_count,
         pending_tools = activity.pending_tool_count,
-        "OpenCode persisted session tree is still active after ACP process exit"
+        "runner persisted session tree is still active after ACP process exit"
     );
-    Ok(OpenCodeTreeState::FreshActive)
+    Ok(RunnerTreeState::FreshActive)
 }
 
-fn opencode_tree_activity_is_fresh(last_updated_ms: Option<u64>) -> bool {
+fn runner_tree_activity_is_fresh(last_updated_ms: Option<u64>) -> bool {
     let Some(last_updated_ms) = last_updated_ms else {
         return true;
     };
@@ -534,10 +533,10 @@ fn opencode_tree_activity_is_fresh(last_updated_ms: Option<u64>) -> bool {
         return true;
     };
     let now_ms = now.as_millis().min(u128::from(u64::MAX)) as u64;
-    now_ms.saturating_sub(last_updated_ms) <= OPENCODE_DB_ACTIVE_FRESHNESS_MS
+    now_ms.saturating_sub(last_updated_ms) <= RUNNER_ARCHIVE_ACTIVE_FRESHNESS_MS
 }
 
-fn opencode_tree_has_active_work(activity: &OpenCodeSessionTreeActivity) -> bool {
+fn runner_tree_has_active_work(activity: &RunnerSessionTreeActivity) -> bool {
     activity.running_tool_count > 0
         || activity.pending_tool_count > 0
         || activity.todos.iter().any(|todo| {
@@ -554,19 +553,19 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn stale_epoch_opencode_activity_is_not_fresh() {
+    fn stale_epoch_runner_activity_is_not_fresh() {
         let stale = (SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock after unix epoch")
             .as_millis() as u64)
-            .saturating_sub(OPENCODE_DB_ACTIVE_FRESHNESS_MS + 1);
+            .saturating_sub(RUNNER_ARCHIVE_ACTIVE_FRESHNESS_MS + 1);
 
-        assert!(!opencode_tree_activity_is_fresh(Some(stale)));
+        assert!(!runner_tree_activity_is_fresh(Some(stale)));
     }
 
     #[test]
-    fn legacy_fixture_timestamps_do_not_trip_freshness_gate() {
-        assert!(opencode_tree_activity_is_fresh(Some(2_000)));
+    fn historical_fixture_timestamps_do_not_trip_freshness_gate() {
+        assert!(runner_tree_activity_is_fresh(Some(2_000)));
     }
 
     #[test]
@@ -581,26 +580,26 @@ mod tests {
     }
 }
 
-struct SuccessfulHandoffContext<'a, L: LinearClient, O: OpenCodeLauncher> {
+struct SuccessfulHandoffContext<'a, L: LinearClient, O: RunnerLauncher> {
     project: &'a ProjectConfig,
     self_defect_project: &'a ProjectConfig,
     store: &'a SqliteStore,
-    opencode: &'a O,
+    runner: &'a O,
     linear: &'a L,
     issue: &'a LinearIssue,
     existing_issue: Option<&'a IssueStateRecord>,
-    session: &'a crate::state::OpenCodeSessionRecord,
+    session: &'a crate::state::RunnerSessionRecord,
 }
 
-async fn close_successful_handoff<L: LinearClient, O: OpenCodeLauncher>(
+async fn close_successful_handoff<L: LinearClient, O: RunnerLauncher>(
     ctx: SuccessfulHandoffContext<'_, L, O>,
-    handoff: &OpenCodeHandoff,
+    handoff: &RunnerHandoff,
 ) -> anyhow::Result<()> {
     let SuccessfulHandoffContext {
         project,
         self_defect_project,
         store,
-        opencode,
+        runner,
         linear,
         issue,
         existing_issue,
@@ -613,7 +612,7 @@ async fn close_successful_handoff<L: LinearClient, O: OpenCodeLauncher>(
             issue = %issue.identifier,
             session_id = %session.session_id,
             message,
-            "successful OpenCode handoff failed validation"
+            "successful runner handoff failed validation"
         );
         fail_runtime_defect(
             project,
@@ -640,7 +639,7 @@ async fn close_successful_handoff<L: LinearClient, O: OpenCodeLauncher>(
             project_id = %project.id,
             issue = %issue.identifier,
             session_id = %session.session_id,
-            "successful OpenCode handoff missing git evidence"
+            "successful runner handoff missing git evidence"
         );
         fail_runtime_defect(
             project,
@@ -667,7 +666,7 @@ async fn close_successful_handoff<L: LinearClient, O: OpenCodeLauncher>(
             issue = %issue.identifier,
             session_id = %session.session_id,
             message,
-            "successful OpenCode handoff has unsafe worktree evidence"
+            "successful runner handoff has unsafe worktree evidence"
         );
         fail_runtime_defect(
             project,
@@ -700,13 +699,13 @@ async fn close_successful_handoff<L: LinearClient, O: OpenCodeLauncher>(
                 issue = %issue.identifier,
                 session_id = %session.session_id,
                 message,
-                "successful OpenCode handoff failed git closure verification"
+                "successful runner handoff failed git closure verification"
             );
-            request_opencode_repair(
+            request_runner_repair(
                 project,
                 self_defect_project,
                 store,
-                opencode,
+                runner,
                 linear,
                 issue,
                 existing_issue,
@@ -737,7 +736,7 @@ async fn close_successful_handoff<L: LinearClient, O: OpenCodeLauncher>(
         .record_issue_evidence(
             &issue.id,
             LinearIssueEvidence {
-                kind: "opencode_git_closure".into(),
+                kind: "runner_git_closure".into(),
                 body: evidence_body,
             },
         )
@@ -750,14 +749,14 @@ async fn close_successful_handoff<L: LinearClient, O: OpenCodeLauncher>(
     let cleanup_status = match cleanup_worktree(&project.repo_path, &git.worktree_path).await {
         Ok(()) => CleanupStatus::Complete,
         Err(error) => {
-            let message = format!("accepted OpenCode handoff cleanup failed: {error}");
+            let message = format!("accepted runner handoff cleanup failed: {error}");
             warn!(
                 project_id = %project.id,
                 issue = %issue.identifier,
                 session_id = %session.session_id,
                 worktree_path = %git.worktree_path,
                 error = %error,
-                "accepted OpenCode handoff cleanup failed after Done transition"
+                "accepted runner handoff cleanup failed after Done transition"
             );
             let failure = FailureRecord {
                 kind: "cleanup".into(),
@@ -789,7 +788,7 @@ async fn close_successful_handoff<L: LinearClient, O: OpenCodeLauncher>(
         branch = %git.branch,
         head_sha = git.head_sha.as_deref().unwrap_or(""),
         cleanup = %cleanup_status,
-        "OpenCode handoff accepted and issue closed"
+        "runner handoff accepted and issue closed"
     );
     let record = IssueStateRecord {
         project_id: project.id.clone(),
@@ -811,7 +810,7 @@ async fn close_successful_handoff<L: LinearClient, O: OpenCodeLauncher>(
     let mut completed_session = session.clone();
     completed_session.process_id = None;
     completed_session.lifecycle_stage = LifecycleStage::Completed;
-    completed_session.stage = crate::state::OpenCodeStage::Completed;
+    completed_session.stage = crate::state::RunnerStage::Completed;
     completed_session.lifecycle_marker = Some("handoff_accepted".into());
     completed_session.last_event = Some(match cleanup_status {
         CleanupStatus::Complete => "issue_closed".into(),
@@ -819,7 +818,7 @@ async fn close_successful_handoff<L: LinearClient, O: OpenCodeLauncher>(
         _ => "issue_closed_cleanup_unknown".into(),
     });
     completed_session.silence_observed = false;
-    store.upsert_opencode_session(&completed_session).await?;
+    store.upsert_runner_session(&completed_session).await?;
     Ok(())
 }
 
@@ -830,10 +829,10 @@ async fn close_successful_handoff<L: LinearClient, O: OpenCodeLauncher>(
 async fn handle_eval_failure(
     project: &ProjectConfig,
     store: &SqliteStore,
-    opencode: &impl OpenCodeLauncher,
+    runner: &impl RunnerLauncher,
     linear: &impl LinearClient,
     issue: &LinearIssue,
-    session: &crate::state::OpenCodeSessionRecord,
+    session: &crate::state::RunnerSessionRecord,
     existing_issue: Option<&IssueStateRecord>,
     failure_fingerprint: &str,
 ) -> anyhow::Result<()> {
@@ -851,7 +850,7 @@ async fn handle_eval_failure(
             failure_fingerprint,
             occurrence_count,
             max_identical,
-            "OpenCode repeated eval failure reached parking threshold"
+            "runner repeated eval failure reached parking threshold"
         );
         park_typed_blocker(
             project,
@@ -861,7 +860,7 @@ async fn handle_eval_failure(
             Some(session),
             false,
             "repeated_eval_failure",
-            format!("OpenCode reported `{failure_fingerprint}` {occurrence_count} times"),
+            format!("runner reported `{failure_fingerprint}` {occurrence_count} times"),
             Some(FailureRecord {
                 kind: "eval_failure".into(),
                 message: failure_fingerprint.into(),
@@ -878,12 +877,12 @@ async fn handle_eval_failure(
             failure_fingerprint,
             occurrence_count,
             max_identical,
-            "continuing OpenCode repair after eval failure"
+            "continuing runner repair after eval failure"
         );
         let spec = build_acp_launch_spec(project, issue);
         let mut terminating_session = session.clone();
         terminate_current_session_process(project, issue, &mut terminating_session).await?;
-        let started = opencode
+        let started = runner
             .continue_repair(&spec, session, failure_fingerprint, failure_fingerprint)
             .await?;
         let mut record = issue_record(
@@ -903,11 +902,11 @@ async fn handle_eval_failure(
         let mut repair_session = session.clone();
         repair_session.process_id = started.process_id;
         repair_session.lifecycle_stage = LifecycleStage::Running;
-        repair_session.stage = crate::state::OpenCodeStage::Running;
+        repair_session.stage = crate::state::RunnerStage::Running;
         repair_session.lifecycle_marker = Some("repair_prompted".into());
         repair_session.last_event = Some(format!("repair_prompted:{failure_fingerprint}"));
         repair_session.silence_observed = false;
-        store.upsert_opencode_session(&repair_session).await?;
+        store.upsert_runner_session(&repair_session).await?;
     }
     Ok(())
 }
@@ -916,18 +915,18 @@ async fn handle_eval_failure(
     clippy::too_many_arguments,
     reason = "repair request needs project, adapters, issue, session, and failure evidence"
 )]
-async fn request_opencode_repair(
+async fn request_runner_repair(
     project: &ProjectConfig,
     self_defect_project: &ProjectConfig,
     store: &SqliteStore,
-    opencode: &impl OpenCodeLauncher,
+    runner: &impl RunnerLauncher,
     linear: &impl LinearClient,
     issue: &LinearIssue,
     existing_issue: Option<&IssueStateRecord>,
     evidence_kind: &str,
     message: String,
     mut failure: FailureRecord,
-    session: &crate::state::OpenCodeSessionRecord,
+    session: &crate::state::RunnerSessionRecord,
 ) -> anyhow::Result<()> {
     let fingerprint = failure
         .fingerprint
@@ -949,7 +948,7 @@ async fn request_opencode_repair(
             issue,
             evidence_kind,
             format!(
-                "repeated OpenCode runtime repair fingerprint `{fingerprint}` reached bounded repair threshold after {occurrence_count} occurrence(s): {message}"
+                "repeated runner runtime repair fingerprint `{fingerprint}` reached bounded repair threshold after {occurrence_count} occurrence(s): {message}"
             ),
             failure,
             session,
@@ -985,7 +984,7 @@ async fn request_opencode_repair(
     let spec = build_acp_launch_spec(project, issue);
     let mut terminating_session = session.clone();
     terminate_current_session_process(project, issue, &mut terminating_session).await?;
-    let started = match opencode
+    let started = match runner
         .continue_repair(&spec, session, &fingerprint, &message)
         .await
     {
@@ -998,7 +997,7 @@ async fn request_opencode_repair(
                 linear,
                 issue,
                 "runtime_defect",
-                format!("OpenCode repair launch failed for fingerprint `{fingerprint}`: {error}"),
+                format!("runner repair launch failed for fingerprint `{fingerprint}`: {error}"),
                 FailureRecord {
                     kind: "runtime_defect".into(),
                     message: error.to_string(),
@@ -1024,11 +1023,11 @@ async fn request_opencode_repair(
     let mut repair_session = session.clone();
     repair_session.process_id = started.process_id;
     repair_session.lifecycle_stage = LifecycleStage::Running;
-    repair_session.stage = crate::state::OpenCodeStage::Running;
+    repair_session.stage = crate::state::RunnerStage::Running;
     repair_session.lifecycle_marker = Some("repair_prompted".into());
     repair_session.last_event = Some(format!("repair_prompted:{fingerprint}"));
     repair_session.silence_observed = false;
-    store.upsert_opencode_session(&repair_session).await?;
+    store.upsert_runner_session(&repair_session).await?;
     Ok(())
 }
 
@@ -1045,7 +1044,7 @@ async fn fail_runtime_defect(
     evidence_kind: &str,
     message: String,
     failure: FailureRecord,
-    session: &crate::state::OpenCodeSessionRecord,
+    session: &crate::state::RunnerSessionRecord,
 ) -> anyhow::Result<()> {
     let elapsed_seconds = match session.process_id {
         Some(process_id) => process_elapsed_seconds(process_id).await,
@@ -1112,7 +1111,7 @@ async fn fail_runtime_defect(
     let mut failed_session = session.clone();
     failed_session.process_id = None;
     failed_session.lifecycle_stage = LifecycleStage::Failed;
-    failed_session.stage = crate::state::OpenCodeStage::Failed;
+    failed_session.stage = crate::state::RunnerStage::Failed;
     failed_session.lifecycle_marker = Some(format!("failed:{}", failure.kind));
     let failure_event = format!(
         "failed:{}",
@@ -1126,14 +1125,14 @@ async fn fail_runtime_defect(
         |snapshot| snapshot.failure_event(&failure_event),
     ));
     failed_session.silence_observed = false;
-    store.upsert_opencode_session(&failed_session).await?;
+    store.upsert_runner_session(&failed_session).await?;
     Ok(())
 }
 
 fn runtime_defect_evidence_body(
     message: &str,
     failure: &FailureRecord,
-    session: &crate::state::OpenCodeSessionRecord,
+    session: &crate::state::RunnerSessionRecord,
     elapsed_seconds: Option<u64>,
     git_snapshot: Option<&RuntimeDefectGitSnapshot>,
 ) -> String {
@@ -1161,7 +1160,7 @@ fn runtime_defect_evidence_body(
 
 struct RuntimeDefectRepairEvidence<'a> {
     message: &'a str,
-    session: &'a crate::state::OpenCodeSessionRecord,
+    session: &'a crate::state::RunnerSessionRecord,
     elapsed_seconds: Option<u64>,
     fingerprint: &'a str,
     occurrence_count: u32,
@@ -1178,7 +1177,7 @@ impl RuntimeDefectRepairEvidence<'_> {
             .unwrap_or_else(|| "git_snapshot: unavailable".into());
 
         format!(
-            "Symphony runtime defect repair scheduled: {message}\n\nsession_id: {session_id}\nprocess_id: {process_id}\nelapsed_seconds: {elapsed_seconds}\nfingerprint: {fingerprint}\nrepair_attempt: {occurrence_count}\nmax_repair_attempts: {max_attempts}\nnext_action: {next_action}\n\n{git_snapshot}\n\nThe issue remains in OpenCode repair and is not returned to ordinary Todo dispatch.",
+            "Symphony runtime defect repair scheduled: {message}\n\nsession_id: {session_id}\nprocess_id: {process_id}\nelapsed_seconds: {elapsed_seconds}\nfingerprint: {fingerprint}\nrepair_attempt: {occurrence_count}\nmax_repair_attempts: {max_attempts}\nnext_action: {next_action}\n\n{git_snapshot}\n\nThe issue remains in runner repair and is not returned to ordinary Todo dispatch.",
             message = self.message,
             session_id = self.session.session_id,
             process_id = self
@@ -1214,7 +1213,7 @@ struct RuntimeDefectGitSnapshot {
 impl RuntimeDefectGitSnapshot {
     async fn capture(
         project: &ProjectConfig,
-        session: &crate::state::OpenCodeSessionRecord,
+        session: &crate::state::RunnerSessionRecord,
     ) -> Option<Self> {
         let worktree_path = session.worktree_path.trim();
         if worktree_path.is_empty() {
@@ -1387,17 +1386,14 @@ async fn latest_session(
     store: &SqliteStore,
     project_id: &str,
     issue_id: &str,
-) -> anyhow::Result<Option<crate::state::OpenCodeSessionRecord>> {
+) -> anyhow::Result<Option<crate::state::RunnerSessionRecord>> {
     let mut sessions: Vec<_> = store
-        .opencode_sessions_for_issue(project_id, issue_id)
+        .runner_sessions_for_issue(project_id, issue_id)
         .await?
         .into_iter()
         .filter(|session| {
             session.lifecycle_stage == LifecycleStage::Running
-                && !matches!(
-                    session.stage,
-                    OpenCodeStage::Failed | OpenCodeStage::Completed
-                )
+                && !matches!(session.stage, RunnerStage::Failed | RunnerStage::Completed)
         })
         .collect();
     Ok(sessions.pop())
@@ -1407,9 +1403,9 @@ async fn latest_recoverable_failed_handoff_session(
     store: &SqliteStore,
     project_id: &str,
     issue_id: &str,
-) -> anyhow::Result<Option<crate::state::OpenCodeSessionRecord>> {
+) -> anyhow::Result<Option<crate::state::RunnerSessionRecord>> {
     let mut sessions: Vec<_> = store
-        .opencode_sessions_for_issue(project_id, issue_id)
+        .runner_sessions_for_issue(project_id, issue_id)
         .await?
         .into_iter()
         .filter(recoverable_failed_handoff_session)
@@ -1417,9 +1413,9 @@ async fn latest_recoverable_failed_handoff_session(
     Ok(sessions.pop())
 }
 
-fn recoverable_failed_handoff_session(session: &crate::state::OpenCodeSessionRecord) -> bool {
+fn recoverable_failed_handoff_session(session: &crate::state::RunnerSessionRecord) -> bool {
     session.lifecycle_stage == LifecycleStage::Failed
-        && session.stage == OpenCodeStage::Failed
+        && session.stage == RunnerStage::Failed
         && session.lifecycle_marker.as_deref() == Some("failed:malformed_handoff")
         && session.last_event.as_deref().is_some_and(|event| {
             event.starts_with("failed:incomplete_success_handoff")
@@ -1429,7 +1425,7 @@ fn recoverable_failed_handoff_session(session: &crate::state::OpenCodeSessionRec
         })
 }
 
-fn successful_handoff_error(handoff: &OpenCodeHandoff) -> Option<String> {
+fn successful_handoff_error(handoff: &RunnerHandoff) -> Option<String> {
     if handoff.eval_results.is_empty() {
         return Some("successful handoff did not include eval results".into());
     }
@@ -1459,8 +1455,8 @@ fn successful_handoff_error(handoff: &OpenCodeHandoff) -> Option<String> {
 
 fn successful_handoff_worktree_error(
     project: &ProjectConfig,
-    session: &crate::state::OpenCodeSessionRecord,
-    git: &crate::opencode::GitClosureEvidence,
+    session: &crate::state::RunnerSessionRecord,
+    git: &crate::runner::GitClosureEvidence,
 ) -> Option<String> {
     let raw_path = git.worktree_path.as_str();
     let trimmed_path = raw_path.trim();
@@ -1510,7 +1506,7 @@ pub(super) async fn park_need_owner_input(
     store: &SqliteStore,
     linear: &impl LinearClient,
     issue: &LinearIssue,
-    session: Option<&crate::state::OpenCodeSessionRecord>,
+    session: Option<&crate::state::RunnerSessionRecord>,
     blocker_kind: &str,
     message: String,
     failure: Option<FailureRecord>,
@@ -1549,10 +1545,10 @@ pub(super) async fn park_need_owner_input(
         terminate_current_session_process(project, issue, &mut parked_session).await?;
         parked_session.process_id = None;
         parked_session.lifecycle_stage = LifecycleStage::Blocked;
-        parked_session.stage = crate::state::OpenCodeStage::Failed;
+        parked_session.stage = crate::state::RunnerStage::Failed;
         parked_session.lifecycle_marker = Some("parked".into());
         parked_session.last_event = Some(format!("parked:{blocker_kind}"));
-        store.upsert_opencode_session(&parked_session).await?;
+        store.upsert_runner_session(&parked_session).await?;
     }
     Ok(())
 }
@@ -1566,7 +1562,7 @@ pub(super) async fn park_typed_blocker(
     store: &SqliteStore,
     linear: &impl LinearClient,
     issue: &LinearIssue,
-    session: Option<&crate::state::OpenCodeSessionRecord>,
+    session: Option<&crate::state::RunnerSessionRecord>,
     transition_to_need_owner_input: bool,
     blocker_kind: &str,
     message: String,
@@ -1607,10 +1603,10 @@ pub(super) async fn park_typed_blocker(
         terminate_current_session_process(project, issue, &mut parked_session).await?;
         parked_session.process_id = None;
         parked_session.lifecycle_stage = LifecycleStage::Blocked;
-        parked_session.stage = crate::state::OpenCodeStage::Failed;
+        parked_session.stage = crate::state::RunnerStage::Failed;
         parked_session.lifecycle_marker = Some("parked".into());
         parked_session.last_event = Some(format!("parked:{blocker_kind}"));
-        store.upsert_opencode_session(&parked_session).await?;
+        store.upsert_runner_session(&parked_session).await?;
     }
     Ok(())
 }

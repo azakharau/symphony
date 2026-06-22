@@ -9,20 +9,20 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     api::runtime_api_json_response,
-    config::{OpenCodeStorageConfig, RootConfig},
+    config::{RootConfig, RunnerArchiveConfig},
     linear::LinearSdkClient,
-    opencode::{
-        OpenCodeSessionArchiveRequest, StdioOpenCodeLauncher, apply_omp_session_tree_metrics,
+    runner::{
+        RunnerSessionArchiveRequest, StdioRunnerLauncher, apply_omp_session_tree_metrics,
         apply_session_tree_metrics, archive_and_delete_session_tree, read_omp_session_tree_metrics,
         read_session_tree_metrics,
     },
-    state::{OpenCodeSessionRecord, RuntimeProviderMode},
+    state::{RunnerSessionRecord, RuntimeProviderMode},
     storage::SqliteStore,
 };
 
 use super::run_once_with_clients;
 
-const OPENCODE_METRICS_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const RUNNER_METRICS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(super) async fn run_continuous(
     config: RootConfig,
@@ -50,7 +50,7 @@ pub(super) async fn run_continuous(
                     if let Err(error) = store.migrate().await {
                         error!(error = %error, "poll storage migration failed");
                     } else if let Err(error) =
-                        run_once_with_clients(&poll_config, &store, &linear, &StdioOpenCodeLauncher)
+                        run_once_with_clients(&poll_config, &store, &linear, &StdioRunnerLauncher)
                             .await
                     {
                         let error_chain = error
@@ -73,7 +73,7 @@ pub(super) async fn run_continuous(
 
     {
         let metrics_database_path = database_path.clone();
-        let opencode_storage = config.opencode_storage.clone();
+        let runner_archive = config.runner_archive.clone();
         tokio::spawn(async move {
             loop {
                 match SqliteStore::open(&metrics_database_path).await {
@@ -81,7 +81,7 @@ pub(super) async fn run_continuous(
                         if let Err(error) = store.migrate().await {
                             error!(error = %error, "runtime metrics poll storage migration failed");
                         } else if let Err(error) =
-                            refresh_runtime_session_metrics(&store, opencode_storage.as_ref()).await
+                            refresh_runtime_session_metrics(&store, runner_archive.as_ref()).await
                         {
                             warn!(error = %error, "runtime metrics poll failed");
                         }
@@ -90,7 +90,7 @@ pub(super) async fn run_continuous(
                         error!(error = %error, "runtime metrics poll storage open failed");
                     }
                 }
-                tokio::time::sleep(OPENCODE_METRICS_POLL_INTERVAL).await;
+                tokio::time::sleep(RUNNER_METRICS_POLL_INTERVAL).await;
             }
         });
     }
@@ -99,7 +99,7 @@ pub(super) async fn run_continuous(
         let cleanup_database_path = database_path.clone();
         let cleanup_interval = Duration::from_secs(config.cleanup.interval_secs);
         let cleanup_retention = Duration::from_secs(config.cleanup.retention_secs);
-        let opencode_storage = config.opencode_storage.clone();
+        let runner_archive = config.runner_archive.clone();
         info!(
             interval_secs = cleanup_interval.as_secs(),
             retention_secs = cleanup_retention.as_secs(),
@@ -118,12 +118,12 @@ pub(super) async fn run_continuous(
                         if let Err(error) = store.migrate().await {
                             error!(error = %error, "runtime cleanup storage migration failed");
                         } else {
-                            if let Some(storage) = opencode_storage.as_ref()
+                            if let Some(storage) = runner_archive.as_ref()
                                 && let Err(error) =
-                                    cleanup_opencode_sessions(&store, storage, cleanup_retention)
+                                    cleanup_runner_sessions(&store, storage, cleanup_retention)
                                         .await
                             {
-                                error!(error = %error, "OpenCode session cleanup failed");
+                                error!(error = %error, "runner session cleanup failed");
                             }
                             match store.cleanup_runtime_state(cleanup_retention).await {
                                 Ok(report) => {
@@ -169,19 +169,19 @@ pub(super) async fn run_continuous(
     }
 }
 
-async fn cleanup_opencode_sessions(
+async fn cleanup_runner_sessions(
     store: &SqliteStore,
-    storage: &OpenCodeStorageConfig,
+    storage: &RunnerArchiveConfig,
     retention: Duration,
 ) -> anyhow::Result<()> {
-    let candidates = store.opencode_cleanup_candidates(retention).await?;
+    let candidates = store.runner_cleanup_candidates(retention).await?;
     if candidates.is_empty() {
-        debug!("OpenCode session cleanup found no archive candidates");
+        debug!("runner session cleanup found no archive candidates");
         return Ok(());
     }
     for candidate in candidates {
-        let report = archive_and_delete_session_tree(OpenCodeSessionArchiveRequest {
-            opencode_database_path: storage.database_path.clone(),
+        let report = archive_and_delete_session_tree(RunnerSessionArchiveRequest {
+            runner_archive_database_path: storage.database_path.clone(),
             archive_root: storage.archive_root.clone(),
             project_id: candidate.project_id.clone(),
             issue_id: candidate.issue_id.clone(),
@@ -191,7 +191,7 @@ async fn cleanup_opencode_sessions(
         .await?;
         if report.sessions_archived > 0 || report.sessions_deleted > 0 {
             let runtime_records_deleted = store
-                .delete_opencode_session_record(
+                .delete_runner_session_record(
                     &candidate.project_id,
                     &candidate.issue_id,
                     &candidate.session_id,
@@ -205,14 +205,14 @@ async fn cleanup_opencode_sessions(
                 sessions_archived = report.sessions_archived,
                 sessions_deleted = report.sessions_deleted,
                 runtime_records_deleted,
-                "OpenCode session tree archived and cleaned"
+                "runner session tree archived and cleaned"
             );
         } else {
             debug!(
                 project_id = %candidate.project_id,
                 issue = %candidate.issue_identifier,
                 session_id = %candidate.session_id,
-                "OpenCode session cleanup candidate had no persisted OpenCode rows"
+                "runner session cleanup candidate had no persisted runner rows"
             );
         }
     }
@@ -221,15 +221,15 @@ async fn cleanup_opencode_sessions(
 
 async fn refresh_runtime_session_metrics(
     store: &SqliteStore,
-    opencode_storage: Option<&OpenCodeStorageConfig>,
+    runner_archive: Option<&RunnerArchiveConfig>,
 ) -> anyhow::Result<()> {
-    for session in store.active_opencode_sessions().await? {
+    for session in store.active_runner_sessions().await? {
         match session.provider_mode {
-            RuntimeProviderMode::OpenCodeAcp => {
-                let Some(storage) = opencode_storage else {
+            RuntimeProviderMode::Acp => {
+                let Some(storage) = runner_archive else {
                     continue;
                 };
-                refresh_single_opencode_session_metrics(store, storage, session).await?;
+                refresh_single_runner_session_metrics(store, storage, session).await?;
             }
             RuntimeProviderMode::OmpAcp => {
                 refresh_single_omp_session_metrics(store, session).await?;
@@ -239,10 +239,10 @@ async fn refresh_runtime_session_metrics(
     Ok(())
 }
 
-async fn refresh_single_opencode_session_metrics(
+async fn refresh_single_runner_session_metrics(
     store: &SqliteStore,
-    storage: &OpenCodeStorageConfig,
-    mut session: OpenCodeSessionRecord,
+    storage: &RunnerArchiveConfig,
+    mut session: RunnerSessionRecord,
 ) -> anyhow::Result<()> {
     let Some(metrics) =
         read_session_tree_metrics(&storage.database_path, &session.session_id).await?
@@ -253,20 +253,20 @@ async fn refresh_single_opencode_session_metrics(
         return Ok(());
     }
     apply_session_tree_metrics(&mut session, &metrics);
-    store.upsert_opencode_session(&session).await?;
+    store.upsert_runner_session(&session).await?;
     debug!(
         project_id = %session.project_id,
         issue_id = %session.issue_id,
         session_id = %session.session_id,
         last_updated_ms = metrics.last_updated_ms,
-        "OpenCode session metrics refreshed from lightweight poll"
+        "runner session metrics refreshed from lightweight poll"
     );
     Ok(())
 }
 
 async fn refresh_single_omp_session_metrics(
     store: &SqliteStore,
-    mut session: OpenCodeSessionRecord,
+    mut session: RunnerSessionRecord,
 ) -> anyhow::Result<()> {
     let Some(metrics) = read_omp_session_tree_metrics(&session.session_id).await? else {
         return Ok(());
@@ -275,7 +275,7 @@ async fn refresh_single_omp_session_metrics(
         return Ok(());
     }
     apply_omp_session_tree_metrics(&mut session, &metrics);
-    store.upsert_opencode_session(&session).await?;
+    store.upsert_runner_session(&session).await?;
     debug!(
         project_id = %session.project_id,
         issue_id = %session.issue_id,
@@ -290,17 +290,17 @@ async fn refresh_single_omp_session_metrics(
 }
 
 fn session_metrics_are_current(
-    session: &OpenCodeSessionRecord,
+    session: &RunnerSessionRecord,
     last_updated_ms: Option<u64>,
 ) -> bool {
     let expected_event = last_updated_ms
-        .map(|updated| format!("opencode_db_updated:{updated}"))
-        .unwrap_or_else(|| "opencode_db_snapshot".into());
+        .map(|updated| format!("runner_archive_updated:{updated}"))
+        .unwrap_or_else(|| "runner_archive_snapshot".into());
     session.last_event.as_deref() == Some(expected_event.as_str())
 }
 
 fn omp_session_metrics_are_current(
-    session: &OpenCodeSessionRecord,
+    session: &RunnerSessionRecord,
     last_updated_ms: Option<u64>,
 ) -> bool {
     let expected_event = last_updated_ms

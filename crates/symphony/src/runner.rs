@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 use crate::{
     config::{OhMyPiAcpCwdPolicy, OhMyPiAcpProviderConfig, ProjectConfig},
     linear::LinearIssue,
-    state::{LifecycleStage, OpenCodeSessionRecord, OpenCodeStage, RuntimeProviderMode},
+    state::{LifecycleStage, RunnerSessionRecord, RunnerStage, RuntimeProviderMode},
 };
 use acp::{
     acp_request, drain_acp_stream, extract_session_id, read_acp_response,
@@ -29,9 +29,9 @@ use acp::{
 };
 use adapter::AgentExecutionAdapter;
 pub use archive::{
-    OpenCodeSessionActivity, OpenCodeSessionArchiveReport, OpenCodeSessionArchiveRequest,
-    OpenCodeSessionMessageError, OpenCodeSessionTreeActivity, OpenCodeSessionTreeMetrics,
-    OpenCodeTimelineEvent, OpenCodeTodoActivity, archive_and_delete_session_tree,
+    RunnerSessionActivity, RunnerSessionArchiveReport, RunnerSessionArchiveRequest,
+    RunnerSessionMessageError, RunnerSessionTreeActivity, RunnerSessionTreeMetrics,
+    RunnerTimelineEvent, RunnerTodoActivity, archive_and_delete_session_tree,
     read_latest_session_tree_error, read_session_tree_activity, read_session_tree_metrics,
 };
 use lifecycle::AcpChildLifecycle;
@@ -49,9 +49,9 @@ pub use session_metrics::{
 };
 pub(crate) use types::OMP_CLEANUP_MARKER_ENV;
 pub use types::{
-    GitClosureEvidence, OpenCodeEvalResult, OpenCodeHandoff, OpenCodeLaunchSpec,
-    OpenCodeProcessStarted, OpenCodeRuntimeConfig, OpenCodeSessionCreated, OpenCodeSessionEvent,
-    OpenCodeStartedSession, OpenCodeStopReason, PermissionPolicy,
+    GitClosureEvidence, PermissionPolicy, RunnerEvalResult, RunnerHandoff, RunnerLaunchSpec,
+    RunnerProcessStarted, RunnerRuntimeConfig, RunnerSessionCreated, RunnerSessionEvent,
+    RunnerStartedSession, RunnerStopReason,
 };
 pub use worktree::worktree_path_allowed;
 use worktree::{
@@ -60,36 +60,33 @@ use worktree::{
 };
 
 #[async_trait::async_trait]
-pub trait OpenCodeLaunchObserver: Sync {
-    async fn process_started(&self, _event: OpenCodeProcessStarted) -> Result<(), OpenCodeError> {
+pub trait RunnerLaunchObserver: Sync {
+    async fn process_started(&self, _event: RunnerProcessStarted) -> Result<(), RunnerError> {
         Ok(())
     }
 
-    async fn session_created(&self, _event: OpenCodeSessionCreated) -> Result<(), OpenCodeError> {
+    async fn session_created(&self, _event: RunnerSessionCreated) -> Result<(), RunnerError> {
         Ok(())
     }
 }
 
-struct NoopOpenCodeLaunchObserver;
+struct NoopRunnerLaunchObserver;
 
 #[async_trait::async_trait]
-impl OpenCodeLaunchObserver for NoopOpenCodeLaunchObserver {}
+impl RunnerLaunchObserver for NoopRunnerLaunchObserver {}
 
 #[async_trait::async_trait]
-pub trait OpenCodeLauncher: Sync {
-    async fn launch(
-        &self,
-        spec: &OpenCodeLaunchSpec,
-    ) -> Result<OpenCodeStartedSession, OpenCodeError>;
+pub trait RunnerLauncher: Sync {
+    async fn launch(&self, spec: &RunnerLaunchSpec) -> Result<RunnerStartedSession, RunnerError>;
 
     async fn launch_observed(
         &self,
-        spec: &OpenCodeLaunchSpec,
-        observer: &dyn OpenCodeLaunchObserver,
-    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
+        spec: &RunnerLaunchSpec,
+        observer: &dyn RunnerLaunchObserver,
+    ) -> Result<RunnerStartedSession, RunnerError> {
         let started = self.launch(spec).await?;
         observer
-            .session_created(OpenCodeSessionCreated {
+            .session_created(RunnerSessionCreated {
                 session_id: started.session_id.clone(),
                 process_id: started.process_id,
             })
@@ -99,19 +96,19 @@ pub trait OpenCodeLauncher: Sync {
 
     async fn latest_handoff(
         &self,
-        _session: &OpenCodeSessionRecord,
-    ) -> Result<Option<OpenCodeHandoff>, OpenCodeError> {
+        _session: &RunnerSessionRecord,
+    ) -> Result<Option<RunnerHandoff>, RunnerError> {
         Ok(None)
     }
 
     async fn continue_repair(
         &self,
-        _spec: &OpenCodeLaunchSpec,
-        session: &OpenCodeSessionRecord,
+        _spec: &RunnerLaunchSpec,
+        session: &RunnerSessionRecord,
         _failure_fingerprint: &str,
         _repair_message: &str,
-    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
-        Ok(OpenCodeStartedSession {
+    ) -> Result<RunnerStartedSession, RunnerError> {
+        Ok(RunnerStartedSession {
             session_id: session.session_id.clone(),
             process_id: session.process_id,
             acp_frame_count: session.acp_frame_count,
@@ -121,11 +118,11 @@ pub trait OpenCodeLauncher: Sync {
 
     async fn continue_session(
         &self,
-        _spec: &OpenCodeLaunchSpec,
-        session: &OpenCodeSessionRecord,
+        _spec: &RunnerLaunchSpec,
+        session: &RunnerSessionRecord,
         _continuation_message: &str,
-    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
-        Ok(OpenCodeStartedSession {
+    ) -> Result<RunnerStartedSession, RunnerError> {
+        Ok(RunnerStartedSession {
             session_id: session.session_id.clone(),
             process_id: session.process_id,
             acp_frame_count: session.acp_frame_count,
@@ -135,10 +132,10 @@ pub trait OpenCodeLauncher: Sync {
 
     async fn resume(
         &self,
-        _spec: &OpenCodeLaunchSpec,
-        session: &OpenCodeSessionRecord,
-    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
-        Ok(OpenCodeStartedSession {
+        _spec: &RunnerLaunchSpec,
+        session: &RunnerSessionRecord,
+    ) -> Result<RunnerStartedSession, RunnerError> {
+        Ok(RunnerStartedSession {
             session_id: session.session_id.clone(),
             process_id: session.process_id,
             acp_frame_count: session.acp_frame_count,
@@ -148,15 +145,12 @@ pub trait OpenCodeLauncher: Sync {
 }
 
 #[derive(Debug, Default)]
-pub struct DeterministicOpenCodeLauncher;
+pub struct DeterministicRunnerLauncher;
 
 #[async_trait::async_trait]
-impl OpenCodeLauncher for DeterministicOpenCodeLauncher {
-    async fn launch(
-        &self,
-        spec: &OpenCodeLaunchSpec,
-    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
-        Ok(OpenCodeStartedSession {
+impl RunnerLauncher for DeterministicRunnerLauncher {
+    async fn launch(&self, spec: &RunnerLaunchSpec) -> Result<RunnerStartedSession, RunnerError> {
+        Ok(RunnerStartedSession {
             session_id: deterministic_session_id(&spec.cwd.display().to_string()),
             process_id: None,
             acp_frame_count: 0,
@@ -166,13 +160,13 @@ impl OpenCodeLauncher for DeterministicOpenCodeLauncher {
 }
 
 #[derive(Debug, Default)]
-pub struct StdioOpenCodeLauncher;
+pub struct StdioRunnerLauncher;
 
 async fn initialize_acp_child(
     child: &mut AcpChildLifecycle,
-    spec: &OpenCodeLaunchSpec,
+    spec: &RunnerLaunchSpec,
     request_id: u64,
-) -> Result<(), OpenCodeError> {
+) -> Result<(), RunnerError> {
     let (stdin, stdout) = child.io();
     let adapter = AgentExecutionAdapter::for_spec(spec);
     acp_request(
@@ -189,10 +183,10 @@ async fn initialize_acp_child(
 
 async fn configure_acp_session(
     child: &mut AcpChildLifecycle,
-    spec: &OpenCodeLaunchSpec,
+    spec: &RunnerLaunchSpec,
     session_id: &str,
     next_id: &mut u64,
-) -> Result<(), OpenCodeError> {
+) -> Result<(), RunnerError> {
     let adapter = AgentExecutionAdapter::for_spec(spec);
     for option in adapter.config_options(spec) {
         let (stdin, stdout) = child.io();
@@ -213,10 +207,10 @@ async fn configure_acp_session(
 
 async fn resume_acp_session(
     child: &mut AcpChildLifecycle,
-    spec: &OpenCodeLaunchSpec,
-    session: &OpenCodeSessionRecord,
+    spec: &RunnerLaunchSpec,
+    session: &RunnerSessionRecord,
     request_id: u64,
-) -> Result<(), OpenCodeError> {
+) -> Result<(), RunnerError> {
     let (stdin, stdout) = child.io();
     let resume_result = acp_request(
         stdin,
@@ -230,7 +224,7 @@ async fn resume_acp_session(
     let resumed_session_id =
         extract_session_id(&resume_result).unwrap_or_else(|_| session.session_id.clone());
     if resumed_session_id != session.session_id {
-        return Err(OpenCodeError::AcpProtocol(format!(
+        return Err(RunnerError::AcpProtocol(format!(
             "ACP session/resume returned `{resumed_session_id}` for `{}`",
             session.session_id
         )));
@@ -258,7 +252,7 @@ fn spawn_prompt_reader(
         )
         .await
         {
-            warn!(error = %error, message = warning, "OpenCode ACP prompt stream ended with error");
+            warn!(error = %error, message = warning, "runner ACP prompt stream ended with error");
             if let Some(process_id) = child.id() {
                 let _ = terminate_process_tree(process_id, warning).await;
             }
@@ -280,7 +274,7 @@ fn spawn_stream_drain(
     let permission_policy = permission_policy.clone();
     tokio::spawn(async move {
         if let Err(error) = drain_acp_stream(stdout, stdin, permission_policy).await {
-            warn!(error = %error, message = warning, "OpenCode ACP stream drain ended with error");
+            warn!(error = %error, message = warning, "runner ACP stream drain ended with error");
         }
         let _ = child.wait().await;
         stderr_drain.abort();
@@ -288,20 +282,16 @@ fn spawn_stream_drain(
 }
 
 #[async_trait::async_trait]
-impl OpenCodeLauncher for StdioOpenCodeLauncher {
-    async fn launch(
-        &self,
-        spec: &OpenCodeLaunchSpec,
-    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
-        self.launch_observed(spec, &NoopOpenCodeLaunchObserver)
-            .await
+impl RunnerLauncher for StdioRunnerLauncher {
+    async fn launch(&self, spec: &RunnerLaunchSpec) -> Result<RunnerStartedSession, RunnerError> {
+        self.launch_observed(spec, &NoopRunnerLaunchObserver).await
     }
 
     async fn launch_observed(
         &self,
-        spec: &OpenCodeLaunchSpec,
-        observer: &dyn OpenCodeLaunchObserver,
-    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
+        spec: &RunnerLaunchSpec,
+        observer: &dyn RunnerLaunchObserver,
+    ) -> Result<RunnerStartedSession, RunnerError> {
         if spec.provider_mode == RuntimeProviderMode::OmpAcp {
             return omp::StdioOmpAcpLauncher
                 .launch_observed(spec, observer)
@@ -313,14 +303,14 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             command = %spec.command.display(),
             agent = %spec.agent,
             model = spec.model.as_deref().unwrap_or("default"),
-            "launching OpenCode ACP session"
+            "launching runner ACP session"
         );
         ensure_worktree(spec).await?;
         remove_stale_handoff_sidecar(&spec.cwd).await?;
         let mut child = AcpChildLifecycle::spawn(spec).await?;
         let process_id = child.process_id();
         if let Err(error) = observer
-            .process_started(OpenCodeProcessStarted { process_id })
+            .process_started(RunnerProcessStarted { process_id })
             .await
         {
             return Err(child
@@ -349,16 +339,16 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
                 issue = %spec.issue_identifier,
                 session_id = %session_id,
                 cwd = %spec.cwd.display(),
-                "OpenCode ACP session created"
+                "runner ACP session created"
             );
             observer
-                .session_created(OpenCodeSessionCreated {
+                .session_created(RunnerSessionCreated {
                     session_id: session_id.clone(),
                     process_id,
                 })
                 .await?;
             configure_acp_session(&mut child, spec, &session_id, &mut next_id).await?;
-            Ok::<String, OpenCodeError>(session_id)
+            Ok::<String, RunnerError>(session_id)
         }
         .await;
         let session_id = match setup {
@@ -389,14 +379,14 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         spawn_prompt_reader(
             &spec.permission_policy,
             prompt_request_id,
-            "OpenCode ACP prompt stream ended with error",
+            "runner ACP prompt stream ended with error",
             process,
             stdin,
             stdout,
             stderr_drain,
         );
 
-        Ok(OpenCodeStartedSession {
+        Ok(RunnerStartedSession {
             session_id,
             process_id,
             acp_frame_count: 4,
@@ -406,15 +396,15 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
 
     async fn resume(
         &self,
-        spec: &OpenCodeLaunchSpec,
-        session: &OpenCodeSessionRecord,
-    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
+        spec: &RunnerLaunchSpec,
+        session: &RunnerSessionRecord,
+    ) -> Result<RunnerStartedSession, RunnerError> {
         info!(
             issue = %spec.issue_identifier,
             session_id = %session.session_id,
             cwd = %spec.cwd.display(),
             command = %spec.command.display(),
-            "resuming OpenCode ACP session"
+            "resuming runner ACP session"
         );
         ensure_resumable_worktree(spec).await?;
         let mut child = AcpChildLifecycle::spawn(spec).await?;
@@ -427,7 +417,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             resume_acp_session(&mut child, spec, session, next_id).await?;
             next_id += 1;
             configure_acp_session(&mut child, spec, &session.session_id, &mut next_id).await?;
-            Ok::<(), OpenCodeError>(())
+            Ok::<(), RunnerError>(())
         }
         .await;
         if let Err(error) = setup {
@@ -442,14 +432,14 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         let (process, stdin, stdout, stderr_drain) = child.into_parts();
         spawn_stream_drain(
             &spec.permission_policy,
-            "OpenCode ACP resumed stream ended with error",
+            "runner ACP resumed stream ended with error",
             process,
             stdin,
             stdout,
             stderr_drain,
         );
 
-        Ok(OpenCodeStartedSession {
+        Ok(RunnerStartedSession {
             session_id: session.session_id.clone(),
             process_id,
             acp_frame_count: 3,
@@ -459,18 +449,18 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
 
     async fn continue_repair(
         &self,
-        spec: &OpenCodeLaunchSpec,
-        session: &OpenCodeSessionRecord,
+        spec: &RunnerLaunchSpec,
+        session: &RunnerSessionRecord,
         failure_fingerprint: &str,
         repair_message: &str,
-    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
+    ) -> Result<RunnerStartedSession, RunnerError> {
         info!(
             issue = %spec.issue_identifier,
             session_id = %session.session_id,
             cwd = %spec.cwd.display(),
             command = %spec.command.display(),
             failure_fingerprint,
-            "continuing OpenCode ACP repair"
+            "continuing runner ACP repair"
         );
         ensure_resumable_worktree(spec).await?;
         remove_stale_handoff_sidecar(&spec.cwd).await?;
@@ -484,7 +474,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             resume_acp_session(&mut child, spec, session, next_id).await?;
             next_id += 1;
             configure_acp_session(&mut child, spec, &session.session_id, &mut next_id).await?;
-            Ok::<(), OpenCodeError>(())
+            Ok::<(), RunnerError>(())
         }
         .await;
         if let Err(error) = setup {
@@ -518,14 +508,14 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         spawn_prompt_reader(
             &spec.permission_policy,
             prompt_request_id,
-            "OpenCode ACP repair prompt stream ended with error",
+            "runner ACP repair prompt stream ended with error",
             process,
             stdin,
             stdout,
             stderr_drain,
         );
 
-        Ok(OpenCodeStartedSession {
+        Ok(RunnerStartedSession {
             session_id: session.session_id.clone(),
             process_id,
             acp_frame_count: 3,
@@ -535,16 +525,16 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
 
     async fn continue_session(
         &self,
-        spec: &OpenCodeLaunchSpec,
-        session: &OpenCodeSessionRecord,
+        spec: &RunnerLaunchSpec,
+        session: &RunnerSessionRecord,
         continuation_message: &str,
-    ) -> Result<OpenCodeStartedSession, OpenCodeError> {
+    ) -> Result<RunnerStartedSession, RunnerError> {
         info!(
             issue = %spec.issue_identifier,
             session_id = %session.session_id,
             cwd = %spec.cwd.display(),
             command = %spec.command.display(),
-            "continuing OpenCode ACP session"
+            "continuing runner ACP session"
         );
         ensure_resumable_worktree(spec).await?;
         remove_stale_handoff_sidecar(&spec.cwd).await?;
@@ -558,7 +548,7 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
             resume_acp_session(&mut child, spec, session, next_id).await?;
             next_id += 1;
             configure_acp_session(&mut child, spec, &session.session_id, &mut next_id).await?;
-            Ok::<(), OpenCodeError>(())
+            Ok::<(), RunnerError>(())
         }
         .await;
         if let Err(error) = setup {
@@ -592,14 +582,14 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
         spawn_prompt_reader(
             &spec.permission_policy,
             prompt_request_id,
-            "OpenCode ACP continuation prompt stream ended with error",
+            "runner ACP continuation prompt stream ended with error",
             process,
             stdin,
             stdout,
             stderr_drain,
         );
 
-        Ok(OpenCodeStartedSession {
+        Ok(RunnerStartedSession {
             session_id: session.session_id.clone(),
             process_id,
             acp_frame_count: 3,
@@ -609,28 +599,28 @@ impl OpenCodeLauncher for StdioOpenCodeLauncher {
 
     async fn latest_handoff(
         &self,
-        session: &OpenCodeSessionRecord,
-    ) -> Result<Option<OpenCodeHandoff>, OpenCodeError> {
+        session: &RunnerSessionRecord,
+    ) -> Result<Option<RunnerHandoff>, RunnerError> {
         let path = handoff_sidecar_path(&session.worktree_path);
         if !tokio::fs::try_exists(&path).await? {
             debug!(
                 session_id = %session.session_id,
                 worktree_path = %session.worktree_path,
-                "OpenCode handoff sidecar absent"
+                "runner handoff sidecar absent"
             );
             return Ok(None);
         }
 
         let input = tokio::fs::read_to_string(&path).await?;
         let mut value: Value = serde_json::from_str(&input)
-            .map_err(|error| OpenCodeError::MalformedHandoff(format!("{path:?}: {error}")))?;
+            .map_err(|error| RunnerError::MalformedHandoff(format!("{path:?}: {error}")))?;
         normalize_handoff_sidecar_value(&mut value, &session.worktree_path);
         let handoff = serde_json::from_value(value)
-            .map_err(|error| OpenCodeError::MalformedHandoff(format!("{path:?}: {error}")))?;
+            .map_err(|error| RunnerError::MalformedHandoff(format!("{path:?}: {error}")))?;
         info!(
             session_id = %session.session_id,
             path = %path.display(),
-            "OpenCode handoff sidecar loaded"
+            "runner handoff sidecar loaded"
         );
         Ok(Some(handoff))
     }
@@ -707,7 +697,7 @@ fn normalize_handoff_sidecar_value(value: &mut Value, worktree_path: &str) {
         object.insert(
             "eval_results".to_owned(),
             json!([{
-                "suite": "opencode-evaluation",
+                "suite": "runner-evaluation",
                 "passed": passed,
                 "failure_fingerprint": failure_fingerprint,
                 "details": details,
@@ -870,7 +860,7 @@ fn normalize_eval_results(object: &mut serde_json::Map<String, Value>) {
         {
             result_object.insert(
                 "suite".to_owned(),
-                Value::String("opencode-evaluation".to_owned()),
+                Value::String("runner-evaluation".to_owned()),
             );
         }
         normalize_object_string_field(result_object, "suite", structured_summary_label);
@@ -1099,16 +1089,16 @@ fn canonical_handoff_stage(stage: &str) -> Option<&'static str> {
     }
 }
 
-pub fn build_acp_launch_spec(project: &ProjectConfig, issue: &LinearIssue) -> OpenCodeLaunchSpec {
+pub fn build_acp_launch_spec(project: &ProjectConfig, issue: &LinearIssue) -> RunnerLaunchSpec {
     if let Some(provider) = project.omp_acp_providers.first() {
         return build_omp_acp_launch_spec(project, issue, provider);
     }
     let branch_name = issue_branch_name(issue);
-    OpenCodeLaunchSpec {
-        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+    RunnerLaunchSpec {
+        provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
-        command: project.opencode.command.clone(),
-        args: project.opencode.args.clone(),
+        command: project.runner.command.clone(),
+        args: project.runner.args.clone(),
         cwd: project.branch.worktree_root.join(&issue.identifier),
         env_allowlist: Vec::new(),
         worktree_root: Some(project.branch.worktree_root.clone()),
@@ -1117,11 +1107,11 @@ pub fn build_acp_launch_spec(project: &ProjectConfig, issue: &LinearIssue) -> Op
         repo_path: Some(project.repo_path.clone()),
         recall_workspace_root: None,
         base_ref: Some(project.branch.base.clone()),
-        agent: project.opencode.agent.clone(),
-        model: project.opencode.model.clone(),
-        effort: project.opencode.effort.clone(),
+        agent: project.runner.agent.clone(),
+        model: project.runner.model.clone(),
+        effort: project.runner.effort.clone(),
         prompt: build_issue_prompt(project, issue, &branch_name),
-        permission_policy: project.opencode.permission_policy.clone(),
+        permission_policy: project.runner.permission_policy.clone(),
     }
 }
 
@@ -1129,14 +1119,14 @@ pub fn build_omp_acp_launch_spec(
     project: &ProjectConfig,
     issue: &LinearIssue,
     provider: &OhMyPiAcpProviderConfig,
-) -> OpenCodeLaunchSpec {
+) -> RunnerLaunchSpec {
     let branch_name = issue_branch_name(issue);
     let issue_worktree = project.branch.worktree_root.join(&issue.identifier);
     let cwd = match provider.cwd {
         OhMyPiAcpCwdPolicy::IssueWorktree => issue_worktree,
         OhMyPiAcpCwdPolicy::ProjectRepo => project.repo_path.clone(),
     };
-    OpenCodeLaunchSpec {
+    RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::OmpAcp,
         provider_id: Some(provider.id.clone()),
         command: provider.command.clone(),
@@ -1153,12 +1143,12 @@ pub fn build_omp_acp_launch_spec(
         model: None,
         effort: None,
         prompt: build_issue_prompt(project, issue, &branch_name),
-        permission_policy: project.opencode.permission_policy.clone(),
+        permission_policy: project.runner.permission_policy.clone(),
     }
 }
 
 fn repair_prompt(
-    spec: &OpenCodeLaunchSpec,
+    spec: &RunnerLaunchSpec,
     failure_fingerprint: &str,
     repair_message: &str,
 ) -> String {
@@ -1182,7 +1172,7 @@ fn repair_prompt(
     )
 }
 
-fn continuation_prompt(spec: &OpenCodeLaunchSpec, continuation_message: &str) -> String {
+fn continuation_prompt(spec: &RunnerLaunchSpec, continuation_message: &str) -> String {
     let provider_context = provider_context_text(spec);
     format!(
         "Symphony continuation required for the current ACP session.\n\n\
@@ -1200,9 +1190,9 @@ fn continuation_prompt(spec: &OpenCodeLaunchSpec, continuation_message: &str) ->
     )
 }
 
-fn provider_context_text(spec: &OpenCodeLaunchSpec) -> String {
+fn provider_context_text(spec: &RunnerLaunchSpec) -> String {
     match spec.provider_mode {
-        RuntimeProviderMode::OpenCodeAcp => String::new(),
+        RuntimeProviderMode::Acp => String::new(),
         RuntimeProviderMode::OmpAcp => String::new(),
     }
 }
@@ -1219,10 +1209,10 @@ fn issue_branch_name(issue: &LinearIssue) -> String {
 pub fn new_session_record(
     project: &ProjectConfig,
     issue: &LinearIssue,
-    started: OpenCodeStartedSession,
-    spec: &OpenCodeLaunchSpec,
-) -> OpenCodeSessionRecord {
-    OpenCodeSessionRecord {
+    started: RunnerStartedSession,
+    spec: &RunnerLaunchSpec,
+) -> RunnerSessionRecord {
+    RunnerSessionRecord {
         project_id: project.id.clone(),
         issue_id: issue.id.clone(),
         session_id: started.session_id,
@@ -1233,7 +1223,7 @@ pub fn new_session_record(
         worktree_path: spec.cwd.display().to_string(),
         process_id: started.process_id,
         lifecycle_stage: LifecycleStage::Running,
-        stage: OpenCodeStage::Starting,
+        stage: RunnerStage::Starting,
         active_agent: Some(spec.agent.clone()),
         active_model: spec.model.clone(),
         message_count: 0,
@@ -1253,7 +1243,7 @@ pub fn new_session_record(
 }
 
 fn deterministic_session_id(input: &str) -> String {
-    format!("opencode:{input}")
+    format!("runner:{input}")
 }
 
 #[cfg(test)]
@@ -1263,9 +1253,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_opencode_orchestrator_handoff_dialect() {
+    fn normalizes_runner_orchestrator_handoff_dialect() {
         let mut value = json!({
-            "schema_version": "symphony-opencode-handoff/v1",
+            "schema_version": "symphony-runner-handoff/v1",
             "status": "completed",
             "session_id": "ses_test",
             "task_id": "task-1",
@@ -1307,22 +1297,22 @@ mod tests {
         });
 
         normalize_handoff_sidecar_value(&mut value, "/tmp/worktree");
-        let handoff: OpenCodeHandoff =
+        let handoff: RunnerHandoff =
             serde_json::from_value(value).expect("normalized handoff should parse");
 
         assert_eq!(handoff.session_id, "ses_test");
         assert_eq!(
             handoff.lifecycle_stages,
             vec![
-                OpenCodeStage::Running,
-                OpenCodeStage::Running,
-                OpenCodeStage::Eval,
-                OpenCodeStage::Review,
-                OpenCodeStage::Running,
-                OpenCodeStage::Eval,
-                OpenCodeStage::Running,
-                OpenCodeStage::Running,
-                OpenCodeStage::Handoff,
+                RunnerStage::Running,
+                RunnerStage::Running,
+                RunnerStage::Eval,
+                RunnerStage::Review,
+                RunnerStage::Running,
+                RunnerStage::Eval,
+                RunnerStage::Running,
+                RunnerStage::Running,
+                RunnerStage::Handoff,
             ]
         );
         assert_eq!(
@@ -1330,7 +1320,7 @@ mod tests {
             ["rust-engineer", "code-reviewer", "evaluator"]
         );
         assert!(handoff.eval_results[0].passed);
-        assert_eq!(handoff.stop_reason, OpenCodeStopReason::Success);
+        assert_eq!(handoff.stop_reason, RunnerStopReason::Success);
         let git = handoff.git.expect("git evidence");
         assert_eq!(git.branch, "feature/test");
         assert_eq!(git.head_sha.as_deref(), Some("0123456789abcdef"));
@@ -1387,14 +1377,14 @@ mod tests {
         });
 
         normalize_handoff_sidecar_value(&mut value, "/tmp/nrv-30");
-        let handoff: OpenCodeHandoff =
+        let handoff: RunnerHandoff =
             serde_json::from_value(value).expect("compact eval handoff should parse");
 
         assert_eq!(handoff.session_id, "ses_nrv_30");
-        assert_eq!(handoff.stop_reason, OpenCodeStopReason::Success);
+        assert_eq!(handoff.stop_reason, RunnerStopReason::Success);
         assert_eq!(handoff.eval_results.len(), 1);
         assert!(handoff.eval_results[0].passed);
-        assert_eq!(handoff.eval_results[0].suite, "opencode-evaluation");
+        assert_eq!(handoff.eval_results[0].suite, "runner-evaluation");
         assert_eq!(
             handoff.eval_results[0].details.as_deref(),
             Some(
@@ -1427,14 +1417,14 @@ mod tests {
         });
 
         normalize_handoff_sidecar_value(&mut value, "/tmp/worktree");
-        let handoff: OpenCodeHandoff =
+        let handoff: RunnerHandoff =
             serde_json::from_value(value).expect("status-derived handoff should parse");
 
-        assert_eq!(handoff.stop_reason, OpenCodeStopReason::Success);
+        assert_eq!(handoff.stop_reason, RunnerStopReason::Success);
     }
 
     #[test]
-    fn normalizes_structured_string_fields_from_opencode_handoff() {
+    fn normalizes_structured_string_fields_from_runner_handoff() {
         let mut value = json!({
             "session_id": "ses_structured",
             "lifecycle_stages": [
@@ -1447,7 +1437,7 @@ mod tests {
             ],
             "eval_results": [
                 {
-                    "suite": {"name": "opencode-evaluation"},
+                    "suite": {"name": "runner-evaluation"},
                     "passed": true,
                     "failure_fingerprint": null,
                     "details": {"summary": "all validation passed"},
@@ -1472,15 +1462,15 @@ mod tests {
         });
 
         normalize_handoff_sidecar_value(&mut value, "/tmp/worktree");
-        let handoff: OpenCodeHandoff =
+        let handoff: RunnerHandoff =
             serde_json::from_value(value).expect("structured string fields should parse");
 
         assert_eq!(
             handoff.lifecycle_stages,
-            vec![OpenCodeStage::Review, OpenCodeStage::Completed]
+            vec![RunnerStage::Review, RunnerStage::Completed]
         );
         assert_eq!(handoff.subagents, ["rust-engineer:ses_child", "evaluator"]);
-        assert_eq!(handoff.eval_results[0].suite, "opencode-evaluation");
+        assert_eq!(handoff.eval_results[0].suite, "runner-evaluation");
         assert_eq!(
             handoff.eval_results[0].details.as_deref(),
             Some("all validation passed")
@@ -1503,19 +1493,19 @@ mod tests {
 }
 
 #[derive(Debug, Error)]
-pub enum OpenCodeError {
-    #[error("opencode io error: {0}")]
+pub enum RunnerError {
+    #[error("runner io error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("opencode child stdin was not piped")]
+    #[error("runner child stdin was not piped")]
     MissingStdin,
-    #[error("opencode child stdout was not piped")]
+    #[error("runner child stdout was not piped")]
     MissingStdout,
-    #[error("opencode child stderr was not piped")]
+    #[error("runner child stderr was not piped")]
     MissingStderr,
-    #[error("opencode ACP protocol error: {0}")]
+    #[error("runner ACP protocol error: {0}")]
     AcpProtocol(String),
     #[error(
-        "opencode ACP setup failed for {issue_identifier} pid={process_id:?} session={session_id:?}: {reason}; termination={termination:?}"
+        "runner ACP setup failed for {issue_identifier} pid={process_id:?} session={session_id:?}: {reason}; termination={termination:?}"
     )]
     AcpSetupFailed {
         issue_identifier: String,
@@ -1529,20 +1519,20 @@ pub enum OpenCodeError {
         kind: crate::state::RuntimeFailureKind,
         message: String,
     },
-    #[error("opencode process tree error: {0}")]
+    #[error("runner process tree error: {0}")]
     ProcessTree(String),
-    #[error("invalid opencode worktree: {0}")]
+    #[error("invalid runner worktree: {0}")]
     InvalidWorktree(String),
     #[error("git command failed: {command}: {stderr}")]
     GitCommand { command: String, stderr: String },
-    #[error("malformed opencode handoff: {0}")]
+    #[error("malformed runner handoff: {0}")]
     MalformedHandoff(String),
-    #[error("opencode sqlite error: {0}")]
+    #[error("runner sqlite error: {0}")]
     Sqlite(#[from] libsql::Error),
-    #[error("opencode json error: {0}")]
+    #[error("runner json error: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("opencode archive error: {0}")]
+    #[error("runner archive error: {0}")]
     Archive(String),
-    #[error("opencode launch observer error: {0}")]
+    #[error("runner launch observer error: {0}")]
     LaunchObserver(String),
 }

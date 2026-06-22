@@ -19,14 +19,14 @@ use symphony::{
         LinearUpstreamContext, ManagedLinearIssueCreate, ManagedLinearIssueState,
         ManagedLinearRelation,
     },
-    opencode::{
-        self, GitClosureEvidence, OpenCodeEvalResult, OpenCodeHandoff, OpenCodeLauncher,
-        OpenCodeSessionEvent, OpenCodeStopReason, PermissionPolicy,
+    runner::{
+        self, GitClosureEvidence, PermissionPolicy, RunnerEvalResult, RunnerHandoff,
+        RunnerLauncher, RunnerSessionEvent, RunnerStopReason,
     },
     state::{
         BlockerRecord, CleanupStatus, EvalRunRecord, FailureRecord, GitRefRecord, IssueStateRecord,
-        LifecycleStage, OpenCodeSessionRecord, OpenCodeStage, OpenCodeStageEventRecord,
-        ProjectStateRecord, RuntimeFailureKind, RuntimeLivenessStatus, RuntimeProviderMode,
+        LifecycleStage, ProjectStateRecord, RunnerSessionRecord, RunnerStage,
+        RunnerStageEventRecord, RuntimeFailureKind, RuntimeLivenessStatus, RuntimeProviderMode,
         SelfDefectOccurrenceRecord, SelfDefectRecommendationConfidence,
         SelfDefectRecommendationRecord, SelfDefectRelationMode,
     },
@@ -65,7 +65,7 @@ worktree_root = "/home/agent/.symphony/workspaces/opencode/symphony"
 team_key = "SYM"
 project_id = "07df87ce-4e93-4d2c-a73d-84aee1f27e07"
 
-[projects.opencode]
+[projects.runner]
 command = "/usr/local/bin/opencode"
 args = ["acp"]
 agent = "build"
@@ -102,7 +102,7 @@ worktree_root = "/home/agent/.symphony/workspaces/opencode/alpha"
 team_key = "ALPHA"
 project_id = "alpha-project"
 
-[projects.opencode]
+[projects.runner]
 command = "/usr/local/bin/opencode"
 args = ["acp"]
 agent = "build"
@@ -131,7 +131,7 @@ worktree_root = "/home/agent/.symphony/workspaces/opencode/symphony"
 team_key = "SYM"
 project_id = "07df87ce-4e93-4d2c-a73d-84aee1f27e07"
 
-[projects.opencode]
+[projects.runner]
 command = "/usr/local/bin/opencode"
 args = ["acp"]
 agent = "build"
@@ -211,19 +211,19 @@ fn test_session(
     issue_id: impl Into<String>,
     session_id: impl Into<String>,
     worktree_path: impl AsRef<std::path::Path>,
-) -> OpenCodeSessionRecord {
-    OpenCodeSessionRecord {
+) -> RunnerSessionRecord {
+    RunnerSessionRecord {
         project_id: project_id.into(),
         issue_id: issue_id.into(),
         session_id: session_id.into(),
-        provider_mode: RuntimeProviderMode::OpenCodeAcp,
+        provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
         agent: "build".into(),
         model: None,
         worktree_path: worktree_path.as_ref().display().to_string(),
         process_id: None,
         lifecycle_stage: LifecycleStage::Running,
-        stage: OpenCodeStage::Running,
+        stage: RunnerStage::Running,
         active_agent: Some("rust-engineer".into()),
         active_model: None,
         message_count: 1,
@@ -247,17 +247,17 @@ fn success_handoff(
     worktree_path: impl AsRef<std::path::Path>,
     branch: &str,
     head_sha: &str,
-) -> OpenCodeHandoff {
-    OpenCodeHandoff {
+) -> RunnerHandoff {
+    RunnerHandoff {
         session_id: session_id.into(),
         lifecycle_stages: vec![
-            OpenCodeStage::Running,
-            OpenCodeStage::Eval,
-            OpenCodeStage::Handoff,
-            OpenCodeStage::Completed,
+            RunnerStage::Running,
+            RunnerStage::Eval,
+            RunnerStage::Handoff,
+            RunnerStage::Completed,
         ],
         subagents: vec!["rust-engineer".into(), "evaluator".into()],
-        eval_results: vec![OpenCodeEvalResult {
+        eval_results: vec![RunnerEvalResult {
             suite: "cargo test".into(),
             passed: true,
             failure_fingerprint: None,
@@ -272,16 +272,16 @@ fn success_handoff(
             worktree_path: worktree_path.as_ref().display().to_string(),
         }),
         risks: Vec::new(),
-        stop_reason: OpenCodeStopReason::Success,
+        stop_reason: RunnerStopReason::Success,
     }
 }
 
-fn eval_failed_handoff(session_id: &str, fingerprint: &str) -> OpenCodeHandoff {
-    OpenCodeHandoff {
+fn eval_failed_handoff(session_id: &str, fingerprint: &str) -> RunnerHandoff {
+    RunnerHandoff {
         session_id: session_id.into(),
-        lifecycle_stages: vec![OpenCodeStage::Running, OpenCodeStage::Eval],
+        lifecycle_stages: vec![RunnerStage::Running, RunnerStage::Eval],
         subagents: vec!["rust-engineer".into(), "evaluator".into()],
-        eval_results: vec![OpenCodeEvalResult {
+        eval_results: vec![RunnerEvalResult {
             suite: "cargo clippy".into(),
             passed: false,
             failure_fingerprint: Some(fingerprint.into()),
@@ -291,7 +291,7 @@ fn eval_failed_handoff(session_id: &str, fingerprint: &str) -> OpenCodeHandoff {
         changed_files: vec!["crates/symphony/src/daemon.rs".into()],
         git: None,
         risks: vec!["repair pending".into()],
-        stop_reason: OpenCodeStopReason::EvalFailed {
+        stop_reason: RunnerStopReason::EvalFailed {
             failure_fingerprint: fingerprint.into(),
         },
     }
@@ -402,7 +402,7 @@ for line in sys.stdin:
             "risks": [],
             "stop_reason": {{"type": "success"}}
         }}
-        (cwd / ".symphony" / "opencode-handoff.json").write_text(json.dumps(handoff), encoding="utf-8")
+        (cwd / ".symphony" / "runner-handoff.json").write_text(json.dumps(handoff), encoding="utf-8")
         print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "result": {{"stopReason": "end_turn"}}}}), flush=True)
         break
     else:
@@ -908,14 +908,14 @@ impl LinearClient for PartiallyFailingProjectLinearClient {
 }
 
 #[derive(Debug, Default)]
-struct ScriptedOpenCodeLauncher {
-    handoff: Option<OpenCodeHandoff>,
+struct ScriptedRunnerLauncher {
+    handoff: Option<RunnerHandoff>,
     launches: std::sync::Mutex<Vec<String>>,
     repairs: std::sync::Mutex<Vec<(String, String)>>,
 }
 
-impl ScriptedOpenCodeLauncher {
-    const fn new(handoff: Option<OpenCodeHandoff>) -> Self {
+impl ScriptedRunnerLauncher {
+    const fn new(handoff: Option<RunnerHandoff>) -> Self {
         Self {
             handoff,
             launches: std::sync::Mutex::new(Vec::new()),
@@ -933,11 +933,11 @@ impl ScriptedOpenCodeLauncher {
 }
 
 #[derive(Debug)]
-struct FailingLaunchOpenCodeLauncher {
+struct FailingLaunchRunnerLauncher {
     message: String,
 }
 
-impl FailingLaunchOpenCodeLauncher {
+impl FailingLaunchRunnerLauncher {
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -946,32 +946,30 @@ impl FailingLaunchOpenCodeLauncher {
 }
 
 #[async_trait::async_trait]
-impl OpenCodeLauncher for FailingLaunchOpenCodeLauncher {
+impl RunnerLauncher for FailingLaunchRunnerLauncher {
     async fn launch(
         &self,
-        _spec: &opencode::OpenCodeLaunchSpec,
-    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
-        Err(opencode::OpenCodeError::InvalidWorktree(
-            self.message.clone(),
-        ))
+        _spec: &runner::RunnerLaunchSpec,
+    ) -> Result<runner::RunnerStartedSession, runner::RunnerError> {
+        Err(runner::RunnerError::InvalidWorktree(self.message.clone()))
     }
 }
 
 #[derive(Debug)]
-struct SetupFailingOpenCodeLauncher;
+struct SetupFailingRunnerLauncher;
 
 #[async_trait::async_trait]
-impl OpenCodeLauncher for SetupFailingOpenCodeLauncher {
+impl RunnerLauncher for SetupFailingRunnerLauncher {
     async fn launch(
         &self,
-        spec: &opencode::OpenCodeLaunchSpec,
-    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
-        Err(opencode::OpenCodeError::AcpSetupFailed {
+        spec: &runner::RunnerLaunchSpec,
+    ) -> Result<runner::RunnerStartedSession, runner::RunnerError> {
+        Err(runner::RunnerError::AcpSetupFailed {
             issue_identifier: spec.issue_identifier.clone(),
             process_id: Some(4242),
             session_id: None,
             reason: "setup failed before session attachment".into(),
-            termination: Box::new(opencode::ProcessTreeTerminationEvidence {
+            termination: Box::new(runner::ProcessTreeTerminationEvidence {
                 root_process_id: 4242,
                 descendant_process_ids: vec![4243],
                 term_signal_sent: true,
@@ -984,15 +982,15 @@ impl OpenCodeLauncher for SetupFailingOpenCodeLauncher {
 }
 
 #[derive(Debug)]
-struct FailingContinueOpenCodeLauncher;
+struct FailingContinueRunnerLauncher;
 
 #[async_trait::async_trait]
-impl OpenCodeLauncher for FailingContinueOpenCodeLauncher {
+impl RunnerLauncher for FailingContinueRunnerLauncher {
     async fn launch(
         &self,
-        spec: &opencode::OpenCodeLaunchSpec,
-    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
-        Ok(opencode::OpenCodeStartedSession {
+        spec: &runner::RunnerLaunchSpec,
+    ) -> Result<runner::RunnerStartedSession, runner::RunnerError> {
+        Ok(runner::RunnerStartedSession {
             session_id: format!("new:{}", spec.issue_identifier),
             process_id: Some(6210),
             acp_frame_count: 0,
@@ -1002,18 +1000,18 @@ impl OpenCodeLauncher for FailingContinueOpenCodeLauncher {
 
     async fn continue_session(
         &self,
-        _spec: &opencode::OpenCodeLaunchSpec,
-        _session: &OpenCodeSessionRecord,
+        _spec: &runner::RunnerLaunchSpec,
+        _session: &RunnerSessionRecord,
         _continuation_message: &str,
-    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
-        Err(opencode::OpenCodeError::InvalidWorktree(
+    ) -> Result<runner::RunnerStartedSession, runner::RunnerError> {
+        Err(runner::RunnerError::InvalidWorktree(
             "continue failed".into(),
         ))
     }
 }
 
 #[derive(Debug)]
-struct ResumeRecordingOpenCodeLauncher {
+struct ResumeRecordingRunnerLauncher {
     resumed_process_id: u32,
     launches: std::sync::Mutex<Vec<String>>,
     resumes: std::sync::Mutex<Vec<(String, String)>>,
@@ -1021,7 +1019,7 @@ struct ResumeRecordingOpenCodeLauncher {
     repairs: std::sync::Mutex<Vec<(String, String)>>,
 }
 
-impl ResumeRecordingOpenCodeLauncher {
+impl ResumeRecordingRunnerLauncher {
     const fn new(resumed_process_id: u32) -> Self {
         Self {
             resumed_process_id,
@@ -1053,16 +1051,16 @@ impl ResumeRecordingOpenCodeLauncher {
 }
 
 #[async_trait::async_trait]
-impl OpenCodeLauncher for ResumeRecordingOpenCodeLauncher {
+impl RunnerLauncher for ResumeRecordingRunnerLauncher {
     async fn launch(
         &self,
-        spec: &opencode::OpenCodeLaunchSpec,
-    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+        spec: &runner::RunnerLaunchSpec,
+    ) -> Result<runner::RunnerStartedSession, runner::RunnerError> {
         self.launches
             .lock()
             .expect("launches lock")
             .push(spec.issue_identifier.clone());
-        Ok(opencode::OpenCodeStartedSession {
+        Ok(runner::RunnerStartedSession {
             session_id: format!("new:{}", spec.issue_identifier),
             process_id: Some(self.resumed_process_id + 1),
             acp_frame_count: 0,
@@ -1072,14 +1070,14 @@ impl OpenCodeLauncher for ResumeRecordingOpenCodeLauncher {
 
     async fn resume(
         &self,
-        spec: &opencode::OpenCodeLaunchSpec,
-        session: &OpenCodeSessionRecord,
-    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+        spec: &runner::RunnerLaunchSpec,
+        session: &RunnerSessionRecord,
+    ) -> Result<runner::RunnerStartedSession, runner::RunnerError> {
         self.resumes
             .lock()
             .expect("resumes lock")
             .push((spec.issue_identifier.clone(), session.session_id.clone()));
-        Ok(opencode::OpenCodeStartedSession {
+        Ok(runner::RunnerStartedSession {
             session_id: session.session_id.clone(),
             process_id: Some(self.resumed_process_id),
             acp_frame_count: 0,
@@ -1089,15 +1087,15 @@ impl OpenCodeLauncher for ResumeRecordingOpenCodeLauncher {
 
     async fn continue_session(
         &self,
-        spec: &opencode::OpenCodeLaunchSpec,
-        session: &OpenCodeSessionRecord,
+        spec: &runner::RunnerLaunchSpec,
+        session: &RunnerSessionRecord,
         _continuation_message: &str,
-    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+    ) -> Result<runner::RunnerStartedSession, runner::RunnerError> {
         self.continuations
             .lock()
             .expect("continuations lock")
             .push((spec.issue_identifier.clone(), session.session_id.clone()));
-        Ok(opencode::OpenCodeStartedSession {
+        Ok(runner::RunnerStartedSession {
             session_id: session.session_id.clone(),
             process_id: Some(self.resumed_process_id),
             acp_frame_count: 0,
@@ -1107,16 +1105,16 @@ impl OpenCodeLauncher for ResumeRecordingOpenCodeLauncher {
 
     async fn continue_repair(
         &self,
-        spec: &opencode::OpenCodeLaunchSpec,
-        session: &OpenCodeSessionRecord,
+        spec: &runner::RunnerLaunchSpec,
+        session: &RunnerSessionRecord,
         failure_fingerprint: &str,
         _repair_message: &str,
-    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+    ) -> Result<runner::RunnerStartedSession, runner::RunnerError> {
         self.repairs.lock().expect("repairs lock").push((
             spec.issue_identifier.clone(),
             failure_fingerprint.to_owned(),
         ));
-        Ok(opencode::OpenCodeStartedSession {
+        Ok(runner::RunnerStartedSession {
             session_id: session.session_id.clone(),
             process_id: Some(self.resumed_process_id),
             acp_frame_count: 0,
@@ -1126,12 +1124,12 @@ impl OpenCodeLauncher for ResumeRecordingOpenCodeLauncher {
 }
 
 #[derive(Debug)]
-struct MalformedHandoffOpenCodeLauncher {
+struct MalformedHandoffRunnerLauncher {
     message: String,
     repairs: std::sync::Mutex<Vec<(String, String)>>,
 }
 
-impl MalformedHandoffOpenCodeLauncher {
+impl MalformedHandoffRunnerLauncher {
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -1145,35 +1143,33 @@ impl MalformedHandoffOpenCodeLauncher {
 }
 
 #[async_trait::async_trait]
-impl OpenCodeLauncher for MalformedHandoffOpenCodeLauncher {
+impl RunnerLauncher for MalformedHandoffRunnerLauncher {
     async fn launch(
         &self,
-        _spec: &opencode::OpenCodeLaunchSpec,
-    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
-        unreachable!("malformed handoff test should not launch OpenCode")
+        _spec: &runner::RunnerLaunchSpec,
+    ) -> Result<runner::RunnerStartedSession, runner::RunnerError> {
+        unreachable!("malformed handoff test should not launch runner")
     }
 
     async fn latest_handoff(
         &self,
-        _session: &OpenCodeSessionRecord,
-    ) -> Result<Option<OpenCodeHandoff>, opencode::OpenCodeError> {
-        Err(opencode::OpenCodeError::MalformedHandoff(
-            self.message.clone(),
-        ))
+        _session: &RunnerSessionRecord,
+    ) -> Result<Option<RunnerHandoff>, runner::RunnerError> {
+        Err(runner::RunnerError::MalformedHandoff(self.message.clone()))
     }
 
     async fn continue_repair(
         &self,
-        _spec: &opencode::OpenCodeLaunchSpec,
-        session: &OpenCodeSessionRecord,
+        _spec: &runner::RunnerLaunchSpec,
+        session: &RunnerSessionRecord,
         failure_fingerprint: &str,
         _repair_message: &str,
-    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+    ) -> Result<runner::RunnerStartedSession, runner::RunnerError> {
         self.repairs
             .lock()
             .expect("repairs lock")
             .push((session.session_id.clone(), failure_fingerprint.to_string()));
-        Ok(opencode::OpenCodeStartedSession {
+        Ok(runner::RunnerStartedSession {
             session_id: session.session_id.clone(),
             process_id: session.process_id,
             acp_frame_count: 0,
@@ -1183,16 +1179,16 @@ impl OpenCodeLauncher for MalformedHandoffOpenCodeLauncher {
 }
 
 #[async_trait::async_trait]
-impl OpenCodeLauncher for ScriptedOpenCodeLauncher {
+impl RunnerLauncher for ScriptedRunnerLauncher {
     async fn launch(
         &self,
-        spec: &opencode::OpenCodeLaunchSpec,
-    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+        spec: &runner::RunnerLaunchSpec,
+    ) -> Result<runner::RunnerStartedSession, runner::RunnerError> {
         self.launches
             .lock()
             .expect("launches lock")
             .push(spec.issue_identifier.clone());
-        Ok(opencode::OpenCodeStartedSession {
+        Ok(runner::RunnerStartedSession {
             session_id: format!("scripted:{}", spec.cwd.display()),
             process_id: None,
             acp_frame_count: 0,
@@ -1202,8 +1198,8 @@ impl OpenCodeLauncher for ScriptedOpenCodeLauncher {
 
     async fn latest_handoff(
         &self,
-        session: &OpenCodeSessionRecord,
-    ) -> Result<Option<OpenCodeHandoff>, opencode::OpenCodeError> {
+        session: &RunnerSessionRecord,
+    ) -> Result<Option<RunnerHandoff>, runner::RunnerError> {
         Ok(self
             .handoff
             .clone()
@@ -1212,16 +1208,16 @@ impl OpenCodeLauncher for ScriptedOpenCodeLauncher {
 
     async fn continue_repair(
         &self,
-        _spec: &opencode::OpenCodeLaunchSpec,
-        session: &OpenCodeSessionRecord,
+        _spec: &runner::RunnerLaunchSpec,
+        session: &RunnerSessionRecord,
         failure_fingerprint: &str,
         _repair_message: &str,
-    ) -> Result<opencode::OpenCodeStartedSession, opencode::OpenCodeError> {
+    ) -> Result<runner::RunnerStartedSession, runner::RunnerError> {
         self.repairs
             .lock()
             .expect("repairs lock")
             .push((session.session_id.clone(), failure_fingerprint.to_string()));
-        Ok(opencode::OpenCodeStartedSession {
+        Ok(runner::RunnerStartedSession {
             session_id: session.session_id.clone(),
             process_id: session.process_id,
             acp_frame_count: 0,

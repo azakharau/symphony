@@ -4,7 +4,7 @@ const pages = [
   { slug: "overview", path: "/", expected: "Running now" },
   { slug: "projects", path: "/projects", expected: "Projects" },
   { slug: "project", path: "/projects/symphony", expected: "Symphony current execution" },
-  { slug: "issue", path: "/projects/symphony/issues/sym-97", expected: "OpenCode session inspector" },
+  { slug: "issue", path: "/projects/symphony/issues/sym-97", expected: "runner session inspector" },
   { slug: "quota", path: "/quota", expected: "Quota windows" },
   { slug: "defects", path: "/defects", expected: "Deduped defects" },
 ];

@@ -1986,6 +1986,7 @@ async fn orchestration_does_not_repair_again_when_recoverable_issue_already_has_
     let mut live_process = Command::new("sleep")
         .arg("120")
         .env("SYMPHONY_ISSUE_WORKTREE", &worktree)
+        .current_dir(&worktree)
         .spawn()
         .expect("spawn live OMP-shaped process");
     thread::sleep(Duration::from_millis(100));
@@ -2112,10 +2113,38 @@ async fn orchestration_records_process_while_acp_session_new_is_still_pending() 
     let db_path = dir.path().join("runtime.sqlite3");
     let transcript_path = dir.path().join("acp-transcript.jsonl");
     let script_path = write_hanging_before_session_new_acp_script(dir.path(), &transcript_path);
-    let configured = valid_config_toml().replace(
-        "command = \"/usr/local/bin/opencode\"",
-        &format!("command = \"{}\"", script_path.display()),
+    let repo = dir.path().join("repo");
+    let worktree_root = dir.path().join("worktrees");
+    fs::create_dir_all(&repo).expect("repo dir");
+    fs::create_dir_all(&worktree_root).expect("worktree root");
+    fs::write(repo.join("WORKFLOW.md"), "test workflow").expect("workflow");
+    run_git(&repo, ["init"]);
+    run_git(&repo, ["config", "user.email", "symphony@example.test"]);
+    run_git(&repo, ["config", "user.name", "Symphony Test"]);
+    run_git(&repo, ["add", "WORKFLOW.md"]);
+    run_git(&repo, ["commit", "-m", "base"]);
+    run_git(&repo, ["branch", "agent-server/opencode-runner-extension"]);
+    run_git(
+        &repo,
+        ["checkout", "agent-server/opencode-runner-extension"],
     );
+    let configured = valid_config_toml()
+        .replace(
+            "workflow_path = \"/home/agent/proj/symphony/WORKFLOW.md\"",
+            &format!("workflow_path = \"{}\"", repo.join("WORKFLOW.md").display()),
+        )
+        .replace(
+            "repo_path = \"/home/agent/proj/symphony\"",
+            &format!("repo_path = \"{}\"", repo.display()),
+        )
+        .replace(
+            "worktree_root = \"/home/agent/.symphony/workspaces/opencode/symphony\"",
+            &format!("worktree_root = \"{}\"", worktree_root.display()),
+        )
+        .replace(
+            "command = \"/usr/local/bin/opencode\"",
+            &format!("command = \"{}\"", script_path.display()),
+        );
     let config = RootConfig::from_toml_str(&configured).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
@@ -3297,5 +3326,10 @@ async fn orchestration_blocker_does_not_reactivate_failed_session() {
 }
 
 fn process_exists(process_id: u32) -> bool {
-    Path::new(&format!("/proc/{process_id}")).exists()
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(process_id.to_string())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }

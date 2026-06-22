@@ -27,7 +27,7 @@ export async function getDashboardData(): Promise<DataResult<AggregateDashboard>
   const fixture = fixtureState();
   if (fixture === "empty") return { status: "available", data: emptyDashboard };
   if (fixture === "acceptance") return { status: "available", data: acceptanceDashboard };
-  return fetchRustJson<AggregateDashboard>("/api/dashboard/ui");
+  return fetchRustJson<AggregateDashboard>("/api/dashboard");
 }
 
 export async function getProjectData(projectId: string): Promise<DataResult<ProjectDetail>> {
@@ -38,7 +38,7 @@ export async function getProjectData(projectId: string): Promise<DataResult<Proj
       ? { status: "available", data: project }
       : unavailable("not_found", `Project ${projectId} is not available in dashboard data.`);
   }
-  return fetchRustJson<ProjectDetail>(`/api/projects/${encodeURIComponent(projectId)}/ui`);
+  return fetchRustJson<ProjectDetail>(`/api/projects/${encodeURIComponent(projectId)}`);
 }
 
 export async function getIssueData(projectId: string, issueId: string): Promise<DataResult<IssueDetail>> {
@@ -50,7 +50,7 @@ export async function getIssueData(projectId: string, issueId: string): Promise<
       : unavailable("not_found", `Issue ${issueId} is not available in dashboard data.`);
   }
   return fetchRustJson<IssueDetail>(
-    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/ui`,
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}`,
   );
 }
 
@@ -81,20 +81,21 @@ export async function getDefectsData(): Promise<DataResult<SelfDefectRouteSummar
         const routing = issue.self_defect_routing;
         if (!routing) return [];
         return [{
-          fingerprint: routing.fingerprint ?? `${issue.project_id}:${issue.issue_id}`,
-          severity: routing.severity,
-          kind: routing.kind,
+          source_issue_id: routing.source_context.issue_id,
+          source_issue_identifier: routing.source_context.issue_identifier,
+          managed_issue_id: routing.managed_bug.issue_id,
+          managed_issue_identifier: routing.managed_bug.identifier,
+          managed_issue_url: routing.managed_bug.url,
+          fingerprint: routing.fingerprint,
           defect_kind: routing.defect_kind,
-          relation: routing.relation,
+          severity: routing.severity,
           relation_mode: routing.relation_mode,
-          source_issue_id: routing.source_issue_id ?? issue.issue_id,
-          source_issue_identifier: routing.source_issue_identifier ?? issue.identifier,
-          managed_issue_id: routing.managed_issue_id,
-          managed_issue_identifier: routing.managed_issue_identifier,
           occurrence_count: routing.occurrence_count,
           first_seen_at: routing.first_seen_at,
           last_seen_at: routing.last_seen_at,
           next_action: routing.next_action,
+          skipped_blocker_reason: routing.skipped_blocker_reason,
+          deadlock_skipped_blocker: routing.deadlock_skipped_blocker,
         }];
       });
   });

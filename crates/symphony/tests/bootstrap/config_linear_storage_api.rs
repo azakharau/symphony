@@ -1594,7 +1594,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
         "status": "inactive_runtime",
         "reason": "runtime has not reported a poll for this enabled project",
         "primary_reason_code": "active_runner_session",
-        "primary_reason_detail": "an runner session is actively executing",
+        "primary_reason_detail": "a runner session is actively executing",
         "last_poll_at": null,
         "last_successful_candidate_scan_at": null,
         "capacity": {
@@ -1663,14 +1663,29 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
     assert!(aggregate_json.contains(r#""running_cost_micros": 123456"#));
     assert!(issue_json.contains(r#""cost_micros": 123456"#));
 
+    let public_aggregate =
+        symphony::api::runtime_api_json_response(&config, &store, "/api/dashboard")
+            .await
+            .expect("public aggregate response");
     let ui_aggregate =
         symphony::api::runtime_api_json_response(&config, &store, "/api/dashboard/ui")
             .await
             .expect("ui aggregate response");
+    let public_project =
+        symphony::api::runtime_api_json_response(&config, &store, "/api/projects/symphony")
+            .await
+            .expect("public project response");
     let ui_project =
         symphony::api::runtime_api_json_response(&config, &store, "/api/projects/symphony/ui")
             .await
             .expect("ui project response");
+    let public_issue = symphony::api::runtime_api_json_response(
+        &config,
+        &store,
+        "/api/projects/symphony/issues/repair",
+    )
+    .await
+    .expect("public issue response");
     let ui_issue = symphony::api::runtime_api_json_response(
         &config,
         &store,
@@ -1682,32 +1697,53 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
         .await
         .expect("dashboard event stream");
 
+    assert_eq!(public_aggregate.status, 200);
     assert_eq!(ui_aggregate.status, 200);
+    assert_eq!(public_project.status, 200);
     assert_eq!(ui_project.status, 200);
+    assert_eq!(public_issue.status, 200);
     assert_eq!(ui_issue.status, 200);
     assert_eq!(events.status, 200);
     assert_eq!(events.content_type, "text/event-stream; charset=utf-8");
+    assert_eq!(ui_aggregate.body, public_aggregate.body);
+    assert_eq!(ui_project.body, public_project.body);
+    assert_eq!(ui_issue.body, public_issue.body);
     assert!(
-        ui_aggregate
+        public_aggregate
             .body
-            .contains(r#""polling_fallback_endpoint":"/api/dashboard/ui""#)
+            .contains(r#""polling_fallback_endpoint":"/api/dashboard""#)
     );
     assert!(
-        ui_aggregate
+        public_aggregate
             .body
             .contains(r#""live_events_endpoint":"/api/dashboard/events""#)
     );
-    assert!(ui_project.body.contains(r#""active_issues""#));
-    assert!(ui_aggregate.body.contains(r#""running_cached_tokens":0"#));
-    assert!(ui_aggregate.body.contains(r#""duration_ms":null"#));
-    assert!(ui_issue.body.contains(r#""runner_session_id":"oc-repair""#));
-    assert!(ui_issue.body.contains(r#""cached_token_count":0"#));
-    assert!(ui_issue.body.contains(r#""duration_ms":null"#));
+    assert!(public_project.body.contains(r#""metadata":{"#));
+    assert!(public_project.body.contains(r#""active_issues""#));
+    assert!(
+        public_aggregate
+            .body
+            .contains(r#""running_cached_tokens":0"#)
+    );
+    assert!(public_aggregate.body.contains(r#""duration_ms":null"#));
+    assert!(public_issue.body.contains(r#""metadata":{"#));
+    assert!(
+        public_issue
+            .body
+            .contains(r#""runner_session_id":"oc-repair""#)
+    );
+    assert!(public_issue.body.contains(r#""cached_token_count":0"#));
+    assert!(public_issue.body.contains(r#""duration_ms":null"#));
     assert!(events.body.starts_with("event: dashboard.snapshot\ndata: "));
+    assert!(
+        events
+            .body
+            .contains(r#""polling_fallback_endpoint":"/api/dashboard""#)
+    );
     assert!(events.body.contains(r#""running_cached_tokens":0"#));
-    assert!(!ui_aggregate.body.contains("cost_micros"));
-    assert!(!ui_project.body.contains("cost_micros"));
-    assert!(!ui_issue.body.contains("cost_micros"));
+    assert!(!public_aggregate.body.contains("cost_micros"));
+    assert!(!public_project.body.contains("cost_micros"));
+    assert!(!public_issue.body.contains("cost_micros"));
     assert!(!events.body.contains("cost_micros"));
 }
 
@@ -1745,9 +1781,20 @@ async fn dashboard_api_json_routes_aggregate_project_and_issue_paths() {
     assert_eq!(project.status, 200);
     assert_eq!(issue.status, 200);
     assert_eq!(missing.status, 404);
+    assert!(aggregate.body.contains(r#""metadata":{"#));
+    assert!(
+        aggregate
+            .body
+            .contains(r#""polling_fallback_endpoint":"/api/dashboard""#)
+    );
     assert!(aggregate.body.contains(r#""project_id":"symphony""#));
+    assert!(project.body.contains(r#""metadata":{"#));
     assert!(project.body.contains(r#""active_issues""#));
+    assert!(issue.body.contains(r#""metadata":{"#));
     assert!(issue.body.contains(r#""identifier":"SYM-94""#));
+    assert!(!aggregate.body.contains("cost_micros"));
+    assert!(!project.body.contains("cost_micros"));
+    assert!(!issue.body.contains("cost_micros"));
 }
 
 #[tokio::test]

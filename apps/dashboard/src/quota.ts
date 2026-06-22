@@ -48,22 +48,22 @@ export type QuotaResult =
 
 export async function readQuota(config: DashboardConfig): Promise<QuotaResult> {
   try {
-    const { stdout } = await execAsync(config.ocuCommand, {
+    const { stdout } = await execAsync(config.providerQuotaCommand, {
       timeout: config.quotaTimeoutMs,
       maxBuffer: 1024 * 1024,
       env: process.env,
     });
-    return parseQuotaJson(stdout, config.ocuCommand);
+    return parseQuotaJson(stdout, config.providerQuotaCommand);
   } catch (error) {
     return unavailable(
-      config.ocuCommand,
+      config.providerQuotaCommand,
       commandTimedOut(error) ? "timeout" : "command_failed",
       error instanceof Error ? error.message : String(error),
     );
   }
 }
 
-export function parseQuotaJson(stdout: string, command = "ocu --localhost --plain"): QuotaResult {
+export function parseQuotaJson(stdout: string, command = "provider-quota --localhost --plain"): QuotaResult {
   let raw: unknown;
   try {
     raw = JSON.parse(stdout);

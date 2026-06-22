@@ -4,5 +4,5 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export function GET() {
-  return proxyRustJson("/api/dashboard/ui");
+  return proxyRustJson("/api/dashboard");
 }

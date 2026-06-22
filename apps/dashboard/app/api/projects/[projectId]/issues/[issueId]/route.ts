@@ -9,6 +9,6 @@ export async function GET(
 ) {
   const { projectId, issueId } = await context.params;
   return proxyRustJson(
-    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}/ui`,
+    `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issueId)}`,
   );
 }

@@ -24,7 +24,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'DASHBOARD_FIXTURE_STATE=acceptance OCU_COMMAND="ocu --localhost --plain" bun run start --hostname 127.0.0.1 --port 32097',
+    command: 'DASHBOARD_FIXTURE_STATE=acceptance SYMPHONY_QUOTA_COMMAND="provider-quota --localhost --plain" bun run start --hostname 127.0.0.1 --port 32097',
     url: "http://127.0.0.1:32097",
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

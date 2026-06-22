@@ -1,8 +1,8 @@
 export type LifecycleStage = "queued" | "running" | "blocked" | "completed" | "failed" | "canceled" | string;
 
 export type DashboardMetadata = {
-  polling_fallback_endpoint?: string;
-  live_events_endpoint?: string;
+  polling_fallback_endpoint: string;
+  live_events_endpoint: string;
 };
 
 export type ProjectCapacity = {
@@ -40,7 +40,7 @@ export type RunningIssueSummary = {
   active_agent?: string | null;
   active_model?: string | null;
   token_count: number;
-  cached_token_count?: number;
+  cached_token_count: number;
   subagents_used: number;
   running_tool_count: number;
   pending_tool_count: number;
@@ -56,20 +56,21 @@ export type RunningIssueSummary = {
 };
 
 export type SelfDefectRouteSummary = {
+  source_issue_id: string;
+  source_issue_identifier: string;
+  managed_issue_id: string;
+  managed_issue_identifier: string;
+  managed_issue_url?: string | null;
   fingerprint: string;
-  severity?: string | null;
-  kind?: string | null;
-  defect_kind?: string | null;
-  relation?: string | null;
-  relation_mode?: string | null;
-  source_issue_id?: string | null;
-  source_issue_identifier?: string | null;
-  managed_issue_id?: string | null;
-  managed_issue_identifier?: string | null;
-  occurrence_count?: number | null;
-  first_seen_at?: string | null;
-  last_seen_at?: string | null;
-  next_action?: string | null;
+  defect_kind: string;
+  severity: string;
+  relation_mode: string;
+  occurrence_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  next_action: string;
+  skipped_blocker_reason?: string | null;
+  deadlock_skipped_blocker: boolean;
 };
 
 export type DashboardProjectCard = {
@@ -85,10 +86,10 @@ export type DashboardProjectCard = {
   liveness: RuntimeLiveness;
   cleanup_status: string;
   running_tokens: number;
-  running_cached_tokens?: number;
+  running_cached_tokens: number;
   recorded_tokens: number;
   running_issues: RunningIssueSummary[];
-  self_defect_routes?: SelfDefectRouteSummary[];
+  self_defect_routes: SelfDefectRouteSummary[];
 };
 
 export type DashboardTotals = {
@@ -98,12 +99,12 @@ export type DashboardTotals = {
   available_sessions: number;
   max_sessions: number;
   running_tokens: number;
-  running_cached_tokens?: number;
+  running_cached_tokens: number;
   recorded_tokens: number;
 };
 
 export type AggregateDashboard = {
-  metadata?: DashboardMetadata;
+  metadata: DashboardMetadata;
   totals: DashboardTotals;
   projects: DashboardProjectCard[];
 };
@@ -225,7 +226,7 @@ export type RunnerSession = {
   todo_count: number;
   part_count: number;
   token_count: number;
-  cached_token_count?: number;
+  cached_token_count: number;
   started_at_ms?: number | null;
   duration_ms?: number | null;
   last_event?: string | null;
@@ -237,25 +238,57 @@ export type RunnerSession = {
   activity_error?: string | null;
 };
 
+export type ManagedSelfDefect = {
+  issue_id: string;
+  identifier: string;
+  url?: string | null;
+};
+
+export type SelfDefectSourceContext = {
+  project_id: string;
+  issue_id: string;
+  issue_identifier: string;
+  session_id?: string | null;
+  process_id?: number | null;
+};
+
+export type SelfDefectRecommendation = {
+  recommendation_id: string;
+  evidence_fingerprint: string;
+  defect_kind: string;
+  defect_category: string;
+  confidence: string;
+  recommended_action: string;
+  source_project_id: string;
+  source_issue_id: string;
+  source_issue_identifier: string;
+  source_session_id?: string | null;
+  source_process_id?: number | null;
+  occurrence_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+};
+
 export type SelfDefectRouting = {
-  fingerprint?: string | null;
-  severity?: string | null;
-  kind?: string | null;
-  defect_kind?: string | null;
-  relation?: string | null;
-  relation_mode?: string | null;
-  source_issue_id?: string | null;
-  source_issue_identifier?: string | null;
-  managed_issue_id?: string | null;
-  managed_issue_identifier?: string | null;
-  occurrence_count?: number | null;
-  first_seen_at?: string | null;
-  last_seen_at?: string | null;
-  next_action?: string | null;
+  managed_bug: ManagedSelfDefect;
+  source_context: SelfDefectSourceContext;
+  fingerprint: string;
+  severity: string;
+  defect_kind: string;
+  category: string;
+  occurrence_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  relation_mode: string;
+  classifier_recommendation?: SelfDefectRecommendation | null;
+  next_action: string;
+  suppression_reason?: string | null;
+  skipped_blocker_reason?: string | null;
+  deadlock_skipped_blocker: boolean;
 };
 
 export type IssueDetail = {
-  metadata?: DashboardMetadata;
+  metadata: DashboardMetadata;
   project_id: string;
   issue_id: string;
   identifier: string;
@@ -275,7 +308,7 @@ export type IssueDetail = {
 };
 
 export type ProjectDetail = {
-  metadata?: DashboardMetadata;
+  metadata: DashboardMetadata;
   project_id: string;
   name: string;
   enabled: boolean;

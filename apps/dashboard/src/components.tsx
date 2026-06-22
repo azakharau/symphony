@@ -173,13 +173,13 @@ export function DefectsSurface({ defects }: { defects: SelfDefectRouteSummary[] 
                 <tr key={`${defect.fingerprint}-${defect.managed_issue_id ?? "unmanaged"}`}>
                   <td className="px-3 py-3 font-mono text-xs">{defect.fingerprint}</td>
                   <td className="px-3 py-3"><Badge tone={statusTone(defect.severity)}>{defect.severity ?? "unknown"}</Badge></td>
-                  <td className="px-3 py-3">{defect.kind ?? defect.defect_kind ?? "unknown"}</td>
-                  <td className="px-3 py-3">{defect.relation ?? defect.relation_mode ?? "unrelated"}</td>
+                  <td className="px-3 py-3">{defect.defect_kind}</td>
+                  <td className="px-3 py-3">{defect.relation_mode}</td>
                   <td className="px-3 py-3">{defect.source_issue_identifier ?? defect.source_issue_id ?? "—"}</td>
-                  <td className="px-3 py-3">{defect.managed_issue_identifier ?? defect.managed_issue_id ?? "—"}</td>
-                  <td className="px-3 py-3">{defect.occurrence_count ?? 1}</td>
+                  <td className="px-3 py-3">{defect.managed_issue_url ? <a className="text-blue-700 hover:underline" href={defect.managed_issue_url} target="_blank" rel="noreferrer">{defect.managed_issue_identifier}</a> : defect.managed_issue_identifier}</td>
+                  <td className="px-3 py-3">{defect.occurrence_count}</td>
                   <td className="px-3 py-3 text-xs text-slate-600">{shortTime(defect.first_seen_at)} / {shortTime(defect.last_seen_at)}</td>
-                  <td className="px-3 py-3">{defect.next_action ?? "inspect evidence"}</td>
+                  <td className="px-3 py-3">{defect.next_action}</td>
                 </tr>
               ))}
             </tbody>
@@ -239,7 +239,6 @@ function ProjectTable({ projects, detailed = false }: { projects: DashboardProje
             <th className="px-3 py-2">blocked</th>
             {detailed ? <th className="px-3 py-2">terminal</th> : null}
             <th className="px-3 py-2">primary reason</th>
-            <th className="px-3 py-2">last event</th>
             <th className="px-3 py-2">cleanup</th>
           </tr>
         </thead>
@@ -254,7 +253,6 @@ function ProjectTable({ projects, detailed = false }: { projects: DashboardProje
               <td className="px-3 py-3">{project.parked_count}</td>
               {detailed ? <td className="px-3 py-3">{project.terminal_count}</td> : null}
               <td className="px-3 py-3">{project.liveness.primary_reason_detail || project.liveness.reason}</td>
-              <td className="px-3 py-3">{project.last_event}</td>
               <td className="px-3 py-3">{project.cleanup_status}</td>
             </tr>
           ))}
@@ -359,7 +357,7 @@ function DefectIssueList({ issues, projectId }: { issues: IssueDetail[]; project
     <div className="grid gap-2 text-sm">
       {issues.map((issue) => (
         <Link key={issue.issue_id} className="rounded-xl border border-red-200 bg-red-50 p-3 text-red-950" href={`/projects/${projectId}/issues/${issue.issue_id}`}>
-          <span className="font-semibold">{issue.identifier}</span> {issue.runtime_defect?.classification ?? issue.self_defect_routing?.kind ?? issue.self_defect_routing?.defect_kind ?? issue.failure?.kind}: {issue.runtime_defect?.next_action ?? issue.self_defect_routing?.next_action ?? issue.failure?.message}
+          <span className="font-semibold">{issue.identifier}</span> {issue.runtime_defect?.classification ?? issue.self_defect_routing?.defect_kind ?? issue.failure?.kind}: {issue.runtime_defect?.next_action ?? issue.self_defect_routing?.next_action ?? issue.failure?.message}
         </Link>
       ))}
     </div>

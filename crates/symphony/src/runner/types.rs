@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -47,7 +47,7 @@ pub struct RunnerLaunchSpec {
 pub(crate) const OMP_CLEANUP_MARKER_ENV: &str = "SYMPHONY_OMP_CLEANUP_MARKER";
 
 impl RunnerLaunchSpec {
-    pub(crate) fn omp_cleanup_marker(&self) -> Option<String> {
+    pub(crate) fn omp_cleanup_marker_for_cwd(&self, cwd: &Path) -> Option<String> {
         if self.provider_mode != RuntimeProviderMode::OmpAcp {
             return None;
         }
@@ -55,7 +55,7 @@ impl RunnerLaunchSpec {
         Some(format!(
             "provider={provider_id};issue={};cwd={}",
             self.issue_identifier,
-            self.cwd.display()
+            cwd.display()
         ))
     }
 }

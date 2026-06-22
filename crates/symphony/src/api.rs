@@ -45,10 +45,7 @@ pub async fn runtime_api_json_response(
 ) -> Result<ApiJsonResponse, StorageError> {
     let api = RuntimeDashboardApi::from_store(config, store).await?;
 
-    if path == AGGREGATE_DASHBOARD_ENDPOINT {
-        return json_response(200, api.aggregate());
-    }
-    if path == UI_AGGREGATE_DASHBOARD_ENDPOINT {
+    if path == AGGREGATE_DASHBOARD_ENDPOINT || path == UI_AGGREGATE_DASHBOARD_ENDPOINT {
         return json_response(200, &ui_aggregate_response(&api));
     }
     if path == DASHBOARD_EVENTS_ENDPOINT {
@@ -61,19 +58,11 @@ pub async fn runtime_api_json_response(
     let parts = rest.split('/').collect::<Vec<_>>();
 
     match parts.as_slice() {
-        [project_id] => api.project_drilldown(project_id)?.map_or_else(
-            || json_response(404, &serde_json::json!({ "error": "project_not_found" })),
-            |project| json_response(200, project),
-        ),
-        [project_id, "ui"] => api.project_drilldown(project_id)?.map_or_else(
+        [project_id] | [project_id, "ui"] => api.project_drilldown(project_id)?.map_or_else(
             || json_response(404, &serde_json::json!({ "error": "project_not_found" })),
             |project| json_response(200, &UiProjectDashboardResponse::from(project)),
         ),
-        [project_id, "issues", issue_id] => api.issue_detail(project_id, issue_id)?.map_or_else(
-            || json_response(404, &serde_json::json!({ "error": "issue_not_found" })),
-            |issue| json_response(200, issue),
-        ),
-        [project_id, "issues", issue_id, "ui"] => {
+        [project_id, "issues", issue_id] | [project_id, "issues", issue_id, "ui"] => {
             api.issue_detail(project_id, issue_id)?.map_or_else(
                 || json_response(404, &serde_json::json!({ "error": "issue_not_found" })),
                 |issue| json_response(200, &UiIssueDetailResponse::from(issue)),
@@ -840,7 +829,7 @@ fn primary_execution_reason(
     if active_issues.iter().any(issue_has_active_runner_session) {
         return (
             "active_runner_session",
-            "an runner session is actively executing".into(),
+            "a runner session is actively executing".into(),
         );
     }
     if liveness.capacity.available_sessions == 0 {
@@ -1094,7 +1083,11 @@ async fn session_detail(
         stage_history
     };
     let process_id = session.process_id;
-    let process_alive = process_alive(process_id).await;
+    let process_alive = if should_probe_session_process(&session) {
+        process_alive(process_id).await
+    } else {
+        None
+    };
     let (activity, activity_error) = match runner_archive_database_path {
         Some(path) => match read_session_tree_activity(path.clone(), &session.session_id, 40).await
         {
@@ -1143,13 +1136,17 @@ async fn session_detail(
     })
 }
 
+fn should_probe_session_process(session: &RunnerSessionRecord) -> bool {
+    session.process_id.is_some()
+        && matches!(
+            session.lifecycle_stage,
+            LifecycleStage::Queued | LifecycleStage::Running | LifecycleStage::Blocked
+        )
+        && !matches!(session.stage, RunnerStage::Completed | RunnerStage::Failed)
+}
+
 async fn process_alive(process_id: Option<u32>) -> Option<bool> {
-    let process_id = process_id?;
-    Some(
-        tokio::fs::try_exists(format!("/proc/{process_id}"))
-            .await
-            .unwrap_or(false),
-    )
+    Some(crate::runner::process_exists(process_id?).await)
 }
 
 fn session_tree_cached_token_count(activity: &RunnerSessionTreeActivity) -> u64 {

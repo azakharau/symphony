@@ -36,7 +36,7 @@ pub use archive::{
 };
 use lifecycle::AcpChildLifecycle;
 pub use lifecycle::ProcessTreeTerminationEvidence;
-pub(crate) use lifecycle::terminate_process_tree;
+pub(crate) use lifecycle::{process_exists, terminate_process_tree};
 pub use omp::{OmpAcpTelemetry, classify_omp_acp_failure_kind};
 pub use omp_metrics::read_omp_session_tree_metrics;
 use prompt::{

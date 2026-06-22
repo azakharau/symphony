@@ -2,12 +2,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     api::{
-        AggregateDashboardResponse, AggregateDashboardTotals, CandidateSuppressionResponse,
-        DASHBOARD_EVENTS_ENDPOINT, IssueDetailResponse, ProjectCapacity, ProjectDashboardCard,
-        ProjectDashboardResponse, ProjectRuntimeLivenessResponse, RunnerSessionDetail,
-        RunningIssueSummary, RuntimeDashboardApi, RuntimeDefectProjection,
-        SelectedCandidateResponse, SelfDefectRouteSummary, SelfDefectRoutingProjection,
-        UI_AGGREGATE_DASHBOARD_ENDPOINT,
+        AGGREGATE_DASHBOARD_ENDPOINT, AggregateDashboardResponse, AggregateDashboardTotals,
+        CandidateSuppressionResponse, DASHBOARD_EVENTS_ENDPOINT, IssueDetailResponse,
+        ProjectCapacity, ProjectDashboardCard, ProjectDashboardResponse,
+        ProjectRuntimeLivenessResponse, RunnerSessionDetail, RunningIssueSummary,
+        RuntimeDashboardApi, RuntimeDefectProjection, SelectedCandidateResponse,
+        SelfDefectRouteSummary, SelfDefectRoutingProjection,
     },
     runner::{RunnerSessionActivity, RunnerSessionTreeActivity},
     state::{CleanupStatus, EvalRunRecord, GitRefRecord, LifecycleStage, RunnerStage},
@@ -213,7 +213,7 @@ pub fn dashboard_event_stream_response(api: &RuntimeDashboardApi) -> DashboardEv
 impl Default for DashboardContractMetadata {
     fn default() -> Self {
         Self {
-            polling_fallback_endpoint: UI_AGGREGATE_DASHBOARD_ENDPOINT.into(),
+            polling_fallback_endpoint: AGGREGATE_DASHBOARD_ENDPOINT.into(),
             live_events_endpoint: DASHBOARD_EVENTS_ENDPOINT.into(),
         }
     }

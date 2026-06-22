@@ -5,7 +5,7 @@ use crate::{
     linear::LinearIssue,
     runner::{
         OMP_CLEANUP_MARKER_ENV, RunnerLauncher, RunnerStartedSession, build_acp_launch_spec,
-        terminate_process_tree,
+        process_exists, terminate_process_tree,
     },
     state::{FailureRecord, LifecycleStage, RunnerSessionRecord, RunnerStage},
     storage::SqliteStore,
@@ -413,6 +413,26 @@ async fn omp_acp_process_is_alive(session: &RunnerSessionRecord, process_id: u32
         return false;
     }
 
+    if omp_acp_process_environ_matches_session_worktree(session, process_id).await {
+        return true;
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        return process_exists(process_id).await
+            && process_cwd_matches(process_id, Path::new(&session.worktree_path)).await;
+    }
+
+    #[cfg(any(target_os = "linux", not(unix)))]
+    {
+        false
+    }
+}
+
+async fn omp_acp_process_environ_matches_session_worktree(
+    session: &RunnerSessionRecord,
+    process_id: u32,
+) -> bool {
     let Ok(environ) = tokio::fs::read(format!("/proc/{process_id}/environ")).await else {
         return false;
     };
@@ -445,11 +465,29 @@ async fn omp_acp_process_matches_cleanup_owner(
         return false;
     }
 
-    let Ok(environ) = tokio::fs::read(format!("/proc/{process_id}/environ")).await else {
-        return false;
-    };
     let issue_worktree = project.branch.worktree_root.join(&issue.identifier);
-    omp_acp_environ_matches_cleanup_owner(&issue_worktree, &issue.identifier, session, &environ)
+
+    if let Ok(environ) = tokio::fs::read(format!("/proc/{process_id}/environ")).await
+        && omp_acp_environ_matches_cleanup_owner(
+            &issue_worktree,
+            &issue.identifier,
+            session,
+            &environ,
+        )
+    {
+        return true;
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        return process_exists(process_id).await
+            && process_cwd_matches(process_id, &issue_worktree).await;
+    }
+
+    #[cfg(any(target_os = "linux", not(unix)))]
+    {
+        false
+    }
 }
 
 fn omp_acp_environ_matches_cleanup_owner(
@@ -480,10 +518,34 @@ fn omp_acp_environ_matches_cleanup_owner(
     })
 }
 
-async fn runner_process_is_alive(process_id: u32) -> bool {
-    tokio::fs::metadata(format!("/proc/{process_id}"))
+#[cfg(all(unix, not(target_os = "linux")))]
+async fn process_cwd_matches(process_id: u32, expected_cwd: &Path) -> bool {
+    let expected_cwd = expected_cwd
+        .canonicalize()
+        .unwrap_or_else(|_| expected_cwd.to_path_buf());
+    let Ok(output) = tokio::process::Command::new("lsof")
+        .args(["-a", "-p", &process_id.to_string(), "-d", "cwd", "-Fn"])
+        .output()
         .await
-        .is_ok()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix('n'))
+        .any(|cwd| {
+            let cwd = Path::new(cwd)
+                .canonicalize()
+                .unwrap_or_else(|_| Path::new(cwd).to_path_buf());
+            cwd == expected_cwd
+        })
+}
+
+async fn runner_process_is_alive(process_id: u32) -> bool {
+    process_exists(process_id).await
 }
 
 pub(super) async fn process_elapsed_seconds(process_id: u32) -> Option<u64> {

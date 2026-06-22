@@ -5,5 +5,5 @@ export const runtime = "nodejs";
 
 export async function GET(_request: Request, context: { params: Promise<{ projectId: string }> }) {
   const { projectId } = await context.params;
-  return proxyRustJson(`/api/projects/${encodeURIComponent(projectId)}/ui`);
+  return proxyRustJson(`/api/projects/${encodeURIComponent(projectId)}`);
 }

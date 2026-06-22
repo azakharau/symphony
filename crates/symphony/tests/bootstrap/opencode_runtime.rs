@@ -1362,10 +1362,11 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
                 !transcript.contains("SYMPHONY_RECALL_WORKSPACE_ROOT"),
                 "{transcript}"
             );
+            let canonical_worktree = worktree.canonicalize().unwrap_or_else(|_| worktree.clone());
             assert!(
                 transcript.contains(&format!(
                     r#""SYMPHONY_ISSUE_WORKTREE": "{}""#,
-                    worktree.display()
+                    canonical_worktree.display()
                 )),
                 "{transcript}"
             );

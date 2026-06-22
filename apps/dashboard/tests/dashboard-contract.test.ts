@@ -31,10 +31,10 @@ describe("dashboard contract normalization", () => {
     });
   });
 
-  test("rewrites Rust UI metadata to BFF fallback endpoints", () => {
+  test("keeps canonical Rust metadata on BFF fallback endpoints", () => {
     const normalized = normalizeDashboardPayload({
       metadata: {
-        polling_fallback_endpoint: "/api/dashboard/ui",
+        polling_fallback_endpoint: "/api/dashboard",
         live_events_endpoint: "/api/dashboard/events",
       },
       totals: { [hiddenUsageKey]: 1 },

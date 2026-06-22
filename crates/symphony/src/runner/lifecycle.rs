@@ -48,8 +48,9 @@ impl AcpChildLifecycle {
                 command.env(name, value);
             }
         }
-        command.env("SYMPHONY_ISSUE_WORKTREE", &spec.cwd);
-        if let Some(marker) = spec.omp_cleanup_marker() {
+        let issue_worktree = spec.cwd.canonicalize().unwrap_or_else(|_| spec.cwd.clone());
+        command.env("SYMPHONY_ISSUE_WORKTREE", &issue_worktree);
+        if let Some(marker) = spec.omp_cleanup_marker_for_cwd(&issue_worktree) {
             command.env(super::OMP_CLEANUP_MARKER_ENV, marker);
         }
         let mut child = command.spawn()?;
@@ -247,7 +248,8 @@ async fn terminate_process_group(process_group_id: u32, signal: &str) -> Result<
     Ok(())
 }
 
-async fn process_exists(process_id: u32) -> bool {
+#[cfg(target_os = "linux")]
+pub(crate) async fn process_exists(process_id: u32) -> bool {
     let Ok(stat) = tokio::fs::read_to_string(format!("/proc/{process_id}/stat")).await else {
         return false;
     };
@@ -257,6 +259,29 @@ async fn process_exists(process_id: u32) -> bool {
     !after_command.1.starts_with("Z ")
 }
 
+#[cfg(all(unix, not(target_os = "linux")))]
+pub(crate) async fn process_exists(process_id: u32) -> bool {
+    let Ok(output) = Command::new("ps")
+        .args(["-o", "stat=", "-p", &process_id.to_string()])
+        .output()
+        .await
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let state = String::from_utf8_lossy(&output.stdout);
+    let state = state.trim();
+    !state.is_empty() && !state.starts_with('Z')
+}
+
+#[cfg(not(unix))]
+pub(crate) async fn process_exists(_process_id: u32) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
 async fn descendant_process_ids(root_process_id: u32) -> Result<Vec<u32>, RunnerError> {
     let mut children = std::collections::BTreeMap::<u32, Vec<u32>>::new();
     let mut entries = tokio::fs::read_dir("/proc").await?;
@@ -271,6 +296,52 @@ async fn descendant_process_ids(root_process_id: u32) -> Result<Vec<u32>, Runner
         children.entry(parent_pid).or_default().push(pid);
     }
 
+    Ok(descendant_process_ids_from_children(
+        root_process_id,
+        children,
+    ))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+async fn descendant_process_ids(root_process_id: u32) -> Result<Vec<u32>, RunnerError> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,ppid="])
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(RunnerError::ProcessTree(format!(
+            "failed to list process tree with ps: {}",
+            output.status
+        )));
+    }
+
+    let mut children = std::collections::BTreeMap::<u32, Vec<u32>>::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.split_whitespace();
+        let Some(pid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Some(parent_pid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        children.entry(parent_pid).or_default().push(pid);
+    }
+
+    Ok(descendant_process_ids_from_children(
+        root_process_id,
+        children,
+    ))
+}
+
+#[cfg(not(unix))]
+async fn descendant_process_ids(_root_process_id: u32) -> Result<Vec<u32>, RunnerError> {
+    Ok(Vec::new())
+}
+
+fn descendant_process_ids_from_children(
+    root_process_id: u32,
+    mut children: std::collections::BTreeMap<u32, Vec<u32>>,
+) -> Vec<u32> {
     let mut descendants = Vec::new();
     let mut stack = children.remove(&root_process_id).unwrap_or_default();
     while let Some(pid) = stack.pop() {
@@ -279,9 +350,10 @@ async fn descendant_process_ids(root_process_id: u32) -> Result<Vec<u32>, Runner
         }
         descendants.push(pid);
     }
-    Ok(descendants)
+    descendants
 }
 
+#[cfg(target_os = "linux")]
 async fn read_process_group_id(process_id: u32) -> Result<u32, RunnerError> {
     let stat = tokio::fs::read_to_string(format!("/proc/{process_id}/stat")).await?;
     let Some(after_command) = stat.rsplit_once(") ") else {
@@ -302,6 +374,32 @@ async fn read_process_group_id(process_id: u32) -> Result<u32, RunnerError> {
         .map_err(|error| RunnerError::ProcessTree(error.to_string()))
 }
 
+#[cfg(all(unix, not(target_os = "linux")))]
+async fn read_process_group_id(process_id: u32) -> Result<u32, RunnerError> {
+    let output = Command::new("ps")
+        .args(["-o", "pgid=", "-p", &process_id.to_string()])
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(RunnerError::ProcessTree(format!(
+            "failed to read process group id for pid {process_id}: {}",
+            output.status
+        )));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .map_err(|error| RunnerError::ProcessTree(error.to_string()))
+}
+
+#[cfg(not(unix))]
+async fn read_process_group_id(_process_id: u32) -> Result<u32, RunnerError> {
+    Err(RunnerError::ProcessTree(
+        "process groups are not supported on this platform".into(),
+    ))
+}
+
+#[cfg(target_os = "linux")]
 async fn read_parent_process_id(process_id: u32) -> Result<u32, RunnerError> {
     let stat = tokio::fs::read_to_string(format!("/proc/{process_id}/stat")).await?;
     let Some(after_command) = stat.rsplit_once(") ") else {

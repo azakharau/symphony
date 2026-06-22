@@ -78,18 +78,21 @@ export const acceptanceDashboard: AggregateDashboard = {
       ],
       self_defect_routes: [
         {
-          fingerprint: "runner-timeout:sym-91",
-          severity: "high",
-          kind: "runtime_timeout",
-          relation: "source_issue_blocked",
           source_issue_id: "sym-91",
           source_issue_identifier: "SYM-91",
           managed_issue_id: "sym-101",
           managed_issue_identifier: "SYM-101",
+          managed_issue_url: "https://linear.app/alexey-zakharov/issue/SYM-101",
+          fingerprint: "runner-timeout:sym-91",
+          defect_kind: "runtime_timeout",
+          severity: "high",
+          relation_mode: "source_issue_blocked",
           occurrence_count: 3,
           first_seen_at: "2026-06-18T10:00:00Z",
           last_seen_at: "2026-06-19T13:55:00Z",
           next_action: "repair managed defect",
+          skipped_blocker_reason: null,
+          deadlock_skipped_blocker: false,
         },
       ],
     },
@@ -182,6 +185,7 @@ export const acceptanceDashboard: AggregateDashboard = {
 };
 
 const sym97Issue: IssueDetail = {
+  metadata: acceptanceDashboard.metadata,
   project_id: "symphony",
   issue_id: "sym-97",
   identifier: "SYM-97",
@@ -291,6 +295,7 @@ const sym97Issue: IssueDetail = {
 };
 
 const blockedIssue: IssueDetail = {
+  metadata: acceptanceDashboard.metadata,
   project_id: "symphony",
   issue_id: "sym-91",
   identifier: "SYM-91",
@@ -301,18 +306,31 @@ const blockedIssue: IssueDetail = {
   failure: null,
   runtime_defect: null,
   self_defect_routing: {
+    managed_bug: {
+      issue_id: "sym-101",
+      identifier: "SYM-101",
+      url: "https://linear.app/alexey-zakharov/issue/SYM-101",
+    },
+    source_context: {
+      project_id: "symphony",
+      issue_id: "sym-91",
+      issue_identifier: "SYM-91",
+      session_id: "oc-sym-97",
+      process_id: null,
+    },
     fingerprint: "runner-timeout:sym-91",
     severity: "high",
-    kind: "runtime_timeout",
-    relation: "source_issue_blocked",
-    source_issue_id: "sym-91",
-    source_issue_identifier: "SYM-91",
-    managed_issue_id: "sym-101",
-    managed_issue_identifier: "SYM-101",
+    defect_kind: "runtime_timeout",
+    category: "runtime",
     occurrence_count: 3,
     first_seen_at: "2026-06-18T10:00:00Z",
     last_seen_at: "2026-06-19T13:55:00Z",
+    relation_mode: "source_issue_blocked",
+    classifier_recommendation: null,
     next_action: "repair managed defect",
+    suppression_reason: null,
+    skipped_blocker_reason: null,
+    deadlock_skipped_blocker: false,
   },
   git_ref: null,
   cleanup_status: "pending",
@@ -447,7 +465,7 @@ export const emptyDashboard: AggregateDashboard = {
 
 export const quotaNormal = {
   status: "available" as const,
-  command: "ocu --plain",
+  command: "provider-quota --plain",
   quota: {
     raw: {},
     buckets: [
@@ -464,7 +482,7 @@ export const quotaNormal = {
 
 export const quotaUnavailable = {
   status: "unavailable" as const,
-  command: "ocu --plain",
+  command: "provider-quota --plain",
   reason: "command_failed" as const,
   message: "quota command unavailable in this environment",
   quota: null,

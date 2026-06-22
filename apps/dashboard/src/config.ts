@@ -1,21 +1,21 @@
 export type DashboardConfig = {
   symphonyApiBase: string;
-  ocuCommand: string;
+  providerQuotaCommand: string;
   quotaTimeoutMs: number;
   refreshMs: number;
   sseEnabled: boolean;
 };
 
 const DEFAULT_API_BASE = "http://127.0.0.1:4115";
-const DEFAULT_OCU_COMMAND = "ocu --localhost --plain";
+const DEFAULT_PROVIDER_QUOTA_COMMAND = "provider-quota --localhost --plain";
 const DEFAULT_QUOTA_TIMEOUT_MS = 5_000;
 const DEFAULT_REFRESH_MS = 1_000;
 
 export function readDashboardConfig(env: NodeJS.ProcessEnv = process.env): DashboardConfig {
   return {
     symphonyApiBase: trimTrailingSlash(env.SYMPHONY_API_BASE || DEFAULT_API_BASE),
-    ocuCommand: env.OCU_COMMAND || DEFAULT_OCU_COMMAND,
-    quotaTimeoutMs: readPositiveInt(env.OCU_TIMEOUT_MS, DEFAULT_QUOTA_TIMEOUT_MS),
+    providerQuotaCommand: env.SYMPHONY_QUOTA_COMMAND || DEFAULT_PROVIDER_QUOTA_COMMAND,
+    quotaTimeoutMs: readPositiveInt(env.SYMPHONY_QUOTA_TIMEOUT_MS, DEFAULT_QUOTA_TIMEOUT_MS),
     refreshMs: readPositiveInt(env.NEXT_PUBLIC_DASHBOARD_REFRESH_MS, DEFAULT_REFRESH_MS),
     sseEnabled: readBoolean(env.NEXT_PUBLIC_DASHBOARD_SSE_ENABLED, true),
   };

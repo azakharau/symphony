@@ -14,12 +14,12 @@ describe("quota parsing", () => {
           model: "local",
         },
       }),
-      "ocu --localhost --plain",
+      "provider-quota --localhost --plain",
     );
 
     expect(result).toEqual({
       status: "available",
-      command: "ocu --localhost --plain",
+      command: "provider-quota --localhost --plain",
       quota: {
         raw: {
           quota: {
@@ -40,7 +40,7 @@ describe("quota parsing", () => {
     });
   });
 
-  test("parses real ocu --plain bucket windows into first-class subscription data", () => {
+  test("parses provider quota bucket windows into first-class subscription data", () => {
     const result = parseQuotaJson(
       JSON.stringify({
         buckets: [
@@ -53,12 +53,12 @@ describe("quota parsing", () => {
           },
         ],
       }),
-      "ocu --plain",
+      "provider-quota --plain",
     );
 
     expect(result).toEqual({
       status: "available",
-      command: "ocu --plain",
+      command: "provider-quota --plain",
       quota: {
         raw: {
           buckets: [
@@ -102,7 +102,7 @@ describe("quota parsing", () => {
   });
 
   test("returns unavailable state on malformed JSON", () => {
-    const result = parseQuotaJson("not json", "ocu --localhost --plain");
+    const result = parseQuotaJson("not json", "provider-quota --localhost --plain");
 
     expect(result.status).toBe("unavailable");
     if (result.status === "unavailable") {

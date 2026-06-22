@@ -22,10 +22,10 @@ describe("dashboard BFF route proxies", () => {
     }
   });
 
-  test("dashboard route targets Rust UI dashboard contract and keeps public fallback metadata", async () => {
+  test("dashboard route targets canonical Rust dashboard contract and keeps public fallback metadata", async () => {
     const fetchMock = installJsonFetch({
       metadata: {
-        polling_fallback_endpoint: "/api/dashboard/ui",
+        polling_fallback_endpoint: "/api/dashboard",
         live_events_endpoint: "/api/dashboard/events",
       },
       totals: { [hiddenUsageKey]: 1 },
@@ -34,7 +34,7 @@ describe("dashboard BFF route proxies", () => {
     const response = await getDashboard();
     const payload = await response.json();
 
-    expectFetchTarget(fetchMock, "http://rust.test/api/dashboard/ui");
+    expectFetchTarget(fetchMock, "http://rust.test/api/dashboard");
     expect(JSON.stringify(payload)).not.toContain(`${"co"}st`);
     expect(payload).toEqual({
       metadata: {
@@ -45,24 +45,24 @@ describe("dashboard BFF route proxies", () => {
     });
   });
 
-  test("project route targets the Rust project UI contract", async () => {
+  test("project route targets the canonical Rust project contract", async () => {
     const fetchMock = installJsonFetch({ project: { id: "project 1" } });
 
     await getProject(new Request("http://bff.test/api/projects/project%201"), {
       params: Promise.resolve({ projectId: "project 1" }),
     });
 
-    expectFetchTarget(fetchMock, "http://rust.test/api/projects/project%201/ui");
+    expectFetchTarget(fetchMock, "http://rust.test/api/projects/project%201");
   });
 
-  test("issue route targets the Rust issue UI contract", async () => {
+  test("issue route targets the canonical Rust issue contract", async () => {
     const fetchMock = installJsonFetch({ issue: { id: "issue/42" } });
 
     await getIssue(new Request("http://bff.test/api/projects/project%201/issues/issue%2F42"), {
       params: Promise.resolve({ projectId: "project 1", issueId: "issue/42" }),
     });
 
-    expectFetchTarget(fetchMock, "http://rust.test/api/projects/project%201/issues/issue%2F42/ui");
+    expectFetchTarget(fetchMock, "http://rust.test/api/projects/project%201/issues/issue%2F42");
   });
 });
 

@@ -9,6 +9,8 @@ mod session_metrics;
 mod types;
 mod worktree;
 
+use std::process::ExitStatus;
+
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::{
@@ -252,11 +254,7 @@ fn spawn_prompt_reader(
         )
         .await
         {
-            warn!(error = %error, message = warning, "runner ACP prompt stream ended with error");
-            if let Some(process_id) = child.id() {
-                let _ = terminate_process_tree(process_id, warning).await;
-            }
-            let _ = child.kill().await;
+            handle_reader_error(error, warning, &mut child).await;
         }
         let _ = child.wait().await;
         stderr_drain.abort();
@@ -274,11 +272,66 @@ fn spawn_stream_drain(
     let permission_policy = permission_policy.clone();
     tokio::spawn(async move {
         if let Err(error) = drain_acp_stream(stdout, stdin, permission_policy).await {
-            warn!(error = %error, message = warning, "runner ACP stream drain ended with error");
+            handle_reader_error(error, warning, &mut child).await;
         }
         let _ = child.wait().await;
         stderr_drain.abort();
     });
+}
+
+async fn handle_reader_error(error: RunnerError, warning: &'static str, child: &mut Child) {
+    match child.try_wait() {
+        Ok(Some(status)) if process_exit_was_managed_shutdown(status) => {
+            debug!(
+                error = %error,
+                status = %status,
+                message = warning,
+                "runner ACP reader stopped after managed process shutdown"
+            );
+        }
+        Ok(Some(status)) => {
+            warn!(
+                error = %error,
+                status = %status,
+                message = warning,
+                "runner ACP reader ended after process exit with error"
+            );
+        }
+        Ok(None) => {
+            warn!(error = %error, message = warning, "runner ACP reader ended with error");
+            if let Some(process_id) = child.id() {
+                let _ = terminate_process_tree(process_id, warning).await;
+            }
+            let _ = child.kill().await;
+        }
+        Err(wait_error) => {
+            warn!(
+                error = %error,
+                wait_error = %wait_error,
+                message = warning,
+                "runner ACP reader could not inspect process after stream error"
+            );
+            if let Some(process_id) = child.id() {
+                let _ = terminate_process_tree(process_id, warning).await;
+            }
+            let _ = child.kill().await;
+        }
+    }
+}
+
+fn process_exit_was_managed_shutdown(status: ExitStatus) -> bool {
+    if status.success() {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        matches!(status.signal(), Some(9 | 15))
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 #[async_trait::async_trait]
@@ -1251,6 +1304,19 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn prompt_reader_treats_owner_terminated_process_as_managed_shutdown() {
+        use std::os::unix::process::ExitStatusExt;
+
+        assert!(process_exit_was_managed_shutdown(ExitStatus::from_raw(0)));
+        assert!(process_exit_was_managed_shutdown(ExitStatus::from_raw(15)));
+        assert!(process_exit_was_managed_shutdown(ExitStatus::from_raw(9)));
+        assert!(!process_exit_was_managed_shutdown(ExitStatus::from_raw(
+            1 << 8
+        )));
+    }
 
     #[test]
     fn normalizes_runner_orchestrator_handoff_dialect() {

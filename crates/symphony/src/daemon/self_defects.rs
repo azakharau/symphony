@@ -237,8 +237,9 @@ fn runtime_self_defect_summary(
         .fingerprint
         .as_deref()
         .unwrap_or(failure.kind.as_str());
+    let failure_reason = bounded_line(&failure.message);
     format!(
-        "Symphony runtime self-defect\nkind: {kind}\nfingerprint: {fingerprint}\nmanaged_severity: {severity}\nmanaged_state: {state}\nsource_project: {source_project}\nsource_issue: {source_issue}\nsession_id: {session_id}\nprocess_id: {process_id}\noccurrence: {occurrence}\nsummary: {message}",
+        "Symphony runtime self-defect\nkind: {kind}\nfingerprint: {fingerprint}\nmanaged_severity: {severity}\nmanaged_state: {state}\nsource_project: {source_project}\nsource_issue: {source_issue}\nsession_id: {session_id}\nprocess_id: {process_id}\noccurrence: {occurrence}\nsummary: {message}\nfailure_reason: {failure_reason}",
         kind = failure.kind,
         severity = policy.severity,
         state = policy.state.state_name(),

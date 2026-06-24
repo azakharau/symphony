@@ -545,9 +545,9 @@ inverse_bridge_reference = true
     );
     assert_eq!(spec.cwd, PathBuf::from("/home/agent/proj/symphony"));
     assert_eq!(spec.env_allowlist, ["PATH", "OMP_TOKEN"]);
-    assert_eq!(spec.agent, "");
-    assert_eq!(spec.model, None);
-    assert_eq!(spec.effort, None);
+    assert_eq!(spec.agent, "build");
+    assert_eq!(spec.model.as_deref(), Some("openai/gpt-5.5"));
+    assert_eq!(spec.effort.as_deref(), Some("high"));
     assert_eq!(spec.recall_workspace_root, None);
     assert!(spec.prompt.contains("SYM-27"), "{}", spec.prompt);
     assert!(

@@ -121,6 +121,17 @@ inverse_bridge_reference = true
     assert!(provider.capabilities.sdk_session_evidence);
     assert!(provider.capabilities.rpc_secondary_mode);
     assert!(provider.capabilities.inverse_bridge_reference);
+    let issue = linear_issue("issue-omp", "SYM-204", "Todo", Some(1));
+    let launch_spec = runner::build_acp_launch_spec(project, &issue);
+    assert_eq!(launch_spec.provider_mode, RuntimeProviderMode::OmpAcp);
+    assert_eq!(launch_spec.provider_id.as_deref(), Some("omp-primary"));
+    assert_eq!(launch_spec.agent, "build");
+    assert_eq!(launch_spec.model.as_deref(), Some("openai/gpt-5.5"));
+    assert_eq!(launch_spec.effort.as_deref(), Some("high"));
+    assert_eq!(
+        launch_spec.cwd,
+        PathBuf::from("/home/agent/.symphony/workspaces/opencode/symphony/SYM-204")
+    );
 }
 
 #[tokio::test]

@@ -2443,7 +2443,29 @@ async fn orchestration_cancels_stale_queued_and_blocked_issues_missing_from_line
 async fn orchestration_records_launch_failure_without_aborting_poll_or_owner_input() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
-    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let configured = valid_config_toml().replace(
+        "[projects.eval]\n",
+        r#"[[projects.omp_acp_providers]]
+id = "omp-primary"
+command = "/usr/local/bin/omp"
+args = ["--model", "openai/gpt-5.5", "acp"]
+cwd = "issue_worktree"
+env_allowlist = ["PATH", "HOME"]
+agent = "omp-agent"
+model = "openai/gpt-5.5"
+effort = "high"
+
+[projects.omp_acp_providers.capabilities]
+acp_stdio = true
+hook_evidence = true
+sdk_session_evidence = true
+rpc_secondary_mode = true
+inverse_bridge_reference = true
+
+[projects.eval]
+"#,
+    );
+    let config = RootConfig::from_toml_str(&configured).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
@@ -2505,6 +2527,11 @@ async fn orchestration_records_launch_failure_without_aborting_poll_or_owner_inp
     assert!(managed.iter().any(|issue| {
         issue.source_issue_id == "launch-fails" && issue.fingerprint == "launch_failed"
     }));
+    assert!(
+        managed[0]
+            .description
+            .contains("failure_reason: invalid runner worktree: existing worktree is dirty")
+    );
     assert!(client.relations().iter().any(|relation| {
         relation
             == &(
@@ -2513,6 +2540,21 @@ async fn orchestration_records_launch_failure_without_aborting_poll_or_owner_inp
                 ManagedLinearRelation::Blocks,
             )
     }));
+    let session = store
+        .runner_session("symphony", "launch-fails", "launch-failed:SYM-201")
+        .await
+        .expect("query launch failure session")
+        .expect("launch failure session");
+    assert_eq!(session.provider_mode, RuntimeProviderMode::OmpAcp);
+    assert_eq!(session.provider_id.as_deref(), Some("omp-primary"));
+    assert_eq!(session.agent, "omp-agent");
+    assert_eq!(session.model.as_deref(), Some("openai/gpt-5.5"));
+    assert_eq!(session.active_agent.as_deref(), Some("omp-agent"));
+    assert_eq!(session.active_model.as_deref(), Some("openai/gpt-5.5"));
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(session.stage, RunnerStage::Failed);
+    assert_eq!(session.lifecycle_marker.as_deref(), Some("launch_failed"));
+    assert_eq!(session.last_event.as_deref(), Some("launch_failed"));
     let issue = store
         .issue("symphony", "launch-fails")
         .await

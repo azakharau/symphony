@@ -1209,9 +1209,18 @@ pub fn build_omp_acp_launch_spec(
         repo_path: Some(project.repo_path.clone()),
         recall_workspace_root: None,
         base_ref: Some(project.branch.base.clone()),
-        agent: String::new(),
-        model: None,
-        effort: None,
+        agent: provider
+            .agent
+            .clone()
+            .unwrap_or_else(|| project.runner.agent.clone()),
+        model: provider
+            .model
+            .clone()
+            .or_else(|| project.runner.model.clone()),
+        effort: provider
+            .effort
+            .clone()
+            .or_else(|| project.runner.effort.clone()),
         prompt: build_issue_prompt(project, issue, &branch_name),
         permission_policy: project.runner.permission_policy.clone(),
     }

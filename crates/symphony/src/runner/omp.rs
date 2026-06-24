@@ -11,7 +11,8 @@ use super::{
     adapter::AgentExecutionAdapter,
     ensure_worktree, launch_uses_issue_worktree,
     lifecycle::AcpChildLifecycle,
-    read_acp_response, remove_stale_handoff_sidecar, spawn_prompt_reader, spawn_stream_drain,
+    prompt_with_session_binding, read_acp_response, remove_stale_handoff_sidecar,
+    spawn_prompt_reader, spawn_stream_drain,
 };
 
 #[derive(Debug, Default)]
@@ -109,13 +110,14 @@ impl StdioOmpAcpLauncher {
             }
         };
 
+        let prompt = prompt_with_session_binding(&spec.prompt, &session_id);
         write_acp_request(
             child.stdin(),
             next_id,
             "session/prompt",
             json!({
                 "sessionId": session_id,
-                "prompt": [{"type": "text", "text": spec.prompt}],
+                "prompt": [{"type": "text", "text": prompt}],
             }),
         )
         .await?;

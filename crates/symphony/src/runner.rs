@@ -261,6 +261,16 @@ fn spawn_prompt_reader(
     });
 }
 
+fn prompt_with_session_binding(prompt: &str, session_id: &str) -> String {
+    format!(
+        "Symphony active session binding\n\
+         - Active Symphony ACP session: `{session_id}`\n\
+         - The structured handoff sidecar MUST set JSON field `session_id` to exactly `{session_id}`.\n\
+         - Do not use issue identifiers, branch names, semantic labels, or invented session ids.\n\n\
+         {prompt}"
+    )
+}
+
 fn spawn_stream_drain(
     permission_policy: &PermissionPolicy,
     warning: &'static str,
@@ -413,6 +423,7 @@ impl RunnerLauncher for StdioRunnerLauncher {
             }
         };
         let prompt_request_id = next_id;
+        let prompt = prompt_with_session_binding(&spec.prompt, &session_id);
         write_acp_request(
             child.stdin(),
             prompt_request_id,
@@ -422,7 +433,7 @@ impl RunnerLauncher for StdioRunnerLauncher {
                 "prompt": [
                     {
                         "type": "text",
-                        "text": spec.prompt.as_str(),
+                        "text": prompt.as_str(),
                     }
                 ],
             }),
@@ -541,7 +552,10 @@ impl RunnerLauncher for StdioRunnerLauncher {
         }
 
         let prompt_request_id = next_id;
-        let prompt = repair_prompt(spec, failure_fingerprint, repair_message);
+        let prompt = prompt_with_session_binding(
+            &repair_prompt(spec, failure_fingerprint, repair_message),
+            &session.session_id,
+        );
         write_acp_request(
             child.stdin(),
             prompt_request_id,
@@ -615,7 +629,10 @@ impl RunnerLauncher for StdioRunnerLauncher {
         }
 
         let prompt_request_id = next_id;
-        let prompt = continuation_prompt(spec, continuation_message);
+        let prompt = prompt_with_session_binding(
+            &continuation_prompt(spec, continuation_message),
+            &session.session_id,
+        );
         write_acp_request(
             child.stdin(),
             prompt_request_id,

@@ -1354,6 +1354,20 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
                 "{transcript}"
             );
             assert!(
+                transcript.contains("Active Symphony ACP session: `ses-test`"),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains("JSON field `session_id` to exactly `ses-test`"),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(
+                    "Do not use issue identifiers, branch names, semantic labels, or invented session ids"
+                ),
+                "{transcript}"
+            );
+            assert!(
                 !transcript.contains("runner ACP session id"),
                 "{transcript}"
             );
@@ -2060,6 +2074,14 @@ async fn stdio_launcher_continues_existing_session_from_dirty_resumable_worktree
             );
             assert!(
                 transcript.contains("MCP tool-schema loop guard"),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains("Active Symphony ACP session: `ses-existing`"),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains("JSON field `session_id` to exactly `ses-existing`"),
                 "{transcript}"
             );
             assert!(

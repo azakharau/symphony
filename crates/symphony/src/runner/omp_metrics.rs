@@ -118,6 +118,9 @@ impl NormalizedUsage {
                     "reportedTotal",
                     "reported_total",
                     "reported-total",
+                    "reportedTotalTokens",
+                    "reported_total_tokens",
+                    "reported-total-tokens",
                 ],
             ),
         }
@@ -455,7 +458,7 @@ mod tests {
         fs::create_dir_all(&subdir).await.expect("subdir");
         fs::write(
             subdir.join("rust-engineer.jsonl"),
-            r#"{"type":"message","timestamp":"2026-06-22T13:48:15.000Z","message":{"role":"assistant","content":[{"type":"text","text":"child"}],"model":"gpt-5.5","usage":{"prompt_tokens":5,"completionTokens":"6","reasoning_tokens":1,"cache_read":8,"cacheWriteTokens":0,"reported_total":"123"}}}"#,
+            r#"{"type":"message","timestamp":"2026-06-22T13:48:15.000Z","message":{"role":"assistant","content":[{"type":"text","text":"child"}],"model":"gpt-5.5","usage":{"prompt_tokens":5,"completionTokens":"6","reasoning_tokens":1,"cache_read":8,"cacheWriteTokens":0,"reported_total_tokens":"123"}}}"#,
         )
         .await
         .expect("subagent file");

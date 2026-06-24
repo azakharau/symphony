@@ -28,7 +28,7 @@ pub struct RunnerSessionArchiveReport {
     pub sessions_deleted: u64,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RunnerSessionTreeMetrics {
     pub root_session_id: String,
     pub session_count: u64,
@@ -41,11 +41,38 @@ pub struct RunnerSessionTreeMetrics {
     pub tokens_reasoning: u64,
     pub tokens_cache_read: u64,
     pub tokens_cache_write: u64,
+    pub tokens_reported_total: u64,
     pub tokens_total: u64,
     pub cost_micros: u64,
+    pub usage_status: String,
     pub active_agent: Option<String>,
     pub active_model: Option<String>,
     pub last_updated_ms: Option<u64>,
+}
+
+impl Default for RunnerSessionTreeMetrics {
+    fn default() -> Self {
+        Self {
+            root_session_id: String::new(),
+            session_count: 0,
+            subagent_count: 0,
+            message_count: 0,
+            part_count: 0,
+            todo_count: 0,
+            tokens_input: 0,
+            tokens_output: 0,
+            tokens_reasoning: 0,
+            tokens_cache_read: 0,
+            tokens_cache_write: 0,
+            tokens_reported_total: 0,
+            tokens_total: 0,
+            cost_micros: 0,
+            usage_status: "missing".to_owned(),
+            active_agent: None,
+            active_model: None,
+            last_updated_ms: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -628,6 +655,12 @@ fn metrics_from_rows(
         .saturating_add(metrics.tokens_reasoning)
         .saturating_add(metrics.tokens_cache_read)
         .saturating_add(metrics.tokens_cache_write);
+    metrics.usage_status = if sessions.is_empty() {
+        "missing"
+    } else {
+        "available"
+    }
+    .to_owned();
     metrics
 }
 

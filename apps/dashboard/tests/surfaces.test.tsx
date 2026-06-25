@@ -159,19 +159,52 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("provider quota exhausted");
   });
 
-  test("project detail renders blocked and runtime-defect states", () => {
+  test("project detail prioritizes current execution and concise queue blockers", () => {
     const blocked = render(<ProjectSurface project={acceptanceProject} />);
     const failed = render(<ProjectSurface project={failedProject} />);
+    const current = sectionText(blocked, "Symphony current execution", "Queue and blockers");
+    const queue = sectionText(blocked, "Queue and blockers", "Runtime");
 
-    expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).toContain("SYM-97");
-    expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).toContain(">duration</th>");
-    expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).toContain("1h 0m");
-    expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).toContain(">last event</th>");
-    expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).toContain("component tests passed");
-    expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).not.toContain("SYM-91");
-    expect(blocked).toContain("provider quota exhausted");
-    expect(failed).toContain("runtime_process_exit");
+    expect(blocked.indexOf("Symphony current execution")).toBeLessThan(blocked.indexOf("Runtime"));
+    expect(current).toContain("SYM-97");
+    expect(current).toContain(">duration</th>");
+    expect(current).toContain("1h 0m");
+    expect(current).toContain(">operational detail</th>");
+    expect(current).toContain("stage review");
+    expect(current).not.toContain(">last event</th>");
+    expect(current).not.toContain("component tests passed");
+    expect(current).not.toContain("worktree");
+    expect(queue).toContain("next SYM-97");
+    expect(queue).toContain("next eligible");
+    expect(queue).toContain("SYM-91");
+    expect(countOccurrences(queue, "SYM-91")).toBe(1);
+    expect(queue).toContain("provider quota exhausted");
+    expect(queue).toContain("repair managed defect");
+    expect(queue).toContain("provider/infra blocker");
+    expect(queue).not.toContain("provider_blocker");
+    expect(failed).toContain("runtime process exit");
+    expect(failed).not.toContain("runtime_process_exit");
     expect(failed).toContain("restart supervised runner");
+  });
+
+  test("project detail bounds recent history by default", () => {
+    const project = JSON.parse(JSON.stringify(acceptanceProject)) as typeof acceptanceProject;
+    project.history_issues = Array.from({ length: 7 }, (_, index) => ({
+      ...project.history_issues[0],
+      issue_id: `sym-history-${index + 1}`,
+      identifier: `SYM-H${index + 1}`,
+      title: `Completed history ${index + 1}`,
+    }));
+
+    const html = render(<ProjectSurface project={project} />);
+    const history = sectionText(html, "Recent run history", "Related defects");
+
+    expect(history).toContain("5 of 7 shown");
+    expect(history).toContain("Showing newest 5 of 7 terminal runs");
+    expect(history).toContain("SYM-H1");
+    expect(history).toContain("SYM-H5");
+    expect(history).not.toContain("SYM-H6");
+    expect(history).not.toContain("SYM-H7");
   });
 
   test("issue inspector renders bounded operational tabs", () => {
@@ -243,8 +276,9 @@ describe("dashboard surfaces", () => {
     expect(currentExecution).toContain("gpt-5.5");
     expect(currentExecution).toContain("1/2");
     expect(currentExecution).toContain(">5</td>");
-    expect(currentExecution).toContain("component tests passed");
-    expect(currentExecution).toContain("/workspaces/symphony/SYM-97");
+    expect(currentExecution).toContain("stage review");
+    expect(currentExecution).not.toContain("component tests passed");
+    expect(currentExecution).not.toContain("/workspaces/symphony/SYM-97");
     expect(currentExecution).not.toContain("stale-tail");
     expect(currentExecution).not.toContain("stale-provider");
     expect(currentExecution).not.toContain("stale event");

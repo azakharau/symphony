@@ -41,6 +41,31 @@ test.describe("SYM-122 dashboard smoke", () => {
       fullPage: true,
     });
   });
+
+  test("overview drills into active and blocked projects", async ({ page }, testInfo) => {
+    await page.goto("/");
+    await page.getByRole("link", { name: "Symphony" }).first().click();
+    await expect(page.getByRole("heading", { name: "Symphony current execution" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "SYM-97" }).first()).toBeVisible();
+    await expect(page.getByText("next eligible").first()).toBeVisible();
+    await expect(page.getByText("provider quota exhausted").first()).toBeVisible();
+    await expect(page.getByText("Showing newest 5")).toHaveCount(0);
+    await page.screenshot({
+      path: `../../artifacts/screenshots/sym-123/${testInfo.project.name}-project-active.png`,
+      fullPage: true,
+    });
+
+    await page.goto("/");
+    await page.getByRole("link", { name: "Atlas" }).first().click();
+    await expect(page.getByRole("heading", { name: "Atlas current execution" })).toBeVisible();
+    await expect(page.getByText("No live execution is currently reported for this project")).toBeVisible();
+    await expect(page.getByText("runtime process exit").first()).toBeVisible();
+    await expect(page.getByText("restart supervised runner").first()).toBeVisible();
+    await page.screenshot({
+      path: `../../artifacts/screenshots/sym-123/${testInfo.project.name}-project-blocked-idle.png`,
+      fullPage: true,
+    });
+  });
 });
 
 test.describe("SYM-122 empty overview", () => {

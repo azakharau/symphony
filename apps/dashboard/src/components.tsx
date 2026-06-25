@@ -5,6 +5,8 @@ import { LiveDuration } from "@/src/live-duration";
 import type { AggregateDashboard, DashboardProjectCard, DashboardTokenMetrics, IssueDetail, ProjectDetail, RunningIssueSummary, SelfDefectRouteSummary } from "@/src/types";
 import type { QuotaResult, QuotaWindow } from "@/src/quota";
 
+const RECENT_HISTORY_LIMIT = 5;
+
 export function DashboardFrame({ children }: { children: React.ReactNode }) {
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-5 px-4 py-5 text-slate-950 sm:px-6 lg:px-8">
@@ -100,6 +102,18 @@ export function ProjectSurface({ project }: { project: ProjectDetail }) {
 
   return (
     <div className="flex flex-col gap-5">
+      <Panel title={`${project.name} current execution`} action={<span>{runningIssues.length ? `${runningIssues.length} running` : "idle"}</span>}>
+        {runningIssues.length ? <IssueTable issues={runningIssues} projectId={project.project_id} /> : <EmptyState message="No live execution is currently reported for this project. Queue state is shown below." />}
+      </Panel>
+
+      <Panel title="Queue and blockers" action={<span>{project.selected_candidate ? `next ${project.selected_candidate.identifier}` : "no selected candidate"}</span>}>
+        {project.selected_candidate || blockers.length || project.suppression_reasons.length ? (
+          <BlockerTable selectedCandidate={project.selected_candidate} issues={blockers} suppressions={project.suppression_reasons} projectId={project.project_id} />
+        ) : (
+          <EmptyState message="No blockers or suppression reasons are currently reported. The project is waiting for eligible work." />
+        )}
+      </Panel>
+
       <section className="grid gap-3 lg:grid-cols-4">
         <MetricCard title="Runtime" value={project.liveness.status} detail={project.liveness.primary_reason_detail || project.liveness.reason} tone={statusTone(project.liveness.status)} />
         <MetricCard title="Capacity" value={`${project.capacity.running_sessions}/${project.capacity.max_sessions}`} detail={`${project.capacity.available_sessions} slots available`} />
@@ -107,14 +121,8 @@ export function ProjectSurface({ project }: { project: ProjectDetail }) {
         <MetricCard title="Cleanup" value={project.cleanup_status} detail={project.enabled ? "enabled" : "disabled"} />
       </section>
 
-      <Panel title={`${project.name} current execution`}>
-        {runningIssues.length ? <IssueTable issues={runningIssues} projectId={project.project_id} /> : <EmptyState message="No live execution is currently reported for this project." />}
-      </Panel>
-      <Panel title="Queue and blockers">
-        {blockers.length || project.suppression_reasons.length ? <BlockerTable issues={blockers} suppressions={project.suppression_reasons} projectId={project.project_id} /> : <EmptyState message="No blockers or suppression reasons are currently reported." />}
-      </Panel>
-      <Panel title="Recent run history">
-        {project.history_issues.length ? <IssueTable issues={project.history_issues} projectId={project.project_id} /> : <EmptyState message="No terminal runs recorded yet." />}
+      <Panel title="Recent run history" action={<span>{historySummary(project.history_issues.length)}</span>}>
+        {project.history_issues.length ? <BoundedHistory issues={project.history_issues} projectId={project.project_id} /> : <EmptyState message="No terminal runs recorded yet." />}
       </Panel>
       <Panel title="Related defects">
         {defects.length ? <DefectIssueList issues={defects} projectId={project.project_id} /> : <EmptyState message="No runtime or self-defect evidence for this project." />}
@@ -347,8 +355,7 @@ function IssueTable({ issues, projectId }: { issues: IssueDetail[]; projectId: s
             <th className="px-3 py-2">tools</th>
             <th className="px-3 py-2">todos</th>
             <th className="px-3 py-2">duration</th>
-            <th className="px-3 py-2">last event</th>
-            <th className="px-3 py-2">worktree</th>
+            <th className="px-3 py-2">operational detail</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
@@ -365,8 +372,7 @@ function IssueTable({ issues, projectId }: { issues: IssueDetail[]; projectId: s
                 <td className="px-3 py-3">{session?.activity?.running_tool_count ?? 0}/{session?.activity?.pending_tool_count ?? 0}</td>
                 <td className="px-3 py-3">{session?.todo_count ?? 0}</td>
                 <td className="px-3 py-3"><LiveDuration startedAtMs={session?.started_at_ms} fallbackMs={session?.duration_ms} /></td>
-                <td className="px-3 py-3">{session?.last_event ?? issue.last_runner_event ?? "—"}</td>
-                <td className="max-w-[220px] truncate px-3 py-3 font-mono text-xs">{session?.worktree_path ?? issue.git_ref?.worktree_path ?? "—"}</td>
+                <td className="px-3 py-3">{issueOperationalDetail(issue, session)}</td>
               </tr>
             );
           })}
@@ -376,19 +382,73 @@ function IssueTable({ issues, projectId }: { issues: IssueDetail[]; projectId: s
   );
 }
 
-function BlockerTable({ issues, suppressions, projectId }: { issues: IssueDetail[]; suppressions: ProjectDetail["suppression_reasons"]; projectId: string }) {
+function BlockerTable({
+  selectedCandidate,
+  issues,
+  suppressions,
+  projectId,
+}: {
+  selectedCandidate: ProjectDetail["selected_candidate"];
+  issues: IssueDetail[];
+  suppressions: ProjectDetail["suppression_reasons"];
+  projectId: string;
+}) {
+  const representedIssueIds = new Set([
+    ...(selectedCandidate ? [selectedCandidate.issue_id] : []),
+    ...issues.map((issue) => issue.issue_id),
+  ]);
+  const supplementalSuppressions = suppressions.filter((suppression) => !representedIssueIds.has(suppression.issue_id));
+
   return (
-    <div className="grid gap-3 text-sm">
-      {issues.map((issue) => (
-        <Link key={issue.issue_id} className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-amber-950" href={`/projects/${projectId}/issues/${issue.issue_id}`}>
-          <span className="font-semibold">{issue.identifier}</span> {issue.blocker?.kind ?? issue.display_status}: {issue.blocker?.message ?? issue.last_runner_event ?? "blocked"}
-        </Link>
-      ))}
-      {suppressions.map((suppression) => (
-        <div key={`${suppression.issue_id}-${suppression.reason_kind}`} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-          <span className="font-semibold">{suppression.identifier}</span> {suppression.reason_kind}: {suppression.reason}
-        </div>
-      ))}
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[760px] text-left text-sm">
+        <thead className="text-xs uppercase tracking-wide text-slate-500">
+          <tr>
+            <th className="px-3 py-2">issue</th>
+            <th className="px-3 py-2">state</th>
+            <th className="px-3 py-2">reason</th>
+            <th className="px-3 py-2">next action</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {selectedCandidate ? (
+            <tr>
+              <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${projectId}/issues/${selectedCandidate.issue_id}`}>{selectedCandidate.identifier}</Link></td>
+              <td className="px-3 py-3"><Badge tone={statusTone(selectedCandidate.lifecycle_stage)}>next eligible</Badge></td>
+              <td className="px-3 py-3">{selectedCandidate.reason}</td>
+              <td className="px-3 py-3">run when capacity is available</td>
+            </tr>
+          ) : null}
+          {issues.map((issue) => (
+            <tr key={issue.issue_id}>
+              <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${projectId}/issues/${issue.issue_id}`}>{issue.identifier}</Link><div className="text-xs text-slate-500">{issue.title}</div></td>
+              <td className="px-3 py-3"><Badge tone={statusTone(issue.lifecycle_stage)}>{issue.display_status}</Badge></td>
+              <td className="px-3 py-3">{issue.blocker?.message ?? issue.stop_reason ?? "blocked"}</td>
+              <td className="px-3 py-3">{issue.runtime_defect?.next_action ?? issue.self_defect_routing?.next_action ?? issue.failure?.message ?? "inspect issue evidence"}</td>
+            </tr>
+          ))}
+          {supplementalSuppressions.map((suppression) => (
+            <tr key={`${suppression.issue_id}-${suppression.reason_kind}`}>
+              <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${projectId}/issues/${suppression.issue_id}`}>{suppression.identifier}</Link></td>
+              <td className="px-3 py-3"><Badge tone="warn">{humanizeLabel(suppression.reason_kind)}</Badge></td>
+              <td className="px-3 py-3">{suppression.reason}</td>
+              <td className="px-3 py-3">waiting for eligibility</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function BoundedHistory({ issues, projectId }: { issues: IssueDetail[]; projectId: string }) {
+  const visibleIssues = issues.slice(0, RECENT_HISTORY_LIMIT);
+  return (
+    <div className="grid gap-3">
+      {issues.length > RECENT_HISTORY_LIMIT ? (
+        <p className="text-sm text-slate-600">Showing newest {RECENT_HISTORY_LIMIT} of {issues.length} terminal runs. Open an issue for full runner history.</p>
+      ) : null}
+      <IssueTable issues={visibleIssues} projectId={projectId} />
     </div>
   );
 }
@@ -398,7 +458,7 @@ function DefectIssueList({ issues, projectId }: { issues: IssueDetail[]; project
     <div className="grid gap-2 text-sm">
       {issues.map((issue) => (
         <Link key={issue.issue_id} className="rounded-xl border border-red-200 bg-red-50 p-3 text-red-950" href={`/projects/${projectId}/issues/${issue.issue_id}`}>
-          <span className="font-semibold">{issue.identifier}</span> {issue.runtime_defect?.classification ?? issue.self_defect_routing?.kind ?? issue.self_defect_routing?.defect_kind ?? issue.failure?.kind}: {issue.runtime_defect?.next_action ?? issue.self_defect_routing?.next_action ?? issue.failure?.message}
+          <span className="font-semibold">{issue.identifier}</span> {humanizeLabel(issue.runtime_defect?.classification ?? issue.self_defect_routing?.kind ?? issue.self_defect_routing?.defect_kind ?? issue.failure?.kind)}: {issue.runtime_defect?.next_action ?? issue.self_defect_routing?.next_action ?? issue.failure?.message}
         </Link>
       ))}
     </div>
@@ -585,6 +645,26 @@ export function processStateLabel(processId?: number | null, alive?: boolean | n
 function isLiveIssue(issue: IssueDetail): boolean {
   const session = currentRunnerSession(issue);
   return issue.lifecycle_stage === "running" || session?.process_alive === true;
+}
+
+function historySummary(total: number): string {
+  if (total === 0) return "empty";
+  if (total <= RECENT_HISTORY_LIMIT) return `${total} shown`;
+  return `${RECENT_HISTORY_LIMIT} of ${total} shown`;
+}
+
+function issueOperationalDetail(issue: IssueDetail, session: ReturnType<typeof currentRunnerSession>): string {
+  if (issue.blocker?.message) return issue.blocker.message;
+  if (issue.runtime_defect?.next_action) return issue.runtime_defect.next_action;
+  if (issue.self_defect_routing?.next_action) return issue.self_defect_routing.next_action;
+  if (issue.failure?.message) return issue.failure.message;
+  if (session?.activity_error) return session.activity_error;
+  if (session?.current_stage) return `stage ${humanizeLabel(session.current_stage)}`;
+  return issue.cleanup_status === "clean" ? "ready for follow-up" : `cleanup ${issue.cleanup_status}`;
+}
+
+function humanizeLabel(value?: string | null): string {
+  return value ? value.replaceAll("_", " ") : "unknown";
 }
 
 function shortTime(value?: string | null): string {

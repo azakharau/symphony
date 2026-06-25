@@ -1,6 +1,34 @@
-import type { AggregateDashboard, IssueDetail, ProjectDetail, SelfDefectRouteSummary } from "@/src/types";
+import type { AggregateDashboard, DashboardTokenMetrics, IssueDetail, ProjectDetail, SelfDefectRouteSummary } from "@/src/types";
 
 const baseCapacity = { max_sessions: 4, running_sessions: 2, available_sessions: 2 };
+
+function tokenMetrics({
+  total,
+  cached,
+  cacheRead = 0,
+  cacheWrite = 0,
+  status = "available",
+}: {
+  total: number;
+  cached: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  status?: string;
+}): DashboardTokenMetrics {
+  return {
+    accounted_total_token_count: total,
+    non_cached_token_count: Math.max(0, total - cached),
+    cached_token_count: cached,
+    input_token_count: 0,
+    output_token_count: 0,
+    reasoning_token_count: Math.max(0, total - cached),
+    cache_read_token_count: cacheRead,
+    cache_write_token_count: cacheWrite,
+    reported_total_token_count: total,
+    metrics_status: status,
+    metrics_source: "fixture",
+  };
+}
 
 export const acceptanceDashboard: AggregateDashboard = {
   metadata: {
@@ -15,6 +43,7 @@ export const acceptanceDashboard: AggregateDashboard = {
     max_sessions: 7,
     running_tokens: 58240,
     running_cached_tokens: 3110,
+    token_metrics: tokenMetrics({ total: 58240, cached: 3110, cacheRead: 2800, cacheWrite: 310 }),
     recorded_tokens: 184320,
   },
   projects: [
@@ -41,6 +70,7 @@ export const acceptanceDashboard: AggregateDashboard = {
       running_tokens: 43210,
       running_cached_tokens: 3110,
       recorded_tokens: 155000,
+      token_metrics: tokenMetrics({ total: 43210, cached: 3110, cacheRead: 2800, cacheWrite: 310 }),
       running_issues: [
         {
           project_id: "symphony",
@@ -62,6 +92,7 @@ export const acceptanceDashboard: AggregateDashboard = {
           active_model: "gpt-5.5",
           token_count: 38210,
           cached_token_count: 3110,
+          token_metrics: tokenMetrics({ total: 38210, cached: 3110, cacheRead: 2800, cacheWrite: 310 }),
           subagents_used: 3,
           running_tool_count: 1,
           pending_tool_count: 2,
@@ -142,6 +173,7 @@ export const acceptanceDashboard: AggregateDashboard = {
       running_tokens: 15030,
       running_cached_tokens: 0,
       recorded_tokens: 5320,
+      token_metrics: tokenMetrics({ total: 15030, cached: 0, status: "degraded" }),
       running_issues: [
         {
           project_id: "atlas",
@@ -163,6 +195,7 @@ export const acceptanceDashboard: AggregateDashboard = {
           active_model: "gpt-5.5",
           token_count: 15030,
           cached_token_count: 0,
+          token_metrics: tokenMetrics({ total: 15030, cached: 0, status: "degraded" }),
           subagents_used: 1,
           running_tool_count: 0,
           pending_tool_count: 0,
@@ -201,6 +234,7 @@ const sym97Issue: IssueDetail = {
   cleanup_status: "clean",
   stop_reason: null,
   last_runner_event: "component tests passed",
+  token_metrics: tokenMetrics({ total: 38210, cached: 3110, cacheRead: 2800, cacheWrite: 310 }),
   runner_sessions: [
     {
       runner_session_id: "oc-sym-97",
@@ -223,6 +257,7 @@ const sym97Issue: IssueDetail = {
       part_count: 64,
       token_count: 38210,
       cached_token_count: 3110,
+      token_metrics: tokenMetrics({ total: 38210, cached: 3110, cacheRead: 2800, cacheWrite: 310 }),
       started_at_ms: 1781880000000,
       duration_ms: 3_600_000,
       last_event: "component tests passed",
@@ -318,6 +353,7 @@ const blockedIssue: IssueDetail = {
   cleanup_status: "pending",
   stop_reason: "owner input required",
   last_runner_event: "provider quota exhausted",
+  token_metrics: tokenMetrics({ total: 0, cached: 0, status: "unavailable" }),
   runner_sessions: [],
   eval_results: [],
 };
@@ -336,6 +372,7 @@ export const acceptanceProject: ProjectDetail = {
     { issue_id: "sym-91", identifier: "SYM-91", reason_kind: "blocked", reason: "provider quota exhausted" },
   ],
   active_issues: [sym97Issue, blockedIssue],
+  token_metrics: tokenMetrics({ total: 43210, cached: 3110, cacheRead: 2800, cacheWrite: 310 }),
   history_issues: [
     {
       ...sym97Issue,
@@ -378,6 +415,7 @@ export const failedProject: ProjectDetail = {
       },
       failure: { kind: "runtime", message: "process exited before handoff", fingerprint: "runtime-exit:atl-42", occurrence_count: 2 },
       last_runner_event: "runtime process exited",
+      token_metrics: tokenMetrics({ total: 15030, cached: 0, status: "degraded" }),
       runner_sessions: [
         {
           ...sym97Issue.runner_sessions[0],
@@ -396,6 +434,7 @@ export const failedProject: ProjectDetail = {
           silence_observed: true,
           activity: null,
           activity_error: "bounded activity unavailable for exited process",
+          token_metrics: tokenMetrics({ total: 15030, cached: 0, status: "degraded" }),
         },
       ],
     },
@@ -413,6 +452,7 @@ export const emptyDashboard: AggregateDashboard = {
     max_sessions: 2,
     running_tokens: 0,
     running_cached_tokens: 0,
+    token_metrics: tokenMetrics({ total: 0, cached: 0, status: "unavailable" }),
     recorded_tokens: 0,
   },
   projects: [
@@ -439,6 +479,7 @@ export const emptyDashboard: AggregateDashboard = {
       running_tokens: 0,
       running_cached_tokens: 0,
       recorded_tokens: 0,
+      token_metrics: tokenMetrics({ total: 0, cached: 0, status: "unavailable" }),
       running_issues: [],
       self_defect_routes: [],
     },

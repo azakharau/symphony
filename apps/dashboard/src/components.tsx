@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 import { LiveDuration } from "@/src/live-duration";
-import type { AggregateDashboard, DashboardProjectCard, IssueDetail, ProjectDetail, RunningIssueSummary, SelfDefectRouteSummary } from "@/src/types";
+import type { AggregateDashboard, DashboardProjectCard, DashboardTokenMetrics, IssueDetail, ProjectDetail, RunningIssueSummary, SelfDefectRouteSummary } from "@/src/types";
 import type { QuotaResult, QuotaWindow } from "@/src/quota";
 
 export function DashboardFrame({ children }: { children: React.ReactNode }) {
@@ -45,7 +45,7 @@ export function OverviewSurface({ dashboard, quota }: { dashboard: AggregateDash
   const running = dashboard.projects.flatMap((project) => project.running_issues ?? []);
   const blockers = dashboard.projects.filter((project) => project.active_count === 0 && (project.parked_count > 0 || isProblemStatus(project.runner_health)));
   const defectCount = dashboard.projects.reduce((total, project) => total + (project.self_defect_routes?.length ?? 0), 0);
-  const runningTokens = tokenBreakdown(dashboard.totals.running_tokens, dashboard.totals.running_cached_tokens);
+  const runningTokens = tokenBreakdown(dashboard.totals.running_tokens, dashboard.totals.running_cached_tokens, dashboard.totals.token_metrics);
 
   return (
     <div className="flex flex-col gap-5">
@@ -53,7 +53,7 @@ export function OverviewSurface({ dashboard, quota }: { dashboard: AggregateDash
         <MetricCard
           title="Sessions"
           value={`${dashboard.totals.running_issue_count}/${dashboard.totals.max_sessions}`}
-          detail={`${dashboard.totals.available_sessions} slots available · ${formatNumber(runningTokens.net)} tokens · ${formatNumber(runningTokens.cached)} cached`}
+          detail={`${dashboard.totals.available_sessions} slots available · ${tokenSummary(runningTokens)}`}
           tone={running.length ? "good" : dashboard.totals.available_sessions > 0 ? "idle" : "warn"}
         />
         <QuotaCompact quota={quota} />
@@ -215,7 +215,7 @@ function RunningTable({ issues }: { issues: RunningIssueSummary[] }) {
               <td className="px-3 py-3"><Badge tone={statusTone(issue.stage)}>{issue.stage ?? issue.display_status}</Badge></td>
               <td className="px-3 py-3"><ProviderStateBlock providerMode={issue.provider_mode} providerId={issue.provider_id} sessionId={issue.session_id} processId={issue.process_id} processAlive={issue.process_alive} runtimeFailureKind={issue.runtime_failure_kind} acpFrameCount={issue.acp_frame_count} evidenceCount={issue.session_evidence_refs?.length} silenceObserved={issue.silence_observed} /></td>
               <td className="px-3 py-3">{issue.active_agent ?? issue.agent ?? "—"}<div className="text-xs text-slate-500">{issue.active_model ?? issue.model ?? "model unknown"}</div></td>
-              <td className="px-3 py-3"><TokenCell total={issue.token_count} cached={issue.cached_token_count} /></td>
+              <td className="px-3 py-3"><TokenCell total={issue.token_count} cached={issue.cached_token_count} metrics={issue.token_metrics} /></td>
               <td className="px-3 py-3"><LiveDuration startedAtMs={issue.started_at_ms} fallbackMs={issue.duration_ms} /></td>
             </tr>
           ))}
@@ -323,7 +323,7 @@ function IssueTable({ issues, projectId }: { issues: IssueDetail[]; projectId: s
                 <td className="px-3 py-3">{session?.active_agent ?? session?.agent ?? "—"}<div className="text-xs text-slate-500">{session?.active_model ?? session?.model ?? "model unknown"}</div></td>
                 <td className="px-3 py-3">{session ? <ProviderStateBlock providerMode={session.provider_mode} providerId={session.provider_id} sessionId={session.runner_session_id} processId={session.process_id} processAlive={session.process_alive} runtimeFailureKind={session.runtime_failure_kind} acpFrameCount={session.acp_frame_count} evidenceCount={session.session_evidence_refs.length} silenceObserved={session.silence_observed} /> : "—"}</td>
                 <td className="px-3 py-3">{session ? processStateLabel(session.process_id, session.process_alive) : "—"}</td>
-                <td className="px-3 py-3"><TokenCell total={session?.token_count ?? 0} cached={session?.cached_token_count} /></td>
+                <td className="px-3 py-3"><TokenCell total={session?.token_count ?? 0} cached={session?.cached_token_count} metrics={session?.token_metrics} /></td>
                 <td className="px-3 py-3">{session?.activity?.running_tool_count ?? 0}/{session?.activity?.pending_tool_count ?? 0}</td>
                 <td className="px-3 py-3">{session?.todo_count ?? 0}</td>
                 <td className="px-3 py-3"><LiveDuration startedAtMs={session?.started_at_ms} fallbackMs={session?.duration_ms} /></td>
@@ -406,12 +406,13 @@ function MetricCard({ title, value, detail, tone = "idle" }: { title: string; va
   );
 }
 
-function TokenCell({ total, cached }: { total: number; cached?: number | null }) {
-  const tokens = tokenBreakdown(total, cached);
+function TokenCell({ total, cached, metrics }: { total: number; cached?: number | null; metrics?: DashboardTokenMetrics | null }) {
+  const tokens = tokenBreakdown(total, cached, metrics);
   return (
     <div>
-      <div>{formatNumber(tokens.net)}</div>
-      <div className="text-xs text-slate-500">{formatNumber(tokens.cached)} cached</div>
+      <div>{formatNumber(tokens.accounted)} / {formatNumber(tokens.reported)} total</div>
+      <div className="text-xs text-slate-500">{formatNumber(tokens.nonCached)} non-cache · {cacheSummary(tokens)}</div>
+      <div className={`text-xs ${tokens.statusTone === "warn" || tokens.statusTone === "bad" ? "font-medium text-amber-700" : "text-slate-500"}`}>metrics {tokens.status}</div>
     </div>
   );
 }
@@ -559,10 +560,79 @@ function formatNumber(value: number): string {
   return new Intl.NumberFormat("en-US").format(value);
 }
 
-function tokenBreakdown(total: number, cached?: number | null): { net: number; cached: number } {
-  const safeCached = Math.max(0, cached ?? 0);
+type TokenBreakdown = {
+  accounted: number;
+  reported: number;
+  nonCached: number;
+  cached: number;
+  cacheRead: number;
+  cacheWrite: number;
+  status: string;
+  statusTone: Tone;
+  splitProven: boolean;
+};
+
+function tokenBreakdown(total: number, cached?: number | null, metrics?: DashboardTokenMetrics | null): TokenBreakdown {
+  if (metrics) {
+    const status = metrics.metrics_status || "unknown";
+    const normalizedStatus = status.toLowerCase();
+    const cachedTokens = Math.max(0, metrics.cached_token_count);
+    const cacheRead = Math.max(0, metrics.cache_read_token_count);
+    const cacheWrite = Math.max(0, metrics.cache_write_token_count);
+    const splitProven = normalizedStatus !== "unavailable" && (normalizedStatus !== "degraded" || cachedTokens > 0 || cacheRead > 0 || cacheWrite > 0);
+    return {
+      accounted: Math.max(0, metrics.accounted_total_token_count),
+      reported: Math.max(0, metrics.reported_total_token_count),
+      nonCached: Math.max(0, metrics.non_cached_token_count),
+      cached: cachedTokens,
+      cacheRead,
+      cacheWrite,
+      status,
+      statusTone: tokenStatusTone(status),
+      splitProven,
+    };
+  }
+
+  const safeCached = cached === undefined || cached === null ? null : Math.max(0, cached);
+  const accounted = Math.max(0, total);
+  const splitProven = safeCached !== null && safeCached > 0;
   return {
-    net: Math.max(0, total - safeCached),
-    cached: safeCached,
+    accounted,
+    reported: accounted,
+    nonCached: splitProven ? Math.max(0, accounted - safeCached) : accounted,
+    cached: safeCached ?? 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    status: splitProven ? "legacy" : "unavailable",
+    statusTone: splitProven ? "idle" : "warn",
+    splitProven,
   };
+}
+
+function tokenSummary(tokens: TokenBreakdown): string {
+  return `${formatNumber(tokens.accounted)} / ${formatNumber(tokens.reported)} tokens · ${formatNumber(tokens.nonCached)} non-cache · ${cacheSummary(tokens)} · metrics ${tokens.status}`;
+}
+
+function tokenStatusTone(status: string): Tone {
+  switch (status.toLowerCase()) {
+    case "available":
+      return "good";
+    case "degraded":
+    case "unavailable":
+    case "missing":
+    case "unknown":
+    case "partial":
+    case "mixed":
+      return "warn";
+    default:
+      return "idle";
+  }
+}
+
+function cacheSummary(tokens: TokenBreakdown): string {
+  if (!tokens.splitProven) {
+    return `${tokens.status} split`;
+  }
+  const evidence = tokens.cacheRead || tokens.cacheWrite ? ` (read ${formatNumber(tokens.cacheRead)} · write ${formatNumber(tokens.cacheWrite)})` : "";
+  return `${formatNumber(tokens.cached)} cached${evidence}`;
 }

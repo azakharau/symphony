@@ -21,6 +21,20 @@ export type RuntimeLiveness = {
   capacity: ProjectCapacity;
 };
 
+export type DashboardTokenMetrics = {
+  accounted_total_token_count: number;
+  non_cached_token_count: number;
+  cached_token_count: number;
+  input_token_count: number;
+  output_token_count: number;
+  reasoning_token_count: number;
+  cache_read_token_count: number;
+  cache_write_token_count: number;
+  reported_total_token_count: number;
+  metrics_status: string;
+  metrics_source: string;
+};
+
 export type RunningIssueSummary = {
   project_id: string;
   project_name: string;
@@ -41,6 +55,7 @@ export type RunningIssueSummary = {
   active_model?: string | null;
   token_count: number;
   cached_token_count?: number;
+  token_metrics?: DashboardTokenMetrics;
   subagents_used: number;
   running_tool_count: number;
   pending_tool_count: number;
@@ -86,6 +101,7 @@ export type DashboardProjectCard = {
   cleanup_status: string;
   running_tokens: number;
   running_cached_tokens?: number;
+  token_metrics?: DashboardTokenMetrics;
   recorded_tokens: number;
   running_issues: RunningIssueSummary[];
   self_defect_routes?: SelfDefectRouteSummary[];
@@ -100,6 +116,7 @@ export type DashboardTotals = {
   running_tokens: number;
   running_cached_tokens?: number;
   recorded_tokens: number;
+  token_metrics?: DashboardTokenMetrics;
 };
 
 export type AggregateDashboard = {
@@ -226,6 +243,7 @@ export type RunnerSession = {
   part_count: number;
   token_count: number;
   cached_token_count?: number;
+  token_metrics?: DashboardTokenMetrics;
   started_at_ms?: number | null;
   duration_ms?: number | null;
   last_event?: string | null;
@@ -271,6 +289,7 @@ export type IssueDetail = {
   stop_reason?: string | null;
   last_runner_event?: string | null;
   runner_sessions: RunnerSession[];
+  token_metrics?: DashboardTokenMetrics;
   eval_results: EvalRun[];
 };
 
@@ -286,6 +305,7 @@ export type ProjectDetail = {
   selected_candidate?: SelectedCandidate | null;
   suppression_reasons: CandidateSuppression[];
   active_issues: IssueDetail[];
+  token_metrics?: DashboardTokenMetrics;
   history_issues: IssueDetail[];
 };
 

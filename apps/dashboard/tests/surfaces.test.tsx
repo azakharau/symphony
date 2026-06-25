@@ -18,7 +18,7 @@ describe("dashboard surfaces", () => {
   test("overview renders empty state with idle reason", () => {
     const html = render(<OverviewSurface dashboard={emptyDashboard} quota={quotaUnavailable} />);
 
-    expect(html).toContain("No OpenCode sessions are running");
+    expect(html).toContain("No runner sessions are running");
     expect(html).toContain("waiting for eligible issues");
     expect(html).toContain("unavailable");
   });
@@ -29,14 +29,19 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("Running now");
     expect(html).toContain("Sessions");
     expect(html).toContain("4 slots available");
-    expect(html).toContain("55,130 tokens");
-    expect(html).toContain("3,110 cached");
+    expect(html).toContain("58,240 / 58,240 tokens");
+    expect(html).toContain("55,130 non-cache");
+    expect(html).toContain("3,110 cached (read 2,800 · write 310)");
+    expect(html).toContain("metrics available");
+    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("38,210 / 38,210 total");
+    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("degraded split");
+    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("metrics degraded");
     expect(html).not.toContain(">Capacity</p>");
     expect(html).toContain("SYM-97");
     expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain(">duration</th>");
     expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain(">provider/state</th>");
     expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("1h 0m");
-    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("OpenCode ACP");
+    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("runner ACP");
     expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("OMP ACP");
     expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("provider auth unavailable");
     expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("pid 5321 stale/stopped");
@@ -53,6 +58,33 @@ describe("dashboard surfaces", () => {
     expect(sectionText(html, "Blockers and idle reasons", "Project health")).not.toContain(">active<");
     expect(sectionText(html, "Blockers and idle reasons", "Project health")).not.toContain(">blocked<");
     expect(html).not.toContain(`${"co"}st`);
+  });
+
+  test("overview does not imply zero cached tokens when token metrics are unavailable", () => {
+    const dashboard = JSON.parse(JSON.stringify(acceptanceDashboard)) as typeof acceptanceDashboard;
+    dashboard.totals.token_metrics = {
+      accounted_total_token_count: 15030,
+      non_cached_token_count: 15030,
+      cached_token_count: 0,
+      input_token_count: 0,
+      output_token_count: 0,
+      reasoning_token_count: 15030,
+      cache_read_token_count: 0,
+      cache_write_token_count: 0,
+      reported_total_token_count: 15030,
+      metrics_status: "unavailable",
+      metrics_source: "test",
+    };
+    dashboard.projects[0].running_issues[0].token_metrics = undefined;
+    dashboard.projects[0].running_issues[0].cached_token_count = undefined;
+
+    const html = render(<OverviewSurface dashboard={dashboard} quota={quotaNormal} />);
+    const running = sectionText(html, "Running now", "Blockers and idle reasons");
+
+    expect(html).toContain("unavailable split");
+    expect(html).toContain("metrics unavailable");
+    expect(running).toContain("metrics unavailable");
+    expect(running).not.toContain("0 cached");
   });
 
   test("overview renders live session duration instead of raw events", () => {
@@ -92,12 +124,12 @@ describe("dashboard surfaces", () => {
   test("issue inspector renders bounded operational tabs", () => {
     const html = render(<IssueInspector issue={acceptanceProject.active_issues[0]} />);
 
-    expect(html).toContain("OpenCode session inspector");
+    expect(html).toContain("runner session inspector");
     expect(html).toContain("Open in Linear");
     expect(html).toContain("https://linear.app/alexey-zakharov/issue/SYM-97");
-    expect(html).toContain("Open in OpenCode");
-    expect(html).toContain("https://opencode.vestalink.net/L3dvcmtzcGFjZXMvc3ltcGhvbnkvU1lNLTk3/session/oc-sym-97");
-    expect(html).not.toContain("https://opencode.vestalink.net/session/oc-sym-97");
+    expect(html).toContain("Open in runner");
+    expect(html).toContain("https://runner.vestalink.net/L3dvcmtzcGFjZXMvc3ltcGhvbnkvU1lNLTk3/session/oc-sym-97");
+    expect(html).not.toContain("https://runner.vestalink.net/session/oc-sym-97");
     expect(html).toContain("Todos");
     expect(html).toContain("Timeline");
     expect(html).toContain("Evidence");
@@ -109,8 +141,8 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("aria-label=\"pending\"");
     expect(html).toContain(">35,100</dd>");
     expect(html).toContain(">3,110 cached</dd>");
-    expect(html).toContain(">OpenCode ACP</dd>");
-    expect(html).toContain("provider opencode-primary");
+    expect(html).toContain(">runner ACP</dd>");
+    expect(html).toContain("provider runner-primary");
     expect(html).toContain(">18 frames</dd>");
     expect(html).toContain(">duration</dt>");
     expect(html).toContain("<span class=\"tabular-nums\">1h 0m</span>");
@@ -136,13 +168,13 @@ describe("dashboard surfaces", () => {
     expect(html).not.toContain("runtime process exited</dd>");
   });
 
-  test("issue inspector links OpenCode sessions by persisted session directory", () => {
+  test("issue inspector links runner sessions by persisted session directory", () => {
     const issue = JSON.parse(JSON.stringify(acceptanceProject.active_issues[0])) as typeof acceptanceProject.active_issues[number];
-    issue.opencode_sessions[0].worktree_path = "/runtime/stale/worktree";
-    issue.opencode_sessions[0].activity!.sessions[0].directory = "/actual/opencode/session";
+    issue.runner_sessions[0].worktree_path = "/runtime/stale/worktree";
+    issue.runner_sessions[0].activity!.sessions[0].directory = "/actual/runner/session";
     const html = render(<IssueInspector issue={issue} />);
 
-    expect(html).toContain("https://opencode.vestalink.net/L2FjdHVhbC9vcGVuY29kZS9zZXNzaW9u/session/oc-sym-97");
+    expect(html).toContain("https://runner.vestalink.net/L2FjdHVhbC9ydW5uZXIvc2Vzc2lvbg/session/oc-sym-97");
     expect(html).not.toContain("L3J1bnRpbWUvc3RhbGUvd29ya3RyZWU");
   });
 
@@ -161,7 +193,7 @@ describe("dashboard surfaces", () => {
   });
 
   test("timeline renders as a compact event stream", () => {
-    const events = acceptanceProject.active_issues[0].opencode_sessions[0].activity?.timeline ?? [];
+    const events = acceptanceProject.active_issues[0].runner_sessions[0].activity?.timeline ?? [];
     const html = render(<ActivityTimeline events={events} />);
 
     expect(html).toContain("border-l border-slate-200");
@@ -175,7 +207,7 @@ describe("dashboard surfaces", () => {
 
   test("tools render grouped by agent", () => {
     const issue = acceptanceProject.active_issues[0];
-    const events = issue.opencode_sessions[0].activity?.timeline.filter((event) => event.kind === "tool" || event.tool) ?? [];
+    const events = issue.runner_sessions[0].activity?.timeline.filter((event) => event.kind === "tool" || event.tool) ?? [];
     const html = render(<ToolsByAgent issue={issue} events={events} />);
 
     expect(html).toContain("Build dashboard surfaces");

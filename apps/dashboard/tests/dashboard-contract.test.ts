@@ -16,18 +16,19 @@ describe("dashboard contract normalization", () => {
         [hiddenTokenKey]: 10,
         running_cached_tokens: 4,
         [hiddenUsageKey]: 99,
+        token_metrics: { cache_read_token_count: 2, cache_write_token_count: 3, metrics_status: "available" },
       },
       projects: [
         {
-          running_issues: [{ [hiddenSessionKey]: 7, token_count: 42, cached_token_count: 11 }],
+          running_issues: [{ [hiddenSessionKey]: 7, token_count: 42, cached_token_count: 11, token_metrics: { metrics_status: "degraded" } }],
         },
       ],
     });
 
     expect(JSON.stringify(normalized)).not.toContain(`${"co"}st`);
     expect(normalized).toEqual({
-      totals: { running_tokens: 10, running_cached_tokens: 4 },
-      projects: [{ running_issues: [{ token_count: 42, cached_token_count: 11 }] }],
+      totals: { running_tokens: 10, running_cached_tokens: 4, token_metrics: { cache_read_token_count: 2, cache_write_token_count: 3, metrics_status: "available" } },
+      projects: [{ running_issues: [{ token_count: 42, cached_token_count: 11, token_metrics: { metrics_status: "degraded" } }] }],
     });
   });
 

@@ -1,0 +1,13 @@
+{
+  "screenshots": [
+    "/home/agent/.symphony/workspaces/omp/symphony/SYM-127/artifacts/screenshots/sym-127/overview.png",
+    "/home/agent/.symphony/workspaces/omp/symphony/SYM-127/artifacts/screenshots/sym-127/projects.png",
+    "/home/agent/.symphony/workspaces/omp/symphony/SYM-127/artifacts/screenshots/sym-127/project-symphony.png",
+    "/home/agent/.symphony/workspaces/omp/symphony/SYM-127/artifacts/screenshots/sym-127/issue-sym-127.png",
+    "/home/agent/.symphony/workspaces/omp/symphony/SYM-127/artifacts/screenshots/sym-127/quota.png",
+    "/home/agent/.symphony/workspaces/omp/symphony/SYM-127/artifacts/screenshots/sym-127/defects.png"
+  ],
+  "consoleEvents": [],
+  "failedRequests": [],
+  "note": "Screenshots captured from live http://127.0.0.1:4120 with Playwright chromium pipe after browser/CDP MCP startup failed."
+}

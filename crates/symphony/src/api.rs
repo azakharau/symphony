@@ -3,7 +3,10 @@ use std::path::PathBuf;
 
 use crate::{
     config::RootConfig,
-    runner::{RunnerSessionTreeActivity, read_session_tree_activity},
+    runner::{
+        RunnerSessionTreeActivity, RunnerSessionTreeMetrics, read_omp_session_tree_metrics,
+        read_session_tree_activity,
+    },
     state::{
         CleanupStatus, EvalRunRecord, GitRefRecord, IssueStateRecord, LifecycleStage,
         ProjectRuntimeLivenessRecord, RunnerSessionRecord, RunnerStage, RuntimeLivenessStatus,
@@ -301,6 +304,7 @@ pub struct RunningIssueSummary {
     pub title: String,
     pub display_status: String,
     pub session_id: Option<String>,
+    pub preferred_runner_session_id: Option<String>,
     pub provider_mode: Option<crate::state::RuntimeProviderMode>,
     pub provider_id: Option<String>,
     pub process_id: Option<u32>,
@@ -522,6 +526,7 @@ fn running_issue_summary(
         title: issue.title.clone(),
         display_status: issue.display_status.clone(),
         session_id: session.map(|session| session.runner_session_id.clone()),
+        preferred_runner_session_id: session.map(|session| session.runner_session_id.clone()),
         provider_mode: session.map(|session| session.provider_mode),
         provider_id: session.and_then(|session| session.provider_id.clone()),
         process_id: session.and_then(|session| session.process_id),
@@ -585,6 +590,7 @@ pub struct IssueDetailResponse {
     pub cleanup_status: CleanupStatus,
     pub stop_reason: Option<String>,
     pub last_runner_event: Option<String>,
+    pub preferred_runner_session_id: Option<String>,
     pub token_metrics: DashboardTokenMetrics,
     pub runner_sessions: Vec<RunnerSessionDetail>,
     pub eval_results: Vec<EvalRunRecord>,
@@ -1172,6 +1178,8 @@ async fn issue_detail_response(
     sessions.sort_by_key(session_display_priority);
     let preferred_session = preferred_issue_session(&sessions);
     let last_runner_event = preferred_session.and_then(|session| session.last_event.clone());
+    let preferred_runner_session_id =
+        preferred_session.map(|session| session.runner_session_id.clone());
     let stop_reason = if issue.issue.lifecycle_stage == LifecycleStage::Running {
         None
     } else {
@@ -1209,6 +1217,7 @@ async fn issue_detail_response(
         cleanup_status: issue.issue.cleanup_status,
         stop_reason,
         last_runner_event,
+        preferred_runner_session_id,
         token_metrics,
         runner_sessions: sessions,
         eval_results,
@@ -1304,8 +1313,8 @@ async fn session_detail(
     let token_metrics = DashboardTokenMetrics::from_session(&session);
     let cached_token_count = token_metrics.cached_token_count;
     let token_count = token_metrics.accounted_total_token_count;
-    let started_at_ms = session_activity_started_at_ms(&session.session_id, activity.as_ref());
-    let duration_ms = session_activity_duration_ms(&session.session_id, activity.as_ref());
+    let (started_at_ms, duration_ms, omp_activity_error) =
+        session_duration_inputs(&session, activity.as_ref()).await;
 
     Ok(RunnerSessionDetail {
         runner_session_id: session.session_id,
@@ -1339,7 +1348,7 @@ async fn session_detail(
         session_evidence_refs: session.session_evidence_refs,
         silence_observed: session.silence_observed,
         activity,
-        activity_error,
+        activity_error: activity_error.or(omp_activity_error),
     })
 }
 
@@ -1350,6 +1359,55 @@ async fn process_alive(process_id: Option<u32>) -> Option<bool> {
             .await
             .unwrap_or(false),
     )
+}
+
+async fn session_duration_inputs(
+    session: &RunnerSessionRecord,
+    activity: Option<&RunnerSessionTreeActivity>,
+) -> (Option<u64>, Option<u64>, Option<String>) {
+    let activity_started_at_ms = session_activity_started_at_ms(&session.session_id, activity);
+    let activity_duration_ms = session_activity_duration_ms(&session.session_id, activity);
+    if activity_started_at_ms.is_some()
+        || session.provider_mode != crate::state::RuntimeProviderMode::OmpAcp
+    {
+        return (activity_started_at_ms, activity_duration_ms, None);
+    }
+
+    match read_omp_session_tree_metrics(&session.session_id).await {
+        Ok(Some(metrics)) => {
+            let (started_at_ms, duration_ms) = omp_metrics_duration_inputs(&metrics);
+            (started_at_ms, duration_ms, None)
+        }
+        Ok(None) => (None, None, None),
+        Err(error) => (None, None, Some(error.to_string())),
+    }
+}
+
+fn omp_metrics_duration_inputs(metrics: &RunnerSessionTreeMetrics) -> (Option<u64>, Option<u64>) {
+    let duration_ms = metrics
+        .started_at_ms
+        .zip(metrics.last_updated_ms)
+        .map(|(started, updated)| updated.saturating_sub(started));
+    (metrics.started_at_ms, duration_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dashboard_api_uses_omp_metrics_started_at_for_duration_inputs() {
+        let metrics = RunnerSessionTreeMetrics {
+            started_at_ms: Some(1_000),
+            last_updated_ms: Some(2_750),
+            ..RunnerSessionTreeMetrics::default()
+        };
+
+        assert_eq!(
+            omp_metrics_duration_inputs(&metrics),
+            (Some(1_000), Some(1_750))
+        );
+    }
 }
 
 fn session_activity_duration_ms(

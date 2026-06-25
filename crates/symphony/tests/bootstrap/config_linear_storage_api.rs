@@ -1240,9 +1240,19 @@ async fn dashboard_api_orders_active_runner_session_before_stale_failures() {
         Some("runner_archive_updated:123")
     );
     assert_eq!(issue.runner_sessions[1].runner_session_id, "zz-failed");
+    assert_eq!(
+        issue.preferred_runner_session_id.as_deref(),
+        Some("aa-running")
+    );
     assert_eq!(card.runner_health, "active");
     assert_eq!(
         card.running_issues[0].session_id.as_deref(),
+        Some("aa-running")
+    );
+    assert_eq!(
+        card.running_issues[0]
+            .preferred_runner_session_id
+            .as_deref(),
         Some("aa-running")
     );
     assert_eq!(
@@ -1745,6 +1755,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
           "title": "Test issue",
           "display_status": "repair loop",
           "session_id": "oc-repair",
+          "preferred_runner_session_id": "oc-repair",
           "provider_mode": "acp",
           "provider_id": null,
           "process_id": null,

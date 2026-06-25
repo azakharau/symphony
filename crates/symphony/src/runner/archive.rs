@@ -47,6 +47,7 @@ pub struct RunnerSessionTreeMetrics {
     pub usage_status: String,
     pub active_agent: Option<String>,
     pub active_model: Option<String>,
+    pub started_at_ms: Option<u64>,
     pub last_updated_ms: Option<u64>,
 }
 
@@ -70,6 +71,7 @@ impl Default for RunnerSessionTreeMetrics {
             usage_status: "missing".to_owned(),
             active_agent: None,
             active_model: None,
+            started_at_ms: None,
             last_updated_ms: None,
         }
     }
@@ -640,6 +642,13 @@ fn metrics_from_rows(
         metrics.cost_micros = metrics
             .cost_micros
             .saturating_add((session.cost.max(0.0) * 1_000_000.0).round() as u64);
+        metrics.started_at_ms = Some(
+            metrics
+                .started_at_ms
+                .map_or(session.time_created, |started| {
+                    started.min(session.time_created)
+                }),
+        );
         if metrics
             .last_updated_ms
             .is_none_or(|last_updated| session.time_updated >= last_updated)

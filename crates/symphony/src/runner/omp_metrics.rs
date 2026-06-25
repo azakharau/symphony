@@ -294,6 +294,11 @@ fn ingest_omp_jsonl_record(
         .part_count
         .saturating_add(message_part_count(value).unwrap_or(1));
     if let Some(timestamp_ms) = timestamp_ms(value) {
+        metrics.started_at_ms = Some(
+            metrics
+                .started_at_ms
+                .map_or(timestamp_ms, |started| started.min(timestamp_ms)),
+        );
         metrics.last_updated_ms = Some(metrics.last_updated_ms.unwrap_or(0).max(timestamp_ms));
     }
     let message = value.get("message");
@@ -442,7 +447,8 @@ mod tests {
         assert_eq!(metrics.usage_status, "available");
         assert_eq!(metrics.active_agent.as_deref(), Some("McpSurfaceScout"));
         assert_eq!(metrics.active_model.as_deref(), Some("gpt-5.5"));
-        assert!(metrics.last_updated_ms.is_some_and(|value| value > 0));
+        assert_eq!(metrics.started_at_ms, Some(1_782_136_035_000));
+        assert_eq!(metrics.last_updated_ms, Some(1_782_136_095_000));
     }
 
     #[tokio::test]

@@ -69,6 +69,7 @@ pub struct UiRunningIssueSummary {
     pub title: String,
     pub display_status: String,
     pub session_id: Option<String>,
+    pub preferred_runner_session_id: Option<String>,
     pub provider_mode: Option<crate::state::RuntimeProviderMode>,
     pub provider_id: Option<String>,
     pub process_id: Option<u32>,
@@ -130,6 +131,7 @@ pub struct UiIssueDetailResponse {
     pub cleanup_status: CleanupStatus,
     pub stop_reason: Option<String>,
     pub last_runner_event: Option<String>,
+    pub preferred_runner_session_id: Option<String>,
     pub token_metrics: DashboardTokenMetrics,
     pub runner_sessions: Vec<UiRunnerSessionDetail>,
     pub eval_results: Vec<EvalRunRecord>,
@@ -293,6 +295,7 @@ impl From<&RunningIssueSummary> for UiRunningIssueSummary {
             title: issue.title.clone(),
             display_status: issue.display_status.clone(),
             session_id: issue.session_id.clone(),
+            preferred_runner_session_id: issue.preferred_runner_session_id.clone(),
             provider_mode: issue.provider_mode,
             provider_id: issue.provider_id.clone(),
             process_id: issue.process_id,
@@ -368,6 +371,7 @@ impl From<&IssueDetailResponse> for UiIssueDetailResponse {
             cleanup_status: issue.cleanup_status,
             stop_reason: issue.stop_reason.clone(),
             last_runner_event: issue.last_runner_event.clone(),
+            preferred_runner_session_id: issue.preferred_runner_session_id.clone(),
             token_metrics: issue.token_metrics.clone(),
             runner_sessions: issue
                 .runner_sessions

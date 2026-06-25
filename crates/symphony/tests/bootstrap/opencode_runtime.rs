@@ -2757,6 +2757,7 @@ fn unchanged_opencode_db_snapshot_preserves_control_marker() {
         usage_status: "available".into(),
         active_agent: Some("build".into()),
         active_model: Some("gpt-5.5".into()),
+        started_at_ms: Some(1000),
         last_updated_ms: Some(2000),
     };
 
@@ -2819,6 +2820,7 @@ async fn omp_split_token_metrics_survive_sqlite_runtime_reload() {
         usage_status: "available".into(),
         active_agent: Some("rust-engineer".into()),
         active_model: Some("gpt-5.5".into()),
+        started_at_ms: Some(21),
         last_updated_ms: Some(42),
     };
     runner::apply_omp_session_tree_metrics(&mut session, &metrics);

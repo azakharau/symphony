@@ -27,6 +27,13 @@ pub fn ingest_session_event(session: &mut RunnerSessionRecord, event: RunnerSess
     session.todo_count = session.todo_count.saturating_add(event.todo_delta);
     session.part_count = session.part_count.saturating_add(event.part_delta);
     session.token_count = session.token_count.saturating_add(event.token_delta);
+    if event.token_delta > 0 {
+        session.tokens_reported_total = session
+            .tokens_reported_total
+            .saturating_add(event.token_delta);
+        session.token_usage_status = "unknown".into();
+        session.token_usage_source = "acp_event".into();
+    }
     session.cost_micros = session.cost_micros.saturating_add(event.cost_micros_delta);
     session.subagent_count = session.subagent_count.saturating_add(event.subagent_delta);
 }
@@ -54,6 +61,14 @@ pub fn apply_session_tree_metrics(
     session.todo_count = metrics.todo_count;
     session.part_count = metrics.part_count;
     session.token_count = metrics.tokens_total;
+    session.tokens_input = metrics.tokens_input;
+    session.tokens_output = metrics.tokens_output;
+    session.tokens_reasoning = metrics.tokens_reasoning;
+    session.tokens_cache_read = metrics.tokens_cache_read;
+    session.tokens_cache_write = metrics.tokens_cache_write;
+    session.tokens_reported_total = metrics.tokens_reported_total;
+    session.token_usage_status = metrics.usage_status.clone();
+    session.token_usage_source = "runner_archive".into();
     session.cost_micros = metrics.cost_micros;
     session.subagent_count = metrics.subagent_count;
     session.lifecycle_marker = Some("runner_archive_activity".into());
@@ -80,6 +95,7 @@ pub fn apply_omp_session_tree_metrics(
     metrics: &RunnerSessionTreeMetrics,
 ) {
     apply_session_tree_metrics(session, metrics);
+    session.token_usage_source = "omp_jsonl".into();
     session.lifecycle_marker = Some("omp_session_activity".into());
     session.last_event = metrics
         .last_updated_ms

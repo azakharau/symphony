@@ -864,6 +864,14 @@ for line in sys.stdin:
         todo_count: 0,
         part_count: 0,
         token_count: 0,
+        tokens_input: 0,
+        tokens_output: 0,
+        tokens_reasoning: 0,
+        tokens_cache_read: 0,
+        tokens_cache_write: 0,
+        tokens_reported_total: 0,
+        token_usage_status: "missing".into(),
+        token_usage_source: "none".into(),
         cost_micros: 0,
         subagent_count: 0,
         eval_stage: None,
@@ -2679,6 +2687,9 @@ async fn opencode_event_ingestion_updates_stage_telemetry_without_losing_session
     assert_eq!(session.todo_count, 1);
     assert_eq!(session.part_count, 4);
     assert_eq!(session.token_count, 2048);
+    assert_eq!(session.tokens_reported_total, 2048);
+    assert_eq!(session.token_usage_status, "unknown");
+    assert_eq!(session.token_usage_source, "acp_event");
     assert_eq!(session.cost_micros, 325_000);
     assert_eq!(session.subagent_count, 1);
     assert_eq!(session.eval_stage.as_deref(), Some("targeted-tests"));
@@ -2761,6 +2772,77 @@ fn unchanged_opencode_db_snapshot_preserves_control_marker() {
         session.last_event.as_deref(),
         Some("runner_archive_updated:2000")
     );
+}
+
+#[tokio::test]
+async fn omp_split_token_metrics_survive_sqlite_runtime_reload() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store
+        .upsert_project(ProjectStateRecord {
+            project_id: "symphony".into(),
+            name: "Symphony".into(),
+            enabled: true,
+            lifecycle_stage: LifecycleStage::Running,
+            cleanup_status: CleanupStatus::Clean,
+        })
+        .await
+        .expect("project");
+    store
+        .upsert_issue(test_issue("symphony", "issue-114", "SYM-114"))
+        .await
+        .expect("issue");
+
+    let mut session = test_session(
+        "symphony",
+        "issue-114",
+        "omp-session-114",
+        "/home/agent/.symphony/workspaces/omp/symphony/SYM-114",
+    );
+    let metrics = runner::RunnerSessionTreeMetrics {
+        root_session_id: session.session_id.clone(),
+        session_count: 2,
+        subagent_count: 1,
+        message_count: 4,
+        part_count: 7,
+        todo_count: 1,
+        tokens_input: 120,
+        tokens_output: 30,
+        tokens_reasoning: 5,
+        tokens_cache_read: 400,
+        tokens_cache_write: 6,
+        tokens_reported_total: 700,
+        tokens_total: 561,
+        cost_micros: 0,
+        usage_status: "available".into(),
+        active_agent: Some("rust-engineer".into()),
+        active_model: Some("gpt-5.5".into()),
+        last_updated_ms: Some(42),
+    };
+    runner::apply_omp_session_tree_metrics(&mut session, &metrics);
+    store
+        .upsert_runner_session(session)
+        .await
+        .expect("persist session");
+
+    let reloaded_store = SqliteStore::open(&db_path).await.expect("reopen sqlite");
+    reloaded_store.migrate().await.expect("migrate reload");
+    let reloaded = reloaded_store
+        .runner_session("symphony", "issue-114", "omp-session-114")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(reloaded.token_count, 561);
+    assert_eq!(reloaded.tokens_input, 120);
+    assert_eq!(reloaded.tokens_output, 30);
+    assert_eq!(reloaded.tokens_reasoning, 5);
+    assert_eq!(reloaded.tokens_cache_read, 400);
+    assert_eq!(reloaded.tokens_cache_write, 6);
+    assert_eq!(reloaded.tokens_reported_total, 700);
+    assert_eq!(reloaded.token_usage_status, "available");
+    assert_eq!(reloaded.token_usage_source, "omp_jsonl");
 }
 
 pub(super) async fn seed_opencode_session_tree(path: &std::path::Path) {

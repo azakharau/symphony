@@ -84,8 +84,8 @@ pub(super) fn session_from_row(row: &Row) -> Result<RunnerSessionRecord, Storage
     let process_id = row
         .get::<Option<i64>>(8)?
         .and_then(|value| u32::try_from(value).ok());
-    let runtime_failure_kind: Option<String> = row.get(22)?;
-    let session_evidence_refs_json: Option<String> = row.get(24)?;
+    let runtime_failure_kind: Option<String> = row.get(30)?;
+    let session_evidence_refs_json: Option<String> = row.get(32)?;
     Ok(RunnerSessionRecord {
         project_id: row.get(0)?,
         issue_id: row.get(1)?,
@@ -105,22 +105,30 @@ pub(super) fn session_from_row(row: &Row) -> Result<RunnerSessionRecord, Storage
         todo_count: get_u64(row, 14)?,
         part_count: get_u64(row, 15)?,
         token_count: get_u64(row, 16)?,
-        cost_micros: get_u64(row, 17)?,
-        subagent_count: get_u64(row, 18)?,
-        eval_stage: row.get(19)?,
-        lifecycle_marker: row.get(20)?,
-        last_event: row.get(21)?,
+        tokens_input: get_u64(row, 17)?,
+        tokens_output: get_u64(row, 18)?,
+        tokens_reasoning: get_u64(row, 19)?,
+        tokens_cache_read: get_u64(row, 20)?,
+        tokens_cache_write: get_u64(row, 21)?,
+        tokens_reported_total: get_u64(row, 22)?,
+        token_usage_status: row.get(23)?,
+        token_usage_source: row.get(24)?,
+        cost_micros: get_u64(row, 25)?,
+        subagent_count: get_u64(row, 26)?,
+        eval_stage: row.get(27)?,
+        lifecycle_marker: row.get(28)?,
+        last_event: row.get(29)?,
         runtime_failure_kind: runtime_failure_kind
             .as_deref()
             .map(RuntimeFailureKind::from_str)
             .transpose()
             .map_err(StorageError::State)?,
-        acp_frame_count: get_u64(row, 23)?,
+        acp_frame_count: get_u64(row, 31)?,
         session_evidence_refs: session_evidence_refs_json
             .map(|json| serde_json::from_str(&json))
             .transpose()?
             .unwrap_or_default(),
-        silence_observed: row.get::<bool>(25)?,
+        silence_observed: row.get::<bool>(33)?,
     })
 }
 

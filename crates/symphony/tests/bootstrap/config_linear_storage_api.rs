@@ -905,6 +905,11 @@ async fn migration_removes_legacy_issue_state_without_losing_sessions() {
         .expect("query session")
         .expect("session preserved");
     assert_eq!(session.session_id, "session-1");
+    assert_eq!(session.token_count, 4);
+    assert_eq!(session.tokens_input, 0);
+    assert_eq!(session.tokens_reported_total, 4);
+    assert_eq!(session.token_usage_status, "unknown");
+    assert_eq!(session.token_usage_source, "legacy_single_total");
 }
 
 #[tokio::test]
@@ -969,6 +974,14 @@ async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
                 todo_count: 1,
                 part_count: 3,
                 token_count: 1440,
+                tokens_input: 1000,
+                tokens_output: 300,
+                tokens_reasoning: 40,
+                tokens_cache_read: 90,
+                tokens_cache_write: 10,
+                tokens_reported_total: 1500,
+                token_usage_status: "available".into(),
+                token_usage_source: "test_split".into(),
                 cost_micros: 250_000,
                 subagent_count: 1,
                 eval_stage: Some("unit".into()),
@@ -1028,6 +1041,14 @@ async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
     );
     assert_eq!(session.active_agent.as_deref(), Some("rust-engineer"));
     assert_eq!(session.token_count, 1440);
+    assert_eq!(session.tokens_input, 1000);
+    assert_eq!(session.tokens_output, 300);
+    assert_eq!(session.tokens_reasoning, 40);
+    assert_eq!(session.tokens_cache_read, 90);
+    assert_eq!(session.tokens_cache_write, 10);
+    assert_eq!(session.tokens_reported_total, 1500);
+    assert_eq!(session.token_usage_status, "available");
+    assert_eq!(session.token_usage_source, "test_split");
 
     let read_model = RuntimeReadModel::from_store(&reloaded)
         .await
@@ -1043,6 +1064,75 @@ async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
             .as_deref(),
         Some("unit")
     );
+}
+
+#[tokio::test]
+async fn runner_session_upsert_preserves_cached_split_token_metrics() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store
+        .upsert_project(ProjectStateRecord {
+            project_id: "symphony".into(),
+            name: "Symphony".into(),
+            enabled: true,
+            lifecycle_stage: LifecycleStage::Running,
+            cleanup_status: CleanupStatus::Clean,
+        })
+        .await
+        .expect("project");
+    store
+        .upsert_issue(test_issue("symphony", "issue-114", "SYM-114"))
+        .await
+        .expect("issue");
+
+    let mut session = test_session("symphony", "issue-114", "session-114", "/tmp/SYM-114");
+    session.token_count = 1440;
+    session.tokens_input = 1000;
+    session.tokens_output = 300;
+    session.tokens_reasoning = 40;
+    session.tokens_cache_read = 90;
+    session.tokens_cache_write = 10;
+    session.tokens_reported_total = 1500;
+    session.token_usage_status = "available".into();
+    session.token_usage_source = "omp_jsonl".into();
+    store
+        .upsert_runner_session(&session)
+        .await
+        .expect("seed split metrics");
+
+    let mut stale_update = session;
+    stale_update.active_agent = Some("reviewer".into());
+    stale_update.token_count = 0;
+    stale_update.tokens_input = 0;
+    stale_update.tokens_output = 0;
+    stale_update.tokens_reasoning = 0;
+    stale_update.tokens_cache_read = 0;
+    stale_update.tokens_cache_write = 0;
+    stale_update.tokens_reported_total = 0;
+    stale_update.token_usage_status = "missing".into();
+    stale_update.token_usage_source = "none".into();
+    store
+        .upsert_runner_session(stale_update)
+        .await
+        .expect("stale update");
+
+    let reloaded = store
+        .runner_session("symphony", "issue-114", "session-114")
+        .await
+        .expect("query session")
+        .expect("session");
+    assert_eq!(reloaded.active_agent.as_deref(), Some("reviewer"));
+    assert_eq!(reloaded.token_count, 1440);
+    assert_eq!(reloaded.tokens_input, 1000);
+    assert_eq!(reloaded.tokens_output, 300);
+    assert_eq!(reloaded.tokens_reasoning, 40);
+    assert_eq!(reloaded.tokens_cache_read, 90);
+    assert_eq!(reloaded.tokens_cache_write, 10);
+    assert_eq!(reloaded.tokens_reported_total, 1500);
+    assert_eq!(reloaded.token_usage_status, "available");
+    assert_eq!(reloaded.token_usage_source, "omp_jsonl");
 }
 
 #[tokio::test]

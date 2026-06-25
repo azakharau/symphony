@@ -89,6 +89,55 @@ impl SqliteStore {
             "INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
+        self.ensure_column(
+            "runner_sessions",
+            "tokens_input",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        self.ensure_column(
+            "runner_sessions",
+            "tokens_output",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        self.ensure_column(
+            "runner_sessions",
+            "tokens_reasoning",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        self.ensure_column(
+            "runner_sessions",
+            "tokens_cache_read",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        self.ensure_column(
+            "runner_sessions",
+            "tokens_cache_write",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        self.ensure_column(
+            "runner_sessions",
+            "tokens_reported_total",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        self.ensure_column(
+            "runner_sessions",
+            "token_usage_status",
+            "TEXT NOT NULL DEFAULT 'missing'",
+        )
+        .await?;
+        self.ensure_column(
+            "runner_sessions",
+            "token_usage_source",
+            "TEXT NOT NULL DEFAULT 'none'",
+        )
+        .await?;
+        self.backfill_legacy_runner_token_metrics().await?;
         self.ensure_column("runner_sessions", "session_evidence_refs_json", "TEXT")
             .await?;
         self.drop_issue_linear_state_column().await?;
@@ -124,6 +173,14 @@ impl SqliteStore {
                         todo_count INTEGER NOT NULL,
                         part_count INTEGER NOT NULL,
                         token_count INTEGER NOT NULL,
+                        tokens_input INTEGER NOT NULL DEFAULT 0,
+                        tokens_output INTEGER NOT NULL DEFAULT 0,
+                        tokens_reasoning INTEGER NOT NULL DEFAULT 0,
+                        tokens_cache_read INTEGER NOT NULL DEFAULT 0,
+                        tokens_cache_write INTEGER NOT NULL DEFAULT 0,
+                        tokens_reported_total INTEGER NOT NULL DEFAULT 0,
+                        token_usage_status TEXT NOT NULL DEFAULT 'missing',
+                        token_usage_source TEXT NOT NULL DEFAULT 'none',
                         cost_micros INTEGER NOT NULL,
                         subagent_count INTEGER NOT NULL,
                         eval_stage TEXT,
@@ -155,6 +212,14 @@ impl SqliteStore {
                         todo_count,
                         part_count,
                         token_count,
+                        tokens_input,
+                        tokens_output,
+                        tokens_reasoning,
+                        tokens_cache_read,
+                        tokens_cache_write,
+                        tokens_reported_total,
+                        token_usage_status,
+                        token_usage_source,
                         cost_micros,
                         subagent_count,
                         eval_stage,
@@ -184,6 +249,14 @@ impl SqliteStore {
                         todo_count,
                         part_count,
                         token_count,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        token_count,
+                        CASE WHEN token_count > 0 THEN 'unknown' ELSE 'missing' END,
+                        CASE WHEN token_count > 0 THEN 'legacy_single_total' ELSE 'none' END,
                         cost_micros,
                         subagent_count,
                         eval_stage,
@@ -255,6 +328,29 @@ impl SqliteStore {
             )
             .await
             .ok();
+        Ok(())
+    }
+
+    async fn backfill_legacy_runner_token_metrics(&self) -> Result<(), StorageError> {
+        self.conn
+            .execute(
+                r#"
+                UPDATE runner_sessions
+                SET tokens_reported_total = token_count,
+                    token_usage_status = CASE WHEN token_count > 0 THEN 'unknown' ELSE 'missing' END,
+                    token_usage_source = CASE WHEN token_count > 0 THEN 'legacy_single_total' ELSE 'none' END
+                WHERE tokens_input = 0
+                  AND tokens_output = 0
+                  AND tokens_reasoning = 0
+                  AND tokens_cache_read = 0
+                  AND tokens_cache_write = 0
+                  AND tokens_reported_total = 0
+                  AND token_usage_status = 'missing'
+                  AND token_usage_source = 'none'
+                "#,
+                (),
+            )
+            .await?;
         Ok(())
     }
 
@@ -680,6 +776,14 @@ impl SqliteStore {
                     todo_count,
                     part_count,
                     token_count,
+                    tokens_input,
+                    tokens_output,
+                    tokens_reasoning,
+                    tokens_cache_read,
+                    tokens_cache_write,
+                    tokens_reported_total,
+                    token_usage_status,
+                    token_usage_source,
                     cost_micros,
                     subagent_count,
                     eval_stage,
@@ -690,7 +794,7 @@ impl SqliteStore {
                     session_evidence_refs_json,
                     silence_observed
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)
                 ON CONFLICT(project_id, issue_id, session_id) DO UPDATE SET
                     provider_mode = excluded.provider_mode,
                     provider_id = excluded.provider_id,
@@ -705,7 +809,15 @@ impl SqliteStore {
                     message_count = excluded.message_count,
                     todo_count = excluded.todo_count,
                     part_count = excluded.part_count,
-                    token_count = excluded.token_count,
+                    token_count = CASE WHEN excluded.tokens_input = 0 AND excluded.tokens_output = 0 AND excluded.tokens_reasoning = 0 AND excluded.tokens_cache_read = 0 AND excluded.tokens_cache_write = 0 AND excluded.tokens_reported_total = 0 AND excluded.token_usage_status = 'missing' AND excluded.token_usage_source = 'none' THEN runner_sessions.token_count ELSE excluded.token_count END,
+                    tokens_input = CASE WHEN excluded.tokens_input = 0 AND excluded.tokens_output = 0 AND excluded.tokens_reasoning = 0 AND excluded.tokens_cache_read = 0 AND excluded.tokens_cache_write = 0 AND excluded.tokens_reported_total = 0 AND excluded.token_usage_status = 'missing' AND excluded.token_usage_source = 'none' THEN runner_sessions.tokens_input ELSE excluded.tokens_input END,
+                    tokens_output = CASE WHEN excluded.tokens_input = 0 AND excluded.tokens_output = 0 AND excluded.tokens_reasoning = 0 AND excluded.tokens_cache_read = 0 AND excluded.tokens_cache_write = 0 AND excluded.tokens_reported_total = 0 AND excluded.token_usage_status = 'missing' AND excluded.token_usage_source = 'none' THEN runner_sessions.tokens_output ELSE excluded.tokens_output END,
+                    tokens_reasoning = CASE WHEN excluded.tokens_input = 0 AND excluded.tokens_output = 0 AND excluded.tokens_reasoning = 0 AND excluded.tokens_cache_read = 0 AND excluded.tokens_cache_write = 0 AND excluded.tokens_reported_total = 0 AND excluded.token_usage_status = 'missing' AND excluded.token_usage_source = 'none' THEN runner_sessions.tokens_reasoning ELSE excluded.tokens_reasoning END,
+                    tokens_cache_read = CASE WHEN excluded.tokens_input = 0 AND excluded.tokens_output = 0 AND excluded.tokens_reasoning = 0 AND excluded.tokens_cache_read = 0 AND excluded.tokens_cache_write = 0 AND excluded.tokens_reported_total = 0 AND excluded.token_usage_status = 'missing' AND excluded.token_usage_source = 'none' THEN runner_sessions.tokens_cache_read ELSE excluded.tokens_cache_read END,
+                    tokens_cache_write = CASE WHEN excluded.tokens_input = 0 AND excluded.tokens_output = 0 AND excluded.tokens_reasoning = 0 AND excluded.tokens_cache_read = 0 AND excluded.tokens_cache_write = 0 AND excluded.tokens_reported_total = 0 AND excluded.token_usage_status = 'missing' AND excluded.token_usage_source = 'none' THEN runner_sessions.tokens_cache_write ELSE excluded.tokens_cache_write END,
+                    tokens_reported_total = CASE WHEN excluded.tokens_input = 0 AND excluded.tokens_output = 0 AND excluded.tokens_reasoning = 0 AND excluded.tokens_cache_read = 0 AND excluded.tokens_cache_write = 0 AND excluded.tokens_reported_total = 0 AND excluded.token_usage_status = 'missing' AND excluded.token_usage_source = 'none' THEN runner_sessions.tokens_reported_total ELSE excluded.tokens_reported_total END,
+                    token_usage_status = CASE WHEN excluded.tokens_input = 0 AND excluded.tokens_output = 0 AND excluded.tokens_reasoning = 0 AND excluded.tokens_cache_read = 0 AND excluded.tokens_cache_write = 0 AND excluded.tokens_reported_total = 0 AND excluded.token_usage_status = 'missing' AND excluded.token_usage_source = 'none' THEN runner_sessions.token_usage_status ELSE excluded.token_usage_status END,
+                    token_usage_source = CASE WHEN excluded.tokens_input = 0 AND excluded.tokens_output = 0 AND excluded.tokens_reasoning = 0 AND excluded.tokens_cache_read = 0 AND excluded.tokens_cache_write = 0 AND excluded.tokens_reported_total = 0 AND excluded.token_usage_status = 'missing' AND excluded.token_usage_source = 'none' THEN runner_sessions.token_usage_source ELSE excluded.token_usage_source END,
                     cost_micros = excluded.cost_micros,
                     subagent_count = excluded.subagent_count,
                     eval_stage = excluded.eval_stage,
@@ -735,6 +847,14 @@ impl SqliteStore {
                     session.todo_count as i64,
                     session.part_count as i64,
                     session.token_count as i64,
+                    session.tokens_input as i64,
+                    session.tokens_output as i64,
+                    session.tokens_reasoning as i64,
+                    session.tokens_cache_read as i64,
+                    session.tokens_cache_write as i64,
+                    session.tokens_reported_total as i64,
+                    session.token_usage_status.as_str(),
+                    session.token_usage_source.as_str(),
                     session.cost_micros as i64,
                     session.subagent_count as i64,
                     session.eval_stage.as_deref(),
@@ -762,7 +882,9 @@ impl SqliteStore {
                 r#"
                 SELECT project_id, issue_id, session_id, provider_mode, provider_id, agent, model, worktree_path,
                        process_id, lifecycle_stage, stage, active_agent, active_model, message_count,
-                       todo_count, part_count, token_count, cost_micros, subagent_count,
+                       todo_count, part_count, token_count, tokens_input, tokens_output,
+                       tokens_reasoning, tokens_cache_read, tokens_cache_write, tokens_reported_total,
+                       token_usage_status, token_usage_source, cost_micros, subagent_count,
                        eval_stage, lifecycle_marker, last_event, runtime_failure_kind,
                        acp_frame_count, session_evidence_refs_json, silence_observed
                 FROM runner_sessions
@@ -803,7 +925,9 @@ impl SqliteStore {
                 r#"
                 SELECT project_id, issue_id, session_id, provider_mode, provider_id, agent, model, worktree_path,
                        process_id, lifecycle_stage, stage, active_agent, active_model, message_count,
-                       todo_count, part_count, token_count, cost_micros, subagent_count,
+                       todo_count, part_count, token_count, tokens_input, tokens_output,
+                       tokens_reasoning, tokens_cache_read, tokens_cache_write, tokens_reported_total,
+                       token_usage_status, token_usage_source, cost_micros, subagent_count,
                        eval_stage, lifecycle_marker, last_event, runtime_failure_kind,
                        acp_frame_count, session_evidence_refs_json, silence_observed
                 FROM runner_sessions
@@ -823,7 +947,9 @@ impl SqliteStore {
                 r#"
                 SELECT project_id, issue_id, session_id, provider_mode, provider_id, agent, model, worktree_path,
                        process_id, lifecycle_stage, stage, active_agent, active_model, message_count,
-                       todo_count, part_count, token_count, cost_micros, subagent_count,
+                       todo_count, part_count, token_count, tokens_input, tokens_output,
+                       tokens_reasoning, tokens_cache_read, tokens_cache_write, tokens_reported_total,
+                       token_usage_status, token_usage_source, cost_micros, subagent_count,
                        eval_stage, lifecycle_marker, last_event, runtime_failure_kind,
                        acp_frame_count, session_evidence_refs_json, silence_observed
                 FROM runner_sessions

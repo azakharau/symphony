@@ -1987,6 +1987,79 @@ async fn dashboard_token_metrics_use_persisted_splits_without_cache_double_count
 }
 
 #[tokio::test]
+async fn dashboard_ui_marks_unsplit_omp_totals_degraded_instead_of_proven_zero_cache() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "omp-unsplit", "SYM-119"))
+        .await
+        .expect("issue");
+
+    let mut session = test_session(
+        "symphony",
+        "omp-unsplit",
+        "omp-session-unsplit",
+        "/home/agent/.symphony/workspaces/omp/symphony/SYM-119",
+    );
+    session.provider_mode = RuntimeProviderMode::OmpAcp;
+    session.provider_id = Some("omp-primary".into());
+    session.token_count = 700;
+    session.tokens_input = 0;
+    session.tokens_output = 0;
+    session.tokens_reasoning = 0;
+    session.tokens_cache_read = 0;
+    session.tokens_cache_write = 0;
+    session.tokens_reported_total = 700;
+    session.token_usage_status = "unknown".into();
+    session.token_usage_source = "acp_event".into();
+    store
+        .upsert_runner_session(session)
+        .await
+        .expect("persist session");
+
+    let aggregate = symphony::api::runtime_api_json_response(&config, &store, "/api/dashboard/ui")
+        .await
+        .expect("aggregate");
+    let issue = symphony::api::runtime_api_json_response(
+        &config,
+        &store,
+        "/api/projects/symphony/issues/omp-unsplit/ui",
+    )
+    .await
+    .expect("issue");
+
+    let aggregate: serde_json::Value =
+        serde_json::from_str(&aggregate.body).expect("aggregate json");
+    let issue: serde_json::Value = serde_json::from_str(&issue.body).expect("issue json");
+    let running_issue = &aggregate["projects"][0]["running_issues"][0];
+    let runner_session = &issue["runner_sessions"][0];
+
+    assert_eq!(running_issue["cached_token_count"], 0);
+    assert_eq!(running_issue["token_metrics"]["metrics_status"], "degraded");
+    assert_eq!(
+        running_issue["token_metrics"]["metrics_source"],
+        "runtime_event_total"
+    );
+    assert_eq!(
+        running_issue["token_metrics"]["reported_total_token_count"],
+        700
+    );
+    assert_eq!(runner_session["token_metrics"]["cache_read_token_count"], 0);
+    assert_eq!(
+        runner_session["token_metrics"]["cache_write_token_count"],
+        0
+    );
+    assert_eq!(
+        runner_session["token_metrics"]["metrics_status"],
+        "degraded"
+    );
+}
+
+#[tokio::test]
 async fn dashboard_token_metrics_statuses_mark_missing_unavailable_and_unknown_degraded() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

@@ -62,6 +62,46 @@ describe("dashboard surfaces", () => {
     expect(html).not.toContain(`${"co"}st`);
   });
 
+  test("overview preserves OMP cacheRead/cacheWrite split instead of dropping cached tokens", () => {
+    const dashboard = JSON.parse(JSON.stringify(acceptanceDashboard)) as typeof acceptanceDashboard;
+    const ompMetrics = {
+      accounted_total_token_count: 561,
+      non_cached_token_count: 155,
+      cached_token_count: 406,
+      input_token_count: 120,
+      output_token_count: 30,
+      reasoning_token_count: 5,
+      cache_read_token_count: 400,
+      cache_write_token_count: 6,
+      reported_total_token_count: 700,
+      metrics_status: "available",
+      metrics_source: "persisted_split_metrics",
+    };
+    const issue = dashboard.projects[0].running_issues[0];
+    dashboard.totals.running_tokens = 561;
+    dashboard.totals.running_cached_tokens = 406;
+    dashboard.totals.token_metrics = ompMetrics;
+    dashboard.projects = [dashboard.projects[0]];
+    dashboard.projects[0].running_tokens = 561;
+    dashboard.projects[0].running_cached_tokens = 406;
+    dashboard.projects[0].token_metrics = ompMetrics;
+    issue.token_count = 561;
+    issue.cached_token_count = 406;
+    issue.token_metrics = ompMetrics;
+
+    const html = render(<OverviewSurface dashboard={dashboard} quota={quotaNormal} />);
+    const sessionCard = sectionText(html, "Sessions", "5h quota");
+    const running = sectionText(html, "Running now", "Blockers and idle reasons");
+
+    expect(sessionCard).toContain("561 / 700 tokens");
+    expect(sessionCard).toContain("155 non-cache");
+    expect(sessionCard).toContain("406 cached (read 400 · write 6)");
+    expect(running).toContain("561 / 700 total");
+    expect(running).toContain("155 non-cache");
+    expect(running).toContain("406 cached (read 400 · write 6)");
+    expect(running).toContain("metrics available");
+  });
+
   test("overview does not imply zero cached tokens when token metrics are unavailable", () => {
     const dashboard = JSON.parse(JSON.stringify(acceptanceDashboard)) as typeof acceptanceDashboard;
     dashboard.totals.token_metrics = {
@@ -228,6 +268,14 @@ describe("dashboard surfaces", () => {
     expect(formatDuration(firstTick)).toBe("1s");
     expect(formatDuration(secondTick)).toBe("2s");
     expect(resolveLiveDurationMs(null, 500, startedAtMs + LIVE_DURATION_REFRESH_MS)).toBe(500);
+  });
+
+  test("duration resolver displays elapsed time from OMP start evidence without fallback duration", () => {
+    const startedAtMs = 1_781_880_000_000;
+    const nowMs = startedAtMs + 3_600_000;
+
+    expect(resolveLiveDurationMs(startedAtMs, null, nowMs)).toBe(3_600_000);
+    expect(formatDuration(resolveLiveDurationMs(startedAtMs, null, nowMs))).toBe("1h 0m");
   });
 
   test("agent inspector renders a tree with active spinner", () => {

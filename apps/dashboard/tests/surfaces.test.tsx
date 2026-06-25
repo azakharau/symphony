@@ -25,40 +25,52 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("unavailable");
   });
 
-  test("overview renders running operations first", () => {
+  test("overview renders operations-first order with compact quota link", () => {
     const html = render(<OverviewSurface dashboard={acceptanceDashboard} quota={quotaNormal} />);
+    const runningIndex = html.indexOf("Running now");
+    const healthIndex = html.indexOf("Project health and capacity");
+    const blockersIndex = html.indexOf("Blockers and idle reasons");
+    const running = sectionText(html, "Running now", "Project health and capacity");
+    const health = sectionText(html, "Project health and capacity", "Blockers and idle reasons");
+    const blockers = sectionText(html, "Blockers and idle reasons", "overview preserves OMP cacheRead");
 
-    expect(html).toContain("Running now");
-    expect(html).toContain("Sessions");
+    expect(runningIndex).toBeGreaterThanOrEqual(0);
+    expect(healthIndex).toBeGreaterThan(runningIndex);
+    expect(blockersIndex).toBeGreaterThan(healthIndex);
+    expect(html).toContain("sessions 2/7");
     expect(html).toContain("4 slots available");
-    expect(html).toContain("58,240 / 58,240 tokens");
-    expect(html).toContain("55,130 non-cache");
-    expect(html).toContain("3,110 cached (read 2,800 · write 310)");
-    expect(html).toContain("metrics available");
-    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("38,210 / 38,210 total");
-    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("degraded split");
-    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("metrics degraded");
+    expect(html).toContain("5h quota 76% remaining");
+    expect(html).toContain('href="/quota"');
+    expect(running).toContain("58,240 / 58,240 tokens");
+    expect(running).toContain("55,130 non-cache");
+    expect(running).toContain("3,110 cached (read 2,800 · write 310)");
+    expect(running).toContain("metrics available");
+    expect(running).toContain("38,210 / 38,210 total");
+    expect(running).toContain("degraded split");
+    expect(running).toContain("metrics degraded");
     expect(html).not.toContain(">Capacity</p>");
-    expect(html).toContain("SYM-97");
-    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain(">duration</th>");
-    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain(">provider/state</th>");
-    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("1h 0m");
-    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("runner ACP");
-    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("OMP ACP");
-    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("provider auth unavailable");
-    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("pid 5321 stale/stopped");
-    expect(sectionText(html, "Running now", "Blockers and idle reasons")).toContain("5 ACP frames");
-    expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain("component tests passed");
-    expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain(">last event</th>");
-    expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain(">tools<");
-    expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain("running /");
-    expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain("worktree");
-    expect(sectionText(html, "Running now", "Blockers and idle reasons")).not.toContain("/home/agent/.symphony/workspaces");
-    expect(sectionText(html, "Blockers and idle reasons", "Project health")).toContain("No blockers reported");
-    expect(sectionText(html, "Blockers and idle reasons", "Project health")).not.toContain("two OpenCode sessions are executing");
-    expect(sectionText(html, "Blockers and idle reasons", "Project health")).not.toContain("running/slots");
-    expect(sectionText(html, "Blockers and idle reasons", "Project health")).not.toContain(">active<");
-    expect(sectionText(html, "Blockers and idle reasons", "Project health")).not.toContain(">blocked<");
+    expect(running).toContain("SYM-97");
+    expect(running).toContain(">duration</th>");
+    expect(running).toContain(">provider/state</th>");
+    expect(running).toContain("1h 0m");
+    expect(running).toContain("runner ACP");
+    expect(running).toContain("OMP ACP");
+    expect(running).toContain("provider auth unavailable");
+    expect(running).toContain("pid 5321 stale/stopped");
+    expect(running).toContain("5 ACP frames");
+    expect(running).not.toContain("component tests passed");
+    expect(running).not.toContain(">last event</th>");
+    expect(running).not.toContain(">tools<");
+    expect(running).not.toContain("running /");
+    expect(running).not.toContain("worktree");
+    expect(running).not.toContain("/home/agent/.symphony/workspaces");
+    expect(health).toContain("running sessions / max slots");
+    expect(health).toContain("waiting for quota reset");
+    expect(blockers).toContain("Atlas");
+    expect(blockers).toContain("blocked");
+    expect(blockers).toContain("waiting for quota reset");
+    expect(blockers).not.toContain("No blockers reported");
+    expect(html).not.toContain("running/slots");
     expect(html).not.toContain(`${"co"}st`);
   });
 
@@ -90,12 +102,10 @@ describe("dashboard surfaces", () => {
     issue.token_metrics = ompMetrics;
 
     const html = render(<OverviewSurface dashboard={dashboard} quota={quotaNormal} />);
-    const sessionCard = sectionText(html, "Sessions", "5h quota");
-    const running = sectionText(html, "Running now", "Blockers and idle reasons");
-
-    expect(sessionCard).toContain("561 / 700 tokens");
-    expect(sessionCard).toContain("155 non-cache");
-    expect(sessionCard).toContain("406 cached (read 400 · write 6)");
+    const running = sectionText(html, "Running now", "Project health and capacity");
+    expect(running).toContain("561 / 700 tokens");
+    expect(running).toContain("155 non-cache");
+    expect(running).toContain("406 cached (read 400 · write 6)");
     expect(running).toContain("561 / 700 total");
     expect(running).toContain("155 non-cache");
     expect(running).toContain("406 cached (read 400 · write 6)");
@@ -121,7 +131,7 @@ describe("dashboard surfaces", () => {
     dashboard.projects[0].running_issues[0].cached_token_count = undefined;
 
     const html = render(<OverviewSurface dashboard={dashboard} quota={quotaNormal} />);
-    const running = sectionText(html, "Running now", "Blockers and idle reasons");
+    const running = sectionText(html, "Running now", "Project health and capacity");
 
     expect(html).toContain("unavailable split");
     expect(html).toContain("metrics unavailable");
@@ -134,7 +144,7 @@ describe("dashboard surfaces", () => {
     dashboard.projects[0].running_issues[0].last_event = "opencode_db_updated:1781882984000";
     const html = render(<OverviewSurface dashboard={dashboard} quota={quotaNormal} />);
 
-    const running = sectionText(html, "Running now", "Blockers and idle reasons");
+    const running = sectionText(html, "Running now", "Project health and capacity");
     expect(running).toContain("1h 0m");
     expect(running).not.toContain("OpenCode activity updated");
     expect(running).not.toContain("opencode_db_updated");

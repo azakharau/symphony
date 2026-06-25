@@ -44,34 +44,35 @@ export function UnavailablePanel({ title, message }: { title: string; message: s
 
 export function OverviewSurface({ dashboard, quota }: { dashboard: AggregateDashboard; quota: QuotaResult }) {
   const running = dashboard.projects.flatMap((project) => project.running_issues ?? []);
-  const blockers = dashboard.projects.filter((project) => project.active_count === 0 && (project.parked_count > 0 || isProblemStatus(project.runner_health)));
+  const blockers = dashboard.projects.filter(isBlockedProject);
   const defectCount = dashboard.projects.reduce((total, project) => total + (project.self_defect_routes?.length ?? 0), 0);
   const runningTokens = tokenBreakdown(dashboard.totals.running_tokens, dashboard.totals.running_cached_tokens, dashboard.totals.token_metrics);
 
   return (
     <div className="flex flex-col gap-5">
-      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <MetricCard
-          title="Sessions"
-          value={`${dashboard.totals.running_issue_count}/${dashboard.totals.max_sessions}`}
-          detail={`${dashboard.totals.available_sessions} slots available · ${tokenSummary(runningTokens)}`}
-          tone={running.length ? "good" : dashboard.totals.available_sessions > 0 ? "idle" : "warn"}
-        />
-        <QuotaCompact quota={quota} />
-        <MetricCard title="Blockers" value={String(blockers.length)} detail="blocked or unhealthy projects" tone={blockers.length ? "warn" : "good"} />
-        <MetricCard title="Defects" value={String(defectCount)} detail="deduped runtime signals" tone={defectCount ? "bad" : "good"} />
-      </section>
-
-      <Panel title="Running now" action={<span>{running.length ? "live sessions" : "empty"}</span>}>
+      <Panel
+        title="Running now"
+        action={
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <span>{running.length ? `${running.length} live` : "empty"}</span>
+            <QuotaCompact quota={quota} />
+          </div>
+        }
+      >
+        <div className="mb-3 flex flex-wrap gap-2 text-xs text-slate-600">
+          <span className="rounded-full border bg-slate-50 px-2 py-1">sessions {dashboard.totals.running_issue_count}/{dashboard.totals.max_sessions}</span>
+          <span className="rounded-full border bg-slate-50 px-2 py-1">{dashboard.totals.available_sessions} slots available</span>
+          <span className="rounded-full border bg-slate-50 px-2 py-1">{tokenSummary(runningTokens)}</span>
+        </div>
         {running.length ? <RunningTable issues={running} /> : <EmptyState message="No runner sessions are running. Project rows below still show idle reasons." />}
+      </Panel>
+
+      <Panel title="Project health and capacity" action={<span>{dashboard.projects.length} projects · {defectCount} defects</span>}>
+        <ProjectHealthCapacityTable projects={dashboard.projects} />
       </Panel>
 
       <Panel title="Blockers and idle reasons">
         {blockers.length ? <ProjectReasonTable projects={blockers} /> : <EmptyState message="No blockers reported. Idle projects are waiting for eligible work or capacity." />}
-      </Panel>
-
-      <Panel title="Project health">
-        <ProjectTable projects={dashboard.projects} />
       </Panel>
     </div>
   );
@@ -265,6 +266,41 @@ function ProjectTable({ projects, detailed = false }: { projects: DashboardProje
   );
 }
 
+function ProjectHealthCapacityTable({ projects }: { projects: DashboardProjectCard[] }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[720px] text-left text-sm">
+        <thead className="text-xs uppercase tracking-wide text-slate-500">
+          <tr>
+            <th className="px-3 py-2">project</th>
+            <th className="px-3 py-2">health</th>
+            <th className="px-3 py-2">enabled</th>
+            <th className="w-16 whitespace-nowrap px-2 py-2 text-center tabular-nums">slots</th>
+            <th className="px-3 py-2">active</th>
+            <th className="px-3 py-2">blocked</th>
+            <th className="px-3 py-2">primary reason</th>
+            <th className="px-3 py-2">running tokens</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {projects.map((project) => (
+            <tr key={project.project_id}>
+              <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${project.project_id}`}>{project.name}</Link></td>
+              <td className="px-3 py-3"><Badge tone={statusTone(project.runner_health)}>{project.runner_health}</Badge></td>
+              <td className="px-3 py-3">{project.enabled ? "yes" : "no"}</td>
+              <td className="w-16 whitespace-nowrap px-2 py-3 text-center tabular-nums" aria-label="running sessions / max slots">{project.capacity.running_sessions}/{project.capacity.max_sessions}</td>
+              <td className="px-3 py-3">{project.active_count}</td>
+              <td className="px-3 py-3">{project.parked_count}</td>
+              <td className="px-3 py-3">{project.liveness.primary_reason_detail || project.liveness.reason}</td>
+              <td className="px-3 py-3"><TokenCell total={project.running_tokens} cached={project.running_cached_tokens} metrics={project.token_metrics} /></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function ProjectReasonTable({ projects }: { projects: DashboardProjectCard[] }) {
   return (
     <div className="overflow-x-auto">
@@ -371,17 +407,19 @@ function DefectIssueList({ issues, projectId }: { issues: IssueDetail[]; project
 
 function QuotaCompact({ quota }: { quota: QuotaResult }) {
   if (quota.status === "unavailable") {
-    return <MetricCard title="5h quota" value="unavailable" detail="quota data temporarily unavailable" tone="warn" />;
+    return (
+      <Link className="rounded-full border border-amber-200 bg-amber-50 px-2 py-1 font-medium text-amber-900 hover:border-amber-400" href="/quota">
+        5h quota unavailable
+      </Link>
+    );
   }
+
   const window = quota.quota.buckets.flatMap((bucket) => bucket.windows).find((entry) => entry.label.toLowerCase() === "5h");
   const remaining = quotaRemainingPercent(window);
   return (
-    <article className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">5h quota</div>
-      <div className="mt-2 text-2xl font-semibold">{remaining}% remaining</div>
-      <Progress value={remaining} />
-      <p className="mt-2 text-xs text-slate-500">reset {shortTime(window?.resetAt)}</p>
-    </article>
+    <Link className="rounded-full border border-slate-200 bg-slate-50 px-2 py-1 font-medium text-slate-700 hover:border-slate-400" href="/quota">
+      5h quota {remaining}% remaining
+    </Link>
   );
 }
 
@@ -495,6 +533,12 @@ function statusTone(status?: string | null): Tone {
 
 function isProblemStatus(value: string): boolean {
   return statusTone(value) === "bad" || value.toLowerCase().includes("blocked");
+}
+
+function isBlockedProject(project: DashboardProjectCard): boolean {
+  const health = project.runner_health.toLowerCase();
+  const liveness = project.liveness.status.toLowerCase();
+  return isProblemStatus(project.runner_health) || health.includes("quota") || liveness.includes("blocked") || liveness.includes("failed");
 }
 
 function badgeClass(tone: Tone): string {

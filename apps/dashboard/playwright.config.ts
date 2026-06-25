@@ -8,7 +8,7 @@ export default defineConfig({
   testMatch: "**/*.pw.ts",
   timeout: 30_000,
   expect: { timeout: 10_000 },
-  outputDir: process.env.PLAYWRIGHT_OUTPUT_DIR ?? join(tmpdir(), "symphony-dashboard-playwright", "sym-97"),
+  outputDir: process.env.PLAYWRIGHT_OUTPUT_DIR ?? join(tmpdir(), "symphony-dashboard-playwright", "sym-122"),
   use: {
     baseURL: "http://127.0.0.1:32097",
     trace: "retain-on-failure",
@@ -24,7 +24,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'DASHBOARD_FIXTURE_STATE=acceptance OCU_COMMAND="ocu --localhost --plain" bun run start --hostname 127.0.0.1 --port 32097',
+    command: 'DASHBOARD_FIXTURE_STATE="${DASHBOARD_FIXTURE_STATE:-acceptance}" OCU_COMMAND="ocu --localhost --plain" bun run start --hostname 127.0.0.1 --port 32097',
     url: "http://127.0.0.1:32097",
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

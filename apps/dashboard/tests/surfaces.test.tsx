@@ -207,8 +207,10 @@ describe("dashboard surfaces", () => {
     expect(history).not.toContain("SYM-H7");
   });
 
-  test("issue inspector renders bounded operational tabs", () => {
+  test("issue inspector renders a lifecycle-first execution drilldown", () => {
     const html = render(<IssueInspector issue={acceptanceProject.active_issues[0]} />);
+    const inspector = sectionText(html, "runner session inspector", "Timeline");
+    const timeline = sectionText(html, "Timeline", "Todos");
 
     expect(html).toContain("runner session inspector");
     expect(html).toContain("Open in Linear");
@@ -218,29 +220,37 @@ describe("dashboard surfaces", () => {
     expect(html).not.toContain("https://runner.vestalink.net/session/oc-sym-97");
     expect(html).toContain("Todos");
     expect(html).toContain("Timeline");
+    expect(html).toContain("Agents");
+    expect(html).toContain("Tools");
+    expect(html).toContain("Evals");
+    expect(html).toContain("Git");
     expect(html).toContain("Evidence");
-    expect(countOccurrences(html, ">running</span>")).toBe(1);
-    expect(html).not.toContain(">review</span>");
+    expect(html).toContain("Raw issue JSON");
+    expect(html).toContain("Last event:");
+    expect(html).toContain("Desktop and mobile route coverage in progress.");
+    expect(timeline).toContain("stage starting");
+    expect(timeline).toContain("stage running");
+    expect(timeline).toContain("stage review");
+    expect(timeline.indexOf("Scope accepted")).toBeLessThan(timeline.indexOf("Smoke"));
     expect(html).toContain("Capture smoke screenshots");
     expect(html).toContain("line-through");
     expect(html).toContain("animate-spin");
     expect(html).toContain("aria-label=\"pending\"");
-    expect(html).toContain(">35,100</dd>");
-    expect(html).toContain(">3,110 cached</dd>");
-    expect(html).toContain(">runner ACP</dd>");
-    expect(html).toContain("provider runner-primary");
-    expect(html).toContain(">18 frames</dd>");
-    expect(html).toContain(">duration</dt>");
-    expect(html).toContain("<span class=\"tabular-nums\">1h 0m</span>");
-    expect(html).not.toContain(">cached</dt>");
-    expect(html).not.toContain(">last event</dt>");
-    expect(html).not.toContain(">process</dt>");
+    expect(inspector).toContain(">35,100</dd>");
+    expect(inspector).toContain("3,110 cached");
+    expect(inspector).toContain(">runner ACP</dd>");
+    expect(inspector).toContain("provider runner-primary");
+    expect(inspector).toContain(">18 frames</dd>");
+    expect(inspector).toContain(">duration</dt>");
+    expect(inspector).toContain("<span class=\"tabular-nums\">1h 0m</span>");
+    expect(html).toContain("sym-97-dashboard-surfaces");
+    expect(html).toContain("abc1234");
+    expect(html).toContain("push/merge");
     expect(html).not.toContain("OpenCode activity updated</dd>");
-    expect(html).not.toContain("updated 178");
     expect(html).not.toContain(">medium<");
   });
 
-  test("issue inspector renders OMP ACP blocker telemetry without raw event dumps", () => {
+  test("issue inspector renders OMP ACP blocker telemetry with clear empty sections", () => {
     const html = render(<IssueInspector issue={failedProject.active_issues[0]} />);
 
     expect(html).toContain("OMP ACP");
@@ -251,7 +261,9 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("session is quiet or stale");
     expect(html).toContain(">5 frames</dd>");
     expect(html).toContain("sdk:auth");
-    expect(html).not.toContain("runtime process exited</dd>");
+    expect(html).toContain("bounded activity unavailable for exited process");
+    expect(html).toContain("No running, pending, or recent tool events were reported.");
+    expect(html).toContain("runtime process exited</dd>");
   });
 
   test("issue inspector links runner sessions by persisted session directory", () => {
@@ -285,9 +297,10 @@ describe("dashboard surfaces", () => {
     expect(currentExecution).not.toContain("/stale/worktree");
   });
 
-  test("issue inspector tabs use preferred runner session instead of a stale tail session", () => {
+  test("issue inspector sections use preferred runner session instead of a stale tail session", () => {
     const issue = withStaleTailSession().active_issues[0];
     const html = render(<IssueInspector issue={issue} />);
+    const selectedSessionSurface = sectionText(html, "runner session inspector", "Raw issue JSON");
     const agents = render(<AgentsTree issue={issue} />);
     const events = currentRunnerSession(issue)?.activity?.timeline.filter((event) => event.kind === "tool" || event.tool) ?? [];
     const tools = render(<ToolsByAgent issue={issue} events={events} />);
@@ -297,9 +310,9 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("Capture smoke screenshots");
     expect(agents).toContain("Dashboard pages");
     expect(tools).toContain("typescript-engineer · 1 tool events");
-    expect(html).not.toContain("stale-tail");
-    expect(html).not.toContain("stale-provider");
-    expect(html).not.toContain("stale-only todo");
+    expect(selectedSessionSurface).not.toContain("stale-tail");
+    expect(selectedSessionSurface).not.toContain("stale-provider");
+    expect(selectedSessionSurface).not.toContain("stale-only todo");
     expect(agents).not.toContain("stale-agent");
     expect(tools).not.toContain("stale-agent");
   });

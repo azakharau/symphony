@@ -66,6 +66,26 @@ test.describe("SYM-122 dashboard smoke", () => {
       fullPage: true,
     });
   });
+
+  test("project issue link opens running issue execution drilldown", async ({ page }, testInfo) => {
+    await page.goto("/projects/symphony");
+    await page.getByRole("link", { name: "SYM-97" }).first().click();
+    await expect(page).toHaveURL(/\/projects\/symphony\/issues\/sym-97$/);
+    await expect(page.getByRole("heading", { level: 2, name: "Build dashboard surfaces" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "runner session inspector" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Timeline" })).toBeVisible();
+    await expect(page.getByText("stage review").first()).toBeVisible();
+    await expect(page.getByText("Desktop and mobile route coverage in progress.").first()).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Agents" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Tools" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Evals" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Git" })).toBeVisible();
+    await expect(page.getByText("Raw issue JSON")).toBeVisible();
+    await page.screenshot({
+      path: `../../artifacts/screenshots/sym-124/${testInfo.project.name}-issue-running.png`,
+      fullPage: true,
+    });
+  });
 });
 
 test.describe("SYM-122 empty overview", () => {

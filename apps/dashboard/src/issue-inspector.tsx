@@ -1,69 +1,56 @@
 "use client";
 
-import { useState } from "react";
-
 import { currentRunnerSession } from "@/src/current-runner-session";
 import { Badge, Panel, processStateLabel, providerModeLabel, runtimeFailureText } from "@/src/components";
 import { LiveDuration } from "@/src/live-duration";
-import type { IssueDetail, SessionActivity, TimelineEvent, TodoActivity } from "@/src/types";
+import type { EvalRun, IssueDetail, RunnerSession, SessionActivity, TimelineEvent, TodoActivity } from "@/src/types";
 
-const tabs = ["Todos", "Timeline", "Agents", "Tools", "Evidence"] as const;
+type BadgeTone = "good" | "warn" | "bad" | "idle";
 const DEFAULT_LINEAR_WORKSPACE_SLUG = "alexey-zakharov";
 const DEFAULT_RUNNER_WEB_BASE = "https://runner.vestalink.net";
-type Tab = (typeof tabs)[number];
 
 export function IssueInspector({ issue }: { issue: IssueDetail }) {
-  const [activeTab, setActiveTab] = useState<Tab>("Todos");
   const session = currentRunnerSession(issue);
   const activity = session?.activity;
-  const timeline = activity?.timeline ?? [];
+  const timeline = sortTimelineEvents(activity?.timeline ?? []);
   const toolEvents = timeline.filter((event) => event.kind === "tool" || event.tool);
-
+  const linearUrl = linearIssueUrl(issue.identifier);
+  const runnerDirectory = session ? runnerSessionDirectory(session) : undefined;
+  const runnerUrl = session && runnerDirectory ? runnerSessionUrl(session.runner_session_id, runnerDirectory) : undefined;
+  const lastEvent = latestEventText(issue, session, timeline);
+  const processTone = session?.process_alive === true ? "good" : session?.process_alive === false ? "bad" : "warn";
   const summary = {
     todos: activity?.todos.length ?? session?.todo_count ?? 0,
     agents: (activity?.sessions.length ?? 0) + (activity?.subagents.length ?? 0),
     tools: toolEvents.length,
     events: timeline.length,
   };
-  const sessionTokens = tokenBreakdown(session?.token_count ?? 0, session?.cached_token_count);
-  const linearUrl = linearIssueUrl(issue.identifier);
-  const runnerDirectory = session ? runnerSessionDirectory(session) : undefined;
-  const runnerUrl = session && runnerDirectory ? runnerSessionUrl(session.runner_session_id, runnerDirectory) : undefined;
 
   return (
     <div className="flex flex-col gap-5">
       <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <div>
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0">
             <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{issue.identifier}</p>
             <h2 className="mt-1 text-2xl font-semibold">{issue.title}</h2>
             <div className="mt-3 flex flex-wrap gap-2">
-              <Badge tone={issue.lifecycle_stage === "failed" ? "bad" : issue.lifecycle_stage === "blocked" ? "warn" : "good"}>{issue.display_status}</Badge>
+              <Badge tone={inspectorTone(issue.lifecycle_stage)}>{issue.display_status}</Badge>
+              <Badge tone={processTone}>{session ? processStateLabel(session.process_id, session.process_alive) : "process unavailable"}</Badge>
+              <Badge tone={inspectorTone(session?.current_stage ?? issue.lifecycle_stage)}>stage {humanizeLabel(session?.current_stage ?? issue.lifecycle_stage)}</Badge>
             </div>
+            <p className="mt-3 max-w-3xl text-sm text-slate-600">
+              Last event: <span className="font-medium text-slate-900">{lastEvent}</span>
+            </p>
           </div>
-          <div className="flex flex-col gap-3 lg:min-w-[520px]">
-            <div className="flex flex-wrap justify-start gap-2 lg:justify-end">
-              <a className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700" href={linearUrl} target="_blank" rel="noreferrer">
-                Open in Linear
+          <div className="flex flex-wrap justify-start gap-2 lg:justify-end">
+            <a className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700" href={linearUrl} target="_blank" rel="noreferrer">
+              Open in Linear
+            </a>
+            {runnerUrl ? (
+              <a className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 shadow-sm hover:border-blue-300 hover:text-blue-700" href={runnerUrl} target="_blank" rel="noreferrer">
+                Open in runner
               </a>
-              {runnerUrl ? (
-                <a className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 shadow-sm hover:border-blue-300 hover:text-blue-700" href={runnerUrl} target="_blank" rel="noreferrer">
-                  Open in runner
-                </a>
-              ) : null}
-            </div>
-            <dl className="grid gap-2 text-sm sm:grid-cols-2">
-              <KeyValue label="active agent" value={session?.active_agent ?? session?.agent ?? "unavailable"} />
-              <KeyValue label="model" value={session?.active_model ?? session?.model ?? "unavailable"} />
-              <KeyValue label="provider" value={providerModeLabel(session?.provider_mode)} detail={session?.provider_id ? `provider ${session.provider_id}` : "provider id unavailable"} />
-              <KeyValue label="session" value={session?.runner_session_id ?? "unavailable"} detail={session ? processStateLabel(session.process_id, session.process_alive) : "process not checked"} mono />
-              <KeyValue label="failure taxonomy" value={runtimeFailureText(session?.runtime_failure_kind)} detail={session?.silence_observed ? "session is quiet or stale" : "no silence marker"} />
-              <KeyValue label="ACP telemetry" value={`${session?.acp_frame_count ?? 0} frames`} detail={sessionEvidenceSummary(session?.session_evidence_refs)} />
-              <KeyValue label="tokens" value={formatCompactNumber(sessionTokens.net)} detail={`${formatCompactNumber(sessionTokens.cached)} cached`} />
-              <KeyValue label="duration" value={<LiveDuration startedAtMs={session?.started_at_ms} fallbackMs={session?.duration_ms} />} />
-              <KeyValue label="worktree" value={session?.worktree_path ?? issue.git_ref?.worktree_path ?? "unavailable"} mono />
-              <KeyValue label="git" value={issue.git_ref ? `${issue.git_ref.branch} ${issue.git_ref.head_sha ?? ""}` : "unavailable"} mono />
-            </dl>
+            ) : null}
           </div>
         </div>
       </section>
@@ -76,25 +63,104 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
       </section>
 
       <Panel title="runner session inspector" action={session?.runner_session_id ?? "no session"}>
-        <div className="mb-4 flex gap-2 overflow-x-auto">
-          {tabs.map((tab) => (
-            <button
-              key={tab}
-              className={`rounded-full border px-3 py-2 text-sm font-medium ${activeTab === tab ? "border-blue-600 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-600"}`}
-              type="button"
-              onClick={() => setActiveTab(tab)}
-            >
-              {tab}
-            </button>
-          ))}
-        </div>
-        {activeTab === "Todos" ? <TodosTab issue={issue} /> : null}
-        {activeTab === "Timeline" ? <TimelineTab events={timeline} /> : null}
-        {activeTab === "Agents" ? <AgentsTab issue={issue} /> : null}
-        {activeTab === "Tools" ? <ToolsByAgent issue={issue} events={toolEvents} /> : null}
-        {activeTab === "Evidence" ? <EvidenceTab issue={issue} /> : null}
+        <RunnerEvidence issue={issue} session={session} toolEvents={toolEvents} />
       </Panel>
+
+      <Panel title="Timeline" action="lifecycle and recent activity">
+        <LifecycleTimeline issue={issue} session={session} events={timeline} />
+      </Panel>
+
+      <section className="grid gap-5 lg:grid-cols-2">
+        <Panel title="Todos" action={summary.todos ? `${summary.todos} reported` : "empty"}>
+          <TodosTab issue={issue} />
+        </Panel>
+        <Panel title="Agents" action={summary.agents ? `${summary.agents} sessions` : "empty"}>
+          <AgentsTab issue={issue} />
+        </Panel>
+        <Panel title="Tools" action={toolEvents.length ? `${toolEvents.length} events` : "empty"}>
+          <ToolsByAgent issue={issue} events={toolEvents} />
+        </Panel>
+        <Panel title="Evals" action={issue.eval_results.length ? `${issue.eval_results.length} runs` : "empty"}>
+          <EvalsSection evals={issue.eval_results} session={session} />
+        </Panel>
+        <Panel title="Git" action={issue.git_ref ? "refs reported" : "empty"}>
+          <GitSection issue={issue} session={session} />
+        </Panel>
+        <Panel title="Evidence" action="raw details available">
+          <EvidenceTab issue={issue} />
+        </Panel>
+      </section>
     </div>
+  );
+}
+
+function RunnerEvidence({ issue, session, toolEvents }: { issue: IssueDetail; session?: RunnerSession; toolEvents: TimelineEvent[] }) {
+  const tokens = tokenBreakdown(session?.token_count ?? 0, session?.cached_token_count);
+  return (
+    <dl className="grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-4">
+      <KeyValue label="active agent" value={session?.active_agent ?? session?.agent ?? "unavailable"} detail={session?.active_model ?? session?.model ?? "model unavailable"} />
+      <KeyValue label="provider/session" value={providerModeLabel(session?.provider_mode)} detail={session?.provider_id ? `provider ${session.provider_id}` : "provider id unavailable"} />
+      <KeyValue label="session id" value={session?.runner_session_id ?? "unavailable"} detail={session ? processStateLabel(session.process_id, session.process_alive) : "process not checked"} mono />
+      <KeyValue label="stage" value={humanizeLabel(session?.current_stage ?? issue.lifecycle_stage)} detail={`lifecycle ${humanizeLabel(session?.lifecycle_stage ?? issue.lifecycle_stage)}`} />
+      <KeyValue label="tokens" value={formatCompactNumber(tokens.net)} detail={cachedTokenDetail(tokens.cached, session?.token_metrics?.metrics_status)} />
+      <KeyValue label="cached-token availability" value={session?.cached_token_count === undefined || session.cached_token_count === null ? "unavailable" : formatCompactNumber(session.cached_token_count)} detail={session?.token_metrics?.metrics_source ?? "legacy session counter"} />
+      <KeyValue label="tools" value={`${session?.activity?.running_tool_count ?? 0} running / ${session?.activity?.pending_tool_count ?? 0} pending`} detail={`${toolEvents.length} recent tool events`} />
+      <KeyValue label="todos" value={session?.todo_count ?? 0} detail={session?.activity ? "todo detail available" : "aggregate count only"} />
+      <KeyValue label="duration" value={<LiveDuration startedAtMs={session?.started_at_ms} fallbackMs={session?.duration_ms} />} detail={sessionLastUpdated(session)} />
+      <KeyValue label="failure taxonomy" value={runtimeFailureText(session?.runtime_failure_kind)} detail={session?.silence_observed ? "session is quiet or stale" : "no silence marker"} />
+      <KeyValue label="ACP telemetry" value={`${session?.acp_frame_count ?? 0} frames`} detail={sessionEvidenceSummary(session?.session_evidence_refs)} />
+      <KeyValue label="last event" value={latestEventText(issue, session, session?.activity?.timeline ?? [])} />
+    </dl>
+  );
+}
+
+function LifecycleTimeline({ issue, session, events }: { issue: IssueDetail; session?: RunnerSession; events: TimelineEvent[] }) {
+  const stages = session?.stage_history.length ? session.stage_history : [session?.current_stage ?? issue.lifecycle_stage];
+  return (
+    <ol className="ml-2 border-l border-slate-200">
+      {stages.map((stage, index) => (
+        <li key={`${stage}-${index}`} className="relative pb-3 pl-5 text-sm">
+          <span className="absolute -left-[0.45rem] top-1 h-3.5 w-3.5 rounded-full bg-blue-600" aria-label={stage === session?.current_stage ? "current lifecycle stage" : "lifecycle stage"} />
+          <div className="flex flex-wrap items-baseline gap-2">
+            <span className="font-semibold text-slate-950">stage {humanizeLabel(stage)}</span>
+            {stage === session?.current_stage ? <span className="text-xs text-blue-700">current</span> : null}
+          </div>
+          <p className="mt-1 text-xs text-slate-500">lifecycle step {index + 1} of {stages.length}</p>
+        </li>
+      ))}
+      {events.length ? events.map((event) => <TimelineItem key={`${event.session_id}-${event.part_id}`} event={event} />) : (
+        <li className="relative pl-5 text-sm text-slate-600">
+          <span className="absolute -left-[0.35rem] top-1 h-2.5 w-2.5 rounded-full bg-slate-300" aria-hidden />
+          No timeline activity is available; lifecycle stage history is shown above.
+        </li>
+      )}
+    </ol>
+  );
+}
+
+function EvalsSection({ evals, session }: { evals: EvalRun[]; session?: RunnerSession }) {
+  if (!evals.length && !session?.eval_stage) return <Limited message="No eval runs were reported for this issue." />;
+  return (
+    <div className="grid gap-2 text-sm">
+      {session?.eval_stage ? <Evidence label="active eval stage" value={session.eval_stage} /> : null}
+      {evals.map((evalRun) => (
+        <Evidence key={evalRun.run_id} label={evalRun.suite} value={`${evalRun.status}${evalRun.details_json ? ` · ${evalRun.details_json}` : ""}`} />
+      ))}
+    </div>
+  );
+}
+
+function GitSection({ issue, session }: { issue: IssueDetail; session?: RunnerSession }) {
+  const ref = issue.git_ref;
+  if (!ref && !session?.worktree_path) return <Limited message="No git or worktree references were reported for this issue." />;
+  return (
+    <dl className="grid gap-2 text-sm">
+      <KeyValue label="branch" value={ref?.branch ?? "unavailable"} mono />
+      <KeyValue label="worktree" value={session?.worktree_path ?? ref?.worktree_path ?? "unavailable"} mono />
+      <KeyValue label="commit" value={ref?.head_sha ?? "no commit reported"} detail={ref?.head_sha ? "head SHA reported by API" : "commit status unavailable"} mono />
+      <KeyValue label="pull request" value={ref?.pr_url ? <a className="text-blue-700 hover:underline" href={ref.pr_url} target="_blank" rel="noreferrer">{ref.pr_url}</a> : "not reported"} />
+      <KeyValue label="push/merge" value="not reported" detail="API exposes branch, worktree, commit, and PR only." />
+    </dl>
   );
 }
 
@@ -153,15 +219,12 @@ function todoState(status: string): { kind: "completed" | "active" | "pending"; 
   };
 }
 
-function TimelineTab({ events, empty = "No timeline activity is available." }: { events: TimelineEvent[]; empty?: string }) {
-  if (!events.length) return <Limited message={empty} />;
-  return <ActivityTimeline events={events} />;
-}
 
 export function ActivityTimeline({ events }: { events: TimelineEvent[] }) {
+  const orderedEvents = sortTimelineEvents(events);
   return (
     <ol className="ml-2 border-l border-slate-200">
-      {events.map((event) => (
+      {orderedEvents.map((event) => (
         <TimelineItem key={`${event.session_id}-${event.part_id}`} event={event} />
       ))}
     </ol>
@@ -348,6 +411,38 @@ function tokenBreakdown(total: number, cached?: number | null): { net: number; c
   };
 }
 
+function sortTimelineEvents(events: TimelineEvent[]): TimelineEvent[] {
+  return [...events].sort((left, right) => (left.time_created_ms || left.time_updated_ms) - (right.time_created_ms || right.time_updated_ms));
+}
+
+function latestEventText(issue: IssueDetail, session?: RunnerSession, events: TimelineEvent[] = []): string {
+  const latestTimelineEvent = sortTimelineEvents(events).at(-1);
+  return latestTimelineEvent?.summary || latestTimelineEvent?.title || session?.last_event || issue.last_runner_event || "no runner event reported";
+}
+
+function sessionLastUpdated(session?: RunnerSession): string {
+  const updated = session?.activity?.last_updated_ms;
+  if (!updated) return "last update unavailable";
+  return `updated ${formatEpochMs(updated)}`;
+}
+
+function cachedTokenDetail(cached: number, status?: string | null): string {
+  if (!status) return `${formatCompactNumber(cached)} cached`;
+  return `${formatCompactNumber(cached)} cached · metrics ${status}`;
+}
+
+function humanizeLabel(value?: string | null): string {
+  return value ? value.replaceAll("_", " ") : "unknown";
+}
+
+function inspectorTone(value?: string | null): BadgeTone {
+  const normalized = (value ?? "").toLowerCase();
+  if (["running", "review", "eval", "handoff", "completed", "done", "active"].some((token) => normalized.includes(token))) return "good";
+  if (["blocked", "silent", "quota", "provider", "idle"].some((token) => normalized.includes(token))) return "warn";
+  if (["failed", "failure", "defect", "exit", "canceled"].some((token) => normalized.includes(token))) return "bad";
+  return "idle";
+}
+
 function formatEpochMs(value: number): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
@@ -374,6 +469,10 @@ function EvidenceTab({ issue }: { issue: IssueDetail }) {
       <Evidence label="self-defect routing" value={issue.self_defect_routing ? `${issue.self_defect_routing.fingerprint ?? "fingerprint unavailable"}: ${issue.self_defect_routing.next_action ?? "inspect"}` : "none"} />
       <Evidence label="evals" value={issue.eval_results.length ? issue.eval_results.map((item) => `${item.suite} ${item.status}`).join("; ") : "none"} />
       <Evidence label="stop reason" value={issue.stop_reason ?? "none"} />
+      <details className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+        <summary className="cursor-pointer font-semibold text-slate-950">Raw issue JSON</summary>
+        <pre className="mt-3 max-h-[26rem] overflow-auto rounded-lg bg-slate-950 p-3 text-xs text-slate-50">{JSON.stringify(issue, null, 2)}</pre>
+      </details>
     </div>
   );
 }

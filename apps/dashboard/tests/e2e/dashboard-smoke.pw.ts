@@ -6,7 +6,7 @@ const pages = [
   { slug: "overview", path: "/", expected: "Running now" },
   { slug: "projects", path: "/projects", expected: "Projects" },
   { slug: "project", path: "/projects/symphony", expected: "Symphony current execution" },
-  { slug: "issue", path: "/projects/symphony/issues/sym-97", expected: "runner session inspector" },
+  { slug: "issue", path: "/projects/symphony/issues/sym-97", expected: "Current runner status" },
   { slug: "quota", path: "/quota", expected: "Quota windows" },
   { slug: "defects", path: "/defects", expected: "Deduped defects" },
 ];
@@ -39,6 +39,10 @@ test.describe("SYM-126 dashboard responsive smoke", () => {
     await page.goto("/projects/symphony");
     await expect(page.getByRole("heading", { name: "Symphony current execution" })).toBeVisible();
     await expect(page.locator(".issue-table tr").first()).toHaveCSS("display", "block");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+    await page.goto("/projects/symphony/issues/sym-97");
+    await expect(page.getByRole("heading", { name: "Current runner status" })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
     await page.goto("/defects");
@@ -88,22 +92,25 @@ test.describe("SYM-126 dashboard responsive smoke", () => {
     });
   });
 
-  test("project issue link opens running issue execution drilldown", async ({ page }, testInfo) => {
-    await page.goto("/projects/symphony");
+  test("overview project issue link opens running issue execution drilldown", async ({ page }, testInfo) => {
+    await page.goto("/");
+    await page.getByRole("link", { name: "Symphony" }).first().click();
+    await expect(page.getByRole("heading", { name: "Symphony current execution" })).toBeVisible();
     await page.getByRole("link", { name: "SYM-97" }).first().click();
     await expect(page).toHaveURL(/\/projects\/symphony\/issues\/sym-97$/);
     await expect(page.getByRole("heading", { level: 2, name: "Build dashboard surfaces" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "runner session inspector" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Timeline" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Current runner status" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Lifecycle timeline" })).toBeVisible();
     await expect(page.getByText("stage review").first()).toBeVisible();
     await expect(page.getByText("Desktop and mobile route coverage in progress.").first()).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Agents" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Tools" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Evals" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Git" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "OMP workers" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Tool activity" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Eval state" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Git and worktree" })).toBeVisible();
+    await expect(page.getByText("Last event:")).toHaveCount(0);
     await expect(page.getByText("Raw issue JSON")).toBeVisible();
     await page.screenshot({
-      path: `../../artifacts/screenshots/sym-126/${testInfo.project.name}-issue-running.png`,
+      path: `../../artifacts/screenshots/sym-130/${testInfo.project.name}-issue-running.png`,
       fullPage: true,
     });
   });

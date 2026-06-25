@@ -17,14 +17,7 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
   const linearUrl = linearIssueUrl(issue.identifier);
   const runnerDirectory = session ? runnerSessionDirectory(session) : undefined;
   const runnerUrl = session && runnerDirectory ? runnerSessionUrl(session.runner_session_id, runnerDirectory) : undefined;
-  const lastEvent = latestEventText(issue, session, timeline);
   const processTone = session?.process_alive === true ? "good" : session?.process_alive === false ? "bad" : "warn";
-  const summary = {
-    todos: activity?.todos.length ?? session?.todo_count ?? 0,
-    agents: (activity?.sessions.length ?? 0) + (activity?.subagents.length ?? 0),
-    tools: toolEvents.length,
-    events: timeline.length,
-  };
 
   return (
     <div className="flex flex-col gap-5">
@@ -38,9 +31,7 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
               <Badge tone={processTone}>{session ? processStateLabel(session.process_id, session.process_alive) : "process unavailable"}</Badge>
               <Badge tone={inspectorTone(session?.current_stage ?? issue.lifecycle_stage)}>stage {humanizeLabel(session?.current_stage ?? issue.lifecycle_stage)}</Badge>
             </div>
-            <p className="mt-3 max-w-3xl break-words text-sm text-slate-600">
-              Last event: <span className="font-medium text-slate-900">{lastEvent}</span>
-            </p>
+            <p className="mt-3 max-w-3xl break-words text-sm text-slate-600">{executionSummary(issue, session, timeline)}</p>
           </div>
           <div className="grid gap-2 sm:flex sm:flex-wrap sm:justify-start lg:justify-end">
             <a className="rounded-lg bg-blue-600 px-4 py-2 text-center text-sm font-semibold text-white shadow-sm hover:bg-blue-700" href={linearUrl} target="_blank" rel="noreferrer">
@@ -55,64 +46,68 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
         </div>
       </section>
 
-      <section className="grid gap-3 sm:grid-cols-4">
-        <Summary value={summary.todos} label="todos" />
-        <Summary value={summary.agents} label="agents" />
-        <Summary value={summary.tools} label="tool events" />
-        <Summary value={summary.events} label="timeline events" />
-      </section>
-
-      <Panel title="runner session inspector" action={session?.runner_session_id ?? "no session"}>
+      <Panel title="Current runner status" action={session?.runner_session_id ?? "No runner session reported by API"}>
         <RunnerEvidence issue={issue} session={session} toolEvents={toolEvents} />
       </Panel>
 
-      <Panel title="Timeline" action="lifecycle and recent activity">
+      <Panel title="Lifecycle timeline" action="stage history and recent activity">
         <LifecycleTimeline issue={issue} session={session} events={timeline} />
       </Panel>
 
-      <section className="grid gap-5 lg:grid-cols-2">
-        <Panel title="Todos" action={summary.todos ? `${summary.todos} reported` : "empty"}>
-          <TodosTab issue={issue} />
-        </Panel>
-        <Panel title="Agents" action={summary.agents ? `${summary.agents} sessions` : "empty"}>
+      <section className="grid gap-5 lg:grid-cols-3">
+        <Panel title="OMP workers" action={activity ? `${(activity.sessions.length + activity.subagents.length).toString()} sessions` : sourceUnavailable(session, "activity source unavailable")}>
           <AgentsTab issue={issue} />
         </Panel>
-        <Panel title="Tools" action={toolEvents.length ? `${toolEvents.length} events` : "empty"}>
+        <Panel title="Todo activity" action={activity ? `${activity.todos.length.toString()} reported` : sourceUnavailable(session, "todo source unavailable")}>
+          <TodosTab issue={issue} />
+        </Panel>
+        <Panel title="Tool activity" action={activity ? `${toolEvents.length.toString()} recent events` : sourceUnavailable(session, "tool source unavailable")}>
           <ToolsByAgent issue={issue} events={toolEvents} />
         </Panel>
-        <Panel title="Evals" action={issue.eval_results.length ? `${issue.eval_results.length} runs` : "empty"}>
+      </section>
+
+      <section className="grid gap-5 lg:grid-cols-2">
+        <Panel title="Eval state" action={issue.eval_results.length ? `${issue.eval_results.length.toString()} runs` : sourceUnavailable(session, "no eval runs reported")}>
           <EvalsSection evals={issue.eval_results} session={session} />
         </Panel>
-        <Panel title="Git" action={issue.git_ref ? "refs reported" : "empty"}>
+        <Panel title="Git and worktree" action={issue.git_ref ? "refs reported" : sourceUnavailable(session, "git refs unavailable")}>
           <GitSection issue={issue} session={session} />
         </Panel>
-        <Panel title="Evidence" action="raw details available">
-          <EvidenceTab issue={issue} />
-        </Panel>
       </section>
+
+      {hasOperationalBlocker(issue, session) ? (
+        <Panel title="Blocker and failure state" action="shown because issue has blocking evidence">
+          <OperationalBlocker issue={issue} session={session} />
+        </Panel>
+      ) : null}
+
+      <Panel title="Debug details" action="raw data collapsed">
+        <DebugDetails issue={issue} />
+      </Panel>
     </div>
   );
 }
 
 function RunnerEvidence({ issue, session, toolEvents }: { issue: IssueDetail; session?: RunnerSession; toolEvents: TimelineEvent[] }) {
-  const tokens = tokenBreakdown(session?.token_count ?? 0, session?.cached_token_count, session?.token_metrics);
+  const tokens = tokenBreakdown(session?.token_count ?? 0, session?.cached_token_count, session?.token_metrics ?? issue.token_metrics);
   return (
     <dl className="grid gap-2 text-sm sm:grid-cols-2 xl:grid-cols-4">
-      <KeyValue label="active agent" value={session?.active_agent ?? session?.agent ?? "unavailable"} detail={session?.active_model ?? session?.model ?? "model unavailable"} />
-      <KeyValue label="provider/session" value={providerModeLabel(session?.provider_mode)} detail={session?.provider_id ? `provider ${session.provider_id}` : "provider id unavailable"} />
+      <KeyValue label="runner identity" value={session?.active_agent ?? session?.agent ?? "unavailable"} detail={session?.active_model ?? session?.model ?? "model unavailable"} />
+      <KeyValue label="provider" value={providerModeLabel(session?.provider_mode)} detail={session?.provider_id ? `provider ${session.provider_id}` : "provider id unavailable"} />
       <KeyValue label="session id" value={session?.runner_session_id ?? "unavailable"} detail={session ? processStateLabel(session.process_id, session.process_alive) : "process not checked"} mono />
       <KeyValue label="stage" value={humanizeLabel(session?.current_stage ?? issue.lifecycle_stage)} detail={`lifecycle ${humanizeLabel(session?.lifecycle_stage ?? issue.lifecycle_stage)}`} />
-      <KeyValue label="tokens" value={formatCompactNumber(tokens.value)} detail={tokens.detail} />
-      <KeyValue label="cached-token availability" value={tokens.cachedAvailable ? formatCompactNumber(tokens.cached) : "unavailable"} detail={tokens.availabilityDetail} />
-      <KeyValue label="tools" value={`${session?.activity?.running_tool_count ?? 0} running / ${session?.activity?.pending_tool_count ?? 0} pending`} detail={`${toolEvents.length} recent tool events`} />
-      <KeyValue label="todos" value={session?.todo_count ?? 0} detail={session?.activity ? "todo detail available" : "aggregate count only"} />
       <KeyValue label="duration" value={<LiveDuration startedAtMs={session?.started_at_ms} fallbackMs={session?.duration_ms} />} detail={sessionLastUpdated(session)} />
-      <KeyValue label="failure taxonomy" value={runtimeFailureText(session?.runtime_failure_kind)} detail={session?.silence_observed ? "session is quiet or stale" : "no silence marker"} />
+      <KeyValue label="tokens" value={`${formatCompactNumber(tokens.accounted)} total`} detail={tokens.detail} />
+      <KeyValue label="cache metrics" value={tokens.cachedAvailable ? `${formatCompactNumber(tokens.cached)} cached` : "unavailable"} detail={tokens.availabilityDetail} />
+      <KeyValue label="tool activity" value={`${session?.activity?.running_tool_count ?? 0} running / ${session?.activity?.pending_tool_count ?? 0} pending`} detail={session?.activity ? `${toolEvents.length} recent tool events` : sourceUnavailable(session, "bounded tool activity unavailable")} />
+      <KeyValue label="todo activity" value={session?.todo_count ?? 0} detail={session?.activity ? "todo detail available" : sourceUnavailable(session, "todo detail unavailable")} />
       <KeyValue label="ACP telemetry" value={`${session?.acp_frame_count ?? 0} frames`} detail={sessionEvidenceSummary(session?.session_evidence_refs)} />
-      <KeyValue label="last event" value={latestEventText(issue, session, session?.activity?.timeline ?? [])} />
+      {session?.runtime_failure_kind ? <KeyValue label="runtime failure" value={runtimeFailureText(session.runtime_failure_kind)} detail={session.silence_observed ? "session is quiet or stale" : undefined} /> : null}
+      {session?.silence_observed && !session.runtime_failure_kind ? <KeyValue label="runtime silence" value="session is quiet or stale" /> : null}
     </dl>
   );
 }
+
 
 function LifecycleTimeline({ issue, session, events }: { issue: IssueDetail; session?: RunnerSession; events: TimelineEvent[] }) {
   const stages = session?.stage_history.length ? session.stage_history : [session?.current_stage ?? issue.lifecycle_stage];
@@ -365,6 +360,68 @@ function buildAgentTree(agents: SessionActivity[]): AgentNode[] {
   return roots;
 }
 
+function executionSummary(issue: IssueDetail, session: RunnerSession | undefined, events: TimelineEvent[]): string {
+  if (issue.blocker?.message) return `Blocked: ${issue.blocker.message}`;
+  if (issue.runtime_defect?.next_action) return `Runtime defect: ${issue.runtime_defect.next_action}`;
+  if (issue.failure?.message) return `Failed: ${issue.failure.message}`;
+  if (!session) return `No runner session is reported; lifecycle is ${humanizeLabel(issue.lifecycle_stage)}.`;
+
+  const activity = session.activity;
+  const activeAgent = session.active_agent ?? session.agent ?? "runner";
+  const provider = providerModeLabel(session.provider_mode);
+  const stage = humanizeLabel(session.current_stage);
+  const tools = activity
+    ? `${activity.running_tool_count} running / ${activity.pending_tool_count} pending tools`
+    : sourceUnavailable(session, "tool activity unavailable");
+  const recent = latestMeaningfulActivity(events);
+  return `${activeAgent} is executing ${stage} through ${provider}; ${tools}. ${recent}`;
+}
+
+function latestMeaningfulActivity(events: TimelineEvent[]): string {
+  const latestTimelineEvent = sortTimelineEvents(events).at(-1);
+  if (!latestTimelineEvent) return "No bounded timeline activity is available.";
+  return `Latest activity: ${latestTimelineEvent.summary || latestTimelineEvent.title || humanizeLabel(latestTimelineEvent.kind)}.`;
+}
+
+function sourceUnavailable(session: RunnerSession | undefined, fallback: string): string {
+  if (!session) return "No runner session reported by API";
+  return session.activity_error ?? fallback;
+}
+
+function hasOperationalBlocker(issue: IssueDetail, session?: RunnerSession): boolean {
+  return Boolean(issue.blocker || issue.failure || issue.runtime_defect || issue.self_defect_routing || issue.stop_reason || session?.runtime_failure_kind || session?.silence_observed);
+}
+
+function OperationalBlocker({ issue, session }: { issue: IssueDetail; session?: RunnerSession }) {
+  return (
+    <div className="grid gap-3 text-sm sm:grid-cols-2">
+      {issue.blocker ? <Evidence label="blocker" value={issue.blocker.message} /> : null}
+      {issue.failure ? <Evidence label="failure" value={failureSummary(issue.failure)} /> : null}
+      {issue.runtime_defect ? <Evidence label="runtime defect" value={runtimeDefectSummary(issue.runtime_defect)} /> : null}
+      {issue.self_defect_routing ? <Evidence label="self-defect routing" value={selfDefectSummary(issue.self_defect_routing)} /> : null}
+      {session?.runtime_failure_kind ? <Evidence label="runtime failure" value={runtimeFailureText(session.runtime_failure_kind)} /> : null}
+      {session?.silence_observed ? <Evidence label="runtime silence" value="session is quiet or stale" /> : null}
+      {issue.stop_reason ? <Evidence label="stop reason" value={issue.stop_reason} /> : null}
+    </div>
+  );
+}
+
+function failureSummary(failure: NonNullable<IssueDetail["failure"]>): string {
+  const count = failure.occurrence_count > 1 ? ` · ${failure.occurrence_count} occurrences` : "";
+  return `${failure.message} · ${humanizeLabel(failure.kind)}${count}`;
+}
+
+function runtimeDefectSummary(defect: NonNullable<IssueDetail["runtime_defect"]>): string {
+  return `${defect.next_action} · ${humanizeLabel(defect.classification)}`;
+}
+
+function selfDefectSummary(route: NonNullable<IssueDetail["self_defect_routing"]>): string {
+  const action = route.next_action ?? "inspect routed defect";
+  const kind = humanizeLabel(route.kind ?? route.defect_kind ?? route.relation ?? route.relation_mode);
+  const count = route.occurrence_count && route.occurrence_count > 1 ? ` · ${route.occurrence_count} occurrences` : "";
+  return `${action} · ${kind}${count}`;
+}
+
 function isActiveStatus(status?: string | null): boolean {
   return ["active", "running", "in_progress", "in-progress"].includes((status ?? "").toLowerCase());
 }
@@ -405,7 +462,9 @@ function sessionEvidenceSummary(refs?: string[] | null): string {
 }
 
 type InspectorTokenBreakdown = {
-  value: number;
+  accounted: number;
+  reported: number;
+  nonCached: number;
   cached: number;
   cachedAvailable: boolean;
   detail: string;
@@ -420,21 +479,29 @@ function tokenBreakdown(total: number, cached?: number | null, metrics?: Dashboa
     const cachedTokens = Math.max(0, metrics.cached_token_count);
     const cacheRead = Math.max(0, metrics.cache_read_token_count);
     const cacheWrite = Math.max(0, metrics.cache_write_token_count);
+    const nonCached = Math.max(0, metrics.non_cached_token_count);
     const splitProven = status.toLowerCase() !== "unavailable" && (status.toLowerCase() !== "degraded" || cachedTokens > 0 || cacheRead > 0 || cacheWrite > 0);
     const cacheEvidence = cacheRead || cacheWrite ? ` (read ${formatCompactNumber(cacheRead)} · write ${formatCompactNumber(cacheWrite)})` : "";
+    const metricState = `metrics ${status}${freshness}${reason}`;
     return {
-      value: splitProven ? Math.max(0, metrics.non_cached_token_count) : Math.max(0, metrics.accounted_total_token_count),
+      accounted: Math.max(0, metrics.accounted_total_token_count),
+      reported: Math.max(0, metrics.reported_total_token_count),
+      nonCached,
       cached: cachedTokens,
       cachedAvailable: splitProven,
-      detail: splitProven ? `${formatCompactNumber(cachedTokens)} cached${cacheEvidence} · metrics ${status}${freshness}${reason}` : `${status} split · metrics ${status}${freshness}${reason}`,
-      availabilityDetail: `${metrics.metrics_source || "metrics source unavailable"} · metrics ${status}${freshness}${reason}`,
+      detail: splitProven
+        ? `${formatCompactNumber(metrics.reported_total_token_count)} reported · ${formatCompactNumber(nonCached)} non-cache · ${formatCompactNumber(cachedTokens)} cached${cacheEvidence} · ${metricState}`
+        : `${formatCompactNumber(metrics.reported_total_token_count)} reported · unavailable split · ${metricState}`,
+      availabilityDetail: `${metrics.metrics_source || "metrics source unavailable"} · ${metricState}`,
     };
   }
 
   const safeCached = cached === undefined || cached === null ? null : Math.max(0, cached);
   const splitProven = safeCached !== null && safeCached > 0;
   return {
-    value: splitProven ? Math.max(0, total - safeCached) : Math.max(0, total),
+    accounted: Math.max(0, total),
+    reported: Math.max(0, total),
+    nonCached: splitProven ? Math.max(0, total - safeCached) : Math.max(0, total),
     cached: safeCached ?? 0,
     cachedAvailable: splitProven,
     detail: splitProven ? `${formatCompactNumber(safeCached)} cached · metrics legacy` : "unavailable split · metrics unavailable",
@@ -446,10 +513,6 @@ function sortTimelineEvents(events: TimelineEvent[]): TimelineEvent[] {
   return [...events].sort((left, right) => (left.time_created_ms || left.time_updated_ms) - (right.time_created_ms || right.time_updated_ms));
 }
 
-function latestEventText(issue: IssueDetail, session?: RunnerSession, events: TimelineEvent[] = []): string {
-  const latestTimelineEvent = sortTimelineEvents(events).at(-1);
-  return latestTimelineEvent?.summary || latestTimelineEvent?.title || session?.last_event || issue.last_runner_event || "no runner event reported";
-}
 
 function sessionLastUpdated(session?: RunnerSession): string {
   const updated = session?.activity?.last_updated_ms;
@@ -485,17 +548,17 @@ function formatEpochMs(value: number): string {
   }).format(date);
 }
 
-function EvidenceTab({ issue }: { issue: IssueDetail }) {
-  const sessionEvidenceRefs = currentRunnerSession(issue)?.session_evidence_refs ?? [];
+function DebugDetails({ issue }: { issue: IssueDetail }) {
+  const session = currentRunnerSession(issue);
+  const sessionEvidenceRefs = session?.session_evidence_refs ?? [];
   return (
     <div className="grid gap-3 text-sm">
-      <Evidence label="blocker" value={issue.blocker ? `${issue.blocker.kind}: ${issue.blocker.message}` : "none"} />
-      <Evidence label="failure" value={issue.failure ? `${issue.failure.kind}: ${issue.failure.message}` : "none"} />
-      <Evidence label="runtime defect" value={issue.runtime_defect ? `${issue.runtime_defect.classification}: ${issue.runtime_defect.next_action}` : "none"} />
-      <Evidence label="session evidence refs" value={sessionEvidenceRefs.length ? sessionEvidenceRefs.join("; ") : "none"} />
-      <Evidence label="self-defect routing" value={issue.self_defect_routing ? `${issue.self_defect_routing.fingerprint ?? "fingerprint unavailable"}: ${issue.self_defect_routing.next_action ?? "inspect"}` : "none"} />
-      <Evidence label="evals" value={issue.eval_results.length ? issue.eval_results.map((item) => `${item.suite} ${item.status}`).join("; ") : "none"} />
-      <Evidence label="stop reason" value={issue.stop_reason ?? "none"} />
+      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+        <span className="font-semibold">debug evidence summary</span>
+        <p className="mt-1 break-words text-slate-600">
+          {sessionEvidenceRefs.length ? `${sessionEvidenceRefs.length} session evidence refs: ${sessionEvidenceRefs.join("; ")}` : "No session evidence refs reported."}
+        </p>
+      </div>
       <details className="rounded-xl border border-slate-200 bg-slate-50 p-3">
         <summary className="cursor-pointer font-semibold text-slate-950">Raw issue JSON</summary>
         <pre className="mt-3 max-h-[26rem] max-w-full overflow-auto whitespace-pre-wrap break-words rounded-lg bg-slate-950 p-3 text-xs text-slate-50">{JSON.stringify(issue, null, 2)}</pre>
@@ -512,9 +575,6 @@ function KeyValue({ label, value, detail, mono = false }: { label: string; value
   return <div className="min-w-0 rounded-xl border border-slate-200 bg-slate-50 p-3"><dt className="text-xs uppercase tracking-wide text-slate-500">{label}</dt><dd className={`mt-1 overflow-hidden break-words ${mono ? "font-mono text-xs" : "font-medium"}`}>{value}</dd>{detail ? <dd className="mt-1 break-words text-xs text-slate-500">{detail}</dd> : null}</div>;
 }
 
-function Summary({ value, label }: { value: number; label: string }) {
-  return <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="text-2xl font-semibold">{value}</div><div className="text-sm text-slate-500">{label}</div></div>;
-}
 
 function Limited({ message }: { message: string }) {
   return <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-600">{message}</div>;

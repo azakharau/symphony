@@ -276,26 +276,33 @@ describe("dashboard surfaces", () => {
     expect(history).not.toContain("SYM-H7");
   });
 
-  test("issue inspector renders a lifecycle-first execution drilldown", () => {
+  test("issue inspector renders an execution-model drilldown without placeholder cards", () => {
     const html = render(<IssueInspector issue={acceptanceProject.active_issues[0]} />);
-    const inspector = sectionText(html, "runner session inspector", "Timeline");
-    const timeline = sectionText(html, "Timeline", "Todos");
+    const hero = sectionText(html, "Build dashboard surfaces", "Current runner status");
+    const inspector = sectionText(html, "Current runner status", "Lifecycle timeline");
+    const timeline = sectionText(html, "Lifecycle timeline", "OMP workers");
 
-    expect(html).toContain("runner session inspector");
+    expect(html).toContain("Current runner status");
     expect(html).toContain("Open in Linear");
     expect(html).toContain("https://linear.app/alexey-zakharov/issue/SYM-97");
     expect(html).toContain("Open in runner");
     expect(html).toContain("https://runner.vestalink.net/L3dvcmtzcGFjZXMvc3ltcGhvbnkvU1lNLTk3/session/oc-sym-97");
     expect(html).not.toContain("https://runner.vestalink.net/session/oc-sym-97");
-    expect(html).toContain("Todos");
-    expect(html).toContain("Timeline");
-    expect(html).toContain("Agents");
-    expect(html).toContain("Tools");
-    expect(html).toContain("Evals");
-    expect(html).toContain("Git");
-    expect(html).toContain("Evidence");
+    expect(html).toContain("Lifecycle timeline");
+    expect(html).toContain("OMP workers");
+    expect(html).toContain("Todo activity");
+    expect(html).toContain("Tool activity");
+    expect(html).toContain("Eval state");
+    expect(html).toContain("Git and worktree");
+    expect(html).toContain("Debug details");
     expect(html).toContain("Raw issue JSON");
-    expect(html).toContain("Last event:");
+    expect(hero).toContain("typescript-engineer is executing review through runner ACP");
+    expect(hero).not.toContain("Last event:");
+    expect(hero).not.toContain("0 todos");
+    expect(hero).not.toContain("0 agents");
+    expect(hero).not.toContain("0 tool events");
+    expect(hero).not.toContain("0 timeline events");
+    expect(html).not.toContain(">Evidence</h2>");
     expect(html).toContain("Desktop and mobile route coverage in progress.");
     expect(timeline).toContain("stage starting");
     expect(timeline).toContain("stage running");
@@ -305,7 +312,8 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("line-through");
     expect(html).toContain("animate-spin");
     expect(html).toContain("aria-label=\"pending\"");
-    expect(inspector).toContain(">35,100</dd>");
+    expect(inspector).toContain(">38,210 total</dd>");
+    expect(inspector).toContain("35,100 non-cache");
     expect(inspector).toContain("3,110 cached");
     expect(inspector).toContain(">runner ACP</dd>");
     expect(inspector).toContain("provider runner-primary");
@@ -319,8 +327,9 @@ describe("dashboard surfaces", () => {
     expect(html).not.toContain(">medium<");
   });
 
-  test("issue inspector renders OMP ACP blocker telemetry with clear empty sections", () => {
+  test("issue inspector renders OMP ACP blocker telemetry with clear unavailable sources", () => {
     const html = render(<IssueInspector issue={failedProject.active_issues[0]} />);
+    const blocker = sectionText(html, "Blocker and failure state", "Debug details");
 
     expect(html).toContain("OMP ACP");
     expect(html).toContain("provider omp-primary");
@@ -332,7 +341,10 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("sdk:auth");
     expect(html).toContain("bounded activity unavailable for exited process");
     expect(html).toContain("No running, pending, or recent tool events were reported.");
-    expect(html).toContain("runtime process exited</dd>");
+    expect(blocker).toContain("Blocker and failure state");
+    expect(blocker).toContain("restart supervised runner · runtime process exit");
+    expect(blocker).not.toContain("runtime_process_exit");
+    expect(blocker).not.toContain("runtime process exited</dd>");
   });
 
   test("issue inspector does not imply zero cached tokens when metrics are unavailable", () => {
@@ -355,7 +367,7 @@ describe("dashboard surfaces", () => {
     };
 
     const html = render(<IssueInspector issue={issue} />);
-    const inspector = sectionText(html, "runner session inspector", "Raw issue JSON");
+    const inspector = sectionText(html, "Current runner status", "Debug details");
 
     expect(inspector).toContain("unavailable split");
     expect(inspector).toContain("metrics unavailable");
@@ -398,7 +410,7 @@ describe("dashboard surfaces", () => {
   test("issue inspector sections use preferred runner session instead of a stale tail session", () => {
     const issue = withStaleTailSession().active_issues[0];
     const html = render(<IssueInspector issue={issue} />);
-    const selectedSessionSurface = sectionText(html, "runner session inspector", "Raw issue JSON");
+    const selectedSessionSurface = sectionText(html, "Current runner status", "Debug details");
     const agents = render(<AgentsTree issue={issue} />);
     const events = currentRunnerSession(issue)?.activity?.timeline.filter((event) => event.kind === "tool" || event.tool) ?? [];
     const tools = render(<ToolsByAgent issue={issue} events={events} />);

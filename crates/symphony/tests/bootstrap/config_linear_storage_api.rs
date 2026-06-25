@@ -1673,6 +1673,19 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
     "running_tokens": 4096,
     "running_cached_tokens": 0,
     "recorded_tokens": 4096,
+    "token_metrics": {
+      "accounted_total_token_count": 4096,
+      "non_cached_token_count": 0,
+      "cached_token_count": 0,
+      "input_token_count": 0,
+      "output_token_count": 0,
+      "reasoning_token_count": 0,
+      "cache_read_token_count": 0,
+      "cache_write_token_count": 0,
+      "reported_total_token_count": 100,
+      "metrics_status": "degraded",
+      "metrics_source": "multiple"
+    },
     "running_cost_micros": 123456,
     "recorded_cost_micros": 123456
   },
@@ -1708,6 +1721,19 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
       "running_tokens": 4096,
       "running_cached_tokens": 0,
       "recorded_tokens": 4096,
+      "token_metrics": {
+        "accounted_total_token_count": 4096,
+        "non_cached_token_count": 0,
+        "cached_token_count": 0,
+        "input_token_count": 0,
+        "output_token_count": 0,
+        "reasoning_token_count": 0,
+        "cache_read_token_count": 0,
+        "cache_write_token_count": 0,
+        "reported_total_token_count": 100,
+        "metrics_status": "degraded",
+        "metrics_source": "multiple"
+      },
       "running_cost_micros": 123456,
       "recorded_cost_micros": 123456,
       "running_issues": [
@@ -1731,6 +1757,19 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
           "active_model": "gpt-5",
           "token_count": 4096,
           "cached_token_count": 0,
+          "token_metrics": {
+            "accounted_total_token_count": 4096,
+            "non_cached_token_count": 0,
+            "cached_token_count": 0,
+            "input_token_count": 0,
+            "output_token_count": 0,
+            "reasoning_token_count": 0,
+            "cache_read_token_count": 0,
+            "cache_write_token_count": 0,
+            "reported_total_token_count": 100,
+            "metrics_status": "degraded",
+            "metrics_source": "test_total"
+          },
           "cost_micros": 123456,
           "subagents_used": 2,
           "running_tool_count": 0,
@@ -1810,6 +1849,204 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
     assert!(!ui_project.body.contains("cost_micros"));
     assert!(!ui_issue.body.contains("cost_micros"));
     assert!(!events.body.contains("cost_micros"));
+}
+
+#[tokio::test]
+async fn dashboard_token_metrics_use_persisted_splits_without_cache_double_counting() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let archive_db_path = dir.path().join("opencode.db");
+    super::opencode_runtime::seed_opencode_session_tree(&archive_db_path).await;
+    let config = RootConfig::from_toml_str(&valid_config_toml().replacen(
+        "[[projects]]\n",
+        &format!(
+            "[runner_archive]\ndatabase_path = \"{}\"\narchive_root = \"{}\"\n\n[[projects]]\n",
+            archive_db_path.display(),
+            dir.path().join("archives").display()
+        ),
+        1,
+    ))
+    .expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "omp-cache", "SYM-115"))
+        .await
+        .expect("issue");
+
+    let mut session = test_session(
+        "symphony",
+        "omp-cache",
+        "ses-root",
+        "/home/agent/.symphony/workspaces/omp/symphony/SYM-115",
+    );
+    session.provider_mode = RuntimeProviderMode::OmpAcp;
+    session.provider_id = Some("omp-primary".into());
+    session.token_count = 561;
+    session.tokens_input = 120;
+    session.tokens_output = 30;
+    session.tokens_reasoning = 5;
+    session.tokens_cache_read = 400;
+    session.tokens_cache_write = 6;
+    session.tokens_reported_total = 700;
+    session.token_usage_status = "available".into();
+    session.token_usage_source = "omp_jsonl".into();
+    store
+        .upsert_runner_session(session)
+        .await
+        .expect("persist session");
+
+    let aggregate = symphony::api::runtime_api_json_response(&config, &store, "/api/dashboard/ui")
+        .await
+        .expect("aggregate");
+    let project =
+        symphony::api::runtime_api_json_response(&config, &store, "/api/projects/symphony/ui")
+            .await
+            .expect("project");
+    let issue = symphony::api::runtime_api_json_response(
+        &config,
+        &store,
+        "/api/projects/symphony/issues/omp-cache/ui",
+    )
+    .await
+    .expect("issue");
+
+    let aggregate: serde_json::Value =
+        serde_json::from_str(&aggregate.body).expect("aggregate json");
+    let project: serde_json::Value = serde_json::from_str(&project.body).expect("project json");
+    let issue: serde_json::Value = serde_json::from_str(&issue.body).expect("issue json");
+
+    assert_eq!(
+        aggregate["totals"]["token_metrics"]["accounted_total_token_count"],
+        561
+    );
+    assert_eq!(
+        aggregate["totals"]["token_metrics"]["non_cached_token_count"],
+        155
+    );
+    assert_eq!(
+        aggregate["totals"]["token_metrics"]["cached_token_count"],
+        406
+    );
+    assert_eq!(
+        aggregate["totals"]["token_metrics"]["cache_read_token_count"],
+        400
+    );
+    assert_eq!(
+        aggregate["totals"]["token_metrics"]["cache_write_token_count"],
+        6
+    );
+    assert_eq!(
+        aggregate["totals"]["token_metrics"]["reported_total_token_count"],
+        700
+    );
+    assert_eq!(
+        aggregate["totals"]["token_metrics"]["metrics_status"],
+        "available"
+    );
+    assert_eq!(
+        aggregate["totals"]["token_metrics"]["metrics_source"],
+        "persisted_split_metrics"
+    );
+    assert_eq!(
+        aggregate["projects"][0]["running_issues"][0]["token_count"],
+        561
+    );
+    assert_eq!(
+        aggregate["projects"][0]["running_issues"][0]["cached_token_count"],
+        406
+    );
+    assert_eq!(
+        aggregate["projects"][0]["running_issues"][0]["token_metrics"]["cache_read_token_count"],
+        400
+    );
+    assert_eq!(project["token_metrics"]["accounted_total_token_count"], 561);
+    assert_eq!(
+        project["active_issues"][0]["token_metrics"]["cached_token_count"],
+        406
+    );
+    assert_eq!(issue["token_metrics"]["accounted_total_token_count"], 561);
+    assert_eq!(issue["runner_sessions"][0]["token_count"], 561);
+    assert_eq!(issue["runner_sessions"][0]["cached_token_count"], 406);
+    assert_eq!(
+        issue["runner_sessions"][0]["token_metrics"]["metrics_source"],
+        "persisted_split_metrics"
+    );
+}
+
+#[tokio::test]
+async fn dashboard_token_metrics_statuses_mark_missing_unavailable_and_unknown_degraded() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "missing-split", "SYM-115A"))
+        .await
+        .expect("missing issue");
+    store
+        .upsert_issue(test_issue("symphony", "unknown-split", "SYM-115B"))
+        .await
+        .expect("unknown issue");
+
+    let mut missing = test_session(
+        "symphony",
+        "missing-split",
+        "missing-session",
+        "/home/agent/.symphony/workspaces/omp/symphony/SYM-115A",
+    );
+    missing.token_count = 0;
+    missing.tokens_reported_total = 0;
+    missing.token_usage_status = "missing".into();
+    missing.token_usage_source = "none".into();
+    store
+        .upsert_runner_session(missing)
+        .await
+        .expect("missing session");
+
+    let mut unknown = test_session(
+        "symphony",
+        "unknown-split",
+        "unknown-session",
+        "/home/agent/.symphony/workspaces/omp/symphony/SYM-115B",
+    );
+    unknown.token_count = 100;
+    unknown.tokens_reported_total = 100;
+    unknown.token_usage_status = "unknown".into();
+    unknown.token_usage_source = "acp_event".into();
+    store
+        .upsert_runner_session(unknown)
+        .await
+        .expect("unknown session");
+
+    let missing = symphony::api::runtime_api_json_response(
+        &config,
+        &store,
+        "/api/projects/symphony/issues/missing-split/ui",
+    )
+    .await
+    .expect("missing issue response");
+    let unknown = symphony::api::runtime_api_json_response(
+        &config,
+        &store,
+        "/api/projects/symphony/issues/unknown-split/ui",
+    )
+    .await
+    .expect("unknown issue response");
+
+    let missing: serde_json::Value = serde_json::from_str(&missing.body).expect("missing json");
+    let unknown: serde_json::Value = serde_json::from_str(&unknown.body).expect("unknown json");
+
+    assert_eq!(missing["token_metrics"]["metrics_status"], "unavailable");
+    assert_eq!(missing["token_metrics"]["metrics_source"], "none");
+    assert_eq!(unknown["token_metrics"]["metrics_status"], "degraded");
+    assert_eq!(
+        unknown["token_metrics"]["metrics_source"],
+        "runtime_event_total"
+    );
 }
 
 #[tokio::test]

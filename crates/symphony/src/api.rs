@@ -239,7 +239,7 @@ pub struct AggregateDashboardResponse {
     pub projects: Vec<ProjectDashboardCard>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AggregateDashboardTotals {
     pub project_count: usize,
     pub enabled_project_count: usize,
@@ -249,8 +249,24 @@ pub struct AggregateDashboardTotals {
     pub running_tokens: u64,
     pub running_cached_tokens: u64,
     pub recorded_tokens: u64,
+    pub token_metrics: DashboardTokenMetrics,
     pub running_cost_micros: u64,
     pub recorded_cost_micros: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DashboardTokenMetrics {
+    pub accounted_total_token_count: u64,
+    pub non_cached_token_count: u64,
+    pub cached_token_count: u64,
+    pub input_token_count: u64,
+    pub output_token_count: u64,
+    pub reasoning_token_count: u64,
+    pub cache_read_token_count: u64,
+    pub cache_write_token_count: u64,
+    pub reported_total_token_count: u64,
+    pub metrics_status: String,
+    pub metrics_source: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -269,6 +285,7 @@ pub struct ProjectDashboardCard {
     pub running_tokens: u64,
     pub running_cached_tokens: u64,
     pub recorded_tokens: u64,
+    pub token_metrics: DashboardTokenMetrics,
     pub running_cost_micros: u64,
     pub recorded_cost_micros: u64,
     pub running_issues: Vec<RunningIssueSummary>,
@@ -296,6 +313,7 @@ pub struct RunningIssueSummary {
     pub active_model: Option<String>,
     pub token_count: u64,
     pub cached_token_count: u64,
+    pub token_metrics: DashboardTokenMetrics,
     pub cost_micros: u64,
     pub subagents_used: u64,
     pub running_tool_count: u64,
@@ -341,6 +359,7 @@ pub struct ProjectDashboardResponse {
     pub selected_candidate: Option<SelectedCandidateResponse>,
     pub suppression_reasons: Vec<CandidateSuppressionResponse>,
     pub active_issues: Vec<IssueDetailResponse>,
+    pub token_metrics: DashboardTokenMetrics,
     pub history_issues: Vec<IssueDetailResponse>,
 }
 
@@ -376,6 +395,7 @@ impl ProjectDashboardResponse {
             .map(|issue| issue.cost_micros)
             .sum::<u64>();
         let recorded_tokens = self.recorded_tokens();
+        let token_metrics = self.token_metrics();
         let recorded_cost_micros = self.recorded_cost_micros();
 
         ProjectDashboardCard {
@@ -401,6 +421,7 @@ impl ProjectDashboardResponse {
             running_tokens,
             running_cached_tokens,
             recorded_tokens,
+            token_metrics,
             running_cost_micros,
             recorded_cost_micros,
             running_issues,
@@ -430,6 +451,15 @@ impl ProjectDashboardResponse {
             .chain(self.history_issues.iter())
             .map(issue_recorded_tokens)
             .sum()
+    }
+
+    fn token_metrics(&self) -> DashboardTokenMetrics {
+        aggregate_token_metrics(
+            self.active_issues
+                .iter()
+                .chain(self.history_issues.iter())
+                .map(|issue| &issue.token_metrics),
+        )
     }
 
     fn recorded_cost_micros(&self) -> u64 {
@@ -463,6 +493,9 @@ fn aggregate_dashboard_totals(projects: &[ProjectDashboardCard]) -> AggregateDas
             .map(|project| project.running_cached_tokens)
             .sum(),
         recorded_tokens: projects.iter().map(|project| project.recorded_tokens).sum(),
+        token_metrics: aggregate_token_metrics(
+            projects.iter().map(|project| &project.token_metrics),
+        ),
         running_cost_micros: projects
             .iter()
             .map(|project| project.running_cost_micros)
@@ -501,6 +534,9 @@ fn running_issue_summary(
         active_model: session.and_then(|session| session.active_model.clone()),
         token_count: session.map_or(0, |session| session.token_count),
         cached_token_count: session.map_or(0, |session| session.cached_token_count),
+        token_metrics: session.map_or_else(DashboardTokenMetrics::unavailable, |session| {
+            session.token_metrics.clone()
+        }),
         cost_micros: session.map_or(0, |session| session.cost_micros),
         subagents_used: session.map_or(0, |session| session.subagents_used),
         running_tool_count: activity.map_or(0, |activity| activity.running_tool_count),
@@ -522,11 +558,7 @@ fn running_issue_summary(
 }
 
 fn issue_recorded_tokens(issue: &IssueDetailResponse) -> u64 {
-    issue
-        .runner_sessions
-        .iter()
-        .map(|session| session.token_count)
-        .sum()
+    issue.token_metrics.accounted_total_token_count
 }
 
 fn issue_recorded_cost_micros(issue: &IssueDetailResponse) -> u64 {
@@ -553,6 +585,7 @@ pub struct IssueDetailResponse {
     pub cleanup_status: CleanupStatus,
     pub stop_reason: Option<String>,
     pub last_runner_event: Option<String>,
+    pub token_metrics: DashboardTokenMetrics,
     pub runner_sessions: Vec<RunnerSessionDetail>,
     pub eval_results: Vec<EvalRunRecord>,
 }
@@ -587,6 +620,7 @@ pub struct RunnerSessionDetail {
     pub part_count: u64,
     pub token_count: u64,
     pub cached_token_count: u64,
+    pub token_metrics: DashboardTokenMetrics,
     pub cost_micros: u64,
     pub started_at_ms: Option<u64>,
     pub duration_ms: Option<u64>,
@@ -600,6 +634,160 @@ pub struct RunnerSessionDetail {
     pub activity_error: Option<String>,
 }
 
+impl DashboardTokenMetrics {
+    fn unavailable() -> Self {
+        Self {
+            accounted_total_token_count: 0,
+            non_cached_token_count: 0,
+            cached_token_count: 0,
+            input_token_count: 0,
+            output_token_count: 0,
+            reasoning_token_count: 0,
+            cache_read_token_count: 0,
+            cache_write_token_count: 0,
+            reported_total_token_count: 0,
+            metrics_status: "unavailable".into(),
+            metrics_source: "none".into(),
+        }
+    }
+
+    fn from_session(session: &RunnerSessionRecord) -> Self {
+        let non_cached_token_count = session
+            .tokens_input
+            .saturating_add(session.tokens_output)
+            .saturating_add(session.tokens_reasoning);
+        let cached_token_count = session
+            .tokens_cache_read
+            .saturating_add(session.tokens_cache_write);
+        let metrics_status = dashboard_token_metrics_status(
+            session.token_usage_status.as_str(),
+            session.token_count,
+            non_cached_token_count,
+            cached_token_count,
+            session.tokens_reported_total,
+        )
+        .into();
+
+        Self {
+            accounted_total_token_count: session.token_count,
+            non_cached_token_count,
+            cached_token_count,
+            input_token_count: session.tokens_input,
+            output_token_count: session.tokens_output,
+            reasoning_token_count: session.tokens_reasoning,
+            cache_read_token_count: session.tokens_cache_read,
+            cache_write_token_count: session.tokens_cache_write,
+            reported_total_token_count: session.tokens_reported_total,
+            metrics_status,
+            metrics_source: dashboard_token_metrics_source(session.token_usage_source.as_str()),
+        }
+    }
+}
+
+fn dashboard_token_metrics_status(
+    usage_status: &str,
+    accounted_total: u64,
+    non_cached_total: u64,
+    cached_total: u64,
+    reported_total: u64,
+) -> &'static str {
+    match usage_status {
+        "available" => "available",
+        "missing"
+            if accounted_total == 0
+                && non_cached_total == 0
+                && cached_total == 0
+                && reported_total == 0 =>
+        {
+            "unavailable"
+        }
+        "missing" | "unknown" | "partial" | "mixed" => "degraded",
+        _ if accounted_total > 0
+            || non_cached_total > 0
+            || cached_total > 0
+            || reported_total > 0 =>
+        {
+            "degraded"
+        }
+        _ => "unavailable",
+    }
+}
+
+fn dashboard_token_metrics_source(source: &str) -> String {
+    match source {
+        "none" => "none".into(),
+        "acp_event" => "runtime_event_total".into(),
+        "legacy_single_total" => "legacy_total".into(),
+        "runner_archive" | "omp_jsonl" => "persisted_split_metrics".into(),
+        other => other.into(),
+    }
+}
+
+fn aggregate_token_metrics<'a>(
+    metrics: impl Iterator<Item = &'a DashboardTokenMetrics>,
+) -> DashboardTokenMetrics {
+    let mut total = DashboardTokenMetrics::unavailable();
+    let mut count = 0_u64;
+    let mut available_count = 0_u64;
+    let mut unavailable_count = 0_u64;
+    let mut first_source: Option<&str> = None;
+    let mut mixed_source = false;
+
+    for item in metrics {
+        count = count.saturating_add(1);
+        available_count =
+            available_count.saturating_add(u64::from(item.metrics_status == "available"));
+        unavailable_count =
+            unavailable_count.saturating_add(u64::from(item.metrics_status == "unavailable"));
+        total.accounted_total_token_count = total
+            .accounted_total_token_count
+            .saturating_add(item.accounted_total_token_count);
+        total.non_cached_token_count = total
+            .non_cached_token_count
+            .saturating_add(item.non_cached_token_count);
+        total.cached_token_count = total
+            .cached_token_count
+            .saturating_add(item.cached_token_count);
+        total.input_token_count = total
+            .input_token_count
+            .saturating_add(item.input_token_count);
+        total.output_token_count = total
+            .output_token_count
+            .saturating_add(item.output_token_count);
+        total.reasoning_token_count = total
+            .reasoning_token_count
+            .saturating_add(item.reasoning_token_count);
+        total.cache_read_token_count = total
+            .cache_read_token_count
+            .saturating_add(item.cache_read_token_count);
+        total.cache_write_token_count = total
+            .cache_write_token_count
+            .saturating_add(item.cache_write_token_count);
+        total.reported_total_token_count = total
+            .reported_total_token_count
+            .saturating_add(item.reported_total_token_count);
+
+        match first_source {
+            Some(source) if source != item.metrics_source => mixed_source = true,
+            Some(_) => {}
+            None => first_source = Some(item.metrics_source.as_str()),
+        }
+    }
+
+    total.metrics_status = if count == 0 || unavailable_count == count {
+        "unavailable".into()
+    } else if available_count == count {
+        "available".into()
+    } else {
+        "degraded".into()
+    };
+    total.metrics_source = if mixed_source {
+        "multiple".into()
+    } else {
+        first_source.unwrap_or("none").into()
+    };
+    total
+}
 async fn issue_read_model(
     store: &SqliteStore,
     issue: IssueStateRecord,
@@ -648,6 +836,12 @@ async fn project_dashboard_response(
     liveness.primary_reason_detail = primary_reason_detail;
     let selected_candidate = selected_candidate_response(&active_issues);
     let suppression_reasons = suppression_reason_responses(&active_issues);
+    let token_metrics = aggregate_token_metrics(
+        active_issues
+            .iter()
+            .chain(history_issues.iter())
+            .map(|issue| &issue.token_metrics),
+    );
 
     Ok(ProjectDashboardResponse {
         project_id: project.project_id,
@@ -660,6 +854,7 @@ async fn project_dashboard_response(
         selected_candidate,
         suppression_reasons,
         active_issues,
+        token_metrics,
         history_issues,
     })
 }
@@ -996,6 +1191,8 @@ async fn issue_detail_response(
     let display_status = issue_display_status(&issue.issue, preferred_session);
     let runtime_defect = runtime_defect_projection(&issue.issue);
     let self_defect_routing = self_defect_routing_projection(store, &issue.issue).await?;
+    let token_metrics =
+        aggregate_token_metrics(sessions.iter().map(|session| &session.token_metrics));
 
     Ok(IssueDetailResponse {
         project_id: issue.issue.project_id,
@@ -1012,6 +1209,7 @@ async fn issue_detail_response(
         cleanup_status: issue.issue.cleanup_status,
         stop_reason,
         last_runner_event,
+        token_metrics,
         runner_sessions: sessions,
         eval_results,
     })
@@ -1103,8 +1301,9 @@ async fn session_detail(
         },
         None => (None, None),
     };
-    let cached_token_count = activity.as_ref().map_or(0, session_tree_cached_token_count);
-    let token_count = session.token_count.saturating_add(cached_token_count);
+    let token_metrics = DashboardTokenMetrics::from_session(&session);
+    let cached_token_count = token_metrics.cached_token_count;
+    let token_count = token_metrics.accounted_total_token_count;
     let started_at_ms = session_activity_started_at_ms(&session.session_id, activity.as_ref());
     let duration_ms = session_activity_duration_ms(&session.session_id, activity.as_ref());
 
@@ -1129,6 +1328,7 @@ async fn session_detail(
         part_count: session.part_count,
         token_count,
         cached_token_count,
+        token_metrics,
         cost_micros: session.cost_micros,
         started_at_ms,
         duration_ms,
@@ -1150,19 +1350,6 @@ async fn process_alive(process_id: Option<u32>) -> Option<bool> {
             .await
             .unwrap_or(false),
     )
-}
-
-fn session_tree_cached_token_count(activity: &RunnerSessionTreeActivity) -> u64 {
-    activity
-        .sessions
-        .iter()
-        .chain(activity.subagents.iter())
-        .map(|session| {
-            session
-                .tokens_cache_read
-                .saturating_add(session.tokens_cache_write)
-        })
-        .sum()
 }
 
 fn session_activity_duration_ms(

@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     api::{
         AggregateDashboardResponse, AggregateDashboardTotals, CandidateSuppressionResponse,
-        DASHBOARD_EVENTS_ENDPOINT, IssueDetailResponse, ProjectCapacity, ProjectDashboardCard,
-        ProjectDashboardResponse, ProjectRuntimeLivenessResponse, RunnerSessionDetail,
-        RunningIssueSummary, RuntimeDashboardApi, RuntimeDefectProjection,
+        DASHBOARD_EVENTS_ENDPOINT, DashboardTokenMetrics, IssueDetailResponse, ProjectCapacity,
+        ProjectDashboardCard, ProjectDashboardResponse, ProjectRuntimeLivenessResponse,
+        RunnerSessionDetail, RunningIssueSummary, RuntimeDashboardApi, RuntimeDefectProjection,
         SelectedCandidateResponse, SelfDefectRouteSummary, SelfDefectRoutingProjection,
         UI_AGGREGATE_DASHBOARD_ENDPOINT,
     },
@@ -26,7 +26,7 @@ pub struct DashboardContractMetadata {
     pub live_events_endpoint: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UiAggregateDashboardTotals {
     pub project_count: usize,
     pub enabled_project_count: usize,
@@ -36,6 +36,7 @@ pub struct UiAggregateDashboardTotals {
     pub running_tokens: u64,
     pub running_cached_tokens: u64,
     pub recorded_tokens: u64,
+    pub token_metrics: DashboardTokenMetrics,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -54,6 +55,7 @@ pub struct UiProjectDashboardCard {
     pub running_tokens: u64,
     pub running_cached_tokens: u64,
     pub recorded_tokens: u64,
+    pub token_metrics: DashboardTokenMetrics,
     pub running_issues: Vec<UiRunningIssueSummary>,
     pub self_defect_routes: Vec<SelfDefectRouteSummary>,
 }
@@ -79,6 +81,7 @@ pub struct UiRunningIssueSummary {
     pub active_model: Option<String>,
     pub token_count: u64,
     pub cached_token_count: u64,
+    pub token_metrics: DashboardTokenMetrics,
     pub subagents_used: u64,
     pub running_tool_count: u64,
     pub pending_tool_count: u64,
@@ -105,6 +108,7 @@ pub struct UiProjectDashboardResponse {
     pub liveness: ProjectRuntimeLivenessResponse,
     pub selected_candidate: Option<SelectedCandidateResponse>,
     pub suppression_reasons: Vec<CandidateSuppressionResponse>,
+    pub token_metrics: DashboardTokenMetrics,
     pub active_issues: Vec<UiIssueDetailResponse>,
     pub history_issues: Vec<UiIssueDetailResponse>,
 }
@@ -126,6 +130,7 @@ pub struct UiIssueDetailResponse {
     pub cleanup_status: CleanupStatus,
     pub stop_reason: Option<String>,
     pub last_runner_event: Option<String>,
+    pub token_metrics: DashboardTokenMetrics,
     pub runner_sessions: Vec<UiRunnerSessionDetail>,
     pub eval_results: Vec<EvalRunRecord>,
 }
@@ -152,6 +157,7 @@ pub struct UiRunnerSessionDetail {
     pub part_count: u64,
     pub token_count: u64,
     pub cached_token_count: u64,
+    pub token_metrics: DashboardTokenMetrics,
     pub started_at_ms: Option<u64>,
     pub duration_ms: Option<u64>,
     pub last_event: Option<String>,
@@ -244,6 +250,7 @@ impl From<&AggregateDashboardTotals> for UiAggregateDashboardTotals {
             running_tokens: totals.running_tokens,
             running_cached_tokens: totals.running_cached_tokens,
             recorded_tokens: totals.recorded_tokens,
+            token_metrics: totals.token_metrics.clone(),
         }
     }
 }
@@ -265,6 +272,7 @@ impl From<&ProjectDashboardCard> for UiProjectDashboardCard {
             running_tokens: card.running_tokens,
             running_cached_tokens: card.running_cached_tokens,
             recorded_tokens: card.recorded_tokens,
+            token_metrics: card.token_metrics.clone(),
             running_issues: card
                 .running_issues
                 .iter()
@@ -297,6 +305,7 @@ impl From<&RunningIssueSummary> for UiRunningIssueSummary {
             active_model: issue.active_model.clone(),
             token_count: issue.token_count,
             cached_token_count: issue.cached_token_count,
+            token_metrics: issue.token_metrics.clone(),
             subagents_used: issue.subagents_used,
             running_tool_count: issue.running_tool_count,
             pending_tool_count: issue.pending_tool_count,
@@ -326,6 +335,7 @@ impl From<&ProjectDashboardResponse> for UiProjectDashboardResponse {
             liveness: project.liveness.clone(),
             selected_candidate: project.selected_candidate.clone(),
             suppression_reasons: project.suppression_reasons.clone(),
+            token_metrics: project.token_metrics.clone(),
             active_issues: project
                 .active_issues
                 .iter()
@@ -358,6 +368,7 @@ impl From<&IssueDetailResponse> for UiIssueDetailResponse {
             cleanup_status: issue.cleanup_status,
             stop_reason: issue.stop_reason.clone(),
             last_runner_event: issue.last_runner_event.clone(),
+            token_metrics: issue.token_metrics.clone(),
             runner_sessions: issue
                 .runner_sessions
                 .iter()
@@ -391,6 +402,7 @@ impl From<&RunnerSessionDetail> for UiRunnerSessionDetail {
             part_count: session.part_count,
             token_count: session.token_count,
             cached_token_count: session.cached_token_count,
+            token_metrics: session.token_metrics.clone(),
             started_at_ms: session.started_at_ms,
             duration_ms: session.duration_ms,
             last_event: session.last_event.clone(),

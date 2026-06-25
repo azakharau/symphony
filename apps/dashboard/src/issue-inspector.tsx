@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { currentRunnerSession } from "@/src/current-runner-session";
 import { Badge, Panel, processStateLabel, providerModeLabel, runtimeFailureText } from "@/src/components";
 import { LiveDuration } from "@/src/live-duration";
 import type { IssueDetail, SessionActivity, TimelineEvent, TodoActivity } from "@/src/types";
@@ -13,7 +14,7 @@ type Tab = (typeof tabs)[number];
 
 export function IssueInspector({ issue }: { issue: IssueDetail }) {
   const [activeTab, setActiveTab] = useState<Tab>("Todos");
-  const session = issue.runner_sessions.at(-1);
+  const session = currentRunnerSession(issue);
   const activity = session?.activity;
   const timeline = activity?.timeline ?? [];
   const toolEvents = timeline.filter((event) => event.kind === "tool" || event.tool);
@@ -98,7 +99,7 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
 }
 
 function TodosTab({ issue }: { issue: IssueDetail }) {
-  const session = issue.runner_sessions.at(-1);
+  const session = currentRunnerSession(issue);
   const todos = session?.activity?.todos ?? [];
   if (!todos.length) return <Limited message={session?.activity_error ?? "Todo details are unavailable; only aggregate todo counts are exposed."} />;
   return (
@@ -169,7 +170,7 @@ export function ActivityTimeline({ events }: { events: TimelineEvent[] }) {
 
 export function ToolsByAgent({ issue, events }: { issue: IssueDetail; events: TimelineEvent[] }) {
   if (!events.length) return <Limited message="No running, pending, or recent tool events were reported." />;
-  const activity = issue.runner_sessions.at(-1)?.activity;
+  const activity = currentRunnerSession(issue)?.activity;
   const agents = (activity?.sessions ?? []).concat(activity?.subagents ?? []);
   const agentsById = new Map(agents.map((agent) => [agent.session_id, agent]));
   const eventsBySession = new Map<string, TimelineEvent[]>();
@@ -229,7 +230,7 @@ function AgentsTab({ issue }: { issue: IssueDetail }) {
 }
 
 export function AgentsTree({ issue }: { issue: IssueDetail }) {
-  const activity = issue.runner_sessions.at(-1)?.activity;
+  const activity = currentRunnerSession(issue)?.activity;
   const agents = (activity?.sessions ?? []).concat(activity?.subagents ?? []);
   if (!agents.length) return <Limited message="Agent tree is unavailable for this session." />;
   const activeSessionIds = new Set(
@@ -237,7 +238,7 @@ export function AgentsTree({ issue }: { issue: IssueDetail }) {
       .filter((event) => isActiveStatus(event.status))
       .map((event) => event.session_id),
   );
-  const session = issue.runner_sessions.at(-1);
+  const session = currentRunnerSession(issue);
   if (!activeSessionIds.size && session?.process_alive) activeSessionIds.add(session.runner_session_id);
   const tree = buildAgentTree(agents);
   return (
@@ -363,12 +364,13 @@ function formatEpochMs(value: number): string {
 }
 
 function EvidenceTab({ issue }: { issue: IssueDetail }) {
+  const sessionEvidenceRefs = currentRunnerSession(issue)?.session_evidence_refs ?? [];
   return (
     <div className="grid gap-3 text-sm">
       <Evidence label="blocker" value={issue.blocker ? `${issue.blocker.kind}: ${issue.blocker.message}` : "none"} />
       <Evidence label="failure" value={issue.failure ? `${issue.failure.kind}: ${issue.failure.message}` : "none"} />
       <Evidence label="runtime defect" value={issue.runtime_defect ? `${issue.runtime_defect.classification}: ${issue.runtime_defect.next_action}` : "none"} />
-      <Evidence label="session evidence refs" value={issue.runner_sessions.at(-1)?.session_evidence_refs.length ? issue.runner_sessions.at(-1)!.session_evidence_refs.join("; ") : "none"} />
+      <Evidence label="session evidence refs" value={sessionEvidenceRefs.length ? sessionEvidenceRefs.join("; ") : "none"} />
       <Evidence label="self-defect routing" value={issue.self_defect_routing ? `${issue.self_defect_routing.fingerprint ?? "fingerprint unavailable"}: ${issue.self_defect_routing.next_action ?? "inspect"}` : "none"} />
       <Evidence label="evals" value={issue.eval_results.length ? issue.eval_results.map((item) => `${item.suite} ${item.status}`).join("; ") : "none"} />
       <Evidence label="stop reason" value={issue.stop_reason ?? "none"} />

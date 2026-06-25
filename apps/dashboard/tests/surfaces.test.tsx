@@ -3,6 +3,8 @@ import type React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { DefectsSurface, OverviewSurface, ProjectSurface, ProjectsSurface, QuotaSurface } from "@/src/components";
+import { currentRunnerSession } from "@/src/current-runner-session";
+import { formatDuration, LIVE_DURATION_REFRESH_MS, resolveLiveDurationMs } from "@/src/live-duration";
 import { ActivityTimeline, AgentsTree, IssueInspector, ToolsByAgent } from "@/src/issue-inspector";
 import {
   acceptanceDashboard,
@@ -114,7 +116,8 @@ describe("dashboard surfaces", () => {
     expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).toContain("SYM-97");
     expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).toContain(">duration</th>");
     expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).toContain("1h 0m");
-    expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).not.toContain(">last event</th>");
+    expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).toContain(">last event</th>");
+    expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).toContain("component tests passed");
     expect(sectionText(blocked, "Symphony current execution", "Queue and blockers")).not.toContain("SYM-91");
     expect(blocked).toContain("provider quota exhausted");
     expect(failed).toContain("runtime_process_exit");
@@ -176,6 +179,55 @@ describe("dashboard surfaces", () => {
 
     expect(html).toContain("https://runner.vestalink.net/L2FjdHVhbC9ydW5uZXIvc2Vzc2lvbg/session/oc-sym-97");
     expect(html).not.toContain("L3J1bnRpbWUvc3RhbGUvd29ya3RyZWU");
+  });
+
+  test("project detail uses preferred runner session instead of a stale tail session", () => {
+    const project = withStaleTailSession();
+    const html = render(<ProjectSurface project={project} />);
+    const currentExecution = sectionText(html, "Symphony current execution", "Queue and blockers");
+
+    expect(currentRunnerSession(project.active_issues[0])?.runner_session_id).toBe("oc-sym-97");
+    expect(currentExecution).toContain("oc-sym-97");
+    expect(currentExecution).toContain("runner-primary");
+    expect(currentExecution).toContain("typescript-engineer");
+    expect(currentExecution).toContain("gpt-5.5");
+    expect(currentExecution).toContain("1/2");
+    expect(currentExecution).toContain(">5</td>");
+    expect(currentExecution).toContain("component tests passed");
+    expect(currentExecution).toContain("/workspaces/symphony/SYM-97");
+    expect(currentExecution).not.toContain("stale-tail");
+    expect(currentExecution).not.toContain("stale-provider");
+    expect(currentExecution).not.toContain("stale event");
+    expect(currentExecution).not.toContain("/stale/worktree");
+  });
+
+  test("issue inspector tabs use preferred runner session instead of a stale tail session", () => {
+    const issue = withStaleTailSession().active_issues[0];
+    const html = render(<IssueInspector issue={issue} />);
+    const agents = render(<AgentsTree issue={issue} />);
+    const events = currentRunnerSession(issue)?.activity?.timeline.filter((event) => event.kind === "tool" || event.tool) ?? [];
+    const tools = render(<ToolsByAgent issue={issue} events={events} />);
+
+    expect(html).toContain("oc-sym-97");
+    expect(html).toContain("runner-primary");
+    expect(html).toContain("Capture smoke screenshots");
+    expect(agents).toContain("Dashboard pages");
+    expect(tools).toContain("typescript-engineer · 1 tool events");
+    expect(html).not.toContain("stale-tail");
+    expect(html).not.toContain("stale-provider");
+    expect(html).not.toContain("stale-only todo");
+    expect(agents).not.toContain("stale-agent");
+    expect(tools).not.toContain("stale-agent");
+  });
+
+  test("live duration resolver refreshes from started_at_ms on one second cadence", () => {
+    const startedAtMs = 10_000;
+    const firstTick = resolveLiveDurationMs(startedAtMs, 500, startedAtMs + LIVE_DURATION_REFRESH_MS);
+    const secondTick = resolveLiveDurationMs(startedAtMs, 500, startedAtMs + LIVE_DURATION_REFRESH_MS * 2);
+
+    expect(formatDuration(firstTick)).toBe("1s");
+    expect(formatDuration(secondTick)).toBe("2s");
+    expect(resolveLiveDurationMs(null, 500, startedAtMs + LIVE_DURATION_REFRESH_MS)).toBe(500);
   });
 
   test("agent inspector renders a tree with active spinner", () => {
@@ -241,6 +293,58 @@ describe("dashboard surfaces", () => {
     expect(empty).toContain("No Symphony self/runtime defects");
   });
 });
+
+function withStaleTailSession(): typeof acceptanceProject {
+  const project = JSON.parse(JSON.stringify(acceptanceProject)) as typeof acceptanceProject;
+  const issue = project.active_issues[0];
+  const preferredSession = issue.runner_sessions[0];
+
+  issue.preferred_runner_session_id = preferredSession.runner_session_id;
+  issue.runner_sessions.push({
+    ...preferredSession,
+    runner_session_id: "stale-tail",
+    provider_id: "stale-provider",
+    process_id: 9001,
+    process_alive: false,
+    active_agent: "stale-agent",
+    active_model: "stale-model",
+    todo_count: 99,
+    started_at_ms: 1781870000000,
+    duration_ms: 7_200_000,
+    last_event: "stale event",
+    worktree_path: "/stale/worktree",
+    session_evidence_refs: ["stale:evidence"],
+    activity: {
+      root_session_id: "stale-tail",
+      sessions: [
+        {
+          session_id: "stale-tail",
+          parent_session_id: null,
+          title: "Stale tail",
+          directory: "/stale/worktree",
+          agent: "stale-agent",
+          model: "stale-model",
+          is_subagent: false,
+          tokens_input: 1,
+          tokens_output: 1,
+          tokens_reasoning: 1,
+          tokens_cache_read: 0,
+          tokens_cache_write: 0,
+          time_created_ms: 1781870000000,
+          time_updated_ms: 1781870001000,
+        },
+      ],
+      subagents: [],
+      todos: [{ session_id: "stale-tail", content: "stale-only todo", status: "in_progress", priority: "high", position: 1, time_updated_ms: 1781870001000 }],
+      timeline: [{ session_id: "stale-tail", part_id: "stale-p1", time_created_ms: 1781870001000, time_updated_ms: 1781870001000, kind: "tool", tool: "stale-tool", status: "running", title: "Stale tool", summary: "stale event" }],
+      running_tool_count: 9,
+      pending_tool_count: 9,
+      last_updated_ms: 1781870001000,
+    },
+  });
+
+  return project;
+}
 
 function render(node: React.ReactElement): string {
   return renderToStaticMarkup(node);

@@ -80,6 +80,7 @@ export const acceptanceDashboard: AggregateDashboard = {
           title: "Build dashboard surfaces",
           display_status: "running",
           session_id: "oc-sym-97",
+          preferred_runner_session_id: "oc-sym-97",
           provider_mode: "acp",
           provider_id: "runner-primary",
           process_id: 4277,
@@ -183,6 +184,7 @@ export const acceptanceDashboard: AggregateDashboard = {
           title: "Recover runtime poller",
           display_status: "runtime defect",
           session_id: "oc-atl-42",
+          preferred_runner_session_id: "oc-atl-42",
           provider_mode: "omp_acp",
           provider_id: "omp-primary",
           process_id: 5321,
@@ -234,6 +236,7 @@ const sym97Issue: IssueDetail = {
   cleanup_status: "clean",
   stop_reason: null,
   last_runner_event: "component tests passed",
+  preferred_runner_session_id: "oc-sym-97",
   token_metrics: tokenMetrics({ total: 38210, cached: 3110, cacheRead: 2800, cacheWrite: 310 }),
   runner_sessions: [
     {

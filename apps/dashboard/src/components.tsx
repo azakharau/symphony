@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { currentRunnerSession } from "@/src/current-runner-session";
 import { LiveDuration } from "@/src/live-duration";
 import type { AggregateDashboard, DashboardProjectCard, DashboardTokenMetrics, IssueDetail, ProjectDetail, RunningIssueSummary, SelfDefectRouteSummary } from "@/src/types";
 import type { QuotaResult, QuotaWindow } from "@/src/quota";
@@ -310,12 +311,13 @@ function IssueTable({ issues, projectId }: { issues: IssueDetail[]; projectId: s
             <th className="px-3 py-2">tools</th>
             <th className="px-3 py-2">todos</th>
             <th className="px-3 py-2">duration</th>
+            <th className="px-3 py-2">last event</th>
             <th className="px-3 py-2">worktree</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
           {issues.map((issue) => {
-            const session = issue.runner_sessions.at(-1);
+            const session = currentRunnerSession(issue);
             return (
               <tr key={issue.issue_id}>
                 <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${projectId}/issues/${issue.issue_id}`}>{issue.identifier}</Link><div className="text-xs text-slate-500">{issue.title}</div></td>
@@ -327,6 +329,7 @@ function IssueTable({ issues, projectId }: { issues: IssueDetail[]; projectId: s
                 <td className="px-3 py-3">{session?.activity?.running_tool_count ?? 0}/{session?.activity?.pending_tool_count ?? 0}</td>
                 <td className="px-3 py-3">{session?.todo_count ?? 0}</td>
                 <td className="px-3 py-3"><LiveDuration startedAtMs={session?.started_at_ms} fallbackMs={session?.duration_ms} /></td>
+                <td className="px-3 py-3">{session?.last_event ?? issue.last_runner_event ?? "—"}</td>
                 <td className="max-w-[220px] truncate px-3 py-3 font-mono text-xs">{session?.worktree_path ?? issue.git_ref?.worktree_path ?? "—"}</td>
               </tr>
             );
@@ -536,7 +539,7 @@ export function processStateLabel(processId?: number | null, alive?: boolean | n
 }
 
 function isLiveIssue(issue: IssueDetail): boolean {
-  const session = issue.runner_sessions.at(-1);
+  const session = currentRunnerSession(issue);
   return issue.lifecycle_stage === "running" || session?.process_alive === true;
 }
 

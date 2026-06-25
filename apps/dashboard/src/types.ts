@@ -43,6 +43,7 @@ export type RunningIssueSummary = {
   title: string;
   display_status: string;
   session_id?: string | null;
+  preferred_runner_session_id?: string | null;
   provider_mode?: string | null;
   provider_id?: string | null;
   process_id?: number | null;
@@ -288,6 +289,7 @@ export type IssueDetail = {
   cleanup_status: string;
   stop_reason?: string | null;
   last_runner_event?: string | null;
+  preferred_runner_session_id?: string | null;
   runner_sessions: RunnerSession[];
   token_metrics?: DashboardTokenMetrics;
   eval_results: EvalRun[];

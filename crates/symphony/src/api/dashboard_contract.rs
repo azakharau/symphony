@@ -34,7 +34,7 @@ pub struct UiAggregateDashboardTotals {
     pub available_sessions: u32,
     pub max_sessions: u32,
     pub running_tokens: u64,
-    pub running_cached_tokens: u64,
+    pub running_cached_tokens: Option<u64>,
     pub recorded_tokens: u64,
     pub token_metrics: DashboardTokenMetrics,
 }
@@ -53,7 +53,7 @@ pub struct UiProjectDashboardCard {
     pub liveness: ProjectRuntimeLivenessResponse,
     pub cleanup_status: CleanupStatus,
     pub running_tokens: u64,
-    pub running_cached_tokens: u64,
+    pub running_cached_tokens: Option<u64>,
     pub recorded_tokens: u64,
     pub token_metrics: DashboardTokenMetrics,
     pub running_issues: Vec<UiRunningIssueSummary>,
@@ -81,7 +81,7 @@ pub struct UiRunningIssueSummary {
     pub active_agent: Option<String>,
     pub active_model: Option<String>,
     pub token_count: u64,
-    pub cached_token_count: u64,
+    pub cached_token_count: Option<u64>,
     pub token_metrics: DashboardTokenMetrics,
     pub subagents_used: u64,
     pub running_tool_count: u64,
@@ -158,7 +158,7 @@ pub struct UiRunnerSessionDetail {
     pub todo_count: u64,
     pub part_count: u64,
     pub token_count: u64,
-    pub cached_token_count: u64,
+    pub cached_token_count: Option<u64>,
     pub token_metrics: DashboardTokenMetrics,
     pub started_at_ms: Option<u64>,
     pub duration_ms: Option<u64>,
@@ -250,7 +250,7 @@ impl From<&AggregateDashboardTotals> for UiAggregateDashboardTotals {
             available_sessions: totals.available_sessions,
             max_sessions: totals.max_sessions,
             running_tokens: totals.running_tokens,
-            running_cached_tokens: totals.running_cached_tokens,
+            running_cached_tokens: cached_token_count_for_ui(&totals.token_metrics),
             recorded_tokens: totals.recorded_tokens,
             token_metrics: totals.token_metrics.clone(),
         }
@@ -272,7 +272,7 @@ impl From<&ProjectDashboardCard> for UiProjectDashboardCard {
             liveness: card.liveness.clone(),
             cleanup_status: card.cleanup_status,
             running_tokens: card.running_tokens,
-            running_cached_tokens: card.running_cached_tokens,
+            running_cached_tokens: cached_token_count_for_ui(&card.token_metrics),
             recorded_tokens: card.recorded_tokens,
             token_metrics: card.token_metrics.clone(),
             running_issues: card
@@ -307,7 +307,7 @@ impl From<&RunningIssueSummary> for UiRunningIssueSummary {
             active_agent: issue.active_agent.clone(),
             active_model: issue.active_model.clone(),
             token_count: issue.token_count,
-            cached_token_count: issue.cached_token_count,
+            cached_token_count: cached_token_count_for_ui(&issue.token_metrics),
             token_metrics: issue.token_metrics.clone(),
             subagents_used: issue.subagents_used,
             running_tool_count: issue.running_tool_count,
@@ -405,7 +405,7 @@ impl From<&RunnerSessionDetail> for UiRunnerSessionDetail {
             todo_count: session.todo_count,
             part_count: session.part_count,
             token_count: session.token_count,
-            cached_token_count: session.cached_token_count,
+            cached_token_count: cached_token_count_for_ui(&session.token_metrics),
             token_metrics: session.token_metrics.clone(),
             started_at_ms: session.started_at_ms,
             duration_ms: session.duration_ms,
@@ -464,5 +464,17 @@ impl From<&RunnerSessionActivity> for UiRunnerSessionActivity {
             time_created_ms: activity.time_created_ms,
             time_updated_ms: activity.time_updated_ms,
         }
+    }
+}
+
+fn cached_token_count_for_ui(metrics: &DashboardTokenMetrics) -> Option<u64> {
+    if metrics.metrics_status == "available"
+        || metrics.cached_token_count > 0
+        || metrics.cache_read_token_count > 0
+        || metrics.cache_write_token_count > 0
+    {
+        Some(metrics.cached_token_count)
+    } else {
+        None
     }
 }

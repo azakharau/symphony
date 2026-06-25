@@ -1367,20 +1367,73 @@ async fn session_duration_inputs(
 ) -> (Option<u64>, Option<u64>, Option<String>) {
     let activity_started_at_ms = session_activity_started_at_ms(&session.session_id, activity);
     let activity_duration_ms = session_activity_duration_ms(&session.session_id, activity);
-    if activity_started_at_ms.is_some()
-        || session.provider_mode != crate::state::RuntimeProviderMode::OmpAcp
-    {
+    if activity_started_at_ms.is_some() {
         return (activity_started_at_ms, activity_duration_ms, None);
     }
 
-    match read_omp_session_tree_metrics(&session.session_id).await {
-        Ok(Some(metrics)) => {
-            let (started_at_ms, duration_ms) = omp_metrics_duration_inputs(&metrics);
-            (started_at_ms, duration_ms, None)
+    if session.provider_mode == crate::state::RuntimeProviderMode::OmpAcp {
+        match read_omp_session_tree_metrics(&session.session_id).await {
+            Ok(Some(metrics)) => {
+                let (started_at_ms, duration_ms) = omp_metrics_duration_inputs(&metrics);
+                if started_at_ms.is_some() {
+                    return (started_at_ms, duration_ms, None);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => return (None, None, Some(error.to_string())),
         }
-        Ok(None) => (None, None, None),
-        Err(error) => (None, None, Some(error.to_string())),
     }
+
+    (live_process_started_at_ms(session).await, None, None)
+}
+
+async fn live_process_started_at_ms(session: &RunnerSessionRecord) -> Option<u64> {
+    if session.lifecycle_stage != LifecycleStage::Running
+        || matches!(session.stage, RunnerStage::Failed | RunnerStage::Completed)
+    {
+        return None;
+    }
+    let process_id = session.process_id?;
+    let process_uptime_seconds = process_uptime_seconds(process_id).await?;
+    let boot_time_ms = boot_time_epoch_seconds().await?.checked_mul(1_000)?;
+    boot_time_ms.checked_add(process_uptime_seconds.saturating_mul(1_000))
+}
+
+async fn process_uptime_seconds(process_id: u32) -> Option<u64> {
+    let stat = tokio::fs::read_to_string(format!("/proc/{process_id}/stat"))
+        .await
+        .ok()?;
+    let start_time_ticks = process_start_time_ticks(&stat)?;
+    let ticks_per_second = clock_ticks_per_second().await?;
+    Some(start_time_ticks / ticks_per_second)
+}
+
+async fn boot_time_epoch_seconds() -> Option<u64> {
+    let stat = tokio::fs::read_to_string("/proc/stat").await.ok()?;
+    stat.lines()
+        .find_map(|line| line.strip_prefix("btime "))
+        .and_then(|value| value.trim().parse().ok())
+}
+
+fn process_start_time_ticks(stat: &str) -> Option<u64> {
+    let after_command = stat.rsplit_once(") ")?.1;
+    after_command.split_whitespace().nth(19)?.parse().ok()
+}
+
+async fn clock_ticks_per_second() -> Option<u64> {
+    let output = tokio::process::Command::new("getconf")
+        .arg("CLK_TCK")
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    std::str::from_utf8(&output.stdout)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 fn omp_metrics_duration_inputs(metrics: &RunnerSessionTreeMetrics) -> (Option<u64>, Option<u64>) {

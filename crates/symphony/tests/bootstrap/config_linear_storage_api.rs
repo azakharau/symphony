@@ -1262,6 +1262,47 @@ async fn dashboard_api_orders_active_runner_session_before_stale_failures() {
 }
 
 #[tokio::test]
+async fn dashboard_ui_active_task_exposes_process_started_at_for_client_duration() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    store
+        .upsert_issue(test_issue("symphony", "live-duration", "SYM-234"))
+        .await
+        .expect("issue");
+    let mut session = test_session(
+        "symphony",
+        "live-duration",
+        "oc-live-duration",
+        dir.path().join("SYM-234"),
+    );
+    session.process_id = Some(std::process::id());
+    session.token_usage_status = "missing".into();
+    session.token_usage_source = "none".into();
+    store
+        .upsert_runner_session(session)
+        .await
+        .expect("running session");
+
+    let ui_aggregate =
+        symphony::api::runtime_api_json_response(&config, &store, "/api/dashboard/ui")
+            .await
+            .expect("ui aggregate");
+    let payload: serde_json::Value =
+        serde_json::from_str(&ui_aggregate.body).expect("ui aggregate json");
+    let running = &payload["projects"][0]["running_issues"][0];
+
+    assert_eq!(running["session_id"], "oc-live-duration");
+    assert!(running["started_at_ms"].as_u64().is_some());
+    assert!(running["duration_ms"].is_null());
+    assert!(running["cached_token_count"].is_null());
+}
+
+#[tokio::test]
 async fn dashboard_api_does_not_surface_stale_starting_session_as_running() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
@@ -1849,13 +1890,17 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
             .contains(r#""live_events_endpoint":"/api/dashboard/events""#)
     );
     assert!(ui_project.body.contains(r#""active_issues""#));
-    assert!(ui_aggregate.body.contains(r#""running_cached_tokens":0"#));
+    assert!(
+        ui_aggregate
+            .body
+            .contains(r#""running_cached_tokens":null"#)
+    );
     assert!(ui_aggregate.body.contains(r#""duration_ms":null"#));
     assert!(ui_issue.body.contains(r#""runner_session_id":"oc-repair""#));
-    assert!(ui_issue.body.contains(r#""cached_token_count":0"#));
+    assert!(ui_issue.body.contains(r#""cached_token_count":null"#));
     assert!(ui_issue.body.contains(r#""duration_ms":null"#));
     assert!(events.body.starts_with("event: dashboard.snapshot\ndata: "));
-    assert!(events.body.contains(r#""running_cached_tokens":0"#));
+    assert!(events.body.contains(r#""running_cached_tokens":null"#));
     assert!(!ui_aggregate.body.contains("cost_micros"));
     assert!(!ui_project.body.contains("cost_micros"));
     assert!(!ui_issue.body.contains("cost_micros"));
@@ -1881,10 +1926,14 @@ async fn dashboard_token_metrics_use_persisted_splits_without_cache_double_count
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
-    store
-        .upsert_issue(test_issue("symphony", "omp-cache", "SYM-115"))
-        .await
-        .expect("issue");
+    let mut issue = test_issue("symphony", "omp-cache", "SYM-115");
+    issue.git_ref = Some(GitRefRecord {
+        branch: "feature/sym-115".into(),
+        worktree_path: "/home/agent/.symphony/workspaces/omp/symphony/SYM-115".into(),
+        head_sha: Some("def456".into()),
+        pr_url: Some("https://example.test/pr/115".into()),
+    });
+    store.upsert_issue(issue).await.expect("issue");
 
     let mut session = test_session(
         "symphony",
@@ -1907,6 +1956,17 @@ async fn dashboard_token_metrics_use_persisted_splits_without_cache_double_count
         .upsert_runner_session(session)
         .await
         .expect("persist session");
+    store
+        .upsert_eval_run(EvalRunRecord {
+            project_id: "symphony".into(),
+            issue_id: "omp-cache".into(),
+            run_id: "eval-omp-cache".into(),
+            suite: "symphony-validation".into(),
+            status: "passed".into(),
+            details_json: Some(r#"{"snapshot":"live-activity"}"#.into()),
+        })
+        .await
+        .expect("eval run");
 
     let aggregate = symphony::api::runtime_api_json_response(&config, &store, "/api/dashboard/ui")
         .await
@@ -1981,6 +2041,40 @@ async fn dashboard_token_metrics_use_persisted_splits_without_cache_double_count
     assert_eq!(issue["runner_sessions"][0]["token_count"], 561);
     assert_eq!(issue["runner_sessions"][0]["cached_token_count"], 406);
     assert_eq!(
+        issue["runner_sessions"][0]["activity"]["sessions"]
+            .as_array()
+            .expect("sessions")
+            .len(),
+        2
+    );
+    assert_eq!(
+        issue["runner_sessions"][0]["activity"]["subagents"]
+            .as_array()
+            .expect("subagents")
+            .len(),
+        1
+    );
+    assert_eq!(
+        issue["runner_sessions"][0]["activity"]["todos"]
+            .as_array()
+            .expect("todos")
+            .len(),
+        1
+    );
+    assert_eq!(
+        issue["runner_sessions"][0]["activity"]["timeline"]
+            .as_array()
+            .expect("timeline")
+            .len(),
+        2
+    );
+    assert_eq!(
+        issue["runner_sessions"][0]["activity"]["running_tool_count"],
+        1
+    );
+    assert_eq!(issue["eval_results"][0]["status"], "passed");
+    assert_eq!(issue["git_ref"]["head_sha"], "def456");
+    assert_eq!(
         issue["runner_sessions"][0]["token_metrics"]["metrics_source"],
         "persisted_split_metrics"
     );
@@ -2038,7 +2132,8 @@ async fn dashboard_ui_marks_unsplit_omp_totals_degraded_instead_of_proven_zero_c
     let running_issue = &aggregate["projects"][0]["running_issues"][0];
     let runner_session = &issue["runner_sessions"][0];
 
-    assert_eq!(running_issue["cached_token_count"], 0);
+    assert!(running_issue["cached_token_count"].is_null());
+    assert!(runner_session["cached_token_count"].is_null());
     assert_eq!(running_issue["token_metrics"]["metrics_status"], "degraded");
     assert_eq!(
         running_issue["token_metrics"]["metrics_source"],

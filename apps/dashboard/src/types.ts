@@ -55,7 +55,7 @@ export type RunningIssueSummary = {
   active_agent?: string | null;
   active_model?: string | null;
   token_count: number;
-  cached_token_count?: number;
+  cached_token_count?: number | null;
   token_metrics?: DashboardTokenMetrics;
   subagents_used: number;
   running_tool_count: number;
@@ -101,7 +101,7 @@ export type DashboardProjectCard = {
   liveness: RuntimeLiveness;
   cleanup_status: string;
   running_tokens: number;
-  running_cached_tokens?: number;
+  running_cached_tokens?: number | null;
   token_metrics?: DashboardTokenMetrics;
   recorded_tokens: number;
   running_issues: RunningIssueSummary[];
@@ -115,7 +115,7 @@ export type DashboardTotals = {
   available_sessions: number;
   max_sessions: number;
   running_tokens: number;
-  running_cached_tokens?: number;
+  running_cached_tokens?: number | null;
   recorded_tokens: number;
   token_metrics?: DashboardTokenMetrics;
 };
@@ -243,7 +243,7 @@ export type RunnerSession = {
   todo_count: number;
   part_count: number;
   token_count: number;
-  cached_token_count?: number;
+  cached_token_count?: number | null;
   token_metrics?: DashboardTokenMetrics;
   started_at_ms?: number | null;
   duration_ms?: number | null;

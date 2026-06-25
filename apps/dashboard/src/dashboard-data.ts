@@ -95,6 +95,7 @@ export async function getDefectsData(): Promise<DataResult<SelfDefectRouteSummar
           first_seen_at: routing.first_seen_at,
           last_seen_at: routing.last_seen_at,
           next_action: routing.next_action,
+          source_status: issue.lifecycle_stage,
         }];
       });
   });
@@ -115,19 +116,66 @@ export function blockedIssues(projects: ProjectDetail[]) {
 }
 
 export function dedupeDefects(routes: SelfDefectRouteSummary[]): SelfDefectRouteSummary[] {
-  const seen = new Map<string, SelfDefectRouteSummary>();
+  const grouped = new Map<string, SelfDefectRouteSummary>();
   for (const route of routes) {
-    const key = `${route.fingerprint}:${route.managed_issue_id ?? route.managed_issue_identifier ?? "unmanaged"}`;
-    const previous = seen.get(key);
-    if (!previous || String(route.last_seen_at ?? "") > String(previous.last_seen_at ?? "")) {
-      seen.set(key, route);
-    }
+    const previous = grouped.get(route.fingerprint);
+    grouped.set(route.fingerprint, previous ? mergeDefectRoute(previous, route) : { ...route });
   }
-  return [...seen.values()].sort((left, right) => {
+  return [...grouped.values()].sort((left, right) => {
+    const active = Number(isActiveDefect(right)) - Number(isActiveDefect(left));
+    if (active !== 0) return active;
     const severity = severityRank(right.severity) - severityRank(left.severity);
     if (severity !== 0) return severity;
     return String(right.last_seen_at ?? "").localeCompare(String(left.last_seen_at ?? ""));
   });
+}
+
+function mergeDefectRoute(left: SelfDefectRouteSummary, right: SelfDefectRouteSummary): SelfDefectRouteSummary {
+  const newer = String(right.last_seen_at ?? "") > String(left.last_seen_at ?? "") ? right : left;
+  const leftActive = isActiveDefect(left);
+  const rightActive = isActiveDefect(right);
+  const primary = leftActive === rightActive ? newer : leftActive ? left : right;
+  const primaryActive = leftActive || rightActive;
+  const severity =
+    primaryActive
+      ? higherSeverity(leftActive ? left.severity : undefined, rightActive ? right.severity : undefined)
+      : higherSeverity(left.severity, right.severity);
+  return {
+    ...primary,
+    severity,
+    occurrence_count: (left.occurrence_count ?? 1) + (right.occurrence_count ?? 1),
+    first_seen_at: earliestTime(left.first_seen_at, right.first_seen_at),
+    last_seen_at: latestTime(left.last_seen_at, right.last_seen_at),
+    source_issue_identifier: joinUnique(left.source_issue_identifier ?? left.source_issue_id, right.source_issue_identifier ?? right.source_issue_id),
+    managed_issue_identifier: joinUnique(left.managed_issue_identifier ?? left.managed_issue_id, right.managed_issue_identifier ?? right.managed_issue_id),
+    source_status: primary.source_status,
+  };
+}
+
+function isActiveDefect(route: SelfDefectRouteSummary): boolean {
+  const status = (route.source_status ?? "active").toLowerCase();
+  return status !== "completed" && status !== "canceled" && status !== "cancelled" && status !== "resolved";
+}
+
+function earliestTime(left?: string | null, right?: string | null): string | null | undefined {
+  if (!left) return right;
+  if (!right) return left;
+  return left <= right ? left : right;
+}
+
+function latestTime(left?: string | null, right?: string | null): string | null | undefined {
+  if (!left) return right;
+  if (!right) return left;
+  return left >= right ? left : right;
+}
+
+function joinUnique(left?: string | null, right?: string | null): string | undefined {
+  const values = [left, right].filter((value): value is string => Boolean(value));
+  return [...new Set(values.flatMap((value) => value.split(", ").filter(Boolean)))].join(", ") || undefined;
+}
+
+function higherSeverity(left?: string | null, right?: string | null): string | null | undefined {
+  return severityRank(left) >= severityRank(right) ? left : right;
 }
 
 function severityRank(value?: string | null): number {

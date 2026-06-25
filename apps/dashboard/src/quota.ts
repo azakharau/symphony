@@ -9,6 +9,8 @@ const PERCENT_TOTAL = 100;
 
 type QuotaFailureReason = "command_failed" | "malformed_json" | "timeout";
 
+export type QuotaHealth = "ok" | "error" | "timeout";
+
 export type QuotaWindow = {
   label: string;
   resetAt?: string;
@@ -19,6 +21,7 @@ export type QuotaWindow = {
 
 export type QuotaBucket = {
   title: string;
+  scope: "general" | "model";
   windows: QuotaWindow[];
 };
 
@@ -30,17 +33,32 @@ export type QuotaData = {
   remaining?: number;
   resetsAt?: string;
   model?: string;
+  fetchedAt: string;
+  parsedAt: string;
+  source: string;
+  parseHealth: QuotaHealth;
+  sourceHealth: QuotaHealth;
 };
 
 export type QuotaResult =
   | {
       status: "available";
       command: string;
+      fetchedAt: string;
+      parsedAt: string;
+      source: string;
+      parseHealth: "ok";
+      sourceHealth: "ok";
       quota: QuotaData;
     }
   | {
       status: "unavailable";
       command: string;
+      fetchedAt: string;
+      parsedAt: string;
+      source: string;
+      parseHealth: QuotaHealth;
+      sourceHealth: QuotaHealth;
       reason: QuotaFailureReason;
       message: string;
       quota: null;
@@ -64,6 +82,7 @@ export async function readQuota(config: DashboardConfig): Promise<QuotaResult> {
 }
 
 export function parseQuotaJson(stdout: string, command = "ocu --localhost --plain"): QuotaResult {
+  const fetchedAt = new Date().toISOString();
   let raw: unknown;
   try {
     raw = JSON.parse(stdout);
@@ -72,18 +91,25 @@ export function parseQuotaJson(stdout: string, command = "ocu --localhost --plai
       command,
       "malformed_json",
       error instanceof Error ? error.message : "quota command did not return JSON",
+      fetchedAt,
     );
   }
 
   return {
     status: "available",
     command,
-    quota: normalizeQuota(raw),
+    fetchedAt,
+    parsedAt: new Date().toISOString(),
+    source: sourceLabel(command),
+    parseHealth: "ok",
+    sourceHealth: "ok",
+    quota: normalizeQuota(raw, fetchedAt),
   };
 }
 
-function normalizeQuota(raw: unknown): QuotaData {
+function normalizeQuota(raw: unknown, fetchedAt: string): QuotaData {
   const source = firstRecord(raw, ["quota", "usage", "data"]) ?? asRecord(raw);
+  const parsedAt = new Date().toISOString();
   return {
     raw,
     buckets: readBuckets(raw),
@@ -92,6 +118,11 @@ function normalizeQuota(raw: unknown): QuotaData {
     remaining: readNumber(source, ["remaining", "remaining_tokens", "remaining_credits", "quota_remaining"]),
     resetsAt: readString(source, ["resets_at", "reset_at", "resetAt"]),
     model: readString(source, ["model", "subscription", "plan"]),
+    fetchedAt,
+    parsedAt,
+    source: "ocu",
+    parseHealth: "ok",
+    sourceHealth: "ok",
   };
 }
 
@@ -116,6 +147,7 @@ function readBuckets(raw: unknown): QuotaBucket[] {
     return [
       {
         title,
+        scope: bucketScope(title),
         windows: readWindows(record.windows),
       },
     ];
@@ -243,14 +275,28 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
-function unavailable(command: string, reason: QuotaFailureReason, message: string): QuotaResult {
+function unavailable(command: string, reason: QuotaFailureReason, message: string, fetchedAt = new Date().toISOString()): QuotaResult {
+  const sourceHealth: QuotaHealth = reason === "timeout" ? "timeout" : reason === "malformed_json" ? "ok" : "error";
   return {
     status: "unavailable",
     command,
+    fetchedAt,
+    parsedAt: new Date().toISOString(),
+    source: sourceLabel(command),
+    parseHealth: reason === "malformed_json" ? "error" : "ok",
+    sourceHealth,
     reason,
     message,
     quota: null,
   };
+}
+
+function sourceLabel(command: string): string {
+  return command.trim().split(/\s+/)[0] || "quota command";
+}
+
+function bucketScope(title: string): "general" | "model" {
+  return title.toLowerCase().includes("main") ? "general" : "model";
 }
 
 function commandTimedOut(error: unknown): boolean {

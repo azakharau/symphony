@@ -86,6 +86,7 @@ export type SelfDefectRouteSummary = {
   first_seen_at?: string | null;
   last_seen_at?: string | null;
   next_action?: string | null;
+  source_status?: string | null;
 };
 
 export type DashboardProjectCard = {

@@ -3,7 +3,7 @@ import Link from "next/link";
 import { currentRunnerSession } from "@/src/current-runner-session";
 import { LiveDuration } from "@/src/live-duration";
 import type { AggregateDashboard, DashboardProjectCard, DashboardTokenMetrics, IssueDetail, ProjectDetail, RunningIssueSummary, SelfDefectRouteSummary } from "@/src/types";
-import type { QuotaResult, QuotaWindow } from "@/src/quota";
+import type { QuotaBucket, QuotaResult, QuotaWindow } from "@/src/quota";
 
 const RECENT_HISTORY_LIMIT = 5;
 
@@ -134,23 +134,22 @@ export function ProjectSurface({ project }: { project: ProjectDetail }) {
 export function QuotaSurface({ quota }: { quota: QuotaResult }) {
   if (quota.status === "unavailable") {
     return (
-      <Panel title="Quota">
+      <Panel title="Quota" action={<QuotaHealthLine quota={quota} />}>
         <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
           <p className="font-semibold">Quota unavailable</p>
           <p className="mt-2">Quota data is temporarily unavailable.</p>
           <p className="mt-1">Reason: {quota.reason}</p>
+          <p className="mt-1">Command: <code>{quota.command}</code></p>
         </div>
       </Panel>
     );
   }
 
-  const windows = quota.quota.buckets.flatMap((bucket) => bucket.windows.map((window) => ({ ...window, bucket: bucket.title })));
-
   return (
-    <Panel title="Quota windows">
-      {windows.length ? (
-        <div className="grid gap-3">
-          {windows.map((window) => <QuotaWindowBar key={`${window.bucket}-${window.label}`} window={window} bucket={window.bucket} />)}
+    <Panel title="Quota windows" action={<QuotaHealthLine quota={quota} />}>
+      {quota.quota.buckets.length ? (
+        <div className="grid gap-4">
+          {quota.quota.buckets.map((bucket) => <QuotaBucketBlock key={bucket.title} bucket={bucket} />)}
         </div>
       ) : (
         <EmptyState message="Quota data is available, but no window buckets were reported." />
@@ -160,36 +159,35 @@ export function QuotaSurface({ quota }: { quota: QuotaResult }) {
 }
 
 export function DefectsSurface({ defects }: { defects: SelfDefectRouteSummary[] }) {
+  const groups = groupDefects(defects);
   return (
-    <Panel title="Deduped defects" action={<span>{defects.length} fingerprints</span>}>
-      {defects.length ? (
+    <Panel title="Deduped defects" action={<span>{groups.length} fingerprints · {defects.length} routed records</span>}>
+      {groups.length ? (
         <div className="overflow-x-auto">
           <table className="w-full min-w-[900px] text-left text-sm">
             <thead className="text-xs uppercase tracking-wide text-slate-500">
               <tr>
                 <th className="px-3 py-2">fingerprint</th>
                 <th className="px-3 py-2">severity</th>
-                <th className="px-3 py-2">kind</th>
-                <th className="px-3 py-2">relation</th>
-                <th className="px-3 py-2">source issue</th>
-                <th className="px-3 py-2">managed issue</th>
+                <th className="px-3 py-2">kind / relation</th>
+                <th className="px-3 py-2">source issues</th>
+                <th className="px-3 py-2">managed issues</th>
                 <th className="px-3 py-2">occurrences</th>
                 <th className="px-3 py-2">first / last</th>
-                <th className="px-3 py-2">next action</th>
+                <th className="px-3 py-2">status / action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {defects.map((defect) => (
-                <tr key={`${defect.fingerprint}-${defect.managed_issue_id ?? "unmanaged"}`}>
-                  <td className="px-3 py-3 font-mono text-xs">{defect.fingerprint}</td>
-                  <td className="px-3 py-3"><Badge tone={statusTone(defect.severity)}>{defect.severity ?? "unknown"}</Badge></td>
-                  <td className="px-3 py-3">{defect.kind ?? defect.defect_kind ?? "unknown"}</td>
-                  <td className="px-3 py-3">{defect.relation ?? defect.relation_mode ?? "unrelated"}</td>
-                  <td className="px-3 py-3">{defect.source_issue_identifier ?? defect.source_issue_id ?? "—"}</td>
-                  <td className="px-3 py-3">{defect.managed_issue_identifier ?? defect.managed_issue_id ?? "—"}</td>
-                  <td className="px-3 py-3">{defect.occurrence_count ?? 1}</td>
-                  <td className="px-3 py-3 text-xs text-slate-600">{shortTime(defect.first_seen_at)} / {shortTime(defect.last_seen_at)}</td>
-                  <td className="px-3 py-3">{defect.next_action ?? "inspect evidence"}</td>
+              {groups.map((group) => (
+                <tr key={group.fingerprint}>
+                  <td className="px-3 py-3 font-mono text-xs">{group.fingerprint}</td>
+                  <td className="px-3 py-3"><Badge tone={statusTone(group.severity)}>{group.severity ?? "unknown"}</Badge></td>
+                  <td className="px-3 py-3">{group.kind}<div className="text-xs text-slate-500">{group.relation}</div></td>
+                  <td className="px-3 py-3">{joinIssueSet(group.sourceIssues)}</td>
+                  <td className="px-3 py-3">{joinIssueSet(group.managedIssues)}</td>
+                  <td className="px-3 py-3">{group.occurrences}<div className="text-xs text-slate-500">{group.records} routes</div></td>
+                  <td className="px-3 py-3 text-xs text-slate-600">{shortTime(group.firstSeenAt)} / {shortTime(group.lastSeenAt)}</td>
+                  <td className="px-3 py-3"><Badge tone={statusTone(group.status)}>{group.status}</Badge><div className="mt-1 text-xs text-slate-600">{group.nextAction}</div></td>
                 </tr>
               ))}
             </tbody>
@@ -483,17 +481,42 @@ function QuotaCompact({ quota }: { quota: QuotaResult }) {
   );
 }
 
-function QuotaWindowBar({ window, bucket }: { window: QuotaWindow; bucket: string }) {
+function QuotaBucketBlock({ bucket }: { bucket: QuotaBucket }) {
+  return (
+    <section className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div>
+          <h3 className="font-semibold">{bucket.title}</h3>
+          <p className="text-xs uppercase tracking-wide text-slate-500">{bucket.scope === "general" ? "general limit" : "model-specific limit"}</p>
+        </div>
+      </div>
+      <div className="grid gap-3 md:grid-cols-2">
+        {bucket.windows.map((window) => <QuotaWindowBar key={`${bucket.title}-${window.label}`} window={window} />)}
+      </div>
+    </section>
+  );
+}
+
+function QuotaWindowBar({ window }: { window: QuotaWindow }) {
   const remaining = quotaRemainingPercent(window);
+  const used = window.usedPercent ?? Math.max(0, 100 - remaining);
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-4">
       <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-        <div><div className="font-semibold">{bucket}</div><div className="text-sm text-slate-500">{window.label} window</div></div>
+        <div><div className="font-semibold">{window.label} window</div><div className="text-sm text-slate-500">{remaining}% remaining</div></div>
         <div className="text-sm text-slate-600">reset {shortTime(window.resetAt)}</div>
       </div>
       <Progress value={remaining} />
-      <div className="mt-2 text-sm text-slate-600">{remaining}% remaining · {window.usedPercent ?? 0}% used</div>
+      <div className="mt-2 text-sm text-slate-600">{remaining}% remaining · {used}% used</div>
     </div>
+  );
+}
+
+function QuotaHealthLine({ quota }: { quota: QuotaResult }) {
+  return (
+    <span>
+      {quota.command} · source {quota.sourceHealth} · parse {quota.parseHealth} · fetched {shortTime(quota.fetchedAt)}
+    </span>
   );
 }
 
@@ -576,6 +599,16 @@ function Progress({ value }: { value: number }) {
 function quotaRemainingPercent(window?: QuotaWindow): number {
   return window?.remainingPercent ?? (window?.usedPercent === undefined ? 0 : 100 - window.usedPercent);
 }
+function severityRank(value?: string | null): number {
+  switch (value) {
+    case "critical": return 4;
+    case "high": return 3;
+    case "medium": return 2;
+    case "low": return 1;
+    default: return 0;
+  }
+}
+
 
 type Tone = "good" | "warn" | "bad" | "idle";
 
@@ -645,6 +678,83 @@ export function processStateLabel(processId?: number | null, alive?: boolean | n
 function isLiveIssue(issue: IssueDetail): boolean {
   const session = currentRunnerSession(issue);
   return issue.lifecycle_stage === "running" || session?.process_alive === true;
+}
+
+type DefectGroup = {
+  fingerprint: string;
+  severity?: string | null;
+  kind: string;
+  relation: string;
+  sourceIssues: string[];
+  managedIssues: string[];
+  occurrences: number;
+  records: number;
+  firstSeenAt?: string | null;
+  lastSeenAt?: string | null;
+  status: string;
+  nextAction: string;
+};
+
+function groupDefects(defects: SelfDefectRouteSummary[]): DefectGroup[] {
+  const groups = new Map<string, DefectGroup>();
+  for (const defect of defects) {
+    const current = groups.get(defect.fingerprint);
+    const sourceIssue = defect.source_issue_identifier ?? defect.source_issue_id;
+    const managedIssue = defect.managed_issue_identifier ?? defect.managed_issue_id;
+    const occurrences = Math.max(1, defect.occurrence_count ?? 1);
+    const status = defect.source_status ?? "active";
+    if (!current) {
+      groups.set(defect.fingerprint, {
+        fingerprint: defect.fingerprint,
+        severity: defect.severity,
+        kind: humanizeLabel(defect.kind ?? defect.defect_kind),
+        relation: humanizeLabel(defect.relation ?? defect.relation_mode ?? "unrelated"),
+        sourceIssues: sourceIssue ? [sourceIssue] : [],
+        managedIssues: managedIssue ? [managedIssue] : [],
+        occurrences,
+        records: 1,
+        firstSeenAt: defect.first_seen_at,
+        lastSeenAt: defect.last_seen_at,
+        status,
+        nextAction: defect.next_action ?? "inspect evidence",
+      });
+      continue;
+    }
+    if (sourceIssue && !current.sourceIssues.includes(sourceIssue)) current.sourceIssues.push(sourceIssue);
+    if (managedIssue && !current.managedIssues.includes(managedIssue)) current.managedIssues.push(managedIssue);
+    current.occurrences += occurrences;
+    current.records += 1;
+    const currentActive = isActiveStatus(current.status);
+    const defectActive = isActiveStatus(status);
+    if (defectActive && !currentActive) {
+      current.status = status;
+      current.severity = defect.severity;
+      current.nextAction = defect.next_action ?? current.nextAction;
+    } else if (defectActive === currentActive && severityRank(defect.severity) > severityRank(current.severity)) {
+      current.severity = defect.severity;
+    }
+    if (!current.firstSeenAt || (defect.first_seen_at && defect.first_seen_at < current.firstSeenAt)) current.firstSeenAt = defect.first_seen_at;
+    if (!current.lastSeenAt || (defect.last_seen_at && defect.last_seen_at > current.lastSeenAt)) {
+      current.lastSeenAt = defect.last_seen_at;
+      if (defectActive || !currentActive) current.nextAction = defect.next_action ?? current.nextAction;
+    }
+  }
+  return [...groups.values()].sort((left, right) => {
+    const active = Number(isActiveStatus(right.status)) - Number(isActiveStatus(left.status));
+    if (active !== 0) return active;
+    const severity = severityRank(right.severity) - severityRank(left.severity);
+    if (severity !== 0) return severity;
+    return String(right.lastSeenAt ?? "").localeCompare(String(left.lastSeenAt ?? ""));
+  });
+}
+
+function joinIssueSet(values: string[]): string {
+  return values.length ? values.join(", ") : "—";
+}
+
+function isActiveStatus(value?: string | null): boolean {
+  const normalized = (value ?? "").toLowerCase();
+  return normalized !== "completed" && normalized !== "canceled" && normalized !== "cancelled" && normalized !== "resolved";
 }
 
 function historySummary(total: number): string {

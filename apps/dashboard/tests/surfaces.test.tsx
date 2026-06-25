@@ -383,10 +383,14 @@ describe("dashboard surfaces", () => {
     expect(normal).toContain("weekly window");
     expect(normal).toContain("76% remaining");
     expect(normal).toContain("76% remaining · 24% used");
+    expect(normal).toContain("Codex 5.3 Spark");
+    expect(normal).toContain("general limit");
+    expect(normal).toContain("model-specific limit");
+    expect(normal).toContain("source ok · parse ok");
+    expect(normal).toContain("ocu --localhost --plain");
     expect(normal).toContain("Jun 19, 2026");
     expect(normal).not.toContain("2026-06-19");
-    expect(normal).not.toContain("ocu --localhost --plain");
-    expect(unavailable).not.toContain("ocu --plain");
+    expect(unavailable).toContain("source error · parse ok");
   });
 
   test("defects surface renders deduped defect table and empty state", () => {
@@ -394,7 +398,13 @@ describe("dashboard surfaces", () => {
     const empty = render(<DefectsSurface defects={[]} />);
 
     expect(populated).toContain("runner-timeout:sym-91");
+    expect(populated).toContain("1 fingerprints · 2 routed records");
+    expect(populated).toContain("SYM-101, SYM-102");
+    expect(populated).toContain("5");
+    expect(populated).toContain("high");
+    expect(populated).not.toContain("critical");
     expect(populated).toContain("repair managed defect");
+    expect(populated).not.toContain("ignore resolved historical duplicate");
     expect(empty).toContain("No Symphony self/runtime defects");
   });
 });

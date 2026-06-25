@@ -123,6 +123,21 @@ export const acceptanceDashboard: AggregateDashboard = {
           last_seen_at: "2026-06-19T13:55:00Z",
           next_action: "repair managed defect",
         },
+        {
+          fingerprint: "runner-timeout:sym-91",
+          severity: "critical",
+          kind: "runtime_timeout",
+          relation: "source_issue_blocked",
+          source_issue_id: "sym-91",
+          source_issue_identifier: "SYM-91-HISTORY",
+          managed_issue_id: "sym-102",
+          managed_issue_identifier: "SYM-102",
+          occurrence_count: 2,
+          first_seen_at: "2026-06-17T10:00:00Z",
+          last_seen_at: "2026-06-18T11:00:00Z",
+          next_action: "ignore resolved historical duplicate",
+          source_status: "completed",
+        },
       ],
     },
     {
@@ -491,24 +506,48 @@ export const emptyDashboard: AggregateDashboard = {
 
 export const quotaNormal = {
   status: "available" as const,
-  command: "ocu --plain",
+  command: "ocu --localhost --plain",
+  fetchedAt: "2026-06-19T14:12:00.000Z",
+  parsedAt: "2026-06-19T14:12:00.000Z",
+  source: "ocu",
+  parseHealth: "ok" as const,
+  sourceHealth: "ok" as const,
   quota: {
     raw: {},
     buckets: [
       {
         title: "Main Codex bucket",
+        scope: "general" as const,
         windows: [
           { label: "5h", usedPercent: 24, remainingPercent: 76, resetAt: "2026-06-19T16:22:40.000Z" },
           { label: "weekly", usedPercent: 41, remainingPercent: 59, resetAt: "2026-06-24T21:18:13.000Z" },
         ],
       },
+      {
+        title: "Codex 5.3 Spark",
+        scope: "model" as const,
+        windows: [
+          { label: "5h", usedPercent: 0, remainingPercent: 100, resetAt: "2026-06-19T16:31:04.000Z" },
+          { label: "weekly", usedPercent: 0, remainingPercent: 100, resetAt: "2026-06-30T05:31:04.000Z" },
+        ],
+      },
     ],
+    fetchedAt: "2026-06-19T14:12:00.000Z",
+    parsedAt: "2026-06-19T14:12:00.000Z",
+    source: "ocu",
+    parseHealth: "ok" as const,
+    sourceHealth: "ok" as const,
   },
 };
 
 export const quotaUnavailable = {
   status: "unavailable" as const,
-  command: "ocu --plain",
+  command: "ocu --localhost --plain",
+  fetchedAt: "2026-06-19T14:12:00.000Z",
+  parsedAt: "2026-06-19T14:12:00.000Z",
+  source: "ocu",
+  parseHealth: "ok" as const,
+  sourceHealth: "error" as const,
   reason: "command_failed" as const,
   message: "quota command unavailable in this environment",
   quota: null,

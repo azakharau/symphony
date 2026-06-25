@@ -1,0 +1,27 @@
+{
+  "baseUrl": "http://127.0.0.1:32097",
+  "apiBase": "http://127.0.0.1:4115",
+  "activeProject": {
+    "project_id": "symphony",
+    "name": "Symphony"
+  },
+  "activeIssue": {
+    "issue_id": "fa354ead-66bc-4897-9d09-46492bd7c983",
+    "identifier": "SYM-131",
+    "title": "P0 Dashboard live visual acceptance after OMP fixes"
+  },
+  "screenshots": [
+    "/home/agent/.symphony/workspaces/omp/symphony/SYM-131/artifacts/screenshots/sym-131/desktop-overview.png",
+    "/home/agent/.symphony/workspaces/omp/symphony/SYM-131/artifacts/screenshots/sym-131/desktop-project-active.png",
+    "/home/agent/.symphony/workspaces/omp/symphony/SYM-131/artifacts/screenshots/sym-131/desktop-issue-active.png",
+    "/home/agent/.symphony/workspaces/omp/symphony/SYM-131/artifacts/screenshots/sym-131/desktop-quota.png",
+    "/home/agent/.symphony/workspaces/omp/symphony/SYM-131/artifacts/screenshots/sym-131/desktop-defects.png",
+    "/home/agent/.symphony/workspaces/omp/symphony/SYM-131/artifacts/screenshots/sym-131/mobile-overview.png",
+    "/home/agent/.symphony/workspaces/omp/symphony/SYM-131/artifacts/screenshots/sym-131/mobile-issue-active.png"
+  ],
+  "consoleEntries": [],
+  "networkFailures": [],
+  "ignoredNetworkFailures": 597,
+  "badResponses": [],
+  "failures": []
+}

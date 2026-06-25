@@ -74,6 +74,33 @@ describe("dashboard surfaces", () => {
     expect(html).not.toContain(`${"co"}st`);
   });
 
+  test("overview attention excludes active capacity and uses liveness copy", () => {
+    const dashboard = JSON.parse(JSON.stringify(acceptanceDashboard)) as typeof acceptanceDashboard;
+    const activeProject = dashboard.projects[0];
+    activeProject.runner_health = "blocked";
+    activeProject.last_event = "linear_terminal_reconciled";
+    activeProject.capacity = { max_sessions: 4, running_sessions: 1, available_sessions: 3 };
+    activeProject.liveness = {
+      ...activeProject.liveness,
+      status: "active",
+      reason: "runner session is live",
+      primary_reason_code: "active_runner_session",
+      primary_reason_detail: "runner session is executing",
+      capacity: activeProject.capacity,
+    };
+    dashboard.projects = [activeProject, dashboard.projects[2]];
+
+    const html = render(<OverviewSurface dashboard={dashboard} quota={quotaNormal} />);
+    const blockers = sectionText(html, "Blockers and idle reasons", "overview preserves OMP cacheRead");
+
+    expect(blockers).not.toContain("Symphony");
+    expect(blockers).toContain("Atlas");
+    expect(blockers).toContain("waiting for quota reset");
+    expect(blockers).toContain("provider quota exhausted");
+    expect(blockers).not.toContain(">last event</th>");
+    expect(blockers).not.toContain("linear_terminal_reconciled");
+  });
+
   test("overview preserves OMP cacheRead/cacheWrite split instead of dropping cached tokens", () => {
     const dashboard = JSON.parse(JSON.stringify(acceptanceDashboard)) as typeof acceptanceDashboard;
     const ompMetrics = {

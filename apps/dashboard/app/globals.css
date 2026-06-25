@@ -159,9 +159,12 @@ a {
   }
 
   .project-table[data-detailed="true"] td:nth-child(9)::before,
-  .project-table:not([data-detailed="true"]) td:nth-child(8)::before,
-  .reason-table td:nth-child(5)::before {
+  .project-table:not([data-detailed="true"]) td:nth-child(8)::before {
     content: "Last event";
+  }
+
+  .reason-table td:nth-child(5)::before {
+    content: "Detail";
   }
 
   .project-table[data-detailed="true"] td:nth-child(10)::before,

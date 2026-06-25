@@ -1039,9 +1039,26 @@ fn primary_execution_reason(
         );
     }
     if active_issues.iter().any(issue_has_active_runner_session) {
+        if liveness.capacity.available_sessions > 0 {
+            let suffix = if matches!(
+                liveness.status,
+                RuntimeLivenessStatus::NoEligibleIssues | RuntimeLivenessStatus::BlockedIssues
+            ) {
+                " and no additional runnable candidate"
+            } else {
+                ""
+            };
+            return (
+                "active_runner_session",
+                format!(
+                    "runner session is actively executing; {} dispatch slot available{suffix}",
+                    liveness.capacity.available_sessions
+                ),
+            );
+        }
         return (
             "active_runner_session",
-            "an runner session is actively executing".into(),
+            "runner session is actively executing".into(),
         );
     }
     if liveness.capacity.available_sessions == 0 {
@@ -1078,11 +1095,17 @@ fn primary_execution_reason(
     }
     match liveness.status {
         RuntimeLivenessStatus::InactiveRuntime => ("inactive_runtime", liveness.reason.clone()),
-        RuntimeLivenessStatus::NoEligibleIssues => ("no_eligible_issues", liveness.reason.clone()),
-        RuntimeLivenessStatus::BlockedIssues => ("linear_blockers", liveness.reason.clone()),
+        RuntimeLivenessStatus::NoEligibleIssues if liveness.capacity.running_sessions > 0 => {
+            ("no_runnable_candidate", liveness.reason.clone())
+        }
+        RuntimeLivenessStatus::NoEligibleIssues => (
+            "idle",
+            "project has no runnable candidates after the latest scan".into(),
+        ),
+        RuntimeLivenessStatus::BlockedIssues => ("no_runnable_candidate", liveness.reason.clone()),
         RuntimeLivenessStatus::CapacityFull => ("capacity_full", liveness.reason.clone()),
         RuntimeLivenessStatus::HealthyCapacityAvailable => {
-            ("healthy_capacity_available", liveness.reason.clone())
+            ("capacity_available", liveness.reason.clone())
         }
         RuntimeLivenessStatus::RunnerProcessDead => ("runner_dead", liveness.reason.clone()),
         RuntimeLivenessStatus::RunnerSetupFailed => {
@@ -1578,12 +1601,41 @@ fn project_runner_health(project: &ProjectDashboardResponse) -> String {
         .iter()
         .any(|issue| issue.lifecycle_stage == LifecycleStage::Running)
     {
-        "active".into()
+        if project.capacity.available_sessions > 0 {
+            "active/capacity_available".into()
+        } else {
+            "active".into()
+        }
     } else if project.active_issues.is_empty() {
         "idle".into()
+    } else if project
+        .active_issues
+        .iter()
+        .any(issue_has_attention_blocker)
+    {
+        "blocked".into()
     } else {
-        "parked".into()
+        match project.liveness.primary_reason_code.as_str() {
+            "capacity_available" | "healthy_capacity_available" => "capacity_available".into(),
+            "no_runnable_candidate" => "no_runnable_candidate".into(),
+            "idle" => "idle".into(),
+            _ => "no_runnable_candidate".into(),
+        }
     }
+}
+
+fn issue_has_attention_blocker(issue: &IssueDetailResponse) -> bool {
+    issue.blocker.is_some()
+        || issue.runtime_defect.is_some()
+        || issue.failure.as_ref().is_some_and(|failure| {
+            matches!(
+                failure.kind.as_str(),
+                "provider_blocker"
+                    | "malformed_handoff"
+                    | "handoff_git_closure_failed"
+                    | "runtime_launch_failed"
+            )
+        })
 }
 
 fn project_last_event(project: &ProjectDashboardResponse) -> String {

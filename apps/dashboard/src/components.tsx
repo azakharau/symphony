@@ -46,7 +46,7 @@ export function UnavailablePanel({ title, message }: { title: string; message: s
 
 export function OverviewSurface({ dashboard, quota }: { dashboard: AggregateDashboard; quota: QuotaResult }) {
   const running = dashboard.projects.flatMap((project) => project.running_issues ?? []);
-  const blockers = dashboard.projects.filter(isBlockedProject);
+  const attentionProjects = dashboard.projects.filter(hasOverviewAttention);
   const defectCount = dashboard.projects.reduce((total, project) => total + (project.self_defect_routes?.length ?? 0), 0);
   const runningTokens = tokenBreakdown(dashboard.totals.running_tokens, dashboard.totals.running_cached_tokens, dashboard.totals.token_metrics);
 
@@ -74,7 +74,7 @@ export function OverviewSurface({ dashboard, quota }: { dashboard: AggregateDash
       </Panel>
 
       <Panel title="Blockers and idle reasons">
-        {blockers.length ? <ProjectReasonTable projects={blockers} /> : <EmptyState message="No blockers reported. Idle projects are waiting for eligible work or capacity." />}
+        {attentionProjects.length ? <ProjectReasonTable projects={attentionProjects} /> : <EmptyState message="No blockers reported. Idle projects are waiting for eligible work or capacity." />}
       </Panel>
     </div>
   );
@@ -317,7 +317,7 @@ function ProjectReasonTable({ projects }: { projects: DashboardProjectCard[] }) 
             <th className="px-3 py-2">health</th>
             <th className="px-3 py-2">enabled</th>
             <th className="px-3 py-2">primary reason</th>
-            <th className="px-3 py-2">last event</th>
+            <th className="px-3 py-2">detail</th>
             <th className="px-3 py-2">cleanup</th>
           </tr>
         </thead>
@@ -328,7 +328,7 @@ function ProjectReasonTable({ projects }: { projects: DashboardProjectCard[] }) 
               <td className="px-3 py-3"><Badge tone={statusTone(project.runner_health)}>{humanizeLabel(project.runner_health)}</Badge></td>
               <td className="px-3 py-3">{project.enabled ? "yes" : "no"}</td>
               <td className="px-3 py-3">{humanizeLabel(project.liveness.primary_reason_detail || project.liveness.reason)}</td>
-              <td className="px-3 py-3">{humanizeLabel(project.last_event)}</td>
+              <td className="px-3 py-3">{secondaryLivenessDetail(project)}</td>
               <td className="px-3 py-3">{humanizeLabel(project.cleanup_status)}</td>
             </tr>
           ))}
@@ -632,6 +632,34 @@ function isBlockedProject(project: DashboardProjectCard): boolean {
   const health = project.runner_health.toLowerCase();
   const liveness = project.liveness.status.toLowerCase();
   return isProblemStatus(project.runner_health) || health.includes("quota") || liveness.includes("blocked") || liveness.includes("failed");
+}
+
+function hasOverviewAttention(project: DashboardProjectCard): boolean {
+  const reasonCode = project.liveness.primary_reason_code.toLowerCase();
+  if (reasonCode.startsWith("active_")) return false;
+  if (isActiveProject(project) && !isBlockedProject(project)) return false;
+  return isBlockedProject(project) || hasUsefulIdleReason(project);
+}
+
+function isActiveProject(project: DashboardProjectCard): boolean {
+  const health = project.runner_health.toLowerCase();
+  const liveness = project.liveness.status.toLowerCase();
+  const reasonCode = project.liveness.primary_reason_code.toLowerCase();
+  return health.includes("active") || liveness.includes("active") || liveness.includes("running") || reasonCode.startsWith("active_") || project.running_issues.length > 0;
+}
+
+function hasUsefulIdleReason(project: DashboardProjectCard): boolean {
+  const status = project.liveness.status.toLowerCase();
+  const reasonCode = project.liveness.primary_reason_code.toLowerCase();
+  const reason = `${project.liveness.primary_reason_detail} ${project.liveness.reason}`.toLowerCase();
+  return (status.includes("idle") || reasonCode === "idle" || reasonCode === "no_runnable_candidate") && !reason.includes("polling normally") && !reason.includes("no running sessions");
+}
+
+function secondaryLivenessDetail(project: DashboardProjectCard): string {
+  const primary = project.liveness.primary_reason_detail.trim();
+  const reason = project.liveness.reason.trim();
+  if (!reason || reason === primary) return "—";
+  return humanizeLabel(reason);
 }
 
 function badgeClass(tone: Tone): string {

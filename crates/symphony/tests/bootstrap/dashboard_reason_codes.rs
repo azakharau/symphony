@@ -90,10 +90,7 @@ async fn dashboard_api_surfaces_primary_execution_reason_codes_and_root_is_json_
         )),
     )
     .await;
-    assert_eq!(
-        no_eligible.liveness.primary_reason_code,
-        "no_eligible_issues"
-    );
+    assert_eq!(no_eligible.liveness.primary_reason_code, "idle");
 
     let linear_blocked = project_for(
         |issue, _| {
@@ -179,6 +176,21 @@ async fn dashboard_api_surfaces_primary_execution_reason_codes_and_root_is_json_
     .await;
     assert_eq!(capacity_full.liveness.primary_reason_code, "capacity_full");
 
+    let capacity_available = project_for(
+        |_, _| {},
+        Some((
+            RuntimeLivenessStatus::HealthyCapacityAvailable,
+            "eligible issue exists and dispatch capacity is available",
+            2,
+            0,
+        )),
+    )
+    .await;
+    assert_eq!(
+        capacity_available.liveness.primary_reason_code,
+        "capacity_available"
+    );
+
     let active_session = project_for(
         |issue, session| {
             *session = Some(test_session(
@@ -189,8 +201,8 @@ async fn dashboard_api_surfaces_primary_execution_reason_codes_and_root_is_json_
             ));
         },
         Some((
-            RuntimeLivenessStatus::HealthyCapacityAvailable,
-            "eligible issue exists and dispatch capacity is available",
+            RuntimeLivenessStatus::NoEligibleIssues,
+            "active runner has no additional runnable issue",
             2,
             1,
         )),
@@ -199,6 +211,42 @@ async fn dashboard_api_surfaces_primary_execution_reason_codes_and_root_is_json_
     assert_eq!(
         active_session.liveness.primary_reason_code,
         "active_runner_session"
+    );
+    assert_eq!(active_session.liveness.capacity.available_sessions, 1);
+    assert!(
+        active_session
+            .liveness
+            .primary_reason_detail
+            .contains("no additional runnable candidate")
+    );
+
+    let no_second_runnable = project_for(
+        |issue, session| {
+            *session = Some(test_session(
+                &issue.project_id,
+                &issue.issue_id,
+                "oc-no-second",
+                "/tmp/symphony-no-second",
+            ));
+        },
+        Some((
+            RuntimeLivenessStatus::BlockedIssues,
+            "candidate issues exist but are blocked or parked",
+            2,
+            1,
+        )),
+    )
+    .await;
+    assert_eq!(
+        no_second_runnable.liveness.primary_reason_code,
+        "active_runner_session"
+    );
+    assert_eq!(no_second_runnable.liveness.capacity.available_sessions, 1);
+    assert!(
+        no_second_runnable
+            .liveness
+            .primary_reason_detail
+            .contains("no additional runnable candidate")
     );
 
     let runner_dead = project_for(

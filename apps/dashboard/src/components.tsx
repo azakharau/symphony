@@ -9,13 +9,13 @@ const RECENT_HISTORY_LIMIT = 5;
 
 export function DashboardFrame({ children }: { children: React.ReactNode }) {
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-5 px-4 py-5 text-slate-950 sm:px-6 lg:px-8">
-      <header className="flex flex-col gap-3 border-b border-slate-200 pb-4 lg:flex-row lg:items-end lg:justify-between">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-500">Symphony operations</p>
+    <main className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-4 px-3 py-4 text-slate-950 sm:gap-5 sm:px-6 sm:py-5 lg:px-8">
+      <header className="flex min-w-0 flex-col gap-3 border-b border-slate-200 pb-4 lg:flex-row lg:items-end lg:justify-between">
+        <div className="min-w-0">
+          <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500 sm:tracking-[0.28em]">Symphony operations</p>
           <h1 className="mt-1 text-2xl font-semibold tracking-tight sm:text-3xl">Observability console</h1>
         </div>
-        <nav aria-label="Dashboard sections" className="flex gap-2 overflow-x-auto text-sm font-medium">
+        <nav aria-label="Dashboard sections" className="-mx-1 flex max-w-full gap-2 overflow-x-auto px-1 pb-1 text-sm font-medium">
           <NavLink href="/">Overview</NavLink>
           <NavLink href="/projects">Projects</NavLink>
           <NavLink href="/quota">Quota</NavLink>
@@ -29,7 +29,7 @@ export function DashboardFrame({ children }: { children: React.ReactNode }) {
 
 export function NavLink({ href, children }: { href: string; children: React.ReactNode }) {
   return (
-    <Link className="rounded-full border border-slate-200 bg-white px-3 py-2 text-slate-700 shadow-sm hover:border-slate-400" href={href}>
+    <Link className="shrink-0 rounded-full border border-slate-200 bg-white px-3 py-2 text-slate-700 shadow-sm hover:border-slate-400" href={href}>
       {children}
     </Link>
   );
@@ -115,10 +115,10 @@ export function ProjectSurface({ project }: { project: ProjectDetail }) {
       </Panel>
 
       <section className="grid gap-3 lg:grid-cols-4">
-        <MetricCard title="Runtime" value={project.liveness.status} detail={project.liveness.primary_reason_detail || project.liveness.reason} tone={statusTone(project.liveness.status)} />
+        <MetricCard title="Runtime" value={humanizeLabel(project.liveness.status)} detail={humanizeLabel(project.liveness.primary_reason_detail || project.liveness.reason)} tone={statusTone(project.liveness.status)} />
         <MetricCard title="Capacity" value={`${project.capacity.running_sessions}/${project.capacity.max_sessions}`} detail={`${project.capacity.available_sessions} slots available`} />
-        <MetricCard title="Queue" value={project.selected_candidate?.identifier ?? "idle"} detail={project.selected_candidate?.reason ?? "no selected candidate"} />
-        <MetricCard title="Cleanup" value={project.cleanup_status} detail={project.enabled ? "enabled" : "disabled"} />
+        <MetricCard title="Queue" value={project.selected_candidate?.identifier ?? "idle"} detail={humanizeLabel(project.selected_candidate?.reason ?? "no selected candidate")} />
+        <MetricCard title="Cleanup" value={humanizeLabel(project.cleanup_status)} detail={project.enabled ? "enabled" : "disabled"} />
       </section>
 
       <Panel title="Recent run history" action={<span>{historySummary(project.history_issues.length)}</span>}>
@@ -163,8 +163,8 @@ export function DefectsSurface({ defects }: { defects: SelfDefectRouteSummary[] 
   return (
     <Panel title="Deduped defects" action={<span>{groups.length} fingerprints · {defects.length} routed records</span>}>
       {groups.length ? (
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[900px] text-left text-sm">
+        <div className="overflow-x-auto sm:-mx-1 sm:px-1">
+          <table className="defect-table responsive-table w-full min-w-[900px] text-left text-sm">
             <thead className="text-xs uppercase tracking-wide text-slate-500">
               <tr>
                 <th className="px-3 py-2">fingerprint</th>
@@ -181,13 +181,13 @@ export function DefectsSurface({ defects }: { defects: SelfDefectRouteSummary[] 
               {groups.map((group) => (
                 <tr key={group.fingerprint}>
                   <td className="px-3 py-3 font-mono text-xs">{group.fingerprint}</td>
-                  <td className="px-3 py-3"><Badge tone={statusTone(group.severity)}>{group.severity ?? "unknown"}</Badge></td>
+                  <td className="px-3 py-3"><Badge tone={statusTone(group.severity)}>{humanizeLabel(group.severity) ?? "unknown"}</Badge></td>
                   <td className="px-3 py-3">{group.kind}<div className="text-xs text-slate-500">{group.relation}</div></td>
                   <td className="px-3 py-3">{joinIssueSet(group.sourceIssues)}</td>
                   <td className="px-3 py-3">{joinIssueSet(group.managedIssues)}</td>
                   <td className="px-3 py-3">{group.occurrences}<div className="text-xs text-slate-500">{group.records} routes</div></td>
                   <td className="px-3 py-3 text-xs text-slate-600">{shortTime(group.firstSeenAt)} / {shortTime(group.lastSeenAt)}</td>
-                  <td className="px-3 py-3"><Badge tone={statusTone(group.status)}>{group.status}</Badge><div className="mt-1 text-xs text-slate-600">{group.nextAction}</div></td>
+                  <td className="px-3 py-3"><Badge tone={statusTone(group.status)}>{humanizeLabel(group.status)}</Badge><div className="mt-1 text-xs text-slate-600">{group.nextAction}</div></td>
                 </tr>
               ))}
             </tbody>
@@ -202,8 +202,8 @@ export function DefectsSurface({ defects }: { defects: SelfDefectRouteSummary[] 
 
 function RunningTable({ issues }: { issues: RunningIssueSummary[] }) {
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[760px] text-left text-sm">
+    <div className="overflow-x-auto sm:-mx-1 sm:px-1">
+      <table className="running-table responsive-table w-full min-w-[760px] text-left text-sm">
         <thead className="text-xs uppercase tracking-wide text-slate-500">
           <tr>
             <th className="px-3 py-2">project</th>
@@ -220,7 +220,7 @@ function RunningTable({ issues }: { issues: RunningIssueSummary[] }) {
             <tr key={`${issue.project_id}-${issue.issue_id}`}>
               <td className="px-3 py-3">{issue.project_name}</td>
               <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${issue.project_id}/issues/${issue.issue_id}`}>{issue.identifier}</Link><div className="text-xs text-slate-500">{issue.title}</div></td>
-              <td className="px-3 py-3"><Badge tone={statusTone(issue.stage)}>{issue.stage ?? issue.display_status}</Badge></td>
+              <td className="px-3 py-3"><Badge tone={statusTone(issue.stage)}>{humanizeLabel(issue.stage ?? issue.display_status)}</Badge></td>
               <td className="px-3 py-3"><ProviderStateBlock providerMode={issue.provider_mode} providerId={issue.provider_id} sessionId={issue.session_id} processId={issue.process_id} processAlive={issue.process_alive} runtimeFailureKind={issue.runtime_failure_kind} acpFrameCount={issue.acp_frame_count} evidenceCount={issue.session_evidence_refs?.length} silenceObserved={issue.silence_observed} /></td>
               <td className="px-3 py-3">{issue.active_agent ?? issue.agent ?? "—"}<div className="text-xs text-slate-500">{issue.active_model ?? issue.model ?? "model unknown"}</div></td>
               <td className="px-3 py-3"><TokenCell total={issue.token_count} cached={issue.cached_token_count} metrics={issue.token_metrics} /></td>
@@ -235,8 +235,8 @@ function RunningTable({ issues }: { issues: RunningIssueSummary[] }) {
 
 function ProjectTable({ projects, detailed = false }: { projects: DashboardProjectCard[]; detailed?: boolean }) {
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[780px] text-left text-sm">
+    <div className="overflow-x-auto sm:-mx-1 sm:px-1">
+      <table className="project-table responsive-table w-full min-w-[780px] text-left text-sm" data-detailed={detailed ? "true" : "false"}>
         <thead className="text-xs uppercase tracking-wide text-slate-500">
           <tr>
             <th className="px-3 py-2">project</th>
@@ -255,15 +255,15 @@ function ProjectTable({ projects, detailed = false }: { projects: DashboardProje
           {projects.map((project) => (
             <tr key={project.project_id}>
               <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${project.project_id}`}>{project.name}</Link></td>
-              <td className="px-3 py-3"><Badge tone={statusTone(project.runner_health)}>{project.runner_health}</Badge></td>
+              <td className="px-3 py-3"><Badge tone={statusTone(project.runner_health)}>{humanizeLabel(project.runner_health)}</Badge></td>
               <td className="px-3 py-3">{project.enabled ? "yes" : "no"}</td>
               <td className="w-16 whitespace-nowrap px-2 py-3 text-center tabular-nums" aria-label="running sessions / max slots">{project.capacity.running_sessions}/{project.capacity.max_sessions}</td>
               <td className="px-3 py-3">{project.active_count}</td>
               <td className="px-3 py-3">{project.parked_count}</td>
               {detailed ? <td className="px-3 py-3">{project.terminal_count}</td> : null}
-              <td className="px-3 py-3">{project.liveness.primary_reason_detail || project.liveness.reason}</td>
-              <td className="px-3 py-3">{project.last_event}</td>
-              <td className="px-3 py-3">{project.cleanup_status}</td>
+              <td className="px-3 py-3">{humanizeLabel(project.liveness.primary_reason_detail || project.liveness.reason)}</td>
+              <td className="px-3 py-3">{humanizeLabel(project.last_event)}</td>
+              <td className="px-3 py-3">{humanizeLabel(project.cleanup_status)}</td>
             </tr>
           ))}
         </tbody>
@@ -274,8 +274,8 @@ function ProjectTable({ projects, detailed = false }: { projects: DashboardProje
 
 function ProjectHealthCapacityTable({ projects }: { projects: DashboardProjectCard[] }) {
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[720px] text-left text-sm">
+    <div className="overflow-x-auto sm:-mx-1 sm:px-1">
+      <table className="health-table responsive-table w-full min-w-[720px] text-left text-sm">
         <thead className="text-xs uppercase tracking-wide text-slate-500">
           <tr>
             <th className="px-3 py-2">project</th>
@@ -292,12 +292,12 @@ function ProjectHealthCapacityTable({ projects }: { projects: DashboardProjectCa
           {projects.map((project) => (
             <tr key={project.project_id}>
               <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${project.project_id}`}>{project.name}</Link></td>
-              <td className="px-3 py-3"><Badge tone={statusTone(project.runner_health)}>{project.runner_health}</Badge></td>
+              <td className="px-3 py-3"><Badge tone={statusTone(project.runner_health)}>{humanizeLabel(project.runner_health)}</Badge></td>
               <td className="px-3 py-3">{project.enabled ? "yes" : "no"}</td>
               <td className="w-16 whitespace-nowrap px-2 py-3 text-center tabular-nums" aria-label="running sessions / max slots">{project.capacity.running_sessions}/{project.capacity.max_sessions}</td>
               <td className="px-3 py-3">{project.active_count}</td>
               <td className="px-3 py-3">{project.parked_count}</td>
-              <td className="px-3 py-3">{project.liveness.primary_reason_detail || project.liveness.reason}</td>
+              <td className="px-3 py-3">{humanizeLabel(project.liveness.primary_reason_detail || project.liveness.reason)}</td>
               <td className="px-3 py-3"><TokenCell total={project.running_tokens} cached={project.running_cached_tokens} metrics={project.token_metrics} /></td>
             </tr>
           ))}
@@ -309,8 +309,8 @@ function ProjectHealthCapacityTable({ projects }: { projects: DashboardProjectCa
 
 function ProjectReasonTable({ projects }: { projects: DashboardProjectCard[] }) {
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[680px] text-left text-sm">
+    <div className="overflow-x-auto sm:-mx-1 sm:px-1">
+      <table className="reason-table responsive-table w-full min-w-[680px] text-left text-sm">
         <thead className="text-xs uppercase tracking-wide text-slate-500">
           <tr>
             <th className="px-3 py-2">project</th>
@@ -325,11 +325,11 @@ function ProjectReasonTable({ projects }: { projects: DashboardProjectCard[] }) 
           {projects.map((project) => (
             <tr key={project.project_id}>
               <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${project.project_id}`}>{project.name}</Link></td>
-              <td className="px-3 py-3"><Badge tone={statusTone(project.runner_health)}>{project.runner_health}</Badge></td>
+              <td className="px-3 py-3"><Badge tone={statusTone(project.runner_health)}>{humanizeLabel(project.runner_health)}</Badge></td>
               <td className="px-3 py-3">{project.enabled ? "yes" : "no"}</td>
-              <td className="px-3 py-3">{project.liveness.primary_reason_detail || project.liveness.reason}</td>
-              <td className="px-3 py-3">{project.last_event}</td>
-              <td className="px-3 py-3">{project.cleanup_status}</td>
+              <td className="px-3 py-3">{humanizeLabel(project.liveness.primary_reason_detail || project.liveness.reason)}</td>
+              <td className="px-3 py-3">{humanizeLabel(project.last_event)}</td>
+              <td className="px-3 py-3">{humanizeLabel(project.cleanup_status)}</td>
             </tr>
           ))}
         </tbody>
@@ -340,8 +340,8 @@ function ProjectReasonTable({ projects }: { projects: DashboardProjectCard[] }) 
 
 function IssueTable({ issues, projectId }: { issues: IssueDetail[]; projectId: string }) {
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[860px] text-left text-sm">
+    <div className="overflow-x-auto sm:-mx-1 sm:px-1">
+      <table className="issue-table responsive-table w-full min-w-[860px] text-left text-sm">
         <thead className="text-xs uppercase tracking-wide text-slate-500">
           <tr>
             <th className="px-3 py-2">issue</th>
@@ -362,7 +362,7 @@ function IssueTable({ issues, projectId }: { issues: IssueDetail[]; projectId: s
             return (
               <tr key={issue.issue_id}>
                 <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${projectId}/issues/${issue.issue_id}`}>{issue.identifier}</Link><div className="text-xs text-slate-500">{issue.title}</div></td>
-                <td className="px-3 py-3"><Badge tone={statusTone(issue.lifecycle_stage)}>{issue.display_status}</Badge></td>
+                <td className="px-3 py-3"><Badge tone={statusTone(issue.lifecycle_stage)}>{humanizeLabel(issue.display_status)}</Badge></td>
                 <td className="px-3 py-3">{session?.active_agent ?? session?.agent ?? "—"}<div className="text-xs text-slate-500">{session?.active_model ?? session?.model ?? "model unknown"}</div></td>
                 <td className="px-3 py-3">{session ? <ProviderStateBlock providerMode={session.provider_mode} providerId={session.provider_id} sessionId={session.runner_session_id} processId={session.process_id} processAlive={session.process_alive} runtimeFailureKind={session.runtime_failure_kind} acpFrameCount={session.acp_frame_count} evidenceCount={session.session_evidence_refs.length} silenceObserved={session.silence_observed} /> : "—"}</td>
                 <td className="px-3 py-3">{session ? processStateLabel(session.process_id, session.process_alive) : "—"}</td>
@@ -398,8 +398,8 @@ function BlockerTable({
   const supplementalSuppressions = suppressions.filter((suppression) => !representedIssueIds.has(suppression.issue_id));
 
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[760px] text-left text-sm">
+    <div className="overflow-x-auto sm:-mx-1 sm:px-1">
+      <table className="blocker-table responsive-table w-full min-w-[760px] text-left text-sm">
         <thead className="text-xs uppercase tracking-wide text-slate-500">
           <tr>
             <th className="px-3 py-2">issue</th>
@@ -420,7 +420,7 @@ function BlockerTable({
           {issues.map((issue) => (
             <tr key={issue.issue_id}>
               <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${projectId}/issues/${issue.issue_id}`}>{issue.identifier}</Link><div className="text-xs text-slate-500">{issue.title}</div></td>
-              <td className="px-3 py-3"><Badge tone={statusTone(issue.lifecycle_stage)}>{issue.display_status}</Badge></td>
+              <td className="px-3 py-3"><Badge tone={statusTone(issue.lifecycle_stage)}>{humanizeLabel(issue.display_status)}</Badge></td>
               <td className="px-3 py-3">{issue.blocker?.message ?? issue.stop_reason ?? "blocked"}</td>
               <td className="px-3 py-3">{issue.runtime_defect?.next_action ?? issue.self_defect_routing?.next_action ?? issue.failure?.message ?? "inspect issue evidence"}</td>
             </tr>
@@ -578,9 +578,9 @@ function ProviderStateBlock({
 export function Panel({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
   return (
     <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-      <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-700">{title}</h2>
-        <div className="text-xs text-slate-500">{action}</div>
+      <div className="flex min-w-0 flex-col gap-1 border-b border-slate-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+        <h2 className="min-w-0 text-sm font-semibold uppercase tracking-wide text-slate-700">{title}</h2>
+        <div className="min-w-0 break-words text-xs text-slate-500 sm:text-right">{action}</div>
       </div>
       <div className="p-3 sm:p-4">{children}</div>
     </section>
@@ -613,7 +613,7 @@ function severityRank(value?: string | null): number {
 type Tone = "good" | "warn" | "bad" | "idle";
 
 export function Badge({ children, tone = "idle" }: { children: React.ReactNode; tone?: Tone }) {
-  return <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${badgeClass(tone)}`}>{children}</span>;
+  return <span className={`inline-flex max-w-full rounded-full px-2 py-1 text-xs font-semibold leading-tight ${badgeClass(tone)}`}>{children}</span>;
 }
 
 function statusTone(status?: string | null): Tone {
@@ -770,7 +770,7 @@ function issueOperationalDetail(issue: IssueDetail, session: ReturnType<typeof c
   if (issue.failure?.message) return issue.failure.message;
   if (session?.activity_error) return session.activity_error;
   if (session?.current_stage) return `stage ${humanizeLabel(session.current_stage)}`;
-  return issue.cleanup_status === "clean" ? "ready for follow-up" : `cleanup ${issue.cleanup_status}`;
+  return issue.cleanup_status === "clean" ? "ready for follow-up" : `cleanup ${humanizeLabel(issue.cleanup_status)}`;
 }
 
 function humanizeLabel(value?: string | null): string {

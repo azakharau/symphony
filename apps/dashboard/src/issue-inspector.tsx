@@ -29,25 +29,25 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
   return (
     <div className="flex flex-col gap-5">
       <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="flex min-w-0 flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0">
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{issue.identifier}</p>
-            <h2 className="mt-1 text-2xl font-semibold">{issue.title}</h2>
+            <p className="break-words text-xs font-semibold uppercase tracking-wide text-slate-500">{issue.identifier}</p>
+            <h2 className="mt-1 break-words text-xl font-semibold sm:text-2xl">{issue.title}</h2>
             <div className="mt-3 flex flex-wrap gap-2">
-              <Badge tone={inspectorTone(issue.lifecycle_stage)}>{issue.display_status}</Badge>
+              <Badge tone={inspectorTone(issue.lifecycle_stage)}>{humanizeLabel(issue.display_status)}</Badge>
               <Badge tone={processTone}>{session ? processStateLabel(session.process_id, session.process_alive) : "process unavailable"}</Badge>
               <Badge tone={inspectorTone(session?.current_stage ?? issue.lifecycle_stage)}>stage {humanizeLabel(session?.current_stage ?? issue.lifecycle_stage)}</Badge>
             </div>
-            <p className="mt-3 max-w-3xl text-sm text-slate-600">
+            <p className="mt-3 max-w-3xl break-words text-sm text-slate-600">
               Last event: <span className="font-medium text-slate-900">{lastEvent}</span>
             </p>
           </div>
-          <div className="flex flex-wrap justify-start gap-2 lg:justify-end">
-            <a className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700" href={linearUrl} target="_blank" rel="noreferrer">
+          <div className="grid gap-2 sm:flex sm:flex-wrap sm:justify-start lg:justify-end">
+            <a className="rounded-lg bg-blue-600 px-4 py-2 text-center text-sm font-semibold text-white shadow-sm hover:bg-blue-700" href={linearUrl} target="_blank" rel="noreferrer">
               Open in Linear
             </a>
             {runnerUrl ? (
-              <a className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 shadow-sm hover:border-blue-300 hover:text-blue-700" href={runnerUrl} target="_blank" rel="noreferrer">
+              <a className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-center text-sm font-semibold text-slate-800 shadow-sm hover:border-blue-300 hover:text-blue-700" href={runnerUrl} target="_blank" rel="noreferrer">
                 Open in runner
               </a>
             ) : null}
@@ -97,7 +97,7 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
 function RunnerEvidence({ issue, session, toolEvents }: { issue: IssueDetail; session?: RunnerSession; toolEvents: TimelineEvent[] }) {
   const tokens = tokenBreakdown(session?.token_count ?? 0, session?.cached_token_count);
   return (
-    <dl className="grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-4">
+    <dl className="grid gap-2 text-sm sm:grid-cols-2 xl:grid-cols-4">
       <KeyValue label="active agent" value={session?.active_agent ?? session?.agent ?? "unavailable"} detail={session?.active_model ?? session?.model ?? "model unavailable"} />
       <KeyValue label="provider/session" value={providerModeLabel(session?.provider_mode)} detail={session?.provider_id ? `provider ${session.provider_id}` : "provider id unavailable"} />
       <KeyValue label="session id" value={session?.runner_session_id ?? "unavailable"} detail={session ? processStateLabel(session.process_id, session.process_alive) : "process not checked"} mono />
@@ -122,7 +122,7 @@ function LifecycleTimeline({ issue, session, events }: { issue: IssueDetail; ses
         <li key={`${stage}-${index}`} className="relative pb-3 pl-5 text-sm">
           <span className="absolute -left-[0.45rem] top-1 h-3.5 w-3.5 rounded-full bg-blue-600" aria-label={stage === session?.current_stage ? "current lifecycle stage" : "lifecycle stage"} />
           <div className="flex flex-wrap items-baseline gap-2">
-            <span className="font-semibold text-slate-950">stage {humanizeLabel(stage)}</span>
+            <span className="break-words font-semibold text-slate-950">stage {humanizeLabel(stage)}</span>
             {stage === session?.current_stage ? <span className="text-xs text-blue-700">current</span> : null}
           </div>
           <p className="mt-1 text-xs text-slate-500">lifecycle step {index + 1} of {stages.length}</p>
@@ -278,12 +278,12 @@ function TimelineItem({ event }: { event: TimelineEvent }) {
         {!active && completed ? <span className="h-3.5 w-3.5 rounded-full bg-emerald-500" /> : null}
         {!active && !completed ? <span className="h-2.5 w-2.5 rounded-full bg-slate-300" /> : null}
       </span>
-      <div className="flex flex-wrap items-baseline gap-2">
-        <span className="font-semibold text-slate-950">{title}</span>
-        {event.status ? <span className="text-xs text-slate-500">{event.status}</span> : null}
+      <div className="flex min-w-0 flex-wrap items-baseline gap-2">
+        <span className="min-w-0 break-words font-semibold text-slate-950">{title}</span>
+        {event.status ? <span className="text-xs text-slate-500">{humanizeLabel(event.status)}</span> : null}
       </div>
-      {summary ? <p className="mt-1 text-slate-600">{summary}</p> : null}
-      <p className="mt-1 text-xs text-slate-500">{event.tool ?? event.kind} · {formatEpochMs(event.time_updated_ms)}</p>
+      {summary ? <p className="mt-1 break-words text-slate-600">{summary}</p> : null}
+      <p className="mt-1 break-words text-xs text-slate-500">{event.tool ?? event.kind} · {formatEpochMs(event.time_updated_ms)}</p>
     </li>
   );
 }
@@ -332,10 +332,10 @@ function AgentTreeNode({ node, activeSessionIds }: { node: AgentNode; activeSess
         </span>
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="font-semibold text-slate-950">{node.agent.title}</span>
+            <span className="min-w-0 break-words font-semibold text-slate-950">{node.agent.title}</span>
             <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">{node.agent.is_subagent ? "subagent" : "root"}</span>
           </div>
-          <p className="mt-1 text-xs text-slate-500">{node.agent.agent ?? "agent unknown"} · {node.agent.model ?? "model unknown"} · {formatCompactNumber(tokens.net)} tokens · {formatCompactNumber(tokens.cached)} cached</p>
+          <p className="mt-1 break-words text-xs text-slate-500">{node.agent.agent ?? "agent unknown"} · {node.agent.model ?? "model unknown"} · {formatCompactNumber(tokens.net)} tokens · {formatCompactNumber(tokens.cached)} cached</p>
         </div>
       </div>
       {node.children.length ? (
@@ -471,18 +471,18 @@ function EvidenceTab({ issue }: { issue: IssueDetail }) {
       <Evidence label="stop reason" value={issue.stop_reason ?? "none"} />
       <details className="rounded-xl border border-slate-200 bg-slate-50 p-3">
         <summary className="cursor-pointer font-semibold text-slate-950">Raw issue JSON</summary>
-        <pre className="mt-3 max-h-[26rem] overflow-auto rounded-lg bg-slate-950 p-3 text-xs text-slate-50">{JSON.stringify(issue, null, 2)}</pre>
+        <pre className="mt-3 max-h-[26rem] max-w-full overflow-auto whitespace-pre-wrap break-words rounded-lg bg-slate-950 p-3 text-xs text-slate-50">{JSON.stringify(issue, null, 2)}</pre>
       </details>
     </div>
   );
 }
 
 function Evidence({ label, value }: { label: string; value: string }) {
-  return <div className="rounded-xl border border-slate-200 bg-slate-50 p-3"><span className="font-semibold">{label}</span><p className="mt-1 text-slate-600">{value}</p></div>;
+  return <div className="min-w-0 rounded-xl border border-slate-200 bg-slate-50 p-3"><span className="font-semibold">{label}</span><p className="mt-1 break-words text-slate-600">{value}</p></div>;
 }
 
 function KeyValue({ label, value, detail, mono = false }: { label: string; value: React.ReactNode; detail?: string; mono?: boolean }) {
-  return <div className="rounded-xl border border-slate-200 bg-slate-50 p-3"><dt className="text-xs uppercase tracking-wide text-slate-500">{label}</dt><dd className={`mt-1 break-all ${mono ? "font-mono text-xs" : "font-medium"}`}>{value}</dd>{detail ? <dd className="mt-1 text-xs text-slate-500">{detail}</dd> : null}</div>;
+  return <div className="min-w-0 rounded-xl border border-slate-200 bg-slate-50 p-3"><dt className="text-xs uppercase tracking-wide text-slate-500">{label}</dt><dd className={`mt-1 overflow-hidden break-words ${mono ? "font-mono text-xs" : "font-medium"}`}>{value}</dd>{detail ? <dd className="mt-1 break-words text-xs text-slate-500">{detail}</dd> : null}</div>;
 }
 
 function Summary({ value, label }: { value: number; label: string }) {

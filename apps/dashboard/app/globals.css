@@ -21,3 +21,212 @@ body {
 a {
   text-decoration: none;
 }
+
+@media (max-width: 640px) {
+  .responsive-table {
+    min-width: 0;
+  }
+
+  .responsive-table thead {
+    display: none;
+  }
+
+  .responsive-table,
+  .responsive-table tbody,
+  .responsive-table tr,
+  .responsive-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .responsive-table tbody {
+    display: grid;
+    gap: 0.75rem;
+  }
+
+  .responsive-table tr {
+    border: 1px solid #e2e8f0;
+    border-radius: 0.875rem;
+    background: #fff;
+    overflow: hidden;
+  }
+
+  .responsive-table tbody,
+  .responsive-table tr,
+  .responsive-table td {
+    border-width: 0;
+  }
+
+  .responsive-table td {
+    display: grid;
+    grid-template-columns: minmax(6.5rem, 38%) minmax(0, 1fr);
+    gap: 0.75rem;
+    padding: 0.625rem 0.75rem;
+    overflow-wrap: anywhere;
+  }
+
+  .responsive-table td::before {
+    color: #64748b;
+    content: "";
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .running-table td:nth-child(1)::before,
+  .project-table td:nth-child(1)::before,
+  .health-table td:nth-child(1)::before,
+  .reason-table td:nth-child(1)::before,
+  .issue-table td:nth-child(1)::before,
+  .blocker-table td:nth-child(1)::before {
+    content: "Issue";
+  }
+
+  .running-table td:nth-child(1)::before,
+  .project-table td:nth-child(1)::before,
+  .health-table td:nth-child(1)::before,
+  .reason-table td:nth-child(1)::before {
+    content: "Project";
+  }
+
+  .running-table td:nth-child(2)::before {
+    content: "Issue";
+  }
+
+  .running-table td:nth-child(3)::before,
+  .issue-table td:nth-child(2)::before {
+    content: "Stage";
+  }
+
+  .running-table td:nth-child(4)::before,
+  .issue-table td:nth-child(4)::before {
+    content: "Provider";
+  }
+
+  .running-table td:nth-child(5)::before,
+  .issue-table td:nth-child(3)::before {
+    content: "Agent";
+  }
+
+  .running-table td:nth-child(6)::before,
+  .health-table td:nth-child(8)::before,
+  .issue-table td:nth-child(6)::before {
+    content: "Tokens";
+  }
+
+  .running-table td:nth-child(7)::before,
+  .issue-table td:nth-child(9)::before {
+    content: "Duration";
+  }
+
+  .project-table td:nth-child(2)::before,
+  .health-table td:nth-child(2)::before,
+  .reason-table td:nth-child(2)::before {
+    content: "Health";
+  }
+
+  .project-table td:nth-child(3)::before,
+  .health-table td:nth-child(3)::before,
+  .reason-table td:nth-child(3)::before {
+    content: "Enabled";
+  }
+
+  .project-table td:nth-child(4)::before,
+  .health-table td:nth-child(4)::before {
+    content: "Slots";
+  }
+
+  .project-table td:nth-child(5)::before,
+  .health-table td:nth-child(5)::before {
+    content: "Active";
+  }
+
+  .project-table td:nth-child(6)::before,
+  .health-table td:nth-child(6)::before {
+    content: "Blocked";
+  }
+
+  .project-table[data-detailed="true"] td:nth-child(7)::before {
+    content: "Terminal";
+  }
+
+  .project-table[data-detailed="true"] td:nth-child(8)::before,
+  .project-table:not([data-detailed="true"]) td:nth-child(7)::before,
+  .health-table td:nth-child(7)::before,
+  .reason-table td:nth-child(4)::before {
+    content: "Reason";
+  }
+
+  .project-table[data-detailed="true"] td:nth-child(9)::before,
+  .project-table:not([data-detailed="true"]) td:nth-child(8)::before,
+  .reason-table td:nth-child(5)::before {
+    content: "Last event";
+  }
+
+  .project-table[data-detailed="true"] td:nth-child(10)::before,
+  .project-table:not([data-detailed="true"]) td:nth-child(9)::before,
+  .reason-table td:nth-child(6)::before {
+    content: "Cleanup";
+  }
+
+  .issue-table td:nth-child(5)::before {
+    content: "Process";
+  }
+
+  .issue-table td:nth-child(7)::before {
+    content: "Tools";
+  }
+
+  .issue-table td:nth-child(8)::before {
+    content: "Todos";
+  }
+
+  .issue-table td:nth-child(10)::before {
+    content: "Detail";
+  }
+
+  .blocker-table td:nth-child(2)::before {
+    content: "State";
+  }
+
+  .blocker-table td:nth-child(3)::before {
+    content: "Reason";
+  }
+
+  .blocker-table td:nth-child(4)::before {
+    content: "Next action";
+  }
+
+  .defect-table td:nth-child(1)::before {
+    content: "Fingerprint";
+  }
+
+  .defect-table td:nth-child(2)::before {
+    content: "Severity";
+  }
+
+  .defect-table td:nth-child(3)::before {
+    content: "Kind";
+  }
+
+  .defect-table td:nth-child(4)::before {
+    content: "Source issues";
+  }
+
+  .defect-table td:nth-child(5)::before {
+    content: "Managed issues";
+  }
+
+  .defect-table td:nth-child(6)::before {
+    content: "Occurrences";
+  }
+
+  .defect-table td:nth-child(7)::before {
+    content: "Seen";
+  }
+
+  .defect-table td:nth-child(8)::before {
+    content: "Status";
+  }
+}

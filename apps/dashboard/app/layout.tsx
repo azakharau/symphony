@@ -7,6 +7,9 @@ import { LiveRefresh } from "@/src/live-refresh";
 export const metadata: Metadata = {
   title: "Symphony Dashboard",
   description: "Foundation dashboard shell for Symphony runtime state.",
+  icons: {
+    icon: "/favicon.svg",
+  },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

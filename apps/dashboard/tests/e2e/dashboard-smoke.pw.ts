@@ -11,7 +11,7 @@ const pages = [
   { slug: "defects", path: "/defects", expected: "Deduped defects" },
 ];
 
-test.describe("SYM-122 dashboard smoke", () => {
+test.describe("SYM-126 dashboard responsive smoke", () => {
   test.skip(fixtureState !== "acceptance", "full surface smoke uses acceptance fixture data");
 
   for (const pageCase of pages) {
@@ -20,11 +20,32 @@ test.describe("SYM-122 dashboard smoke", () => {
       await expect(page.getByText(pageCase.expected).first()).toBeVisible();
       await expect(page.getByText(`${"co"}st`).first()).toHaveCount(0);
       await page.screenshot({
-        path: `../../artifacts/screenshots/sym-122/${testInfo.project.name}-${pageCase.slug}.png`,
+        path: `../../artifacts/screenshots/sym-126/${testInfo.project.name}-${pageCase.slug}.png`,
         fullPage: true,
       });
     });
   }
+
+  test("mobile routes render list-first responsive tables and favicon", async ({ page, request }, testInfo) => {
+    test.skip(testInfo.project.name !== "mobile", "responsive table smoke only runs on the mobile project");
+
+    const favicon = await request.get("/favicon.svg");
+    expect(favicon.status()).toBe(200);
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Running now" })).toBeVisible();
+    await expect(page.locator(".running-table tr").first()).toHaveCSS("display", "block");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+    await page.goto("/projects/symphony");
+    await expect(page.getByRole("heading", { name: "Symphony current execution" })).toBeVisible();
+    await expect(page.locator(".issue-table tr").first()).toHaveCSS("display", "block");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+    await page.goto("/defects");
+    await expect(page.getByRole("heading", { name: "Deduped defects" })).toBeVisible();
+    await expect(page.locator(".defect-table tr").first()).toHaveCSS("display", "block");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  });
 
   test("overview shows running and blocked operations", async ({ page }, testInfo) => {
     await page.goto("/");
@@ -37,7 +58,7 @@ test.describe("SYM-122 dashboard smoke", () => {
     await expect(page.getByRole("link", { name: "Atlas" }).last()).toBeVisible();
     await expect(page.getByText("waiting for quota reset").last()).toBeVisible();
     await page.screenshot({
-      path: `../../artifacts/screenshots/sym-122/${testInfo.project.name}-overview-operations.png`,
+      path: `../../artifacts/screenshots/sym-126/${testInfo.project.name}-overview-operations.png`,
       fullPage: true,
     });
   });
@@ -51,7 +72,7 @@ test.describe("SYM-122 dashboard smoke", () => {
     await expect(page.getByText("provider quota exhausted").first()).toBeVisible();
     await expect(page.getByText("Showing newest 5")).toHaveCount(0);
     await page.screenshot({
-      path: `../../artifacts/screenshots/sym-123/${testInfo.project.name}-project-active.png`,
+      path: `../../artifacts/screenshots/sym-126/${testInfo.project.name}-project-active.png`,
       fullPage: true,
     });
 
@@ -62,7 +83,7 @@ test.describe("SYM-122 dashboard smoke", () => {
     await expect(page.getByText("runtime process exit").first()).toBeVisible();
     await expect(page.getByText("restart supervised runner").first()).toBeVisible();
     await page.screenshot({
-      path: `../../artifacts/screenshots/sym-123/${testInfo.project.name}-project-blocked-idle.png`,
+      path: `../../artifacts/screenshots/sym-126/${testInfo.project.name}-project-blocked-idle.png`,
       fullPage: true,
     });
   });
@@ -82,13 +103,13 @@ test.describe("SYM-122 dashboard smoke", () => {
     await expect(page.getByRole("heading", { name: "Git" })).toBeVisible();
     await expect(page.getByText("Raw issue JSON")).toBeVisible();
     await page.screenshot({
-      path: `../../artifacts/screenshots/sym-124/${testInfo.project.name}-issue-running.png`,
+      path: `../../artifacts/screenshots/sym-126/${testInfo.project.name}-issue-running.png`,
       fullPage: true,
     });
   });
 });
 
-test.describe("SYM-122 empty overview", () => {
+test.describe("SYM-126 empty overview", () => {
   test.skip(fixtureState !== "empty", "empty state requires DASHBOARD_FIXTURE_STATE=empty");
 
   test("overview explains no running work", async ({ page }, testInfo) => {
@@ -99,7 +120,7 @@ test.describe("SYM-122 empty overview", () => {
     await expect(page.getByRole("link", { name: "5h quota unavailable" })).toHaveAttribute("href", "/quota");
     await expect(page.getByText(`${"co"}st`).first()).toHaveCount(0);
     await page.screenshot({
-      path: `../../artifacts/screenshots/sym-122/${testInfo.project.name}-overview-empty.png`,
+      path: `../../artifacts/screenshots/sym-126/${testInfo.project.name}-overview-empty.png`,
       fullPage: true,
     });
   });

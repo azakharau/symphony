@@ -535,8 +535,8 @@ function TokenCell({ total, cached, metrics }: { total: number; cached?: number 
   return (
     <div>
       <div>{formatNumber(tokens.accounted)} / {formatNumber(tokens.reported)} total</div>
-      <div className="text-xs text-slate-500">{formatNumber(tokens.nonCached)} non-cache · {cacheSummary(tokens)}</div>
-      <div className={`text-xs ${tokens.statusTone === "warn" || tokens.statusTone === "bad" ? "font-medium text-amber-700" : "text-slate-500"}`}>metrics {tokens.status}</div>
+      <div className="text-xs text-slate-500">{tokens.splitProven ? `${formatNumber(tokens.nonCached)} non-cache · ${cacheSummary(tokens)}` : cacheSummary(tokens)}</div>
+      <div className={`text-xs ${tokens.statusTone === "warn" || tokens.statusTone === "bad" ? "font-medium text-amber-700" : "text-slate-500"}`}>{metricsSummary(tokens)}</div>
     </div>
   );
 }
@@ -833,6 +833,8 @@ type TokenBreakdown = {
   cacheRead: number;
   cacheWrite: number;
   status: string;
+  freshness: string;
+  reason?: string | null;
   statusTone: Tone;
   splitProven: boolean;
 };
@@ -844,6 +846,7 @@ function tokenBreakdown(total: number, cached?: number | null, metrics?: Dashboa
     const cachedTokens = Math.max(0, metrics.cached_token_count);
     const cacheRead = Math.max(0, metrics.cache_read_token_count);
     const cacheWrite = Math.max(0, metrics.cache_write_token_count);
+    const freshness = metrics.metrics_freshness || "unknown";
     const splitProven = normalizedStatus !== "unavailable" && (normalizedStatus !== "degraded" || cachedTokens > 0 || cacheRead > 0 || cacheWrite > 0);
     return {
       accounted: Math.max(0, metrics.accounted_total_token_count),
@@ -853,7 +856,9 @@ function tokenBreakdown(total: number, cached?: number | null, metrics?: Dashboa
       cacheRead,
       cacheWrite,
       status,
-      statusTone: tokenStatusTone(status),
+      freshness,
+      reason: metrics.metrics_reason,
+      statusTone: tokenStatusTone(status, freshness),
       splitProven,
     };
   }
@@ -869,16 +874,26 @@ function tokenBreakdown(total: number, cached?: number | null, metrics?: Dashboa
     cacheRead: 0,
     cacheWrite: 0,
     status: splitProven ? "legacy" : "unavailable",
+    freshness: splitProven ? "unknown" : "unavailable",
+    reason: splitProven ? null : "no split metrics collected",
     statusTone: splitProven ? "idle" : "warn",
     splitProven,
   };
 }
 
 function tokenSummary(tokens: TokenBreakdown): string {
-  return `${formatNumber(tokens.accounted)} / ${formatNumber(tokens.reported)} tokens · ${formatNumber(tokens.nonCached)} non-cache · ${cacheSummary(tokens)} · metrics ${tokens.status}`;
+  const split = tokens.splitProven ? `${formatNumber(tokens.nonCached)} non-cache · ${cacheSummary(tokens)}` : cacheSummary(tokens);
+  return `${formatNumber(tokens.accounted)} / ${formatNumber(tokens.reported)} tokens · ${split} · ${metricsSummary(tokens)}`;
 }
 
-function tokenStatusTone(status: string): Tone {
+function metricsSummary(tokens: TokenBreakdown): string {
+  const freshness = tokens.freshness && tokens.freshness !== "fresh" && tokens.freshness !== tokens.status ? ` · ${tokens.freshness}` : "";
+  const reason = tokens.reason ? ` · ${tokens.reason}` : "";
+  return `metrics ${tokens.status}${freshness}${reason}`;
+}
+
+function tokenStatusTone(status: string, freshness = "fresh"): Tone {
+  if (freshness === "stale") return "warn";
   switch (status.toLowerCase()) {
     case "available":
       return "good";

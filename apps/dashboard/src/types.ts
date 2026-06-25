@@ -33,6 +33,8 @@ export type DashboardTokenMetrics = {
   reported_total_token_count: number;
   metrics_status: string;
   metrics_source: string;
+  metrics_freshness: string;
+  metrics_reason?: string | null;
 };
 
 export type RunningIssueSummary = {

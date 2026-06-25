@@ -10,37 +10,45 @@ const OMP_SESSION_DIR: &str = ".omp/agent/sessions";
 
 #[derive(Default)]
 struct UsageStatusTracker {
-    message_count: u64,
-    usage_record_count: u64,
-    partial_usage_count: u64,
+    file_count: u64,
+    available_count: u64,
+    partial_count: u64,
+    missing_count: u64,
 }
 
 impl UsageStatusTracker {
-    fn record_message(&mut self) {
-        self.message_count = self.message_count.saturating_add(1);
-    }
-
-    fn record_usage(&mut self, usage: &NormalizedUsage) {
-        self.usage_record_count = self.usage_record_count.saturating_add(1);
-        if usage.is_partial() {
-            self.partial_usage_count = self.partial_usage_count.saturating_add(1);
+    fn record_file(&mut self, message_count: u64, usage: Option<&NormalizedUsage>) {
+        if message_count == 0 {
+            return;
+        }
+        self.file_count = self.file_count.saturating_add(1);
+        match usage {
+            Some(usage) if usage.is_complete() => {
+                self.available_count = self.available_count.saturating_add(1);
+            }
+            Some(_) => {
+                self.partial_count = self.partial_count.saturating_add(1);
+            }
+            None => {
+                self.missing_count = self.missing_count.saturating_add(1);
+            }
         }
     }
 
     fn status(&self) -> &'static str {
-        if self.usage_record_count == 0 {
+        if self.file_count == 0 || self.missing_count == self.file_count {
             "missing"
-        } else if self.usage_record_count < self.message_count {
-            "mixed"
-        } else if self.partial_usage_count > 0 {
+        } else if self.available_count == self.file_count {
+            "available"
+        } else if self.partial_count > 0 {
             "partial"
         } else {
-            "available"
+            "mixed"
         }
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct NormalizedUsage {
     input: Option<u64>,
     output: Option<u64>,
@@ -127,21 +135,22 @@ impl NormalizedUsage {
     }
 
     fn accounted_total(&self) -> u64 {
-        self.input
-            .unwrap_or(0)
-            .saturating_add(self.output.unwrap_or(0))
-            .saturating_add(self.reasoning.unwrap_or(0))
-            .saturating_add(self.cache_read.unwrap_or(0))
-            .saturating_add(self.cache_write.unwrap_or(0))
+        self.reported_total.unwrap_or_else(|| {
+            self.input
+                .unwrap_or(0)
+                .saturating_add(self.output.unwrap_or(0))
+                .saturating_add(self.reasoning.unwrap_or(0))
+                .saturating_add(self.cache_read.unwrap_or(0))
+                .saturating_add(self.cache_write.unwrap_or(0))
+        })
     }
 
-    fn is_partial(&self) -> bool {
-        self.input.is_none()
-            || self.output.is_none()
-            || self.reasoning.is_none()
-            || self.cache_read.is_none()
-            || self.cache_write.is_none()
-            || self.reported_total.is_none()
+    fn is_complete(&self) -> bool {
+        self.input.is_some()
+            && self.output.is_some()
+            && self.cache_read.is_some()
+            && self.cache_write.is_some()
+            && self.reported_total.is_some()
     }
 }
 
@@ -271,11 +280,45 @@ async fn ingest_jsonl_file(
     usage_status: &mut UsageStatusTracker,
 ) -> Result<(), RunnerError> {
     let content = fs::read_to_string(path).await.map_err(RunnerError::Io)?;
+    let mut latest_usage = None::<NormalizedUsage>;
+    let mut latest_cost_micros = 0_u64;
+    let mut message_count = 0_u64;
+
     for line in content.lines().filter(|line| !line.trim().is_empty()) {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        ingest_omp_jsonl_record(&value, metrics, usage_status);
+        if let Some((usage, cost_micros)) = ingest_omp_jsonl_record(&value, metrics) {
+            latest_usage = Some(usage);
+            latest_cost_micros = cost_micros;
+        }
+        if value.get("type").and_then(Value::as_str) == Some("message") {
+            message_count = message_count.saturating_add(1);
+        }
+    }
+
+    usage_status.record_file(message_count, latest_usage.as_ref());
+    if let Some(usage) = latest_usage {
+        metrics.tokens_input = metrics
+            .tokens_input
+            .saturating_add(usage.input.unwrap_or(0));
+        metrics.tokens_output = metrics
+            .tokens_output
+            .saturating_add(usage.output.unwrap_or(0));
+        metrics.tokens_reasoning = metrics
+            .tokens_reasoning
+            .saturating_add(usage.reasoning.unwrap_or(0));
+        metrics.tokens_cache_read = metrics
+            .tokens_cache_read
+            .saturating_add(usage.cache_read.unwrap_or(0));
+        metrics.tokens_cache_write = metrics
+            .tokens_cache_write
+            .saturating_add(usage.cache_write.unwrap_or(0));
+        metrics.tokens_reported_total = metrics
+            .tokens_reported_total
+            .saturating_add(usage.reported_total.unwrap_or(0));
+        metrics.tokens_total = metrics.tokens_total.saturating_add(usage.accounted_total());
+        metrics.cost_micros = metrics.cost_micros.saturating_add(latest_cost_micros);
     }
     Ok(())
 }
@@ -283,12 +326,10 @@ async fn ingest_jsonl_file(
 fn ingest_omp_jsonl_record(
     value: &Value,
     metrics: &mut RunnerSessionTreeMetrics,
-    usage_status: &mut UsageStatusTracker,
-) {
+) -> Option<(NormalizedUsage, u64)> {
     if value.get("type").and_then(Value::as_str) != Some("message") {
-        return;
+        return None;
     }
-    usage_status.record_message();
     metrics.message_count = metrics.message_count.saturating_add(1);
     metrics.part_count = metrics
         .part_count
@@ -309,36 +350,13 @@ fn ingest_omp_jsonl_record(
     {
         metrics.active_model = Some(model.to_owned());
     }
-    let Some(usage_value) = value
+    let usage_value = value
         .get("usage")
-        .or_else(|| message.and_then(|message| message.get("usage")))
-    else {
-        return;
-    };
-    let usage = NormalizedUsage::from_value(usage_value);
-    usage_status.record_usage(&usage);
-    metrics.tokens_input = metrics
-        .tokens_input
-        .saturating_add(usage.input.unwrap_or(0));
-    metrics.tokens_output = metrics
-        .tokens_output
-        .saturating_add(usage.output.unwrap_or(0));
-    metrics.tokens_reasoning = metrics
-        .tokens_reasoning
-        .saturating_add(usage.reasoning.unwrap_or(0));
-    metrics.tokens_cache_read = metrics
-        .tokens_cache_read
-        .saturating_add(usage.cache_read.unwrap_or(0));
-    metrics.tokens_cache_write = metrics
-        .tokens_cache_write
-        .saturating_add(usage.cache_write.unwrap_or(0));
-    metrics.tokens_reported_total = metrics
-        .tokens_reported_total
-        .saturating_add(usage.reported_total.unwrap_or(0));
-    metrics.tokens_total = metrics.tokens_total.saturating_add(usage.accounted_total());
-    metrics.cost_micros = metrics
-        .cost_micros
-        .saturating_add(cost_micros(usage_value.get("cost")));
+        .or_else(|| message.and_then(|message| message.get("usage")))?;
+    Some((
+        NormalizedUsage::from_value(usage_value),
+        cost_micros(usage_value.get("cost")),
+    ))
 }
 
 fn message_part_count(value: &Value) -> Option<u64> {
@@ -441,7 +459,7 @@ mod tests {
         assert_eq!(metrics.session_count, 2);
         assert_eq!(metrics.subagent_count, 1);
         assert_eq!(metrics.message_count, 2);
-        assert_eq!(metrics.tokens_total, 51);
+        assert_eq!(metrics.tokens_total, 48);
         assert_eq!(metrics.tokens_reported_total, 48);
         assert_eq!(metrics.tokens_cache_read, 10);
         assert_eq!(metrics.usage_status, "available");
@@ -449,6 +467,53 @@ mod tests {
         assert_eq!(metrics.active_model.as_deref(), Some("gpt-5.5"));
         assert_eq!(metrics.started_at_ms, Some(1_782_136_035_000));
         assert_eq!(metrics.last_updated_ms, Some(1_782_136_095_000));
+    }
+
+    #[tokio::test]
+    async fn uses_latest_omp_usage_snapshot_instead_of_summing_cumulative_records() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_root_session(
+            dir.path(),
+            "cumulative113",
+            r#"{"type":"message","timestamp":"2026-06-22T13:47:15.000Z","message":{"role":"assistant","content":[{"type":"text","text":"first"}],"model":"gpt-5.5","usage":{"input":100,"output":20,"reasoningTokens":5,"cacheRead":80,"cacheWrite":0,"totalTokens":200}}}
+{"type":"message","timestamp":"2026-06-22T13:48:15.000Z","message":{"role":"assistant","content":[{"type":"text","text":"second"}],"model":"gpt-5.5","usage":{"input":150,"output":30,"reasoningTokens":7,"cacheRead":120,"cacheWrite":0,"totalTokens":300}}}"#,
+        )
+        .await;
+
+        let metrics = read_omp_session_tree_metrics_from_root(dir.path(), "cumulative113")
+            .await
+            .expect("metrics")
+            .expect("found");
+
+        assert_eq!(metrics.message_count, 2);
+        assert_eq!(metrics.tokens_total, 300);
+        assert_eq!(metrics.tokens_input, 150);
+        assert_eq!(metrics.tokens_output, 30);
+        assert_eq!(metrics.tokens_reasoning, 7);
+        assert_eq!(metrics.tokens_cache_read, 120);
+        assert_eq!(metrics.usage_status, "available");
+    }
+
+    #[tokio::test]
+    async fn fallback_total_includes_reasoning_when_omp_omits_reported_total() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_root_session(
+            dir.path(),
+            "nototal113",
+            r#"{"type":"message","timestamp":"2026-06-22T13:47:15.000Z","message":{"role":"assistant","content":[{"type":"text","text":"split only"}],"model":"gpt-5.5","usage":{"input":100,"output":20,"reasoningTokens":5,"cacheRead":80,"cacheWrite":1}}}"#,
+        )
+        .await;
+
+        let metrics = read_omp_session_tree_metrics_from_root(dir.path(), "nototal113")
+            .await
+            .expect("metrics")
+            .expect("found");
+
+        assert_eq!(metrics.tokens_total, 206);
+        assert_eq!(metrics.tokens_reasoning, 5);
+        assert_eq!(metrics.tokens_cache_read, 80);
+        assert_eq!(metrics.tokens_cache_write, 1);
+        assert_eq!(metrics.usage_status, "partial");
     }
 
     #[tokio::test]
@@ -480,7 +545,7 @@ mod tests {
         assert_eq!(metrics.tokens_cache_read, 15);
         assert_eq!(metrics.tokens_cache_write, 2);
         assert_eq!(metrics.tokens_reported_total, 1122);
-        assert_eq!(metrics.tokens_total, 48);
+        assert_eq!(metrics.tokens_total, 1122);
         assert_eq!(metrics.subagent_count, 1);
         assert_eq!(metrics.usage_status, "available");
     }
@@ -513,7 +578,7 @@ mod tests {
             .expect("found");
         assert_eq!(partial.usage_status, "partial");
         assert_eq!(partial.tokens_reported_total, 42);
-        assert_eq!(partial.tokens_total, 0);
+        assert_eq!(partial.tokens_total, 42);
 
         write_root_session(
             dir.path(),
@@ -526,8 +591,26 @@ mod tests {
             .await
             .expect("metrics")
             .expect("found");
-        assert_eq!(mixed.usage_status, "mixed");
+        assert_eq!(mixed.usage_status, "available");
         assert_eq!(mixed.message_count, 2);
-        assert_eq!(mixed.tokens_total, 15);
+        assert_eq!(mixed.tokens_total, 99);
+
+        let subdir = dir
+            .path()
+            .join("-shared-symphony-home-workspaces-omp-recall-MNE-235")
+            .join("2026-06-22T13-47-14-809Z_mixed113");
+        fs::create_dir_all(&subdir).await.expect("subdir");
+        fs::write(
+            subdir.join("missing-agent.jsonl"),
+            r#"{"type":"message","timestamp":"2026-06-22T13:49:15.000Z","message":{"role":"assistant","content":[{"type":"text","text":"missing child usage"}],"model":"gpt-5.5"}}"#,
+        )
+        .await
+        .expect("subagent file");
+        let mixed_with_missing_file =
+            read_omp_session_tree_metrics_from_root(dir.path(), "mixed113")
+                .await
+                .expect("metrics")
+                .expect("found");
+        assert_eq!(mixed_with_missing_file.usage_status, "mixed");
     }
 }

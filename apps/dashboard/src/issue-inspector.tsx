@@ -3,7 +3,7 @@
 import { currentRunnerSession } from "@/src/current-runner-session";
 import { Badge, Panel, processStateLabel, providerModeLabel, runtimeFailureText } from "@/src/components";
 import { LiveDuration } from "@/src/live-duration";
-import type { EvalRun, IssueDetail, RunnerSession, SessionActivity, TimelineEvent, TodoActivity } from "@/src/types";
+import type { DashboardTokenMetrics, EvalRun, IssueDetail, RunnerSession, SessionActivity, TimelineEvent, TodoActivity } from "@/src/types";
 
 type BadgeTone = "good" | "warn" | "bad" | "idle";
 const DEFAULT_LINEAR_WORKSPACE_SLUG = "alexey-zakharov";
@@ -95,15 +95,15 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
 }
 
 function RunnerEvidence({ issue, session, toolEvents }: { issue: IssueDetail; session?: RunnerSession; toolEvents: TimelineEvent[] }) {
-  const tokens = tokenBreakdown(session?.token_count ?? 0, session?.cached_token_count);
+  const tokens = tokenBreakdown(session?.token_count ?? 0, session?.cached_token_count, session?.token_metrics);
   return (
     <dl className="grid gap-2 text-sm sm:grid-cols-2 xl:grid-cols-4">
       <KeyValue label="active agent" value={session?.active_agent ?? session?.agent ?? "unavailable"} detail={session?.active_model ?? session?.model ?? "model unavailable"} />
       <KeyValue label="provider/session" value={providerModeLabel(session?.provider_mode)} detail={session?.provider_id ? `provider ${session.provider_id}` : "provider id unavailable"} />
       <KeyValue label="session id" value={session?.runner_session_id ?? "unavailable"} detail={session ? processStateLabel(session.process_id, session.process_alive) : "process not checked"} mono />
       <KeyValue label="stage" value={humanizeLabel(session?.current_stage ?? issue.lifecycle_stage)} detail={`lifecycle ${humanizeLabel(session?.lifecycle_stage ?? issue.lifecycle_stage)}`} />
-      <KeyValue label="tokens" value={formatCompactNumber(tokens.net)} detail={cachedTokenDetail(tokens.cached, session?.token_metrics?.metrics_status)} />
-      <KeyValue label="cached-token availability" value={session?.cached_token_count === undefined || session.cached_token_count === null ? "unavailable" : formatCompactNumber(session.cached_token_count)} detail={session?.token_metrics?.metrics_source ?? "legacy session counter"} />
+      <KeyValue label="tokens" value={formatCompactNumber(tokens.value)} detail={tokens.detail} />
+      <KeyValue label="cached-token availability" value={tokens.cachedAvailable ? formatCompactNumber(tokens.cached) : "unavailable"} detail={tokens.availabilityDetail} />
       <KeyValue label="tools" value={`${session?.activity?.running_tool_count ?? 0} running / ${session?.activity?.pending_tool_count ?? 0} pending`} detail={`${toolEvents.length} recent tool events`} />
       <KeyValue label="todos" value={session?.todo_count ?? 0} detail={session?.activity ? "todo detail available" : "aggregate count only"} />
       <KeyValue label="duration" value={<LiveDuration startedAtMs={session?.started_at_ms} fallbackMs={session?.duration_ms} />} detail={sessionLastUpdated(session)} />
@@ -320,9 +320,10 @@ type AgentNode = {
 
 function AgentTreeNode({ node, activeSessionIds }: { node: AgentNode; activeSessionIds: Set<string> }) {
   const active = activeSessionIds.has(node.agent.session_id);
-  const tokens = tokenBreakdown(
-    node.agent.tokens_input + node.agent.tokens_output + node.agent.tokens_reasoning + node.agent.tokens_cache_read + node.agent.tokens_cache_write,
-    node.agent.tokens_cache_read + node.agent.tokens_cache_write,
+  const cached = Math.max(0, node.agent.tokens_cache_read + node.agent.tokens_cache_write);
+  const nonCached = Math.max(
+    0,
+    node.agent.tokens_input + node.agent.tokens_output + node.agent.tokens_reasoning,
   );
   return (
     <li>
@@ -335,7 +336,7 @@ function AgentTreeNode({ node, activeSessionIds }: { node: AgentNode; activeSess
             <span className="min-w-0 break-words font-semibold text-slate-950">{node.agent.title}</span>
             <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">{node.agent.is_subagent ? "subagent" : "root"}</span>
           </div>
-          <p className="mt-1 break-words text-xs text-slate-500">{node.agent.agent ?? "agent unknown"} · {node.agent.model ?? "model unknown"} · {formatCompactNumber(tokens.net)} tokens · {formatCompactNumber(tokens.cached)} cached</p>
+          <p className="mt-1 break-words text-xs text-slate-500">{node.agent.agent ?? "agent unknown"} · {node.agent.model ?? "model unknown"} · {formatCompactNumber(nonCached)} tokens · {formatCompactNumber(cached)} cached</p>
         </div>
       </div>
       {node.children.length ? (
@@ -403,11 +404,41 @@ function sessionEvidenceSummary(refs?: string[] | null): string {
   return `${refs.length} evidence refs: ${refs.slice(0, 2).join(", ")}`;
 }
 
-function tokenBreakdown(total: number, cached?: number | null): { net: number; cached: number } {
-  const safeCached = Math.max(0, cached ?? 0);
+type InspectorTokenBreakdown = {
+  value: number;
+  cached: number;
+  cachedAvailable: boolean;
+  detail: string;
+  availabilityDetail: string;
+};
+
+function tokenBreakdown(total: number, cached?: number | null, metrics?: DashboardTokenMetrics | null): InspectorTokenBreakdown {
+  if (metrics) {
+    const status = metrics.metrics_status || "unknown";
+    const freshness = metrics.metrics_freshness && metrics.metrics_freshness !== "fresh" && metrics.metrics_freshness !== status ? ` · ${metrics.metrics_freshness}` : "";
+    const reason = metrics.metrics_reason ? ` · ${metrics.metrics_reason}` : "";
+    const cachedTokens = Math.max(0, metrics.cached_token_count);
+    const cacheRead = Math.max(0, metrics.cache_read_token_count);
+    const cacheWrite = Math.max(0, metrics.cache_write_token_count);
+    const splitProven = status.toLowerCase() !== "unavailable" && (status.toLowerCase() !== "degraded" || cachedTokens > 0 || cacheRead > 0 || cacheWrite > 0);
+    const cacheEvidence = cacheRead || cacheWrite ? ` (read ${formatCompactNumber(cacheRead)} · write ${formatCompactNumber(cacheWrite)})` : "";
+    return {
+      value: splitProven ? Math.max(0, metrics.non_cached_token_count) : Math.max(0, metrics.accounted_total_token_count),
+      cached: cachedTokens,
+      cachedAvailable: splitProven,
+      detail: splitProven ? `${formatCompactNumber(cachedTokens)} cached${cacheEvidence} · metrics ${status}${freshness}${reason}` : `${status} split · metrics ${status}${freshness}${reason}`,
+      availabilityDetail: `${metrics.metrics_source || "metrics source unavailable"} · metrics ${status}${freshness}${reason}`,
+    };
+  }
+
+  const safeCached = cached === undefined || cached === null ? null : Math.max(0, cached);
+  const splitProven = safeCached !== null && safeCached > 0;
   return {
-    net: Math.max(0, total - safeCached),
-    cached: safeCached,
+    value: splitProven ? Math.max(0, total - safeCached) : Math.max(0, total),
+    cached: safeCached ?? 0,
+    cachedAvailable: splitProven,
+    detail: splitProven ? `${formatCompactNumber(safeCached)} cached · metrics legacy` : "unavailable split · metrics unavailable",
+    availabilityDetail: splitProven ? "legacy session counter" : "no split metrics collected",
   };
 }
 
@@ -426,10 +457,6 @@ function sessionLastUpdated(session?: RunnerSession): string {
   return `updated ${formatEpochMs(updated)}`;
 }
 
-function cachedTokenDetail(cached: number, status?: string | null): string {
-  if (!status) return `${formatCompactNumber(cached)} cached`;
-  return `${formatCompactNumber(cached)} cached · metrics ${status}`;
-}
 
 function humanizeLabel(value?: string | null): string {
   return value ? value.replaceAll("_", " ") : "unknown";

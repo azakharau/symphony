@@ -22,6 +22,7 @@ pub const ISSUE_DETAIL_ENDPOINT_TEMPLATE: &str = "/api/projects/{project_id}/iss
 
 mod dashboard_contract;
 mod self_defect_routing;
+mod token_metrics;
 
 pub use dashboard_contract::{
     DashboardEventStreamResponse, UiAggregateDashboardResponse, UiIssueDetailResponse,
@@ -33,6 +34,8 @@ pub use self_defect_routing::{
     SelfDefectRoutingProjection, SelfDefectSourceContext,
 };
 use self_defect_routing::{self_defect_route_summaries, self_defect_routing_projection};
+pub use token_metrics::DashboardTokenMetrics;
+use token_metrics::aggregate_token_metrics;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApiJsonResponse {
@@ -258,21 +261,6 @@ pub struct AggregateDashboardTotals {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct DashboardTokenMetrics {
-    pub accounted_total_token_count: u64,
-    pub non_cached_token_count: u64,
-    pub cached_token_count: u64,
-    pub input_token_count: u64,
-    pub output_token_count: u64,
-    pub reasoning_token_count: u64,
-    pub cache_read_token_count: u64,
-    pub cache_write_token_count: u64,
-    pub reported_total_token_count: u64,
-    pub metrics_status: String,
-    pub metrics_source: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectDashboardCard {
     pub project_id: String,
     pub name: String,
@@ -399,7 +387,8 @@ impl ProjectDashboardResponse {
             .map(|issue| issue.cost_micros)
             .sum::<u64>();
         let recorded_tokens = self.recorded_tokens();
-        let token_metrics = self.token_metrics();
+        let token_metrics =
+            aggregate_token_metrics(running_issues.iter().map(|issue| &issue.token_metrics));
         let recorded_cost_micros = self.recorded_cost_micros();
 
         ProjectDashboardCard {
@@ -640,160 +629,6 @@ pub struct RunnerSessionDetail {
     pub activity_error: Option<String>,
 }
 
-impl DashboardTokenMetrics {
-    fn unavailable() -> Self {
-        Self {
-            accounted_total_token_count: 0,
-            non_cached_token_count: 0,
-            cached_token_count: 0,
-            input_token_count: 0,
-            output_token_count: 0,
-            reasoning_token_count: 0,
-            cache_read_token_count: 0,
-            cache_write_token_count: 0,
-            reported_total_token_count: 0,
-            metrics_status: "unavailable".into(),
-            metrics_source: "none".into(),
-        }
-    }
-
-    fn from_session(session: &RunnerSessionRecord) -> Self {
-        let non_cached_token_count = session
-            .tokens_input
-            .saturating_add(session.tokens_output)
-            .saturating_add(session.tokens_reasoning);
-        let cached_token_count = session
-            .tokens_cache_read
-            .saturating_add(session.tokens_cache_write);
-        let metrics_status = dashboard_token_metrics_status(
-            session.token_usage_status.as_str(),
-            session.token_count,
-            non_cached_token_count,
-            cached_token_count,
-            session.tokens_reported_total,
-        )
-        .into();
-
-        Self {
-            accounted_total_token_count: session.token_count,
-            non_cached_token_count,
-            cached_token_count,
-            input_token_count: session.tokens_input,
-            output_token_count: session.tokens_output,
-            reasoning_token_count: session.tokens_reasoning,
-            cache_read_token_count: session.tokens_cache_read,
-            cache_write_token_count: session.tokens_cache_write,
-            reported_total_token_count: session.tokens_reported_total,
-            metrics_status,
-            metrics_source: dashboard_token_metrics_source(session.token_usage_source.as_str()),
-        }
-    }
-}
-
-fn dashboard_token_metrics_status(
-    usage_status: &str,
-    accounted_total: u64,
-    non_cached_total: u64,
-    cached_total: u64,
-    reported_total: u64,
-) -> &'static str {
-    match usage_status {
-        "available" => "available",
-        "missing"
-            if accounted_total == 0
-                && non_cached_total == 0
-                && cached_total == 0
-                && reported_total == 0 =>
-        {
-            "unavailable"
-        }
-        "missing" | "unknown" | "partial" | "mixed" => "degraded",
-        _ if accounted_total > 0
-            || non_cached_total > 0
-            || cached_total > 0
-            || reported_total > 0 =>
-        {
-            "degraded"
-        }
-        _ => "unavailable",
-    }
-}
-
-fn dashboard_token_metrics_source(source: &str) -> String {
-    match source {
-        "none" => "none".into(),
-        "acp_event" => "runtime_event_total".into(),
-        "legacy_single_total" => "legacy_total".into(),
-        "runner_archive" | "omp_jsonl" => "persisted_split_metrics".into(),
-        other => other.into(),
-    }
-}
-
-fn aggregate_token_metrics<'a>(
-    metrics: impl Iterator<Item = &'a DashboardTokenMetrics>,
-) -> DashboardTokenMetrics {
-    let mut total = DashboardTokenMetrics::unavailable();
-    let mut count = 0_u64;
-    let mut available_count = 0_u64;
-    let mut unavailable_count = 0_u64;
-    let mut first_source: Option<&str> = None;
-    let mut mixed_source = false;
-
-    for item in metrics {
-        count = count.saturating_add(1);
-        available_count =
-            available_count.saturating_add(u64::from(item.metrics_status == "available"));
-        unavailable_count =
-            unavailable_count.saturating_add(u64::from(item.metrics_status == "unavailable"));
-        total.accounted_total_token_count = total
-            .accounted_total_token_count
-            .saturating_add(item.accounted_total_token_count);
-        total.non_cached_token_count = total
-            .non_cached_token_count
-            .saturating_add(item.non_cached_token_count);
-        total.cached_token_count = total
-            .cached_token_count
-            .saturating_add(item.cached_token_count);
-        total.input_token_count = total
-            .input_token_count
-            .saturating_add(item.input_token_count);
-        total.output_token_count = total
-            .output_token_count
-            .saturating_add(item.output_token_count);
-        total.reasoning_token_count = total
-            .reasoning_token_count
-            .saturating_add(item.reasoning_token_count);
-        total.cache_read_token_count = total
-            .cache_read_token_count
-            .saturating_add(item.cache_read_token_count);
-        total.cache_write_token_count = total
-            .cache_write_token_count
-            .saturating_add(item.cache_write_token_count);
-        total.reported_total_token_count = total
-            .reported_total_token_count
-            .saturating_add(item.reported_total_token_count);
-
-        match first_source {
-            Some(source) if source != item.metrics_source => mixed_source = true,
-            Some(_) => {}
-            None => first_source = Some(item.metrics_source.as_str()),
-        }
-    }
-
-    total.metrics_status = if count == 0 || unavailable_count == count {
-        "unavailable".into()
-    } else if available_count == count {
-        "available".into()
-    } else {
-        "degraded".into()
-    };
-    total.metrics_source = if mixed_source {
-        "multiple".into()
-    } else {
-        first_source.unwrap_or("none").into()
-    };
-    total
-}
 async fn issue_read_model(
     store: &SqliteStore,
     issue: IssueStateRecord,
@@ -1483,6 +1318,165 @@ mod tests {
             omp_metrics_duration_inputs(&metrics),
             (Some(1_000), Some(1_750))
         );
+    }
+
+    #[test]
+    fn project_card_token_metrics_match_running_issue_metrics_not_history() {
+        let running = issue_response(
+            "running",
+            LifecycleStage::Running,
+            vec![session_detail(
+                "running-session",
+                LifecycleStage::Running,
+                RunnerStage::Running,
+                300,
+                120,
+            )],
+            token_metrics(300, 120, "available"),
+        );
+        let history = issue_response(
+            "history",
+            LifecycleStage::Completed,
+            vec![session_detail(
+                "history-session",
+                LifecycleStage::Completed,
+                RunnerStage::Completed,
+                9_000,
+                0,
+            )],
+            token_metrics(9_000, 0, "unavailable"),
+        );
+        let project = ProjectDashboardResponse {
+            project_id: "symphony".into(),
+            name: "Symphony".into(),
+            enabled: true,
+            lifecycle_stage: LifecycleStage::Running,
+            cleanup_status: CleanupStatus::Clean,
+            capacity: ProjectCapacity {
+                max_sessions: 1,
+                running_sessions: 1,
+                available_sessions: 0,
+            },
+            liveness: ProjectRuntimeLivenessResponse {
+                status: RuntimeLivenessStatus::HealthyCapacityAvailable,
+                reason: "running".into(),
+                primary_reason_code: "active_runner_session".into(),
+                primary_reason_detail: "runner session is actively executing".into(),
+                last_poll_at: None,
+                last_successful_candidate_scan_at: None,
+                capacity: ProjectCapacity {
+                    max_sessions: 1,
+                    running_sessions: 1,
+                    available_sessions: 0,
+                },
+            },
+            selected_candidate: None,
+            suppression_reasons: Vec::new(),
+            active_issues: vec![running],
+            token_metrics: token_metrics(9_300, 120, "degraded"),
+            history_issues: vec![history],
+        };
+
+        let card = project.card();
+
+        assert_eq!(card.running_tokens, 300);
+        assert_eq!(card.running_cached_tokens, 120);
+        assert_eq!(card.token_metrics.accounted_total_token_count, 300);
+        assert_eq!(card.token_metrics.cached_token_count, 120);
+        assert_eq!(card.token_metrics.metrics_status, "available");
+    }
+
+    fn token_metrics(total: u64, cached: u64, status: &str) -> DashboardTokenMetrics {
+        DashboardTokenMetrics {
+            accounted_total_token_count: total,
+            non_cached_token_count: total.saturating_sub(cached),
+            cached_token_count: cached,
+            input_token_count: total.saturating_sub(cached),
+            output_token_count: 0,
+            reasoning_token_count: 0,
+            cache_read_token_count: cached,
+            cache_write_token_count: 0,
+            reported_total_token_count: total,
+            metrics_status: status.into(),
+            metrics_source: "test".into(),
+            metrics_freshness: if status == "unavailable" {
+                "unavailable".into()
+            } else {
+                "fresh".into()
+            },
+            metrics_reason: (status != "available").then(|| "test metric state".into()),
+        }
+    }
+
+    fn issue_response(
+        id: &str,
+        lifecycle_stage: LifecycleStage,
+        runner_sessions: Vec<RunnerSessionDetail>,
+        token_metrics: DashboardTokenMetrics,
+    ) -> IssueDetailResponse {
+        IssueDetailResponse {
+            project_id: "symphony".into(),
+            issue_id: id.into(),
+            identifier: format!("SYM-{id}"),
+            title: id.into(),
+            lifecycle_stage,
+            display_status: "running".into(),
+            blocker: None,
+            failure: None,
+            runtime_defect: None,
+            self_defect_routing: None,
+            git_ref: None,
+            cleanup_status: CleanupStatus::Clean,
+            stop_reason: None,
+            last_runner_event: None,
+            preferred_runner_session_id: None,
+            token_metrics,
+            runner_sessions,
+            eval_results: Vec::new(),
+        }
+    }
+
+    fn session_detail(
+        id: &str,
+        lifecycle_stage: LifecycleStage,
+        current_stage: RunnerStage,
+        token_count: u64,
+        cached_token_count: u64,
+    ) -> RunnerSessionDetail {
+        RunnerSessionDetail {
+            runner_session_id: id.into(),
+            provider_mode: crate::state::RuntimeProviderMode::OmpAcp,
+            provider_id: Some("omp".into()),
+            agent: "build".into(),
+            model: Some("gpt-5.5".into()),
+            worktree_path: "/tmp/worktree".into(),
+            process_id: None,
+            process_alive: None,
+            lifecycle_stage,
+            current_stage,
+            stage_history: vec![current_stage],
+            active_agent: Some("build".into()),
+            active_model: Some("gpt-5.5".into()),
+            subagents_used: 0,
+            eval_stage: None,
+            message_count: 0,
+            todo_count: 0,
+            part_count: 0,
+            token_count,
+            cached_token_count,
+            token_metrics: token_metrics(token_count, cached_token_count, "available"),
+            cost_micros: 0,
+            started_at_ms: None,
+            duration_ms: None,
+            lifecycle_marker: None,
+            last_event: None,
+            runtime_failure_kind: None,
+            acp_frame_count: 0,
+            session_evidence_refs: Vec::new(),
+            silence_observed: false,
+            activity: None,
+            activity_error: None,
+        }
     }
 }
 

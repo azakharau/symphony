@@ -27,6 +27,8 @@ function tokenMetrics({
     reported_total_token_count: total,
     metrics_status: status,
     metrics_source: "fixture",
+    metrics_freshness: status === "unavailable" ? "unavailable" : "fresh",
+    metrics_reason: status === "available" ? null : "fixture metric status",
   };
 }
 

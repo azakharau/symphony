@@ -353,6 +353,8 @@ mod tests {
                 reported_total_token_count: 0,
                 metrics_status: "unavailable".into(),
                 metrics_source: "none".into(),
+                metrics_freshness: "unavailable".into(),
+                metrics_reason: Some("no token metrics collected".into()),
             },
             runner_sessions: Vec::new(),
             eval_results: Vec::new(),

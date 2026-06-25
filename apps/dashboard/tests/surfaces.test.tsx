@@ -115,6 +115,8 @@ describe("dashboard surfaces", () => {
       reported_total_token_count: 700,
       metrics_status: "available",
       metrics_source: "persisted_split_metrics",
+      metrics_freshness: "fresh",
+      metrics_reason: null,
     };
     const issue = dashboard.projects[0].running_issues[0];
     dashboard.totals.running_tokens = 561;
@@ -153,6 +155,8 @@ describe("dashboard surfaces", () => {
       reported_total_token_count: 15030,
       metrics_status: "unavailable",
       metrics_source: "test",
+      metrics_freshness: "unavailable",
+      metrics_reason: "no token metrics collected",
     };
     dashboard.projects[0].running_issues[0].token_metrics = undefined;
     dashboard.projects[0].running_issues[0].cached_token_count = undefined;
@@ -164,6 +168,44 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("metrics unavailable");
     expect(running).toContain("metrics unavailable");
     expect(running).not.toContain("0 cached");
+    expect(running).not.toContain("15,030 non-cache");
+  });
+
+  test("overview labels stale token metrics with freshness reason", () => {
+    const dashboard = JSON.parse(JSON.stringify(acceptanceDashboard)) as typeof acceptanceDashboard;
+    const staleMetrics = {
+      accounted_total_token_count: 300,
+      non_cached_token_count: 180,
+      cached_token_count: 120,
+      input_token_count: 150,
+      output_token_count: 30,
+      reasoning_token_count: 7,
+      cache_read_token_count: 120,
+      cache_write_token_count: 0,
+      reported_total_token_count: 300,
+      metrics_status: "available",
+      metrics_source: "persisted_split_metrics",
+      metrics_freshness: "stale",
+      metrics_reason: "metrics are stale; latest runtime usage update is older than 10 minutes",
+    };
+    dashboard.totals.running_tokens = 300;
+    dashboard.totals.running_cached_tokens = 120;
+    dashboard.totals.token_metrics = staleMetrics;
+    dashboard.projects = [dashboard.projects[0]];
+    dashboard.projects[0].running_tokens = 300;
+    dashboard.projects[0].running_cached_tokens = 120;
+    dashboard.projects[0].token_metrics = staleMetrics;
+    dashboard.projects[0].running_issues[0].token_count = 300;
+    dashboard.projects[0].running_issues[0].cached_token_count = 120;
+    dashboard.projects[0].running_issues[0].token_metrics = staleMetrics;
+
+    const html = render(<OverviewSurface dashboard={dashboard} quota={quotaNormal} />);
+    const running = sectionText(html, "Running now", "Project health and capacity");
+
+    expect(running).toContain("180 non-cache");
+    expect(running).toContain("120 cached (read 120 · write 0)");
+    expect(running).toContain("metrics available · stale");
+    expect(running).toContain("latest runtime usage update is older than 10 minutes");
   });
 
   test("overview renders live session duration instead of raw events", () => {
@@ -291,6 +333,35 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("bounded activity unavailable for exited process");
     expect(html).toContain("No running, pending, or recent tool events were reported.");
     expect(html).toContain("runtime process exited</dd>");
+  });
+
+  test("issue inspector does not imply zero cached tokens when metrics are unavailable", () => {
+    const issue = JSON.parse(JSON.stringify(failedProject.active_issues[0])) as typeof failedProject.active_issues[number];
+    issue.runner_sessions[0].cached_token_count = null;
+    issue.runner_sessions[0].token_metrics = {
+      accounted_total_token_count: 15030,
+      non_cached_token_count: 15030,
+      cached_token_count: 0,
+      input_token_count: 0,
+      output_token_count: 0,
+      reasoning_token_count: 15030,
+      cache_read_token_count: 0,
+      cache_write_token_count: 0,
+      reported_total_token_count: 15030,
+      metrics_status: "unavailable",
+      metrics_source: "none",
+      metrics_freshness: "unavailable",
+      metrics_reason: "no token metrics collected",
+    };
+
+    const html = render(<IssueInspector issue={issue} />);
+    const inspector = sectionText(html, "runner session inspector", "Raw issue JSON");
+
+    expect(inspector).toContain("unavailable split");
+    expect(inspector).toContain("metrics unavailable");
+    expect(inspector).toContain("no token metrics collected");
+    expect(inspector).toContain(">unavailable</dd>");
+    expect(inspector).not.toContain("0 cached");
   });
 
   test("issue inspector links runner sessions by persisted session directory", () => {

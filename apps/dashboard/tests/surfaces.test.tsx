@@ -41,10 +41,8 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("4 slots available");
     expect(html).toContain("5h quota 76% remaining");
     expect(html).toContain('href="/quota"');
-    expect(running).toContain("58,240 / 58,240 tokens");
-    expect(running).toContain("55,130 non-cache");
-    expect(running).toContain("3,110 cached (read 2,800 · write 310)");
-    expect(running).toContain("metrics available");
+    expect(running).not.toContain("58,240 / 58,240 tokens ·");
+    expect(running).not.toContain("55,130 non-cache · 3,110 cached");
     expect(running).toContain("38,210 / 38,210 total");
     expect(running).toContain("degraded split");
     expect(running).toContain("metrics degraded");
@@ -86,22 +84,27 @@ describe("dashboard surfaces", () => {
     activeProject.liveness = {
       ...activeProject.liveness,
       status: "active",
-      reason: "runner session is live",
+      reason: "runtime polling normally",
       primary_reason_code: "active_runner_session",
-      primary_reason_detail: "runner session is executing",
+      primary_reason_detail: "runner session is executing · dispatch slot available",
       capacity: activeProject.capacity,
     };
+    activeProject.runner_health = "active/capacity_available";
     dashboard.projects = [activeProject, dashboard.projects[2]];
 
     const html = render(<OverviewSurface dashboard={dashboard} quota={quotaNormal} />);
+    const health = sectionText(html, "Project health and capacity", "Blockers and idle reasons");
     const blockers = sectionText(html, "Blockers and idle reasons", "overview preserves OMP cacheRead");
-
     expect(blockers).not.toContain("Symphony");
     expect(blockers).toContain("Atlas");
     expect(blockers).toContain("waiting for quota reset");
     expect(blockers).toContain("provider quota exhausted");
     expect(blockers).not.toContain(">last event</th>");
     expect(blockers).not.toContain("linear_terminal_reconciled");
+    expect(health).toContain(">active</span>");
+    expect(health).toContain("runner session is executing</td>");
+    expect(health).not.toContain("active/capacity available");
+    expect(health).not.toContain("dispatch slot available");
   });
 
   test("overview preserves OMP cacheRead/cacheWrite split instead of dropping cached tokens", () => {
@@ -135,9 +138,7 @@ describe("dashboard surfaces", () => {
 
     const html = render(<OverviewSurface dashboard={dashboard} quota={quotaNormal} />);
     const running = sectionText(html, "Running now", "Project health and capacity");
-    expect(running).toContain("561 / 700 tokens");
-    expect(running).toContain("155 non-cache");
-    expect(running).toContain("406 cached (read 400 · write 6)");
+    expect(running).not.toContain("561 / 700 tokens");
     expect(running).toContain("561 / 700 total");
     expect(running).toContain("155 non-cache");
     expect(running).toContain("406 cached (read 400 · write 6)");
@@ -193,7 +194,8 @@ describe("dashboard surfaces", () => {
     const html = render(<OverviewSurface dashboard={dashboard} quota={quotaNormal} />);
     const running = sectionText(html, "Running now", "Project health and capacity");
 
-    expect(running).toContain("561 / 700 tokens");
+    expect(running).not.toContain("561 / 700 tokens");
+    expect(running).toContain("561 / 700 total");
     expect(running).toContain("406 cached (read 400 · write 6)");
     expect(running).toContain("metrics available");
     expect(running).not.toContain("metrics degraded");
@@ -355,6 +357,7 @@ describe("dashboard surfaces", () => {
     const html = render(<IssueInspector issue={acceptanceProject.active_issues[0]} />);
     const hero = sectionText(html, "Build dashboard surfaces", "Current runner status");
     const inspector = sectionText(html, "Current runner status", "Lifecycle timeline");
+    const detailedActivity = sectionText(html, "OMP workers", "Eval state");
     const timeline = sectionText(html, "Lifecycle timeline", "OMP workers");
 
     expect(html).toContain("Current runner status");
@@ -367,6 +370,9 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("OMP workers");
     expect(html).toContain("Todo activity");
     expect(html).toContain("Tool activity");
+    expect(detailedActivity).toContain("OMP workers");
+    expect(detailedActivity).toContain("Todo activity");
+    expect(detailedActivity).toContain("Tool activity");
     expect(html).toContain("Eval state");
     expect(html).toContain("Git and worktree");
     expect(html).toContain("Debug details");
@@ -393,6 +399,9 @@ describe("dashboard surfaces", () => {
     expect(inspector).toContain(">runner ACP</dd>");
     expect(inspector).toContain("provider runner-primary");
     expect(inspector).toContain(">18 frames</dd>");
+    expect(inspector).not.toContain(">cache metrics</dt>");
+    expect(inspector).not.toContain(">tool activity</dt>");
+    expect(inspector).not.toContain(">todo activity</dt>");
 
 
     expect(inspector).toContain(">duration</dt>");
@@ -523,8 +532,8 @@ describe("dashboard surfaces", () => {
     expect(inspector).toContain("unavailable split");
     expect(inspector).toContain("metrics unavailable");
     expect(inspector).toContain("no token metrics collected");
-    expect(inspector).toContain(">unavailable</dd>");
     expect(inspector).not.toContain("0 cached");
+    expect(inspector).not.toContain(">cache metrics</dt>");
   });
 
   test("issue inspector links runner sessions by persisted session directory", () => {

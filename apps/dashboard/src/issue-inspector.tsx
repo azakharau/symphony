@@ -47,7 +47,7 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
       </section>
 
       <Panel title="Current runner status" action={session?.runner_session_id ?? "No runner session reported by API"}>
-        <RunnerEvidence issue={issue} session={session} toolEvents={toolEvents} />
+        <RunnerEvidence issue={issue} session={session} />
       </Panel>
 
       <Panel title="Lifecycle timeline" action="stage history and recent activity">
@@ -88,7 +88,7 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
   );
 }
 
-function RunnerEvidence({ issue, session, toolEvents }: { issue: IssueDetail; session?: RunnerSession; toolEvents: TimelineEvent[] }) {
+function RunnerEvidence({ issue, session }: { issue: IssueDetail; session?: RunnerSession }) {
   const tokens = tokenBreakdown(session?.token_count ?? 0, session?.cached_token_count, session?.token_metrics ?? issue.token_metrics);
   return (
     <dl className="grid gap-2 text-sm sm:grid-cols-2 xl:grid-cols-4">
@@ -98,9 +98,6 @@ function RunnerEvidence({ issue, session, toolEvents }: { issue: IssueDetail; se
       <KeyValue label="stage" value={humanizeLabel(session?.current_stage ?? issue.lifecycle_stage)} detail={`lifecycle ${humanizeLabel(session?.lifecycle_stage ?? issue.lifecycle_stage)}`} />
       <KeyValue label="duration" value={<LiveDuration startedAtMs={session?.started_at_ms} fallbackMs={session?.duration_ms} />} detail={sessionLastUpdated(session)} />
       <KeyValue label="tokens" value={`${formatCompactNumber(tokens.accounted)} total`} detail={tokens.detail} />
-      <KeyValue label="cache metrics" value={tokens.cachedAvailable ? `${formatCompactNumber(tokens.cached)} cached` : "unavailable"} detail={tokens.availabilityDetail} />
-      <KeyValue label="tool activity" value={`${session?.activity?.running_tool_count ?? 0} running / ${session?.activity?.pending_tool_count ?? 0} pending`} detail={session?.activity ? `${toolEvents.length} recent tool events` : sourceUnavailable(session, "bounded tool activity unavailable")} />
-      <KeyValue label="todo activity" value={session?.todo_count ?? 0} detail={session?.activity ? "todo detail available" : sourceUnavailable(session, "todo detail unavailable")} />
       <KeyValue label="ACP telemetry" value={`${session?.acp_frame_count ?? 0} frames`} detail={sessionEvidenceSummary(session?.session_evidence_refs)} />
       {session?.runtime_failure_kind ? <KeyValue label="runtime failure" value={runtimeFailureText(session.runtime_failure_kind)} detail={session.silence_observed ? "session is quiet or stale" : undefined} /> : null}
       {session?.silence_observed && !session.runtime_failure_kind ? <KeyValue label="runtime silence" value="session is quiet or stale" /> : null}

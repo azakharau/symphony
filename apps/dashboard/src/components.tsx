@@ -48,7 +48,6 @@ export function OverviewSurface({ dashboard, quota }: { dashboard: AggregateDash
   const running = dashboard.projects.flatMap((project) => project.running_issues ?? []);
   const attentionProjects = dashboard.projects.filter(hasOverviewAttention);
   const defectCount = dashboard.projects.reduce((total, project) => total + (project.self_defect_routes?.length ?? 0), 0);
-  const runningTokens = tokenBreakdown(dashboard.totals.running_tokens, dashboard.totals.running_cached_tokens, dashboard.totals.token_metrics);
 
   return (
     <div className="flex flex-col gap-5">
@@ -64,7 +63,6 @@ export function OverviewSurface({ dashboard, quota }: { dashboard: AggregateDash
         <div className="mb-3 flex flex-wrap gap-2 text-xs text-slate-600">
           <span className="rounded-full border bg-slate-50 px-2 py-1">sessions {dashboard.totals.running_issue_count}/{dashboard.totals.max_sessions}</span>
           <span className="rounded-full border bg-slate-50 px-2 py-1">{dashboard.totals.available_sessions} slots available</span>
-          <span className="rounded-full border bg-slate-50 px-2 py-1">{tokenSummary(runningTokens)}</span>
         </div>
         {running.length ? <RunningTable issues={running} /> : <EmptyState message="No runner sessions are running. Project rows below still show idle reasons." />}
       </Panel>
@@ -254,13 +252,13 @@ function ProjectTable({ projects, detailed = false }: { projects: DashboardProje
           {projects.map((project) => (
             <tr key={project.project_id}>
               <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${project.project_id}`}>{project.name}</Link></td>
-              <td className="px-3 py-3"><Badge tone={statusTone(project.runner_health)}>{humanizeLabel(project.runner_health)}</Badge></td>
+              <td className="px-3 py-3"><Badge tone={statusTone(project.runner_health)}>{projectHealthLabel(project)}</Badge></td>
               <td className="px-3 py-3">{project.enabled ? "yes" : "no"}</td>
               <td className="w-16 whitespace-nowrap px-2 py-3 text-center tabular-nums" aria-label="running sessions / max slots">{project.capacity.running_sessions}/{project.capacity.max_sessions}</td>
               <td className="px-3 py-3">{project.active_count}</td>
               <td className="px-3 py-3">{project.parked_count}</td>
               {detailed ? <td className="px-3 py-3">{project.terminal_count}</td> : null}
-              <td className="px-3 py-3">{humanizeLabel(project.liveness.primary_reason_detail || project.liveness.reason)}</td>
+              <td className="px-3 py-3">{primaryLivenessReason(project)}</td>
               <td className="px-3 py-3">{humanizeLabel(project.cleanup_status)}</td>
             </tr>
           ))}
@@ -289,12 +287,12 @@ function ProjectHealthCapacityTable({ projects }: { projects: DashboardProjectCa
           {projects.map((project) => (
             <tr key={project.project_id}>
               <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${project.project_id}`}>{project.name}</Link></td>
-              <td className="px-3 py-3"><Badge tone={statusTone(project.runner_health)}>{humanizeLabel(project.runner_health)}</Badge></td>
+              <td className="px-3 py-3"><Badge tone={statusTone(project.runner_health)}>{projectHealthLabel(project)}</Badge></td>
               <td className="px-3 py-3">{project.enabled ? "yes" : "no"}</td>
               <td className="w-16 whitespace-nowrap px-2 py-3 text-center tabular-nums" aria-label="running sessions / max slots">{project.capacity.running_sessions}/{project.capacity.max_sessions}</td>
               <td className="px-3 py-3">{project.active_count}</td>
               <td className="px-3 py-3">{project.parked_count}</td>
-              <td className="px-3 py-3">{humanizeLabel(project.liveness.primary_reason_detail || project.liveness.reason)}</td>
+              <td className="px-3 py-3">{primaryLivenessReason(project)}</td>
             </tr>
           ))}
         </tbody>
@@ -321,9 +319,9 @@ function ProjectReasonTable({ projects }: { projects: DashboardProjectCard[] }) 
           {projects.map((project) => (
             <tr key={project.project_id}>
               <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${project.project_id}`}>{project.name}</Link></td>
-              <td className="px-3 py-3"><Badge tone={statusTone(project.runner_health)}>{humanizeLabel(project.runner_health)}</Badge></td>
+              <td className="px-3 py-3"><Badge tone={statusTone(project.runner_health)}>{projectHealthLabel(project)}</Badge></td>
               <td className="px-3 py-3">{project.enabled ? "yes" : "no"}</td>
-              <td className="px-3 py-3">{humanizeLabel(project.liveness.primary_reason_detail || project.liveness.reason)}</td>
+              <td className="px-3 py-3">{primaryLivenessReason(project)}</td>
               <td className="px-3 py-3">{secondaryLivenessDetail(project)}</td>
               <td className="px-3 py-3">{humanizeLabel(project.cleanup_status)}</td>
             </tr>
@@ -651,6 +649,20 @@ function hasUsefulIdleReason(project: DashboardProjectCard): boolean {
   return (status.includes("idle") || reasonCode === "idle" || reasonCode === "no_runnable_candidate") && !reason.includes("polling normally") && !reason.includes("no running sessions");
 }
 
+function projectHealthLabel(project: DashboardProjectCard): string {
+  return project.runner_health.toLowerCase() === "active/capacity_available" ? "active" : humanizeLabel(project.runner_health);
+}
+
+function primaryLivenessReason(project: DashboardProjectCard): string {
+  const raw = project.liveness.primary_reason_detail || project.liveness.reason;
+  const cleaned = raw
+    .replace(/\bdispatch slot available\b/gi, "")
+    .replace(/^\s*(?:[·,;/|-])\s*/, "")
+    .replace(/\s*(?:[·,;/|-])\s*$/, "")
+    .trim();
+  return humanizeLabel(cleaned || (isActiveProject(project) ? "active" : raw));
+}
+
 function secondaryLivenessDetail(project: DashboardProjectCard): string {
   const primary = project.liveness.primary_reason_detail.trim();
   const reason = project.liveness.reason.trim();
@@ -877,10 +889,6 @@ function tokenBreakdown(total: number, cached?: number | null, metrics?: Dashboa
   };
 }
 
-function tokenSummary(tokens: TokenBreakdown): string {
-  const split = tokens.splitProven ? `${formatNumber(tokens.nonCached)} non-cache · ${cacheSummary(tokens)}` : cacheSummary(tokens);
-  return `${formatNumber(tokens.accounted)} / ${formatNumber(tokens.reported)} tokens · ${split} · ${metricsSummary(tokens)}`;
-}
 
 function metricsSummary(tokens: TokenBreakdown): string {
   const freshness = tokens.freshness && tokens.freshness !== "fresh" && tokens.freshness !== tokens.status ? ` · ${tokens.freshness}` : "";

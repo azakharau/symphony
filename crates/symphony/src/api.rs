@@ -446,15 +446,6 @@ impl ProjectDashboardResponse {
             .sum()
     }
 
-    fn token_metrics(&self) -> DashboardTokenMetrics {
-        aggregate_token_metrics(
-            self.active_issues
-                .iter()
-                .chain(self.history_issues.iter())
-                .map(|issue| &issue.token_metrics),
-        )
-    }
-
     fn recorded_cost_micros(&self) -> u64 {
         self.active_issues
             .iter()
@@ -486,9 +477,7 @@ fn aggregate_dashboard_totals(projects: &[ProjectDashboardCard]) -> AggregateDas
             .map(|project| project.running_cached_tokens)
             .sum(),
         recorded_tokens: projects.iter().map(|project| project.recorded_tokens).sum(),
-        token_metrics: aggregate_token_metrics(
-            projects.iter().map(|project| &project.token_metrics),
-        ),
+        token_metrics: aggregate_running_token_metrics(projects),
         running_cost_micros: projects
             .iter()
             .map(|project| project.running_cost_micros)
@@ -498,6 +487,15 @@ fn aggregate_dashboard_totals(projects: &[ProjectDashboardCard]) -> AggregateDas
             .map(|project| project.recorded_cost_micros)
             .sum(),
     }
+}
+
+fn aggregate_running_token_metrics(projects: &[ProjectDashboardCard]) -> DashboardTokenMetrics {
+    aggregate_token_metrics(
+        projects
+            .iter()
+            .filter(|project| !project.running_issues.is_empty())
+            .map(|project| &project.token_metrics),
+    )
 }
 
 fn running_issue_summary(
@@ -1384,6 +1382,123 @@ mod tests {
         assert_eq!(card.token_metrics.accounted_total_token_count, 300);
         assert_eq!(card.token_metrics.cached_token_count, 120);
         assert_eq!(card.token_metrics.metrics_status, "available");
+    }
+
+    #[test]
+    fn aggregate_dashboard_totals_token_metrics_ignore_idle_project_metrics() {
+        let running_project = project_card(
+            "running",
+            vec![running_issue_summary(
+                "running-issue",
+                300,
+                120,
+                "available",
+            )],
+            token_metrics(300, 120, "available"),
+        );
+        let idle_project = project_card("idle", Vec::new(), token_metrics(0, 0, "unavailable"));
+
+        let totals = aggregate_dashboard_totals(&[running_project, idle_project]);
+
+        assert_eq!(totals.running_issue_count, 1);
+        assert_eq!(totals.running_tokens, 300);
+        assert_eq!(totals.running_cached_tokens, 120);
+        assert_eq!(totals.token_metrics.accounted_total_token_count, 300);
+        assert_eq!(totals.token_metrics.cached_token_count, 120);
+        assert_eq!(totals.token_metrics.metrics_status, "available");
+        assert_eq!(totals.token_metrics.metrics_freshness, "fresh");
+        assert_eq!(totals.token_metrics.metrics_reason, None);
+    }
+
+    fn project_card(
+        id: &str,
+        running_issues: Vec<RunningIssueSummary>,
+        token_metrics: DashboardTokenMetrics,
+    ) -> ProjectDashboardCard {
+        ProjectDashboardCard {
+            project_id: id.into(),
+            name: id.into(),
+            enabled: true,
+            active_count: running_issues.len(),
+            parked_count: 0,
+            terminal_count: 0,
+            runner_health: "active".into(),
+            last_event: "none".into(),
+            capacity: ProjectCapacity {
+                max_sessions: 1,
+                running_sessions: running_issues.len() as u32,
+                available_sessions: u32::from(running_issues.is_empty()),
+            },
+            liveness: ProjectRuntimeLivenessResponse {
+                status: RuntimeLivenessStatus::HealthyCapacityAvailable,
+                reason: "test".into(),
+                primary_reason_code: "test".into(),
+                primary_reason_detail: "test".into(),
+                last_poll_at: None,
+                last_successful_candidate_scan_at: None,
+                capacity: ProjectCapacity {
+                    max_sessions: 1,
+                    running_sessions: running_issues.len() as u32,
+                    available_sessions: u32::from(running_issues.is_empty()),
+                },
+            },
+            cleanup_status: CleanupStatus::Clean,
+            running_tokens: running_issues.iter().map(|issue| issue.token_count).sum(),
+            running_cached_tokens: running_issues
+                .iter()
+                .map(|issue| issue.cached_token_count)
+                .sum(),
+            recorded_tokens: token_metrics.accounted_total_token_count,
+            token_metrics,
+            running_cost_micros: 0,
+            recorded_cost_micros: 0,
+            running_issues,
+            self_defect_routes: Vec::new(),
+        }
+    }
+
+    fn running_issue_summary(
+        id: &str,
+        token_count: u64,
+        cached_token_count: u64,
+        status: &str,
+    ) -> RunningIssueSummary {
+        RunningIssueSummary {
+            project_id: "symphony".into(),
+            project_name: "Symphony".into(),
+            issue_id: id.into(),
+            identifier: format!("SYM-{id}"),
+            title: id.into(),
+            display_status: "running".into(),
+            session_id: Some(format!("session-{id}")),
+            preferred_runner_session_id: Some(format!("session-{id}")),
+            provider_mode: Some(crate::state::RuntimeProviderMode::OmpAcp),
+            provider_id: Some("omp".into()),
+            process_id: None,
+            process_alive: None,
+            lifecycle_stage: Some(LifecycleStage::Running),
+            stage: Some(RunnerStage::Running),
+            agent: Some("build".into()),
+            model: Some("gpt-5.5".into()),
+            active_agent: Some("build".into()),
+            active_model: Some("gpt-5.5".into()),
+            token_count,
+            cached_token_count,
+            token_metrics: token_metrics(token_count, cached_token_count, status),
+            cost_micros: 0,
+            subagents_used: 0,
+            running_tool_count: 0,
+            pending_tool_count: 0,
+            todo_count: 0,
+            started_at_ms: None,
+            duration_ms: None,
+            last_event: None,
+            runtime_failure_kind: None,
+            acp_frame_count: 0,
+            session_evidence_refs: Vec::new(),
+            silence_observed: false,
+            worktree_path: None,
+        }
     }
 
     fn token_metrics(total: u64, cached: u64, status: &str) -> DashboardTokenMetrics {

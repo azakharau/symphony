@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use crate::{
     config::RootConfig,
     runner::{
-        RunnerSessionTreeActivity, RunnerSessionTreeMetrics, read_omp_session_tree_metrics,
-        read_session_tree_activity,
+        RunnerSessionTreeActivity, RunnerSessionTreeMetrics, read_omp_session_tree_activity,
+        read_omp_session_tree_metrics, read_session_tree_activity,
     },
     state::{
         CleanupStatus, EvalRunRecord, GitRefRecord, IssueStateRecord, LifecycleStage,
@@ -1158,14 +1158,8 @@ async fn session_detail(
     };
     let process_id = session.process_id;
     let process_alive = process_alive(process_id).await;
-    let (activity, activity_error) = match runner_archive_database_path {
-        Some(path) => match read_session_tree_activity(path.clone(), &session.session_id, 40).await
-        {
-            Ok(activity) => (activity, None),
-            Err(error) => (None, Some(error.to_string())),
-        },
-        None => (None, None),
-    };
+    let (activity, activity_error) =
+        session_activity(&session, runner_archive_database_path, process_alive).await;
     let token_metrics = DashboardTokenMetrics::from_session(&session);
     let cached_token_count = token_metrics.cached_token_count;
     let token_count = token_metrics.accounted_total_token_count;
@@ -1206,6 +1200,49 @@ async fn session_detail(
         activity,
         activity_error: activity_error.or(omp_activity_error),
     })
+}
+
+async fn session_activity(
+    session: &RunnerSessionRecord,
+    runner_archive_database_path: Option<&PathBuf>,
+    process_alive: Option<bool>,
+) -> (Option<RunnerSessionTreeActivity>, Option<String>) {
+    if let Some(path) = runner_archive_database_path {
+        match read_session_tree_activity(path.clone(), &session.session_id, 40).await {
+            Ok(Some(activity)) => return (Some(activity), None),
+            Ok(None) => {}
+            Err(error) => return (None, Some(format!("parse failed: {error}"))),
+        }
+    }
+
+    if session.provider_mode == crate::state::RuntimeProviderMode::OmpAcp {
+        return match read_omp_session_tree_activity(&session.session_id, 40).await {
+            Ok(Some(activity)) => (Some(activity), None),
+            Ok(None) => (
+                None,
+                Some(omp_activity_absence_reason(session, process_alive)),
+            ),
+            Err(error) => (None, Some(format!("parse failed: {error}"))),
+        };
+    }
+
+    (
+        None,
+        Some("not exposed by provider: runner archive activity is not configured".into()),
+    )
+}
+
+fn omp_activity_absence_reason(
+    session: &RunnerSessionRecord,
+    process_alive: Option<bool>,
+) -> String {
+    if process_alive == Some(false)
+        || matches!(session.stage, RunnerStage::Failed | RunnerStage::Completed)
+        || !matches!(session.lifecycle_stage, LifecycleStage::Running)
+    {
+        return "stale: OMP JSONL activity was not observed for this stopped runner session".into();
+    }
+    "not yet observed: OMP JSONL activity for this session was not found".into()
 }
 
 async fn process_alive(process_id: Option<u32>) -> Option<bool> {

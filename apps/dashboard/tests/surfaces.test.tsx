@@ -399,6 +399,10 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("push/merge");
     expect(html).not.toContain("OpenCode activity updated</dd>");
     expect(html).not.toContain(">medium<");
+    expect(html).not.toContain("Agent tree is unavailable for this session.");
+    expect(html).not.toContain("Todo details are unavailable; only aggregate todo counts are exposed.");
+    expect(html).not.toContain("No timeline activity is available; lifecycle stage history is shown above.");
+    expect(html).not.toContain("No running, pending, or recent tool events were reported.");
   });
 
   test("issue inspector uses OMP update event timestamp when activity is unavailable", () => {
@@ -426,6 +430,51 @@ describe("dashboard surfaces", () => {
     expect(inspector).toContain("last update unavailable");
   });
 
+  test("issue inspector renders exact activity source limitations", () => {
+    const reasons = [
+      "not exposed by provider: runner archive activity is not configured",
+      "not yet observed: OMP JSONL activity for this session was not found",
+      "stale: OMP JSONL activity was not observed for this stopped runner session",
+      "parse failed: runner archive error: parse failed: OMP JSONL line 1",
+    ];
+
+    for (const reason of reasons) {
+      const issue = JSON.parse(JSON.stringify(acceptanceProject.active_issues[0])) as typeof acceptanceProject.active_issues[number];
+      issue.runner_sessions[0].activity = null;
+      issue.runner_sessions[0].activity_error = reason;
+
+      const html = render(<IssueInspector issue={issue} />);
+
+      expect(html).toContain(reason);
+      expect(html).not.toContain("Agent tree is unavailable for this session.");
+      expect(html).not.toContain("Todo details are unavailable; only aggregate todo counts are exposed.");
+      expect(html).not.toContain("No timeline activity is available; lifecycle stage history is shown above.");
+      expect(html).not.toContain("No running, pending, or recent tool events were reported.");
+    }
+  });
+
+  test("issue inspector labels observed empty OMP sections precisely", () => {
+    const issue = JSON.parse(JSON.stringify(acceptanceProject.active_issues[0])) as typeof acceptanceProject.active_issues[number];
+    issue.runner_sessions[0].activity = {
+      root_session_id: "empty-omp",
+      sessions: [],
+      subagents: [],
+      todos: [],
+      timeline: [],
+      running_tool_count: 0,
+      pending_tool_count: 0,
+      last_updated_ms: null,
+    };
+    issue.runner_sessions[0].activity_error = null;
+
+    const html = render(<IssueInspector issue={issue} />);
+
+    expect(html).toContain("not yet observed: OMP worker activity has not been reported.");
+    expect(html).toContain("not yet observed: OMP todo activity has not been reported.");
+    expect(html).toContain("not yet observed: OMP tool activity has not been reported.");
+    expect(html).toContain("not yet observed: OMP timeline activity has not been reported.");
+  });
+
   test("issue inspector renders OMP ACP blocker telemetry with clear unavailable sources", () => {
     const html = render(<IssueInspector issue={failedProject.active_issues[0]} />);
     const blocker = sectionText(html, "Blocker and failure state", "Debug details");
@@ -439,7 +488,7 @@ describe("dashboard surfaces", () => {
     expect(html).toContain(">5 frames</dd>");
     expect(html).toContain("sdk:auth");
     expect(html).toContain("bounded activity unavailable for exited process");
-    expect(html).toContain("No running, pending, or recent tool events were reported.");
+    expect(html).not.toContain("No running, pending, or recent tool events were reported.");
     expect(blocker).toContain("Blocker and failure state");
     expect(blocker).toContain("restart supervised runner · runtime process exit");
     expect(blocker).not.toContain("runtime_process_exit");

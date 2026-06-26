@@ -126,7 +126,7 @@ function LifecycleTimeline({ issue, session, events }: { issue: IssueDetail; ses
       {events.length ? events.map((event) => <TimelineItem key={`${event.session_id}-${event.part_id}`} event={event} />) : (
         <li className="relative pl-5 text-sm text-slate-600">
           <span className="absolute -left-[0.35rem] top-1 h-2.5 w-2.5 rounded-full bg-slate-300" aria-hidden />
-          No timeline activity is available; lifecycle stage history is shown above.
+          {activityEmptyReason(session, "timeline")}
         </li>
       )}
     </ol>
@@ -162,7 +162,7 @@ function GitSection({ issue, session }: { issue: IssueDetail; session?: RunnerSe
 function TodosTab({ issue }: { issue: IssueDetail }) {
   const session = currentRunnerSession(issue);
   const todos = session?.activity?.todos ?? [];
-  if (!todos.length) return <Limited message={session?.activity_error ?? "Todo details are unavailable; only aggregate todo counts are exposed."} />;
+  if (!todos.length) return <Limited message={activityEmptyReason(session, "todo")} />;
   return (
     <ol className="grid gap-1.5">
       {todos.map((todo) => (
@@ -227,7 +227,7 @@ export function ActivityTimeline({ events }: { events: TimelineEvent[] }) {
 }
 
 export function ToolsByAgent({ issue, events }: { issue: IssueDetail; events: TimelineEvent[] }) {
-  if (!events.length) return <Limited message="No running, pending, or recent tool events were reported." />;
+  if (!events.length) return <Limited message={activityEmptyReason(currentRunnerSession(issue), "tool")} />;
   const activity = currentRunnerSession(issue)?.activity;
   const agents = (activity?.sessions ?? []).concat(activity?.subagents ?? []);
   const agentsById = new Map(agents.map((agent) => [agent.session_id, agent]));
@@ -290,7 +290,7 @@ function AgentsTab({ issue }: { issue: IssueDetail }) {
 export function AgentsTree({ issue }: { issue: IssueDetail }) {
   const activity = currentRunnerSession(issue)?.activity;
   const agents = (activity?.sessions ?? []).concat(activity?.subagents ?? []);
-  if (!agents.length) return <Limited message="Agent tree is unavailable for this session." />;
+  if (!agents.length) return <Limited message={activityEmptyReason(currentRunnerSession(issue), "worker")} />;
   const activeSessionIds = new Set(
     (activity?.timeline ?? [])
       .filter((event) => isActiveStatus(event.status))
@@ -379,13 +379,27 @@ function executionSummary(issue: IssueDetail, session: RunnerSession | undefined
 
 function latestMeaningfulActivity(events: TimelineEvent[]): string {
   const latestTimelineEvent = sortTimelineEvents(events).at(-1);
-  if (!latestTimelineEvent) return "No bounded timeline activity is available.";
+  if (!latestTimelineEvent) return "not yet observed: OMP timeline activity has not been reported.";
   return `Latest activity: ${latestTimelineEvent.summary || latestTimelineEvent.title || humanizeLabel(latestTimelineEvent.kind)}.`;
 }
 
 function sourceUnavailable(session: RunnerSession | undefined, fallback: string): string {
   if (!session) return "No runner session reported by API";
   return session.activity_error ?? fallback;
+}
+
+function activityEmptyReason(session: RunnerSession | undefined, source: "timeline" | "todo" | "tool" | "worker"): string {
+  if (!session?.activity) return sourceUnavailable(session, `${source} activity source unavailable`);
+  switch (source) {
+    case "timeline":
+      return "not yet observed: OMP timeline activity has not been reported.";
+    case "todo":
+      return "not yet observed: OMP todo activity has not been reported.";
+    case "tool":
+      return "not yet observed: OMP tool activity has not been reported.";
+    case "worker":
+      return "not yet observed: OMP worker activity has not been reported.";
+  }
 }
 
 function hasOperationalBlocker(issue: IssueDetail, session?: RunnerSession): boolean {

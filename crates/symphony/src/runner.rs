@@ -40,7 +40,7 @@ use lifecycle::AcpChildLifecycle;
 pub use lifecycle::ProcessTreeTerminationEvidence;
 pub(crate) use lifecycle::terminate_process_tree;
 pub use omp::{OmpAcpTelemetry, classify_omp_acp_failure_kind};
-pub use omp_metrics::read_omp_session_tree_metrics;
+pub use omp_metrics::{read_omp_session_tree_activity, read_omp_session_tree_metrics};
 use prompt::{
     build_issue_prompt, commit_policy_text, delegated_subagent_contract_text,
     mcp_tool_loop_guard_text, validation_policy_text,

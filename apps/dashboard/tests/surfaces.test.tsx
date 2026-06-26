@@ -66,6 +66,9 @@ describe("dashboard surfaces", () => {
     expect(running).not.toContain("/home/agent/.symphony/workspaces");
     expect(health).toContain("running sessions / max slots");
     expect(health).toContain("waiting for quota reset");
+    expect(health).not.toContain("running tokens");
+    expect(health).not.toContain("metrics unavailable");
+    expect(health).not.toContain("non-cache");
     expect(blockers).toContain("Atlas");
     expect(blockers).toContain("blocked");
     expect(blockers).toContain("waiting for quota reset");

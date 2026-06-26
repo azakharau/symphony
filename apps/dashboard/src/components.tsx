@@ -273,7 +273,7 @@ function ProjectTable({ projects, detailed = false }: { projects: DashboardProje
 function ProjectHealthCapacityTable({ projects }: { projects: DashboardProjectCard[] }) {
   return (
     <div className="overflow-x-auto sm:-mx-1 sm:px-1">
-      <table className="health-table responsive-table w-full min-w-[720px] text-left text-sm">
+      <table className="health-table responsive-table w-full min-w-[640px] text-left text-sm">
         <thead className="text-xs uppercase tracking-wide text-slate-500">
           <tr>
             <th className="px-3 py-2">project</th>
@@ -283,7 +283,6 @@ function ProjectHealthCapacityTable({ projects }: { projects: DashboardProjectCa
             <th className="px-3 py-2">active</th>
             <th className="px-3 py-2">blocked</th>
             <th className="px-3 py-2">primary reason</th>
-            <th className="px-3 py-2">running tokens</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
@@ -296,7 +295,6 @@ function ProjectHealthCapacityTable({ projects }: { projects: DashboardProjectCa
               <td className="px-3 py-3">{project.active_count}</td>
               <td className="px-3 py-3">{project.parked_count}</td>
               <td className="px-3 py-3">{humanizeLabel(project.liveness.primary_reason_detail || project.liveness.reason)}</td>
-              <td className="px-3 py-3"><TokenCell total={project.running_tokens} cached={project.running_cached_tokens} metrics={project.token_metrics} /></td>
             </tr>
           ))}
         </tbody>

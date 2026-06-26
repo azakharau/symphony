@@ -9,12 +9,12 @@ mod session_metrics;
 mod types;
 mod worktree;
 
-use std::process::ExitStatus;
+use std::{io::ErrorKind, path::Path, process::ExitStatus};
 
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::{
-    io::BufReader,
+    io::{AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout},
     task::JoinHandle,
 };
@@ -238,6 +238,8 @@ fn spawn_prompt_reader(
     permission_policy: &PermissionPolicy,
     prompt_request_id: u64,
     warning: &'static str,
+    session_id: String,
+    worktree_path: std::path::PathBuf,
     mut child: Child,
     mut stdin: ChildStdin,
     mut stdout: BufReader<ChildStdout>,
@@ -257,6 +259,7 @@ fn spawn_prompt_reader(
             handle_reader_error(error, warning, &mut child).await;
         }
         let _ = child.wait().await;
+        write_missing_handoff_sidecar_blocker_if_absent(&worktree_path, &session_id, warning).await;
         stderr_drain.abort();
     });
 }
@@ -274,6 +277,8 @@ fn prompt_with_session_binding(prompt: &str, session_id: &str) -> String {
 fn spawn_stream_drain(
     permission_policy: &PermissionPolicy,
     warning: &'static str,
+    session_id: String,
+    worktree_path: std::path::PathBuf,
     mut child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
@@ -285,8 +290,73 @@ fn spawn_stream_drain(
             handle_reader_error(error, warning, &mut child).await;
         }
         let _ = child.wait().await;
+        write_missing_handoff_sidecar_blocker_if_absent(&worktree_path, &session_id, warning).await;
         stderr_drain.abort();
     });
+}
+
+async fn write_missing_handoff_sidecar_blocker_if_absent(
+    worktree_path: &Path,
+    session_id: &str,
+    reason: &str,
+) {
+    let path = handoff_sidecar_path(worktree_path);
+
+    let handoff = RunnerHandoff {
+        session_id: session_id.to_owned(),
+        lifecycle_stages: vec![RunnerStage::Running, RunnerStage::Failed],
+        subagents: Vec::new(),
+        eval_results: Vec::new(),
+        changed_files: Vec::new(),
+        git: None,
+        risks: vec![reason.to_owned()],
+        stop_reason: RunnerStopReason::ProviderBlocker {
+            message:
+                ".symphony/runner-handoff.json was not produced before the runner ACP process ended"
+                    .into(),
+        },
+    };
+    let payload = match serde_json::to_vec_pretty(&handoff) {
+        Ok(payload) => payload,
+        Err(error) => {
+            warn!(error = %error, "could not serialize missing handoff sidecar blocker");
+            return;
+        }
+    };
+    if let Some(parent) = path.parent()
+        && let Err(error) = tokio::fs::create_dir_all(parent).await
+    {
+        warn!(
+            error = %error,
+            path = %parent.display(),
+            "could not create runner handoff sidecar directory"
+        );
+        return;
+    }
+    match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .await
+    {
+        Ok(mut file) => {
+            if let Err(error) = file.write_all(&payload).await {
+                warn!(
+                    error = %error,
+                    path = %path.display(),
+                    "could not write missing handoff sidecar blocker"
+                );
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            warn!(
+                error = %error,
+                path = %path.display(),
+                "could not create missing handoff sidecar blocker"
+            );
+        }
+    }
 }
 
 async fn handle_reader_error(error: RunnerError, warning: &'static str, child: &mut Child) {
@@ -444,6 +514,8 @@ impl RunnerLauncher for StdioRunnerLauncher {
             &spec.permission_policy,
             prompt_request_id,
             "runner ACP prompt stream ended with error",
+            session_id.clone(),
+            spec.cwd.clone(),
             process,
             stdin,
             stdout,
@@ -497,6 +569,8 @@ impl RunnerLauncher for StdioRunnerLauncher {
         spawn_stream_drain(
             &spec.permission_policy,
             "runner ACP resumed stream ended with error",
+            session.session_id.clone(),
+            spec.cwd.clone(),
             process,
             stdin,
             stdout,
@@ -576,6 +650,8 @@ impl RunnerLauncher for StdioRunnerLauncher {
             &spec.permission_policy,
             prompt_request_id,
             "runner ACP repair prompt stream ended with error",
+            session.session_id.clone(),
+            spec.cwd.clone(),
             process,
             stdin,
             stdout,
@@ -653,6 +729,8 @@ impl RunnerLauncher for StdioRunnerLauncher {
             &spec.permission_policy,
             prompt_request_id,
             "runner ACP continuation prompt stream ended with error",
+            session.session_id.clone(),
+            spec.cwd.clone(),
             process,
             stdin,
             stdout,
@@ -1589,6 +1667,62 @@ mod tests {
         assert_eq!(git.head_sha.as_deref(), Some("0123456789abcdef"));
         assert_eq!(git.worktree_path, "/tmp/worktree");
         assert_eq!(git.pr_url.as_deref(), Some("https://example.test/pr/1"));
+    }
+
+    #[tokio::test]
+    async fn writes_provider_blocker_handoff_when_prompt_reader_finishes_without_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let worktree = dir.path();
+
+        write_missing_handoff_sidecar_blocker_if_absent(
+            worktree,
+            "ses-missing-sidecar",
+            "runner ACP prompt stream ended with error",
+        )
+        .await;
+
+        let sidecar = handoff_sidecar_path(worktree);
+        let input = tokio::fs::read_to_string(&sidecar)
+            .await
+            .expect("fallback sidecar");
+        let handoff: RunnerHandoff = serde_json::from_str(&input).expect("typed fallback handoff");
+
+        assert_eq!(handoff.session_id, "ses-missing-sidecar");
+        assert_eq!(
+            handoff.lifecycle_stages,
+            vec![RunnerStage::Running, RunnerStage::Failed]
+        );
+        assert!(matches!(
+            handoff.stop_reason,
+            RunnerStopReason::ProviderBlocker { ref message }
+                if message == ".symphony/runner-handoff.json was not produced before the runner ACP process ended"
+        ));
+        assert_eq!(handoff.risks, ["runner ACP prompt stream ended with error"]);
+    }
+
+    #[tokio::test]
+    async fn missing_handoff_fallback_does_not_overwrite_existing_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let worktree = dir.path();
+        let sidecar = handoff_sidecar_path(worktree);
+        tokio::fs::create_dir_all(sidecar.parent().expect("sidecar parent"))
+            .await
+            .expect("sidecar directory");
+        tokio::fs::write(&sidecar, "real runner handoff")
+            .await
+            .expect("real sidecar");
+
+        write_missing_handoff_sidecar_blocker_if_absent(
+            worktree,
+            "ses-fallback",
+            "runner ACP prompt stream ended with error",
+        )
+        .await;
+
+        let input = tokio::fs::read_to_string(&sidecar)
+            .await
+            .expect("sidecar contents");
+        assert_eq!(input, "real runner handoff");
     }
 }
 

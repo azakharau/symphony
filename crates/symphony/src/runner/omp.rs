@@ -144,6 +144,8 @@ impl StdioOmpAcpLauncher {
                 spawn_stream_drain(
                     &spec.permission_policy,
                     "OMP ACP stream drain ended with error",
+                    session_id.clone(),
+                    spec.cwd.clone(),
                     process,
                     stdin,
                     stdout,
@@ -161,6 +163,8 @@ impl StdioOmpAcpLauncher {
                     &spec.permission_policy,
                     next_id,
                     "OMP ACP prompt stream ended with error",
+                    session_id.clone(),
+                    spec.cwd.clone(),
                     process,
                     stdin,
                     stdout,

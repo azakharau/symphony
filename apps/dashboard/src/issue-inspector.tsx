@@ -515,9 +515,20 @@ function sortTimelineEvents(events: TimelineEvent[]): TimelineEvent[] {
 
 
 function sessionLastUpdated(session?: RunnerSession): string {
-  const updated = session?.activity?.last_updated_ms;
+  const updated = session?.activity?.last_updated_ms ?? runnerEventUpdatedMs(session?.last_event);
   if (!updated) return "last update unavailable";
   return `updated ${formatEpochMs(updated)}`;
+}
+
+function runnerEventUpdatedMs(lastEvent?: string | null): number | null {
+  const raw = lastEvent?.startsWith("omp_jsonl_updated:")
+    ? lastEvent.slice("omp_jsonl_updated:".length)
+    : lastEvent?.startsWith("runner_archive_updated:")
+      ? lastEvent.slice("runner_archive_updated:".length)
+      : null;
+  if (!raw) return null;
+  const updated = Number(raw);
+  return Number.isFinite(updated) && updated > 0 ? updated : null;
 }
 
 

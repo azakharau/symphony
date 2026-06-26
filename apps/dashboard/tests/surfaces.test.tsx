@@ -141,6 +141,63 @@ describe("dashboard surfaces", () => {
     expect(running).toContain("metrics available");
   });
 
+  test("overview top token summary ignores idle projects with unavailable metrics", () => {
+    const dashboard = JSON.parse(JSON.stringify(acceptanceDashboard)) as typeof acceptanceDashboard;
+    const activeMetrics = {
+      accounted_total_token_count: 561,
+      non_cached_token_count: 155,
+      cached_token_count: 406,
+      input_token_count: 120,
+      output_token_count: 30,
+      reasoning_token_count: 5,
+      cache_read_token_count: 400,
+      cache_write_token_count: 6,
+      reported_total_token_count: 700,
+      metrics_status: "available",
+      metrics_source: "persisted_split_metrics",
+      metrics_freshness: "fresh",
+      metrics_reason: null,
+    };
+    const idleProject = dashboard.projects[1];
+    idleProject.token_metrics = {
+      accounted_total_token_count: 0,
+      non_cached_token_count: 0,
+      cached_token_count: 0,
+      input_token_count: 0,
+      output_token_count: 0,
+      reasoning_token_count: 0,
+      cache_read_token_count: 0,
+      cache_write_token_count: 0,
+      reported_total_token_count: 0,
+      metrics_status: "unavailable",
+      metrics_source: "none",
+      metrics_freshness: "unavailable",
+      metrics_reason: "no token metrics collected",
+    };
+    const issue = dashboard.projects[0].running_issues[0];
+    dashboard.projects = [dashboard.projects[0], idleProject];
+    dashboard.totals.running_issue_count = 1;
+    dashboard.totals.running_tokens = 561;
+    dashboard.totals.running_cached_tokens = 406;
+    dashboard.totals.token_metrics = activeMetrics;
+    dashboard.projects[0].running_tokens = 561;
+    dashboard.projects[0].running_cached_tokens = 406;
+    dashboard.projects[0].token_metrics = activeMetrics;
+    issue.token_count = 561;
+    issue.cached_token_count = 406;
+    issue.token_metrics = activeMetrics;
+
+    const html = render(<OverviewSurface dashboard={dashboard} quota={quotaNormal} />);
+    const running = sectionText(html, "Running now", "Project health and capacity");
+
+    expect(running).toContain("561 / 700 tokens");
+    expect(running).toContain("406 cached (read 400 · write 6)");
+    expect(running).toContain("metrics available");
+    expect(running).not.toContain("metrics degraded");
+    expect(running).not.toContain("no token metrics collected");
+  });
+
+
   test("overview does not imply zero cached tokens when token metrics are unavailable", () => {
     const dashboard = JSON.parse(JSON.stringify(acceptanceDashboard)) as typeof acceptanceDashboard;
     dashboard.totals.token_metrics = {
@@ -318,6 +375,8 @@ describe("dashboard surfaces", () => {
     expect(inspector).toContain(">runner ACP</dd>");
     expect(inspector).toContain("provider runner-primary");
     expect(inspector).toContain(">18 frames</dd>");
+
+
     expect(inspector).toContain(">duration</dt>");
     expect(inspector).toContain("<span class=\"tabular-nums\">1h 0m</span>");
     expect(html).toContain("sym-97-dashboard-surfaces");
@@ -325,6 +384,31 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("push/merge");
     expect(html).not.toContain("OpenCode activity updated</dd>");
     expect(html).not.toContain(">medium<");
+  });
+
+  test("issue inspector uses OMP update event timestamp when activity is unavailable", () => {
+    const issue = JSON.parse(JSON.stringify(acceptanceProject.active_issues[0])) as typeof acceptanceProject.active_issues[number];
+    issue.runner_sessions[0].activity = null;
+    issue.runner_sessions[0].activity_error = "bounded activity unavailable";
+    issue.runner_sessions[0].last_event = "omp_jsonl_updated:1781883600000";
+
+    const html = render(<IssueInspector issue={issue} />);
+    const inspector = sectionText(html, "Current runner status", "Debug details");
+
+    expect(inspector).toContain("updated");
+    expect(inspector).not.toContain("last update unavailable");
+  });
+
+  test("issue inspector keeps missing update timestamp explicit", () => {
+    const issue = JSON.parse(JSON.stringify(acceptanceProject.active_issues[0])) as typeof acceptanceProject.active_issues[number];
+    issue.runner_sessions[0].activity = null;
+    issue.runner_sessions[0].activity_error = "bounded activity unavailable";
+    issue.runner_sessions[0].last_event = "component tests passed";
+
+    const html = render(<IssueInspector issue={issue} />);
+    const inspector = sectionText(html, "Current runner status", "Debug details");
+
+    expect(inspector).toContain("last update unavailable");
   });
 
   test("issue inspector renders OMP ACP blocker telemetry with clear unavailable sources", () => {

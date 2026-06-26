@@ -247,7 +247,6 @@ function ProjectTable({ projects, detailed = false }: { projects: DashboardProje
             <th className="px-3 py-2">blocked</th>
             {detailed ? <th className="px-3 py-2">terminal</th> : null}
             <th className="px-3 py-2">primary reason</th>
-            <th className="px-3 py-2">last event</th>
             <th className="px-3 py-2">cleanup</th>
           </tr>
         </thead>
@@ -262,7 +261,6 @@ function ProjectTable({ projects, detailed = false }: { projects: DashboardProje
               <td className="px-3 py-3">{project.parked_count}</td>
               {detailed ? <td className="px-3 py-3">{project.terminal_count}</td> : null}
               <td className="px-3 py-3">{humanizeLabel(project.liveness.primary_reason_detail || project.liveness.reason)}</td>
-              <td className="px-3 py-3">{humanizeLabel(project.last_event)}</td>
               <td className="px-3 py-3">{humanizeLabel(project.cleanup_status)}</td>
             </tr>
           ))}

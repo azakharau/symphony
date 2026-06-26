@@ -276,13 +276,28 @@ describe("dashboard surfaces", () => {
     expect(running).not.toContain("opencode_db_updated");
   });
 
-  test("projects surface renders table-first comparison", () => {
-    const html = render(<ProjectsSurface dashboard={acceptanceDashboard} />);
+  test("projects surface hides raw last-event values from primary table", () => {
+    const dashboard = JSON.parse(JSON.stringify(acceptanceDashboard)) as typeof acceptanceDashboard;
+    dashboard.projects[0].last_event = "linear_terminal_reconciled";
+    dashboard.projects[1].last_event = "omp_jsonl_updated:1781883600000";
+
+    const html = render(<ProjectsSurface dashboard={dashboard} />);
 
     expect(html).toContain(">slots</th>");
+    expect(html).toContain(">health</th>");
+    expect(html).toContain(">active</th>");
+    expect(html).toContain(">blocked</th>");
+    expect(html).toContain(">primary reason</th>");
+    expect(html).toContain(">cleanup</th>");
     expect(html).toContain("title=\"running/slots\"");
     expect(html).not.toContain(">running/slots</th>");
-    expect(html).toContain("provider quota exhausted");
+    expect(html).toContain("waiting for quota reset");
+    expect(html).toContain("pending");
+    expect(html).not.toContain("provider quota exhausted");
+    expect(html).not.toContain(">last event</th>");
+    expect(html).not.toContain("linear terminal reconciled");
+    expect(html).not.toContain("linear_terminal_reconciled");
+    expect(html).not.toContain("omp_jsonl_updated");
   });
 
   test("project detail prioritizes current execution and concise queue blockers", () => {

@@ -26,6 +26,28 @@ test.describe("SYM-126 dashboard responsive smoke", () => {
     });
   }
 
+  test("projects hides raw last-event fields", async ({ page }, testInfo) => {
+    await page.goto("/projects");
+    await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
+    await expect(page.locator(".project-table")).toBeVisible();
+    await expect(page.getByText(/last event/i)).toHaveCount(0);
+
+    const bodyText = (await page.locator("body").textContent()) ?? "";
+    expect(bodyText).not.toMatch(/linear terminal reconciled/i);
+    expect(bodyText).not.toMatch(/linear_terminal_reconciled/i);
+    expect(bodyText).not.toMatch(/omp_jsonl_updated/i);
+
+    const mobileLabels = await page.locator(".project-table td").evaluateAll((cells) =>
+      cells.map((cell) => getComputedStyle(cell, "::before").content.replace(/^"|"$/g, "")),
+    );
+    expect(mobileLabels).not.toContain("Last event");
+
+    await page.screenshot({
+      path: `/tmp/symphony-dashboard-acceptance-20260626/projects-${testInfo.project.name}.png`,
+      fullPage: true,
+    });
+  });
+
   test("mobile routes render list-first responsive tables and favicon", async ({ page, request }, testInfo) => {
     test.skip(testInfo.project.name !== "mobile", "responsive table smoke only runs on the mobile project");
 

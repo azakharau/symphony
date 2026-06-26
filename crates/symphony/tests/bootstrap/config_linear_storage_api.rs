@@ -1244,7 +1244,7 @@ async fn dashboard_api_orders_active_runner_session_before_stale_failures() {
         issue.preferred_runner_session_id.as_deref(),
         Some("aa-running")
     );
-    assert_eq!(card.runner_health, "active");
+    assert_eq!(card.runner_health, "active/capacity_available");
     assert_eq!(
         card.running_issues[0].session_id.as_deref(),
         Some("aa-running")
@@ -1726,7 +1726,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
     "recorded_tokens": 4096,
     "token_metrics": {
       "accounted_total_token_count": 4096,
-      "non_cached_token_count": 0,
+      "non_cached_token_count": 4096,
       "cached_token_count": 0,
       "input_token_count": 0,
       "output_token_count": 0,
@@ -1735,7 +1735,9 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
       "cache_write_token_count": 0,
       "reported_total_token_count": 100,
       "metrics_status": "degraded",
-      "metrics_source": "multiple"
+      "metrics_source": "test_total",
+      "metrics_freshness": "unknown",
+      "metrics_reason": "only aggregate token events are available"
     },
     "running_cost_micros": 123456,
     "recorded_cost_micros": 123456
@@ -1759,7 +1761,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
         "status": "inactive_runtime",
         "reason": "runtime has not reported a poll for this enabled project",
         "primary_reason_code": "active_runner_session",
-        "primary_reason_detail": "an runner session is actively executing",
+        "primary_reason_detail": "runner session is actively executing; 1 dispatch slot available",
         "last_poll_at": null,
         "last_successful_candidate_scan_at": null,
         "capacity": {
@@ -1774,7 +1776,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
       "recorded_tokens": 4096,
       "token_metrics": {
         "accounted_total_token_count": 4096,
-        "non_cached_token_count": 0,
+        "non_cached_token_count": 4096,
         "cached_token_count": 0,
         "input_token_count": 0,
         "output_token_count": 0,
@@ -1783,7 +1785,9 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
         "cache_write_token_count": 0,
         "reported_total_token_count": 100,
         "metrics_status": "degraded",
-        "metrics_source": "multiple"
+        "metrics_source": "test_total",
+        "metrics_freshness": "unknown",
+        "metrics_reason": "only aggregate token events are available"
       },
       "running_cost_micros": 123456,
       "recorded_cost_micros": 123456,
@@ -1811,7 +1815,7 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
           "cached_token_count": 0,
           "token_metrics": {
             "accounted_total_token_count": 4096,
-            "non_cached_token_count": 0,
+            "non_cached_token_count": 4096,
             "cached_token_count": 0,
             "input_token_count": 0,
             "output_token_count": 0,
@@ -1820,7 +1824,9 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
             "cache_write_token_count": 0,
             "reported_total_token_count": 100,
             "metrics_status": "degraded",
-            "metrics_source": "test_total"
+            "metrics_source": "test_total",
+            "metrics_freshness": "unknown",
+            "metrics_reason": "only aggregate token events are available"
           },
           "cost_micros": 123456,
           "subagents_used": 2,

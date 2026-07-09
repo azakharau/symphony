@@ -8,7 +8,7 @@ use crate::{
         BlockerRecord, CleanupStatus, EvalRunRecord, FailureRecord, GitRefRecord, IssueStateRecord,
         LifecycleStage, ProjectRuntimeLivenessRecord, ProjectStateRecord, RunnerSessionRecord,
         RunnerStage, RunnerStageEventRecord, RuntimeFailureKind, RuntimeLivenessStatus,
-        RuntimeProviderMode,
+        RuntimeProviderMode, StageInvocationRecord,
     },
     storage::StorageError,
 };
@@ -60,6 +60,25 @@ pub(super) fn issue_from_row(row: &Row) -> Result<IssueStateRecord, StorageError
         failure: decode_optional::<FailureRecord>(failure_json)?,
         git_ref: decode_optional::<GitRefRecord>(git_ref_json)?,
         cleanup_status: parse_cleanup(&cleanup_status)?,
+    })
+}
+
+pub(super) fn stage_invocation_from_row(row: &Row) -> Result<StageInvocationRecord, StorageError> {
+    Ok(StageInvocationRecord {
+        project_id: row.get(0)?,
+        issue_id: row.get(1)?,
+        fingerprint: row.get(2)?,
+        state_id: row.get(3)?,
+        state_name: row.get(4)?,
+        issue_updated_at: row.get(5)?,
+        labels_hash: row.get(6)?,
+        blockers_hash: row.get(7)?,
+        selected_agent: row.get(8)?,
+        provider: row.get(9)?,
+        session_id: row.get(10)?,
+        status: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
     })
 }
 

@@ -84,6 +84,7 @@ impl LinearIssueNode {
             identifier: self.identifier,
             title: self.title,
             description: self.description,
+            state_id: self.state.id,
             state: self.state.name,
             priority: self.priority,
             branch_name: self.branch_name,
@@ -124,6 +125,8 @@ impl LinearMilestoneNode {
 
 #[derive(Debug, Deserialize)]
 struct WorkflowStateName {
+    #[serde(default)]
+    id: Option<String>,
     name: String,
 }
 

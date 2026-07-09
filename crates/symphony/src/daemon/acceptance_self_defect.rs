@@ -414,6 +414,7 @@ max_sessions = 1
             title: format!("{identifier} title"),
             description: Some("managed issue".into()),
             state: state.into(),
+            state_id: None,
             priority: Some(1),
             branch_name: None,
             url: None,

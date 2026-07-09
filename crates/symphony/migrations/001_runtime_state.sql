@@ -40,6 +40,28 @@ CREATE TABLE IF NOT EXISTS issues (
     FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS stage_invocations (
+    project_id TEXT NOT NULL,
+    issue_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    state_id TEXT,
+    state_name TEXT NOT NULL,
+    issue_updated_at TEXT,
+    labels_hash TEXT NOT NULL,
+    blockers_hash TEXT NOT NULL,
+    selected_agent TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    session_id TEXT,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (project_id, issue_id, fingerprint),
+    FOREIGN KEY (project_id, issue_id) REFERENCES issues(project_id, issue_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_stage_invocations_issue_status
+ON stage_invocations(project_id, issue_id, status, updated_at);
+
 CREATE TABLE IF NOT EXISTS runner_sessions (
     project_id TEXT NOT NULL,
     issue_id TEXT NOT NULL,

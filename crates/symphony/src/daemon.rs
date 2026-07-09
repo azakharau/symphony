@@ -31,6 +31,7 @@ use crate::{
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, IssueStateRecord, LifecycleStage,
         RunnerSessionRecord, RunnerStage, RuntimeLivenessStatus, SelfDefectResolutionState,
+        StageInvocationRecord,
     },
     storage::SqliteStore,
 };
@@ -152,6 +153,114 @@ impl DispatchCandidate {
         }
     }
 }
+
+fn stage_invocation_fingerprint(project: &ProjectConfig, issue: &LinearIssue) -> String {
+    stable_hash(&[
+        "stage-entry-v1",
+        &project.id,
+        &issue.id,
+        issue.state_id.as_deref().unwrap_or_default(),
+        &issue.state,
+        issue.updated_at.as_deref().unwrap_or_default(),
+    ])
+}
+
+fn stage_invocation_is_open(invocation: &StageInvocationRecord) -> bool {
+    !matches!(
+        invocation.status.as_str(),
+        "left_stage" | "completed" | "canceled"
+    )
+}
+
+fn stage_invocation_record(
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+    launch_spec: &crate::runner::RunnerLaunchSpec,
+    fingerprint: &str,
+) -> StageInvocationRecord {
+    StageInvocationRecord {
+        project_id: project.id.clone(),
+        issue_id: issue.id.clone(),
+        fingerprint: fingerprint.to_owned(),
+        state_id: issue.state_id.clone(),
+        state_name: issue.state.clone(),
+        issue_updated_at: issue.updated_at.clone(),
+        labels_hash: labels_hash(&issue.labels),
+        blockers_hash: blockers_hash(issue),
+        selected_agent: launch_spec.agent.clone(),
+        provider: launch_spec
+            .provider_id
+            .clone()
+            .unwrap_or_else(|| launch_spec.provider_mode.as_str().to_owned()),
+        session_id: None,
+        status: "reserved".into(),
+        created_at: None,
+        updated_at: None,
+    }
+}
+
+fn labels_hash(labels: &[String]) -> String {
+    let mut labels = labels.iter().map(String::as_str).collect::<Vec<_>>();
+    labels.sort_unstable();
+    stable_hash_values("labels-v1", labels)
+}
+
+fn blockers_hash(issue: &LinearIssue) -> String {
+    let mut blockers = issue
+        .blocked_by
+        .iter()
+        .map(|blocker| {
+            format!(
+                "{}\u{1f}{}\u{1f}{}",
+                blocker.id.as_deref().unwrap_or_default(),
+                blocker.identifier.as_deref().unwrap_or_default(),
+                blocker.state.as_deref().unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>();
+    blockers.sort_unstable();
+    stable_hash_owned_values("blockers-v1", &blockers)
+}
+
+fn stable_hash_values(prefix: &str, values: Vec<&str>) -> String {
+    let mut hash = FNV_OFFSET_BASIS;
+    update_stable_hash(&mut hash, prefix);
+    for value in values {
+        update_stable_hash(&mut hash, value);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn stable_hash_owned_values(prefix: &str, values: &[String]) -> String {
+    let mut hash = FNV_OFFSET_BASIS;
+    update_stable_hash(&mut hash, prefix);
+    for value in values {
+        update_stable_hash(&mut hash, value);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn stable_hash(values: &[&str]) -> String {
+    let mut hash = FNV_OFFSET_BASIS;
+    for value in values {
+        update_stable_hash(&mut hash, value);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn update_stable_hash(hash: &mut u64, value: &str) {
+    for byte in value.len().to_le_bytes() {
+        *hash ^= u64::from(byte);
+        *hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    for byte in value.as_bytes() {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(FNV_PRIME);
+    }
+}
+
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 pub async fn run_once_with_linear_client(
     config: &RootConfig,
@@ -344,6 +453,9 @@ async fn reconcile_project(
                     );
                     store.upsert_issue(&record).await?;
                 }
+                store
+                    .mark_latest_stage_invocation_status(&project.id, &issue.id, "left_stage")
+                    .await?;
             }
             Some(stage) if project.workflow.is_terminal_stage(stage) => {
                 if let Some(resolution) = self_defect_resolution_for_workflow_stage(stage) {
@@ -377,6 +489,24 @@ async fn reconcile_project(
                 let sessions_changed =
                     mark_issue_sessions_terminal(store, project, &issue, terminal_lifecycle_stage)
                         .await?;
+                let labels_hash = labels_hash(&issue.labels);
+                let blockers_hash = blockers_hash(&issue);
+                store
+                    .update_latest_stage_invocation_observation(
+                        &project.id,
+                        &issue.id,
+                        issue.updated_at.as_deref(),
+                        &labels_hash,
+                        &blockers_hash,
+                    )
+                    .await?;
+                store
+                    .mark_latest_stage_invocation_status(
+                        &project.id,
+                        &issue.id,
+                        terminal_lifecycle_stage.as_str(),
+                    )
+                    .await?;
                 if issue_changed || sessions_changed {
                     info!(
                         project_id = %project.id,
@@ -390,6 +520,9 @@ async fn reconcile_project(
             }
             Some(WorkflowStage::NeedOwnerInput) => {
                 let existing = store.issue(&project.id, &issue.id).await?;
+                store
+                    .mark_latest_stage_invocation_status(&project.id, &issue.id, "left_stage")
+                    .await?;
                 if has_new_owner_response(existing.as_ref(), &issue) {
                     info!(
                         project_id = %project.id,
@@ -515,6 +648,17 @@ async fn reconcile_project(
                     record.git_ref = existing.git_ref.clone().or(record.git_ref);
                     record.cleanup_status = existing.cleanup_status;
                 }
+                let labels_hash = labels_hash(&issue.labels);
+                let blockers_hash = blockers_hash(&issue);
+                store
+                    .update_latest_stage_invocation_observation(
+                        &project.id,
+                        &issue.id,
+                        issue.updated_at.as_deref(),
+                        &labels_hash,
+                        &blockers_hash,
+                    )
+                    .await?;
                 if latest_running_session_for_issue(store, &project.id, &issue.id)
                     .await?
                     .is_none()
@@ -737,33 +881,75 @@ async fn reconcile_project(
                         CleanupStatus::Clean,
                     );
                     store.upsert_issue(&record).await?;
-                } else if has_reusable_existing_session(store, &project.id, &issue.id).await? {
-                    info!(
-                        project_id = %project.id,
-                        issue = %issue.identifier,
-                        "existing runner session found; queued for capacity-gated resume"
-                    );
-                    let mut record = issue_record(
-                        project,
-                        &issue,
-                        LifecycleStage::Queued,
-                        None,
-                        CleanupStatus::Clean,
-                    );
-                    if let Some(existing) = &existing {
-                        record.failure.clone_from(&existing.failure);
-                        record.git_ref.clone_from(&existing.git_ref);
-                    }
-                    store.upsert_issue(&record).await?;
-                    mark_existing_session_queued(store, project, &issue).await?;
-                    eligible.push(DispatchCandidate::ExistingSession(issue));
                 } else {
-                    debug!(
-                        project_id = %project.id,
-                        issue = %issue.identifier,
-                        "Todo issue is eligible for dispatch"
-                    );
-                    eligible.push(DispatchCandidate::New(issue));
+                    let stage_fingerprint = stage_invocation_fingerprint(project, &issue);
+                    let latest_invocation = store
+                        .latest_stage_invocation_for_issue(&project.id, &issue.id)
+                        .await?;
+                    if latest_invocation
+                        .as_ref()
+                        .is_some_and(stage_invocation_is_open)
+                    {
+                        debug!(
+                            project_id = %project.id,
+                            issue = %issue.identifier,
+                            stage_fingerprint = %stage_fingerprint,
+                            "Todo issue already has an open stage-entry invocation; recording observation without runner invocation"
+                        );
+                        let labels_hash = labels_hash(&issue.labels);
+                        let blockers_hash = blockers_hash(&issue);
+                        store
+                            .update_latest_stage_invocation_observation(
+                                &project.id,
+                                &issue.id,
+                                issue.updated_at.as_deref(),
+                                &labels_hash,
+                                &blockers_hash,
+                            )
+                            .await?;
+                        let mut record = issue_record(
+                            project,
+                            &issue,
+                            LifecycleStage::Queued,
+                            None,
+                            CleanupStatus::Clean,
+                        );
+                        if let Some(existing) = &existing {
+                            record.failure.clone_from(&existing.failure);
+                            record.git_ref.clone_from(&existing.git_ref);
+                        }
+                        store.upsert_issue(&record).await?;
+                    } else if latest_invocation.is_none()
+                        && has_reusable_existing_session(store, &project.id, &issue.id).await?
+                    {
+                        info!(
+                            project_id = %project.id,
+                            issue = %issue.identifier,
+                            "legacy runner session without stage ledger found; queued for capacity-gated resume"
+                        );
+                        let mut record = issue_record(
+                            project,
+                            &issue,
+                            LifecycleStage::Queued,
+                            None,
+                            CleanupStatus::Clean,
+                        );
+                        if let Some(existing) = &existing {
+                            record.failure.clone_from(&existing.failure);
+                            record.git_ref.clone_from(&existing.git_ref);
+                        }
+                        store.upsert_issue(&record).await?;
+                        mark_existing_session_queued(store, project, &issue).await?;
+                        eligible.push(DispatchCandidate::ExistingSession(issue));
+                    } else {
+                        debug!(
+                            project_id = %project.id,
+                            issue = %issue.identifier,
+                            stage_fingerprint = %stage_fingerprint,
+                            "Todo issue is eligible for a new stage-entry invocation"
+                        );
+                        eligible.push(DispatchCandidate::New(issue));
+                    }
                 }
             }
             _ => {
@@ -781,6 +967,9 @@ async fn reconcile_project(
                     CleanupStatus::Clean,
                 );
                 store.upsert_issue(&record).await?;
+                store
+                    .mark_latest_stage_invocation_status(&project.id, &issue.id, "left_stage")
+                    .await?;
             }
         }
     }
@@ -886,6 +1075,7 @@ async fn reconcile_missing_candidate_issues(
                 .workflow
                 .required_linear_state(WorkflowStage::Canceled)
                 .into(),
+            state_id: None,
             priority: None,
             branch_name: None,
             url: None,
@@ -957,13 +1147,29 @@ async fn dispatch_candidate(
     report: &mut OrchestrationReport,
 ) -> anyhow::Result<()> {
     let issue = candidate.issue();
+    let launch_spec = build_acp_launch_spec(project, issue);
+    let stage_fingerprint = matches!(candidate, DispatchCandidate::New(_))
+        .then(|| stage_invocation_fingerprint(project, issue));
+    if let Some(fingerprint) = stage_fingerprint.as_deref()
+        && store
+            .stage_invocation(&project.id, &issue.id, fingerprint)
+            .await?
+            .is_some()
+    {
+        info!(
+            project_id = %project.id,
+            issue = %issue.identifier,
+            stage_fingerprint = %fingerprint,
+            "stage-entry invocation already recorded; skipping duplicate runner launch"
+        );
+        return Ok(());
+    }
     info!(
         project_id = %project.id,
         issue = %issue.identifier,
         "dispatching issue to runner"
     );
     transition_issue_to_stage(linear, project, &issue.id, WorkflowStage::InProgress).await?;
-    let launch_spec = build_acp_launch_spec(project, issue);
     let existing_record = store.issue(&project.id, &issue.id).await?;
     let mut record = issue_record(
         project,
@@ -978,6 +1184,18 @@ async fn dispatch_candidate(
         record.cleanup_status = existing.cleanup_status;
     }
     store.upsert_issue(&record).await?;
+    if let Some(fingerprint) = stage_fingerprint.as_deref() {
+        let invocation = stage_invocation_record(project, issue, &launch_spec, fingerprint);
+        if !store.insert_stage_invocation_if_absent(&invocation).await? {
+            info!(
+                project_id = %project.id,
+                issue = %issue.identifier,
+                stage_fingerprint = %fingerprint,
+                "stage-entry invocation was concurrently recorded; skipping duplicate runner launch"
+            );
+            return Ok(());
+        }
+    }
     match candidate {
         DispatchCandidate::New(issue) => {
             let observer = RuntimeLaunchObserver::new(project, &issue, &launch_spec, store);
@@ -991,10 +1209,30 @@ async fn dispatch_candidate(
                         worktree_path = %session.worktree_path,
                         "runner session recorded"
                     );
+                    if let Some(fingerprint) = stage_fingerprint.as_deref() {
+                        store
+                            .mark_stage_invocation_started(
+                                &project.id,
+                                &issue.id,
+                                fingerprint,
+                                &session.session_id,
+                            )
+                            .await?;
+                    }
                     upsert_observed_launch_session(store, session).await?;
                     report.dispatched.push(issue.identifier);
                 }
                 Err(error) => {
+                    if let Some(fingerprint) = stage_fingerprint.as_deref() {
+                        store
+                            .mark_stage_invocation_status(
+                                &project.id,
+                                &issue.id,
+                                fingerprint,
+                                "launch_failed",
+                            )
+                            .await?;
+                    }
                     handle_launch_failure(
                         project,
                         self_defect_project,
@@ -1772,8 +2010,8 @@ mod tests {
     use super::*;
     use crate::{
         config::{BranchPolicy, ConcurrencyConfig, EvalDefaults, ProjectWorkflow},
-        linear::LinearProjectConfig,
-        runner::{PermissionPolicy, RunnerRuntimeConfig},
+        linear::{LinearMilestone, LinearProjectConfig},
+        runner::{PermissionPolicy, RunnerRuntimeConfig, RunnerStartedSession},
     };
 
     #[derive(Debug)]
@@ -1841,6 +2079,355 @@ mod tests {
             concurrency: ConcurrencyConfig { max_sessions: 1 },
             workflow,
         }
+    }
+
+    fn ledger_config() -> RootConfig {
+        RootConfig::from_toml_str(
+            r#"
+[[projects]]
+id = "project"
+name = "Project"
+enabled = true
+workflow_path = "/tmp/project.workflow.toml"
+repo_path = "/tmp/project"
+
+[projects.branch]
+base = "main"
+worktree_root = "/tmp/worktrees"
+
+[projects.linear]
+team_key = "SYM"
+project_id = "linear-project"
+
+[projects.runner]
+command = "/usr/bin/runner"
+args = []
+agent = "build"
+permission_policy = "reject"
+
+[projects.eval]
+default_suite = "suite"
+
+[projects.concurrency]
+max_sessions = 4
+"#,
+        )
+        .expect("config")
+    }
+
+    fn ledger_issue(state: &str, updated_at: &str, labels: &[&str]) -> LinearIssue {
+        LinearIssue {
+            id: "issue-id".into(),
+            identifier: "SYM-141".into(),
+            title: "Ledger test".into(),
+            description: Some("description must not affect invocation identity".into()),
+            state: state.into(),
+            state_id: Some(format!(
+                "state-{}",
+                state.replace(' ', "-").to_ascii_lowercase()
+            )),
+            priority: Some(1),
+            branch_name: None,
+            url: None,
+            labels: labels.iter().map(|label| (*label).into()).collect(),
+            project_milestone: Some(LinearMilestone {
+                id: "milestone".into(),
+                name: "Milestone".into(),
+            }),
+            blocked_by: Vec::new(),
+            upstream_context: Vec::new(),
+            has_new_owner_answer: false,
+            owner_answer_created_at: None,
+            created_at: Some("2026-01-01T00:00:00Z".into()),
+            updated_at: Some(updated_at.into()),
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct LedgerLinearClient {
+        issues: Mutex<Vec<LinearIssue>>,
+        transitions: Mutex<Vec<(String, String)>>,
+    }
+
+    impl LedgerLinearClient {
+        async fn set_issues(&self, issues: Vec<LinearIssue>) {
+            *self.issues.lock().await = issues;
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LinearClient for LedgerLinearClient {
+        async fn fetch_candidate_issues(
+            &self,
+            _project: &ProjectConfig,
+        ) -> Result<Vec<LinearIssue>, crate::linear::LinearClientError> {
+            Ok(self.issues.lock().await.clone())
+        }
+
+        async fn fetch_workflow_state_names(
+            &self,
+            project: &ProjectConfig,
+        ) -> Result<Vec<String>, crate::linear::LinearClientError> {
+            Ok(project
+                .workflow
+                .processed_state_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect())
+        }
+
+        async fn transition_issue(
+            &self,
+            issue_id: &str,
+            transition: crate::linear::LinearTransition,
+        ) -> Result<(), crate::linear::LinearClientError> {
+            self.transitions
+                .lock()
+                .await
+                .push((issue_id.into(), transition.state_name().into()));
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct CountingRunner {
+        launches: Mutex<Vec<String>>,
+        continuations: Mutex<Vec<String>>,
+    }
+
+    impl CountingRunner {
+        async fn launch_count(&self) -> usize {
+            self.launches.lock().await.len()
+        }
+
+        async fn continuation_count(&self) -> usize {
+            self.continuations.lock().await.len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RunnerLauncher for CountingRunner {
+        async fn launch(
+            &self,
+            spec: &crate::runner::RunnerLaunchSpec,
+        ) -> Result<RunnerStartedSession, crate::runner::RunnerError> {
+            let mut launches = self.launches.lock().await;
+            launches.push(spec.issue_identifier.clone());
+            Ok(RunnerStartedSession {
+                session_id: format!("session-{}", launches.len()),
+                process_id: Some(std::process::id()),
+                acp_frame_count: 0,
+                session_evidence_refs: Vec::new(),
+            })
+        }
+
+        async fn continue_session(
+            &self,
+            _spec: &crate::runner::RunnerLaunchSpec,
+            session: &RunnerSessionRecord,
+            _continuation_message: &str,
+        ) -> Result<RunnerStartedSession, crate::runner::RunnerError> {
+            self.continuations
+                .lock()
+                .await
+                .push(session.session_id.clone());
+            Ok(RunnerStartedSession {
+                session_id: session.session_id.clone(),
+                process_id: Some(std::process::id()),
+                acp_frame_count: session.acp_frame_count,
+                session_evidence_refs: session.session_evidence_refs.clone(),
+            })
+        }
+    }
+
+    async fn ledger_store(path: &std::path::Path) -> SqliteStore {
+        let store = SqliteStore::open(path).await.expect("open sqlite");
+        store.migrate().await.expect("migrate");
+        store
+    }
+
+    #[tokio::test]
+    async fn stage_invocation_ledger_prevents_duplicate_launch_across_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("runtime.sqlite3");
+        let config = ledger_config();
+        let linear = LedgerLinearClient::default();
+        let runner = CountingRunner::default();
+        linear
+            .set_issues(vec![ledger_issue("Todo", "2026-01-01T00:00:00Z", &[])])
+            .await;
+
+        {
+            let store = ledger_store(&db_path).await;
+            let report = run_once_with_clients(&config, &store, &linear, &runner)
+                .await
+                .expect("first run");
+            assert_eq!(report.dispatched, vec!["SYM-141"]);
+        }
+
+        {
+            let store = ledger_store(&db_path).await;
+            let report = run_once_with_clients(&config, &store, &linear, &runner)
+                .await
+                .expect("second run");
+            assert!(report.dispatched.is_empty());
+            let invocations = store
+                .stage_invocations_for_issue("project", "issue-id")
+                .await
+                .expect("invocations");
+            assert_eq!(invocations.len(), 1);
+        }
+
+        assert_eq!(runner.launch_count().await, 1);
+        assert_eq!(runner.continuation_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn status_away_and_back_creates_exactly_one_new_stage_invocation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("runtime.sqlite3");
+        let store = ledger_store(&db_path).await;
+        let config = ledger_config();
+        let linear = LedgerLinearClient::default();
+        let runner = CountingRunner::default();
+
+        linear
+            .set_issues(vec![ledger_issue("Todo", "2026-01-01T00:00:00Z", &[])])
+            .await;
+        run_once_with_clients(&config, &store, &linear, &runner)
+            .await
+            .expect("first Todo");
+
+        linear
+            .set_issues(vec![ledger_issue("Backlog", "2026-01-01T00:01:00Z", &[])])
+            .await;
+        run_once_with_clients(&config, &store, &linear, &runner)
+            .await
+            .expect("away state");
+
+        linear
+            .set_issues(vec![ledger_issue("Todo", "2026-01-01T00:02:00Z", &[])])
+            .await;
+        let report = run_once_with_clients(&config, &store, &linear, &runner)
+            .await
+            .expect("second Todo");
+        assert_eq!(report.dispatched, vec!["SYM-141"]);
+
+        linear
+            .set_issues(vec![ledger_issue("Todo", "2026-01-01T00:02:00Z", &[])])
+            .await;
+        let report = run_once_with_clients(&config, &store, &linear, &runner)
+            .await
+            .expect("duplicate second Todo");
+        assert!(report.dispatched.is_empty());
+
+        let invocations = store
+            .stage_invocations_for_issue("project", "issue-id")
+            .await
+            .expect("invocations");
+        assert_eq!(invocations.len(), 2);
+        assert_eq!(runner.launch_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn todo_label_change_updates_open_invocation_without_duplicate_launch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("runtime.sqlite3");
+        let store = ledger_store(&db_path).await;
+        let config = ledger_config();
+        let linear = LedgerLinearClient::default();
+        let runner = CountingRunner::default();
+
+        linear
+            .set_issues(vec![ledger_issue(
+                "Todo",
+                "2026-01-01T00:00:00Z",
+                &["alpha"],
+            )])
+            .await;
+        run_once_with_clients(&config, &store, &linear, &runner)
+            .await
+            .expect("first Todo");
+        let before = store
+            .stage_invocations_for_issue("project", "issue-id")
+            .await
+            .expect("before");
+        let first_labels_hash = before[0].labels_hash.clone();
+
+        linear
+            .set_issues(vec![ledger_issue(
+                "Todo",
+                "2026-01-01T00:01:00Z",
+                &["alpha", "beta"],
+            )])
+            .await;
+        let report = run_once_with_clients(&config, &store, &linear, &runner)
+            .await
+            .expect("same Todo label update");
+        assert!(report.dispatched.is_empty());
+
+        let after = store
+            .stage_invocations_for_issue("project", "issue-id")
+            .await
+            .expect("after");
+        assert_eq!(after.len(), 1);
+        assert_ne!(after[0].labels_hash, first_labels_hash);
+        assert_eq!(
+            after[0].issue_updated_at.as_deref(),
+            Some("2026-01-01T00:01:00Z")
+        );
+        assert_eq!(runner.launch_count().await, 1);
+        assert_eq!(runner.continuation_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn label_changes_update_active_invocation_without_relaunching() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("runtime.sqlite3");
+        let store = ledger_store(&db_path).await;
+        let config = ledger_config();
+        let linear = LedgerLinearClient::default();
+        let runner = CountingRunner::default();
+
+        linear
+            .set_issues(vec![ledger_issue(
+                "Todo",
+                "2026-01-01T00:00:00Z",
+                &["alpha"],
+            )])
+            .await;
+        run_once_with_clients(&config, &store, &linear, &runner)
+            .await
+            .expect("first Todo");
+        let before = store
+            .stage_invocations_for_issue("project", "issue-id")
+            .await
+            .expect("before");
+        let first_labels_hash = before[0].labels_hash.clone();
+
+        linear
+            .set_issues(vec![ledger_issue(
+                "In Progress",
+                "2026-01-01T00:01:00Z",
+                &["alpha", "beta"],
+            )])
+            .await;
+        run_once_with_clients(&config, &store, &linear, &runner)
+            .await
+            .expect("active label update");
+
+        let after = store
+            .stage_invocations_for_issue("project", "issue-id")
+            .await
+            .expect("after");
+        assert_eq!(after.len(), 1);
+        assert_ne!(after[0].labels_hash, first_labels_hash);
+        assert_eq!(
+            after[0].issue_updated_at.as_deref(),
+            Some("2026-01-01T00:01:00Z")
+        );
+        assert_eq!(runner.launch_count().await, 1);
+        assert_eq!(runner.continuation_count().await, 0);
     }
 
     #[tokio::test]

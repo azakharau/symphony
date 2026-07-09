@@ -18,7 +18,7 @@ query CandidateIssues($teamKey: String!, $projectId: ID!, $states: [String!], $a
       identifier
       title
       description
-      state { name }
+      state { id name }
       priority
       branchName
       url
@@ -134,7 +134,7 @@ mutation CreateManagedIssue($input: IssueCreateInput!) {
       identifier
       title
       description
-      state { name }
+      state { id name }
       priority
       branchName
       url

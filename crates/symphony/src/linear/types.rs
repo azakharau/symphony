@@ -16,6 +16,8 @@ pub struct LinearIssue {
     pub title: String,
     pub description: Option<String>,
     pub state: String,
+    #[serde(default)]
+    pub state_id: Option<String>,
     pub priority: Option<i64>,
     pub branch_name: Option<String>,
     pub url: Option<String>,

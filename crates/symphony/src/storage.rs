@@ -11,12 +11,13 @@ use crate::{
     state::{
         CleanupStatus, EvalRunRecord, IssueStateRecord, LifecycleStage,
         ProjectRuntimeLivenessRecord, ProjectStateRecord, RunnerSessionRecord,
-        RunnerStageEventRecord, RuntimeLivenessStatus, StateParseError,
+        RunnerStageEventRecord, RuntimeLivenessStatus, StageInvocationRecord, StateParseError,
     },
 };
 use rows::{
     collect_rows, encode_optional, eval_run_from_row, issue_from_row, liveness_from_row,
     optional_row, project_from_row, session_from_row, stage_event_from_row,
+    stage_invocation_from_row,
 };
 
 const RUNTIME_STATE_MIGRATION: &str = include_str!("../migrations/001_runtime_state.sql");
@@ -748,6 +749,248 @@ impl SqliteStore {
             )
             .await?;
         optional_row(&mut rows, issue_from_row).await
+    }
+
+    pub async fn insert_stage_invocation_if_absent<I>(
+        &self,
+        invocation: I,
+    ) -> Result<bool, StorageError>
+    where
+        I: Borrow<StageInvocationRecord> + Send + Sync,
+    {
+        let invocation = invocation.borrow();
+        let inserted = self
+            .conn
+            .execute(
+                r#"
+                INSERT OR IGNORE INTO stage_invocations (
+                    project_id,
+                    issue_id,
+                    fingerprint,
+                    state_id,
+                    state_name,
+                    issue_updated_at,
+                    labels_hash,
+                    blockers_hash,
+                    selected_agent,
+                    provider,
+                    session_id,
+                    status
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                "#,
+                params![
+                    invocation.project_id.as_str(),
+                    invocation.issue_id.as_str(),
+                    invocation.fingerprint.as_str(),
+                    invocation.state_id.as_deref(),
+                    invocation.state_name.as_str(),
+                    invocation.issue_updated_at.as_deref(),
+                    invocation.labels_hash.as_str(),
+                    invocation.blockers_hash.as_str(),
+                    invocation.selected_agent.as_str(),
+                    invocation.provider.as_str(),
+                    invocation.session_id.as_deref(),
+                    invocation.status.as_str(),
+                ],
+            )
+            .await?;
+        Ok(inserted > 0)
+    }
+
+    pub async fn stage_invocation(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        fingerprint: &str,
+    ) -> Result<Option<StageInvocationRecord>, StorageError> {
+        let mut rows = self
+            .conn
+            .query(
+                r#"
+                SELECT project_id, issue_id, fingerprint, state_id, state_name, issue_updated_at,
+                       labels_hash, blockers_hash, selected_agent, provider, session_id, status,
+                       created_at, updated_at
+                FROM stage_invocations
+                WHERE project_id = ?1 AND issue_id = ?2 AND fingerprint = ?3
+                "#,
+                params![project_id, issue_id, fingerprint],
+            )
+            .await?;
+        optional_row(&mut rows, stage_invocation_from_row).await
+    }
+
+    pub async fn stage_invocations_for_issue(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<Vec<StageInvocationRecord>, StorageError> {
+        let mut rows = self
+            .conn
+            .query(
+                r#"
+                SELECT project_id, issue_id, fingerprint, state_id, state_name, issue_updated_at,
+                       labels_hash, blockers_hash, selected_agent, provider, session_id, status,
+                       created_at, updated_at
+                FROM stage_invocations
+                WHERE project_id = ?1 AND issue_id = ?2
+                ORDER BY created_at ASC, rowid ASC
+                "#,
+                params![project_id, issue_id],
+            )
+            .await?;
+        collect_rows(&mut rows, stage_invocation_from_row).await
+    }
+
+    pub async fn latest_stage_invocation_for_issue(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<Option<StageInvocationRecord>, StorageError> {
+        let mut rows = self
+            .conn
+            .query(
+                r#"
+                SELECT project_id, issue_id, fingerprint, state_id, state_name, issue_updated_at,
+                       labels_hash, blockers_hash, selected_agent, provider, session_id, status,
+                       created_at, updated_at
+                FROM stage_invocations
+                WHERE project_id = ?1 AND issue_id = ?2
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT 1
+                "#,
+                params![project_id, issue_id],
+            )
+            .await?;
+        optional_row(&mut rows, stage_invocation_from_row).await
+    }
+
+    pub async fn has_stage_invocations_for_issue(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+    ) -> Result<bool, StorageError> {
+        let mut rows = self
+            .conn
+            .query(
+                r#"
+                SELECT 1
+                FROM stage_invocations
+                WHERE project_id = ?1 AND issue_id = ?2
+                LIMIT 1
+                "#,
+                params![project_id, issue_id],
+            )
+            .await?;
+        Ok(rows.next().await?.is_some())
+    }
+
+    pub async fn mark_stage_invocation_started(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        fingerprint: &str,
+        session_id: &str,
+    ) -> Result<(), StorageError> {
+        self.conn
+            .execute(
+                r#"
+                UPDATE stage_invocations
+                SET session_id = ?4,
+                    status = 'started',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE project_id = ?1 AND issue_id = ?2 AND fingerprint = ?3
+                "#,
+                params![project_id, issue_id, fingerprint, session_id],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn mark_stage_invocation_status(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        fingerprint: &str,
+        status: &str,
+    ) -> Result<(), StorageError> {
+        self.conn
+            .execute(
+                r#"
+                UPDATE stage_invocations
+                SET status = ?4,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE project_id = ?1 AND issue_id = ?2 AND fingerprint = ?3
+                "#,
+                params![project_id, issue_id, fingerprint, status],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn mark_latest_stage_invocation_status(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        status: &str,
+    ) -> Result<(), StorageError> {
+        self.conn
+            .execute(
+                r#"
+                UPDATE stage_invocations
+                SET status = ?3,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE rowid = (
+                    SELECT rowid
+                    FROM stage_invocations
+                    WHERE project_id = ?1
+                      AND issue_id = ?2
+                    ORDER BY created_at DESC, rowid DESC
+                    LIMIT 1
+                )
+                "#,
+                params![project_id, issue_id, status],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_latest_stage_invocation_observation(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        issue_updated_at: Option<&str>,
+        labels_hash: &str,
+        blockers_hash: &str,
+    ) -> Result<(), StorageError> {
+        self.conn
+            .execute(
+                r#"
+                UPDATE stage_invocations
+                SET issue_updated_at = ?3,
+                    labels_hash = ?4,
+                    blockers_hash = ?5,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE rowid = (
+                    SELECT rowid
+                    FROM stage_invocations
+                    WHERE project_id = ?1
+                      AND issue_id = ?2
+                      AND status IN ('reserved', 'started')
+                    ORDER BY created_at DESC, rowid DESC
+                    LIMIT 1
+                )
+                "#,
+                params![
+                    project_id,
+                    issue_id,
+                    issue_updated_at,
+                    labels_hash,
+                    blockers_hash
+                ],
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn upsert_runner_session<S>(&self, session: S) -> Result<(), StorageError>

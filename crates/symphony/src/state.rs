@@ -90,6 +90,24 @@ pub struct IssueStateRecord {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StageInvocationRecord {
+    pub project_id: String,
+    pub issue_id: String,
+    pub fingerprint: String,
+    pub state_id: Option<String>,
+    pub state_name: String,
+    pub issue_updated_at: Option<String>,
+    pub labels_hash: String,
+    pub blockers_hash: String,
+    pub selected_agent: String,
+    pub provider: String,
+    pub session_id: Option<String>,
+    pub status: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RunnerSessionRecord {
     pub project_id: String,
     pub issue_id: String,

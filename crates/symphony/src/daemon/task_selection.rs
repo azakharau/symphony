@@ -118,6 +118,7 @@ mod tests {
             title: "Symphony self-defect: test".into(),
             description: None,
             state: "Todo".into(),
+            state_id: None,
             priority,
             branch_name: None,
             url: None,

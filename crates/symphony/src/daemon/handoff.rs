@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -1477,14 +1477,20 @@ fn successful_handoff_worktree_error(
     if path.as_os_str().is_empty() {
         return Some("git closure evidence did not include a worktree path".into());
     }
-    if !worktree_path_allowed(&project.branch.worktree_root, &path) {
+    if !absolute_path_without_parent_dir(&path) {
         return Some(format!(
-            "git closure worktree path `{}` is outside configured worktree root `{}`",
-            path.display(),
-            project.branch.worktree_root.display()
+            "git closure worktree path `{}` is not an absolute safe path",
+            path.display()
         ));
     }
+
     let active_path = PathBuf::from(session.worktree_path.trim());
+    if !absolute_path_without_parent_dir(&active_path) {
+        return Some(format!(
+            "active session worktree `{}` is not an absolute safe path",
+            active_path.display()
+        ));
+    }
     if !paths_equivalent(&path, &active_path) {
         return Some(format!(
             "git closure worktree path `{}` does not match active session worktree `{}`",
@@ -1492,8 +1498,24 @@ fn successful_handoff_worktree_error(
             active_path.display()
         ));
     }
+    if !worktree_path_allowed(&project.branch.worktree_root, &path)
+        && session.provider_mode != RuntimeProviderMode::OmpAcp
+    {
+        return Some(format!(
+            "git closure worktree path `{}` is outside configured worktree root `{}`",
+            path.display(),
+            project.branch.worktree_root.display()
+        ));
+    }
 
     None
+}
+
+fn absolute_path_without_parent_dir(path: &Path) -> bool {
+    path.is_absolute()
+        && !path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
 }
 
 fn paths_equivalent(left: &Path, right: &Path) -> bool {

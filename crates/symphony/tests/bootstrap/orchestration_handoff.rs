@@ -586,6 +586,132 @@ async fn omp_handoff_with_semantic_session_id_closes_from_runtime_session() {
 }
 
 #[tokio::test]
+async fn omp_handoff_from_active_legacy_provider_worktree_outside_current_root_closes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let repo = dir.path().join("repo");
+    let origin = dir.path().join("origin.git");
+    fs::create_dir_all(&origin).expect("origin dir");
+    run_git(&origin, ["init", "--bare"]);
+    fs::create_dir_all(&repo).expect("repo dir");
+    run_git(&repo, ["init"]);
+    run_git(&repo, ["config", "user.email", "symphony@example.test"]);
+    run_git(&repo, ["config", "user.name", "Symphony Test"]);
+    run_git(
+        &repo,
+        [
+            "remote",
+            "add",
+            "origin",
+            origin.to_str().expect("origin utf8"),
+        ],
+    );
+    fs::write(repo.join("README.md"), "base checkout").expect("readme");
+    run_git(&repo, ["add", "README.md"]);
+    run_git(&repo, ["commit", "-m", "base"]);
+    run_git(&repo, ["branch", "agent-server/opencode-runner-extension"]);
+    run_git(
+        &repo,
+        ["checkout", "agent-server/opencode-runner-extension"],
+    );
+    run_git(
+        &repo,
+        ["push", "origin", "agent-server/opencode-runner-extension"],
+    );
+
+    let current_root = dir.path().join("opencode-worktrees");
+    let legacy_provider_root = dir.path().join("omp-worktrees");
+    fs::create_dir_all(&legacy_provider_root).expect("legacy provider root");
+    let worktree = legacy_provider_root.join("SYM-236");
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "--detach",
+            worktree.to_str().expect("worktree path utf8"),
+            "agent-server/opencode-runner-extension",
+        ],
+    );
+    fs::write(worktree.join("artifact.txt"), "done").expect("artifact");
+    run_git(&worktree, ["add", "artifact.txt"]);
+    run_git(&worktree, ["commit", "-m", "SYM-236 implementation"]);
+    let head_sha = git_output(&worktree, ["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    let issue_branch = "symphony/SYM-236";
+    let issue_refspec = format!("HEAD:refs/heads/{issue_branch}");
+    run_git(&worktree, ["push", "origin", &issue_refspec]);
+
+    let config_toml = valid_config_toml()
+        .replace(
+            "repo_path = \"/home/agent/proj/symphony\"",
+            &format!("repo_path = \"{}\"", repo.display()),
+        )
+        .replace(
+            "/home/agent/.symphony/workspaces/opencode/symphony",
+            &current_root.display().to_string(),
+        );
+    let config = RootConfig::from_toml_str(&config_toml).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    store
+        .upsert_issue(test_issue("symphony", "legacy-omp", "SYM-236"))
+        .await
+        .expect("issue");
+    let mut session = test_session("symphony", "legacy-omp", "omp-runtime-id", &worktree);
+    session.provider_mode = RuntimeProviderMode::OmpAcp;
+    session.provider_id = Some("omp-primary".into());
+    store.upsert_runner_session(session).await.expect("session");
+
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "legacy-omp",
+        "SYM-236",
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedRunnerLauncher::new(Some(success_handoff(
+        "omp-runtime-id",
+        &worktree,
+        issue_branch,
+        &head_sha,
+    )));
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("poll");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("legacy-omp".into(), LinearTransition::Done)]
+    );
+    assert!(
+        client
+            .evidence()
+            .iter()
+            .all(|(_, evidence)| evidence.kind != "malformed_handoff"),
+        "active OMP worktree outside current root must not be self-defected"
+    );
+    assert!(opencode.repairs().is_empty());
+    let issue = store
+        .issue("symphony", "legacy-omp")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Completed);
+    assert_eq!(issue.cleanup_status, CleanupStatus::Complete);
+    assert_eq!(
+        issue.git_ref.expect("git ref").worktree_path,
+        worktree.display().to_string()
+    );
+    assert!(
+        !worktree.exists(),
+        "accepted active worktree should be cleaned up"
+    );
+}
+
+#[tokio::test]
 async fn passing_handoff_closes_when_canonical_checkout_has_unrelated_dirty_files() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

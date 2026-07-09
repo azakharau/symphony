@@ -81,6 +81,43 @@ max_sessions = 2
 "#
 }
 
+const fn valid_workflow_toml() -> &'static str {
+    r#"
+processed_states = ["Backlog"]
+
+[states]
+todo = "Todo"
+in_progress = "In Progress"
+in_review = "In Review"
+need_owner_input = "Need Owner Input"
+done = "Done"
+canceled = "Canceled"
+backlog = "Backlog"
+
+[agents.default]
+todo = "build"
+in_progress = "build"
+in_review = "code-reviewer"
+need_owner_input = "build"
+done = "build"
+canceled = "build"
+backlog = "build"
+
+[[agents.labels]]
+label = "rust"
+agent = "rust-engineer"
+precedence = 100
+stages = ["todo"]
+
+
+[self_defects]
+executable_label = "self-defect-executable"
+[owner_input]
+block_project_dispatch = true
+return_stage = "todo"
+"#
+}
+
 const fn two_project_config_toml() -> &'static str {
     r#"
 [server]
@@ -183,7 +220,6 @@ fn managed_self_bug(
 ) -> LinearIssue {
     let mut issue = linear_issue(id, identifier, "Todo", priority);
     issue.title = "Symphony self-defect: test".into();
-    issue.description = Some("<!-- symphony:managed-self-bug fingerprint=test -->".into());
     issue.project_milestone = None;
     issue
 }
@@ -772,7 +808,7 @@ impl LinearClient for RecordingLinearClient {
             id: format!("managed-{}", self.managed_issues().len() + 1),
             identifier,
             title: request.title.clone(),
-            description: Some(request.description_with_fingerprint()),
+            description: Some(request.description.clone()),
             state: request.state.state_name().into(),
             priority: Some(request.priority),
             branch_name: None,

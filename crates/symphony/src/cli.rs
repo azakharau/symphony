@@ -63,10 +63,7 @@ where
     let cli = Cli::parse_from(args);
     match cli.command {
         Command::ValidateConfig { config } => {
-            let input = tokio::fs::read_to_string(&config)
-                .await
-                .with_context(|| format!("read config {}", config.display()))?;
-            RootConfig::from_toml_str(&input)?;
+            RootConfig::from_toml_file(&config)?;
             Ok(())
         }
         Command::InitStore { database } => {

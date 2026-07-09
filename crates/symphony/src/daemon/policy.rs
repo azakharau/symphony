@@ -43,10 +43,6 @@ fn priority_order(priority: Option<i64>) -> (i64, i64) {
     priority.map_or((1, i64::MAX), |priority| (0, priority))
 }
 
-pub(super) fn is_terminal_state(state: &str) -> bool {
-    matches!(state, "Done" | "Canceled")
-}
-
 fn is_accepted_blocker_state(state: &str) -> bool {
     matches!(state, "Done" | "completed" | "Completed")
 }

@@ -1,0 +1,50 @@
+processed_states = ["Backlog"]
+
+[states]
+todo = "Todo"
+in_progress = "In Progress"
+in_review = "In Review"
+need_owner_input = "Need Owner Input"
+done = "Done"
+canceled = "Canceled"
+backlog = "Backlog"
+
+[agents.default]
+todo = "build"
+in_progress = "build"
+in_review = "code-reviewer"
+need_owner_input = "build"
+done = "build"
+canceled = "build"
+backlog = "build"
+
+[[agents.labels]]
+label = "rust"
+agent = "rust-engineer"
+precedence = 100
+stages = ["todo"]
+
+[[agents.labels]]
+label = "typescript"
+agent = "typescript-engineer"
+precedence = 100
+stages = ["todo"]
+
+[[agents.labels]]
+label = "python"
+agent = "python-engineer"
+precedence = 100
+stages = ["todo"]
+
+[[agents.labels]]
+label = "review"
+agent = "code-reviewer"
+precedence = 50
+stages = ["in_review"]
+
+
+[self_defects]
+executable_label = "self-defect-executable"
+[owner_input]
+block_project_dispatch = true
+return_stage = "todo"

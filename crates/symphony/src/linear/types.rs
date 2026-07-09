@@ -101,16 +101,6 @@ pub struct ManagedLinearIssueCreate {
     pub label_ids: Vec<String>,
 }
 
-impl ManagedLinearIssueCreate {
-    pub fn description_with_fingerprint(&self) -> String {
-        format!(
-            "{}\n\n<!-- symphony:managed-self-bug fingerprint={} -->",
-            self.description.trim_end(),
-            self.fingerprint
-        )
-    }
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ManagedLinearIssueState {
@@ -149,8 +139,10 @@ pub enum LinearTransition {
     Backlog,
     Todo,
     InProgress,
+    InReview,
     NeedOwnerInput,
     Done,
+    Canceled,
 }
 
 impl LinearTransition {
@@ -159,8 +151,23 @@ impl LinearTransition {
             Self::Backlog => "Backlog",
             Self::Todo => "Todo",
             Self::InProgress => "In Progress",
+            Self::InReview => "In Review",
             Self::NeedOwnerInput => "Need Owner Input",
             Self::Done => "Done",
+            Self::Canceled => "Canceled",
+        }
+    }
+
+    pub fn from_state_name(state_name: &str) -> Option<Self> {
+        match state_name {
+            "Backlog" => Some(Self::Backlog),
+            "Todo" => Some(Self::Todo),
+            "In Progress" => Some(Self::InProgress),
+            "In Review" => Some(Self::InReview),
+            "Need Owner Input" => Some(Self::NeedOwnerInput),
+            "Done" => Some(Self::Done),
+            "Canceled" => Some(Self::Canceled),
+            _ => None,
         }
     }
 }

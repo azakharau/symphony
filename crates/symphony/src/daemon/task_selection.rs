@@ -54,11 +54,17 @@ pub(super) fn compare_dispatch_selections(
         .then_with(|| left.issue().id.cmp(&right.issue().id))
 }
 
-pub(super) fn self_bug_default_suppression(issue: &LinearIssue) -> Option<BlockerRecord> {
+pub(super) fn self_bug_default_suppression(
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+) -> Option<BlockerRecord> {
     if !is_managed_self_defect_issue(issue) || issue.priority.unwrap_or(i64::MAX) <= 1 {
         return None;
     }
-    if self_bug_execution_promoted(issue) {
+    if project
+        .workflow
+        .self_defect_execution_promoted(&issue.labels)
+    {
         return None;
     }
     Some(BlockerRecord {
@@ -71,10 +77,6 @@ pub(super) fn self_bug_default_suppression(issue: &LinearIssue) -> Option<Blocke
 
 pub(super) fn is_managed_self_defect_issue(issue: &LinearIssue) -> bool {
     issue.title.starts_with("Symphony self-defect:")
-        || issue
-            .description
-            .as_deref()
-            .is_some_and(|description| description.contains("symphony:managed-self-bug"))
 }
 
 fn classify_issue(
@@ -93,13 +95,6 @@ fn classify_issue(
     }
 }
 
-fn self_bug_execution_promoted(issue: &LinearIssue) -> bool {
-    issue
-        .labels
-        .iter()
-        .any(|label| label == "symphony-self-bug-executable")
-}
-
 fn task_class_order(class: TaskClass) -> u8 {
     match class {
         TaskClass::P0SelfBug => 0,
@@ -115,8 +110,7 @@ fn priority_order(priority: Option<i64>) -> (i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::linear::LinearIssue;
-
+    use crate::{config::ProjectWorkflow, linear::LinearIssue};
     fn issue(identifier: &str, priority: Option<i64>) -> LinearIssue {
         LinearIssue {
             id: identifier.to_lowercase(),
@@ -140,14 +134,47 @@ mod tests {
 
     #[test]
     fn p1_self_bug_is_suppressed_until_explicit_label_promotion() {
+        let mut project = ProjectConfig {
+            id: "symphony".into(),
+            name: "Symphony".into(),
+            enabled: true,
+            workflow_path: "/tmp/workflow".into(),
+            repo_path: "/tmp/repo".into(),
+            branch: crate::config::BranchPolicy {
+                base: "main".into(),
+                worktree_root: "/tmp/worktrees".into(),
+            },
+            linear: crate::linear::LinearProjectConfig {
+                team_key: "SYM".into(),
+                project_id: Some("linear-project".into()),
+            },
+            runner: crate::runner::RunnerRuntimeConfig {
+                command: "runner".into(),
+                args: Vec::new(),
+                agent: "build".into(),
+                model: None,
+                effort: None,
+                permission_policy: crate::runner::PermissionPolicy::Reject,
+            },
+            omp_acp_providers: Vec::new(),
+            eval: crate::config::EvalDefaults {
+                default_suite: "default".into(),
+                max_identical_failure_fingerprints: 2,
+            },
+            concurrency: crate::config::ConcurrencyConfig { max_sessions: 1 },
+            workflow: ProjectWorkflow::default(),
+        };
+        project.workflow.self_defects.executable_label = Some("self-defect-executable".into());
         let mut p1 = issue("SYM-1", Some(2));
         assert_eq!(
-            self_bug_default_suppression(&p1).expect("suppressed").kind,
+            self_bug_default_suppression(&project, &p1)
+                .expect("suppressed")
+                .kind,
             "managed_self_defect_policy"
         );
 
-        p1.labels.push("symphony-self-bug-executable".into());
-        assert!(self_bug_default_suppression(&p1).is_none());
+        p1.labels.push("self-defect-executable".into());
+        assert!(self_bug_default_suppression(&project, &p1).is_none());
     }
 
     #[test]
@@ -161,6 +188,41 @@ mod tests {
             ..issue("ALPHA-1", Some(1))
         };
 
-        assert!(self_bug_default_suppression(&product).is_none());
+        assert!(
+            self_bug_default_suppression(
+                &ProjectConfig {
+                    id: "symphony".into(),
+                    name: "Symphony".into(),
+                    enabled: true,
+                    workflow_path: "/tmp/workflow".into(),
+                    repo_path: "/tmp/repo".into(),
+                    branch: crate::config::BranchPolicy {
+                        base: "main".into(),
+                        worktree_root: "/tmp/worktrees".into(),
+                    },
+                    linear: crate::linear::LinearProjectConfig {
+                        team_key: "SYM".into(),
+                        project_id: Some("linear-project".into()),
+                    },
+                    runner: crate::runner::RunnerRuntimeConfig {
+                        command: "runner".into(),
+                        args: Vec::new(),
+                        agent: "build".into(),
+                        model: None,
+                        effort: None,
+                        permission_policy: crate::runner::PermissionPolicy::Reject,
+                    },
+                    omp_acp_providers: Vec::new(),
+                    eval: crate::config::EvalDefaults {
+                        default_suite: "default".into(),
+                        max_identical_failure_fingerprints: 2,
+                    },
+                    concurrency: crate::config::ConcurrencyConfig { max_sessions: 1 },
+                    workflow: ProjectWorkflow::default(),
+                },
+                &product
+            )
+            .is_none()
+        );
     }
 }

@@ -5,7 +5,13 @@ async fn daemon_once_entrypoint_validates_config_migrates_and_reconciles_project
     let dir = tempfile::tempdir().expect("tempdir");
     let config_path = dir.path().join("projects.toml");
     let db_path = dir.path().join("runtime.sqlite3");
-    fs::write(&config_path, valid_config_toml()).expect("write config");
+    let workflow_path = dir.path().join("symphony.workflow.toml");
+    fs::write(&workflow_path, valid_workflow_toml()).expect("write workflow");
+    let config = valid_config_toml().replace(
+        "workflow_path = \"/home/agent/proj/symphony/WORKFLOW.md\"",
+        &format!("workflow_path = \"{}\"", workflow_path.display()),
+    );
+    fs::write(&config_path, config).expect("write config");
 
     cli::run_with_args([
         "symphony",
@@ -409,7 +415,7 @@ async fn orchestration_suppresses_p1_p2_self_bugs_unless_promoted() {
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
     let mut promoted = managed_self_bug("promoted", "SYM-903", Some(3));
-    promoted.labels.push("symphony-self-bug-executable".into());
+    promoted.labels.push("self-defect-executable".into());
     let client = RecordingLinearClient::new(vec![
         managed_self_bug("p1-self", "SYM-902", Some(2)),
         promoted,
@@ -3269,7 +3275,6 @@ async fn orchestration_dispatches_managed_self_defect_without_milestone() {
 
     let mut issue = linear_issue("managed-self", "SYM-207", "Todo", Some(1));
     issue.title = "Symphony self-defect: launch_failed".into();
-    issue.description = Some("<!-- symphony:managed-self-bug fingerprint=launch_failed -->".into());
     issue.project_milestone = None;
     let client = RecordingLinearClient::new(vec![issue]);
     let opencode = ResumeRecordingRunnerLauncher::new(6207);

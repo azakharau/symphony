@@ -17,10 +17,10 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    config::{ProjectConfig, RootConfig, RunnerArchiveConfig},
+    config::{ProjectConfig, RootConfig, RunnerArchiveConfig, WorkflowStage},
     linear::{
         EmptyLinearClient, LinearClient, LinearGraphqlClient, LinearIssue, LinearIssueEvidence,
-        LinearTransition, ReqwestGraphqlTransport,
+        ReqwestGraphqlTransport,
     },
     runner::{
         DeterministicRunnerLauncher, ProcessTreeTerminationEvidence, RunnerLaunchObserver,
@@ -43,8 +43,7 @@ use handoff::{
 use http::run_continuous;
 use liveness::project_liveness_projection;
 use policy::{
-    blocker_record, compare_issues_for_dispatch, has_new_owner_response, is_terminal_state,
-    unaccepted_blocker,
+    blocker_record, compare_issues_for_dispatch, has_new_owner_response, unaccepted_blocker,
 };
 use records::issue_record;
 use self_defects::{RuntimeSelfDefectInput, record_runtime_self_defect};
@@ -80,10 +79,7 @@ pub struct AcceptanceSelfDefectOptions {
 }
 
 pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
-    let input = tokio::fs::read_to_string(&options.config_path)
-        .await
-        .with_context(|| format!("read config {}", options.config_path.display()))?;
-    let config = RootConfig::from_toml_str(&input)?;
+    let config = RootConfig::from_toml_file(&options.config_path)?;
     info!(
         config_path = %options.config_path.display(),
         database_path = %options.database_path.display(),
@@ -110,10 +106,7 @@ pub async fn run(options: DaemonOptions) -> anyhow::Result<()> {
 pub async fn record_acceptance_self_defect(
     options: AcceptanceSelfDefectOptions,
 ) -> anyhow::Result<()> {
-    let input = tokio::fs::read_to_string(&options.config_path)
-        .await
-        .with_context(|| format!("read config {}", options.config_path.display()))?;
-    let config = RootConfig::from_toml_str(&input)?;
+    let config = RootConfig::from_toml_file(&options.config_path)?;
     let store = SqliteStore::open(&options.database_path)
         .await
         .with_context(|| format!("open sqlite database {}", options.database_path.display()))?;
@@ -303,11 +296,15 @@ async fn reconcile_project(
     let mut issues = linear.fetch_candidate_issues(project).await?;
     issues.sort_by(compare_issues_for_dispatch);
     reconcile_missing_candidate_issues(project, store, &issues, report).await?;
-    let has_unanswered_owner_input = issues
-        .iter()
-        .any(|issue| issue.state == "Need Owner Input" && !issue.has_new_owner_answer);
-    let active_runnable_todo_milestone = active_runnable_todo_milestone(&issues);
-    let runnable_todo_milestone_count = runnable_todo_milestone_count(&issues);
+    let has_unanswered_owner_input = project.workflow.block_project_dispatch_for_owner_input()
+        && issues.iter().any(|issue| {
+            project
+                .workflow
+                .is_stage(&issue.state, WorkflowStage::NeedOwnerInput)
+                && !issue.has_new_owner_answer
+        });
+    let active_runnable_todo_milestone = active_runnable_todo_milestone(&project.workflow, &issues);
+    let runnable_todo_milestone_count = runnable_todo_milestone_count(&project.workflow, &issues);
     debug!(
         project_id = %project.id,
         active_runnable_todo_milestone = active_runnable_todo_milestone.as_deref().unwrap_or("none"),
@@ -329,8 +326,8 @@ async fn reconcile_project(
         );
     }
     for issue in issues {
-        match issue.state.as_str() {
-            "Backlog" => {
+        match project.workflow.stage_for_linear_state(&issue.state) {
+            Some(WorkflowStage::Backlog) => {
                 if store.issue(&project.id, &issue.id).await?.is_some() {
                     debug!(
                         project_id = %project.id,
@@ -347,13 +344,13 @@ async fn reconcile_project(
                     store.upsert_issue(&record).await?;
                 }
             }
-            state if is_terminal_state(state) => {
-                if let Some(resolution) = self_defect_resolution_for_linear_state(state) {
+            Some(stage) if project.workflow.is_terminal_stage(stage) => {
+                if let Some(resolution) = self_defect_resolution_for_workflow_stage(stage) {
                     store
                         .mark_self_defect_managed_issue_resolved(&issue.id, resolution)
                         .await?;
                 }
-                let terminal_lifecycle_stage = lifecycle_stage_for_terminal_linear_state(state);
+                let terminal_lifecycle_stage = lifecycle_stage_for_workflow_stage(stage);
                 let existing = store.issue(&project.id, &issue.id).await?;
                 let mut record = issue_record(
                     project,
@@ -383,24 +380,28 @@ async fn reconcile_project(
                     info!(
                         project_id = %project.id,
                         issue = %issue.identifier,
-                        state,
+                        state = %issue.state,
                         cleanup = ?record.cleanup_status,
                         "terminal issue reconciled"
                     );
                     report.terminal_reconciled.push(issue.identifier);
                 }
             }
-            "Need Owner Input" => {
+            Some(WorkflowStage::NeedOwnerInput) => {
                 let existing = store.issue(&project.id, &issue.id).await?;
                 if has_new_owner_response(existing.as_ref(), &issue) {
                     info!(
                         project_id = %project.id,
                         issue = %issue.identifier,
-                        "new owner response observed; returning issue to Todo"
+                        "new owner response observed; returning issue to configured workflow stage"
                     );
-                    linear
-                        .transition_issue(&issue.id, LinearTransition::Todo)
-                        .await?;
+                    transition_issue_to_stage(
+                        linear,
+                        project,
+                        &issue.id,
+                        project.workflow.owner_input_return_stage(),
+                    )
+                    .await?;
                     let record = issue_record(
                         project,
                         &issue,
@@ -437,15 +438,14 @@ async fn reconcile_project(
                     report.parked_owner_input.push(issue.identifier);
                 }
             }
-            "In Progress" => {
+            Some(WorkflowStage::InProgress) => {
                 if has_unanswered_owner_input {
                     info!(
                         project_id = %project.id,
                         issue = %issue.identifier,
                         "pausing in-progress issue because project has unanswered Need Owner Input"
                     );
-                    linear
-                        .transition_issue(&issue.id, LinearTransition::Todo)
+                    transition_issue_to_stage(linear, project, &issue.id, WorkflowStage::Todo)
                         .await?;
                     let record = issue_record(
                         project,
@@ -470,8 +470,7 @@ async fn reconcile_project(
                         blocker_state = blocker.state.as_deref().unwrap_or("unknown"),
                         "pausing in-progress issue because Linear blocker is not accepted"
                     );
-                    linear
-                        .transition_issue(&issue.id, LinearTransition::Todo)
+                    transition_issue_to_stage(linear, project, &issue.id, WorkflowStage::Todo)
                         .await?;
                     let record = issue_record(
                         project,
@@ -498,8 +497,7 @@ async fn reconcile_project(
                 if retain_typed_non_owner_blocker(project, store, &issue, existing.as_ref()).await?
                 {
                     if should_requeue_retained_blocker {
-                        linear
-                            .transition_issue(&issue.id, LinearTransition::Todo)
+                        transition_issue_to_stage(linear, project, &issue.id, WorkflowStage::Todo)
                             .await?;
                     }
                     report.blocked.push(issue.identifier);
@@ -526,8 +524,7 @@ async fn reconcile_project(
                         reason = "missing_active_session",
                         "In Progress issue has no active runner session; returning to Todo for fresh dispatch"
                     );
-                    linear
-                        .transition_issue(&issue.id, LinearTransition::Todo)
+                    transition_issue_to_stage(linear, project, &issue.id, WorkflowStage::Todo)
                         .await?;
                     let mut record = issue_record(
                         project,
@@ -578,7 +575,7 @@ async fn reconcile_project(
                 }
                 store.upsert_issue(&record).await?;
             }
-            "Todo" => {
+            Some(WorkflowStage::Todo) => {
                 let existing = store.issue(&project.id, &issue.id).await?;
                 if has_unanswered_owner_input {
                     debug!(
@@ -602,7 +599,7 @@ async fn reconcile_project(
                         .await?;
                     continue;
                 }
-                if let Some(blocker) = self_bug_default_suppression(&issue) {
+                if let Some(blocker) = self_bug_default_suppression(project, &issue) {
                     info!(
                         project_id = %project.id,
                         issue = %issue.identifier,
@@ -861,7 +858,10 @@ async fn reconcile_missing_candidate_issues(
             identifier: existing.identifier.clone(),
             title: existing.title.clone(),
             description: None,
-            state: "Canceled".into(),
+            state: project
+                .workflow
+                .required_linear_state(WorkflowStage::Canceled)
+                .into(),
             priority: None,
             branch_name: None,
             url: None,
@@ -938,9 +938,7 @@ async fn dispatch_candidate(
         issue = %issue.identifier,
         "dispatching issue to runner"
     );
-    linear
-        .transition_issue(&issue.id, LinearTransition::InProgress)
-        .await?;
+    transition_issue_to_stage(linear, project, &issue.id, WorkflowStage::InProgress).await?;
     let launch_spec = build_acp_launch_spec(project, issue);
     let existing_record = store.issue(&project.id, &issue.id).await?;
     let mut record = issue_record(
@@ -1195,11 +1193,11 @@ async fn retain_typed_non_owner_blocker(
             store.upsert_issue(&record).await?;
             return Ok(true);
         }
-        if issue.state == "Todo" {
+        if project.workflow.is_stage(&issue.state, WorkflowStage::Todo) {
             return Ok(false);
         }
     }
-    if issue.state == "Todo"
+    if project.workflow.is_stage(&issue.state, WorkflowStage::Todo)
         && unaccepted_blocker(&issue.blocked_by).is_none()
         && retryable_todo_blocker_kind(&blocker.kind)
     {
@@ -1328,9 +1326,7 @@ async fn handle_launch_failure(
         },
     )
     .await?;
-    linear
-        .transition_issue(&issue.id, LinearTransition::Todo)
-        .await?;
+    transition_issue_to_stage(linear, project, &issue.id, WorkflowStage::Todo).await?;
     if matches!(
         launch_spec.provider_mode,
         crate::state::RuntimeProviderMode::OmpAcp
@@ -1673,10 +1669,27 @@ fn runner_provider_error_is_stale(
         && metrics.tokens_total > 0
 }
 
-fn active_runnable_todo_milestone(issues: &[LinearIssue]) -> Option<String> {
+async fn transition_issue_to_stage(
+    linear: &impl LinearClient,
+    project: &ProjectConfig,
+    issue_id: &str,
+    stage: WorkflowStage,
+) -> Result<(), crate::linear::LinearClientError> {
+    linear
+        .transition_issue_to_state(issue_id, project.workflow.required_linear_state(stage))
+        .await
+}
+
+fn active_runnable_todo_milestone(
+    workflow: &crate::config::ProjectWorkflow,
+    issues: &[LinearIssue],
+) -> Option<String> {
     issues
         .iter()
-        .filter(|issue| issue.state == "Todo" && unaccepted_blocker(&issue.blocked_by).is_none())
+        .filter(|issue| {
+            workflow.is_stage(&issue.state, WorkflowStage::Todo)
+                && unaccepted_blocker(&issue.blocked_by).is_none()
+        })
         .find_map(|issue| {
             issue
                 .project_milestone
@@ -1685,17 +1698,19 @@ fn active_runnable_todo_milestone(issues: &[LinearIssue]) -> Option<String> {
         })
 }
 
-fn self_defect_resolution_for_linear_state(state: &str) -> Option<SelfDefectResolutionState> {
-    match state {
-        "Done" => Some(SelfDefectResolutionState::Done),
-        "Canceled" => Some(SelfDefectResolutionState::Canceled),
+fn self_defect_resolution_for_workflow_stage(
+    stage: WorkflowStage,
+) -> Option<SelfDefectResolutionState> {
+    match stage {
+        WorkflowStage::Done => Some(SelfDefectResolutionState::Done),
+        WorkflowStage::Canceled => Some(SelfDefectResolutionState::Canceled),
         _ => None,
     }
 }
 
-fn lifecycle_stage_for_terminal_linear_state(state: &str) -> LifecycleStage {
-    match state {
-        "Canceled" => LifecycleStage::Canceled,
+fn lifecycle_stage_for_workflow_stage(stage: WorkflowStage) -> LifecycleStage {
+    match stage {
+        WorkflowStage::Canceled => LifecycleStage::Canceled,
         _ => LifecycleStage::Completed,
     }
 }
@@ -1707,12 +1722,15 @@ fn preserves_need_owner_input_blocker_kind(kind: &str) -> bool {
     )
 }
 
-fn runnable_todo_milestone_count(issues: &[LinearIssue]) -> usize {
+fn runnable_todo_milestone_count(
+    workflow: &crate::config::ProjectWorkflow,
+    issues: &[LinearIssue],
+) -> usize {
     let mut milestones = Vec::<&str>::new();
-    for issue in issues
-        .iter()
-        .filter(|issue| issue.state == "Todo" && unaccepted_blocker(&issue.blocked_by).is_none())
-    {
+    for issue in issues.iter().filter(|issue| {
+        workflow.is_stage(&issue.state, WorkflowStage::Todo)
+            && unaccepted_blocker(&issue.blocked_by).is_none()
+    }) {
         let Some(milestone) = issue.project_milestone.as_ref() else {
             continue;
         };

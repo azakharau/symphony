@@ -127,7 +127,7 @@ mod tests {
     use std::{path::PathBuf, sync::Mutex};
 
     use crate::{
-        config::{BranchPolicy, ConcurrencyConfig, EvalDefaults},
+        config::{BranchPolicy, ConcurrencyConfig, EvalDefaults, ProjectWorkflow},
         linear::{
             LinearClientError, LinearIssueEvidence, LinearMilestone, LinearProjectConfig,
             ManagedLinearRelation,
@@ -399,6 +399,7 @@ max_sessions = 1
                 max_identical_failure_fingerprints: 2,
             },
             concurrency: ConcurrencyConfig { max_sessions: 1 },
+            workflow: ProjectWorkflow::default(),
         }
     }
 

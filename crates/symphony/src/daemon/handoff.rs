@@ -11,8 +11,8 @@ use super::session::{
     process_elapsed_seconds, session_has_live_process, terminate_current_session_process,
 };
 use crate::{
-    config::{ProjectConfig, RunnerArchiveConfig},
-    linear::{LinearClient, LinearIssue, LinearIssueEvidence, LinearTransition},
+    config::{ProjectConfig, RunnerArchiveConfig, WorkflowStage},
+    linear::{LinearClient, LinearIssue, LinearIssueEvidence},
     runner::{
         RunnerError, RunnerHandoff, RunnerLauncher, RunnerSessionTreeActivity, RunnerStopReason,
         apply_session_tree_metrics_preserving_marker, build_acp_launch_spec,
@@ -744,7 +744,10 @@ async fn close_successful_handoff<L: LinearClient, O: RunnerLauncher>(
     let mut terminating_session = session.clone();
     terminate_current_session_process(project, issue, &mut terminating_session).await?;
     linear
-        .transition_issue(&issue.id, LinearTransition::Done)
+        .transition_issue_to_state(
+            &issue.id,
+            project.workflow.required_linear_state(WorkflowStage::Done),
+        )
         .await?;
     let cleanup_status = match cleanup_worktree(&project.repo_path, &git.worktree_path).await {
         Ok(()) => CleanupStatus::Complete,
@@ -1083,10 +1086,16 @@ async fn fail_runtime_defect(
     let mut terminating_session = session.clone();
     terminate_current_session_process(project, issue, &mut terminating_session).await?;
     let transition = match registry_record.relation_mode {
-        SelfDefectRelationMode::Blocking => LinearTransition::Todo,
-        SelfDefectRelationMode::RelatedOnly => LinearTransition::Backlog,
+        SelfDefectRelationMode::Blocking => WorkflowStage::Todo,
+        SelfDefectRelationMode::RelatedOnly => WorkflowStage::Backlog,
     };
-    linear.transition_issue(&issue.id, transition).await?;
+    let transition_state = project
+        .workflow
+        .linear_state(transition)
+        .unwrap_or_else(|| project.workflow.required_linear_state(WorkflowStage::Todo));
+    linear
+        .transition_issue_to_state(&issue.id, transition_state)
+        .await?;
     let mut record = issue_record(
         project,
         issue,
@@ -1522,7 +1531,12 @@ pub(super) async fn park_need_owner_input(
         )
         .await?;
     linear
-        .transition_issue(&issue.id, LinearTransition::NeedOwnerInput)
+        .transition_issue_to_state(
+            &issue.id,
+            project
+                .workflow
+                .required_linear_state(WorkflowStage::NeedOwnerInput),
+        )
         .await?;
     let record = IssueStateRecord {
         project_id: project.id.clone(),
@@ -1579,7 +1593,12 @@ pub(super) async fn park_typed_blocker(
         .await?;
     if transition_to_need_owner_input {
         linear
-            .transition_issue(&issue.id, LinearTransition::NeedOwnerInput)
+            .transition_issue_to_state(
+                &issue.id,
+                project
+                    .workflow
+                    .required_linear_state(WorkflowStage::NeedOwnerInput),
+            )
             .await?;
     }
     let record = IssueStateRecord {

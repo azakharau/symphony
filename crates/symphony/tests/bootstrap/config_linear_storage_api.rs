@@ -469,6 +469,7 @@ async fn linear_graphql_client_fetches_project_candidates_transitions_and_record
             serde_json::json!("Backlog"),
             serde_json::json!("Todo"),
             serde_json::json!("In Progress"),
+            serde_json::json!("In Review"),
             serde_json::json!("Need Owner Input"),
             serde_json::json!("Done"),
             serde_json::json!("Canceled"),
@@ -551,12 +552,11 @@ async fn linear_graphql_client_paginates_candidate_issues_until_exhausted() {
 async fn linear_client_finds_open_managed_issue_by_fingerprint() {
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
-    let client = RecordingLinearClient::new(vec![
-        linear_issue("done-managed", "SYM-10", "Done", Some(1))
-            .with_description("<!-- symphony:managed-self-bug fingerprint=sym-self-1 -->"),
-        linear_issue("open-managed", "SYM-11", "Todo", Some(1))
-            .with_description("<!-- symphony:managed-self-bug fingerprint=sym-self-1 -->"),
-    ]);
+    let mut done = linear_issue("done-managed", "SYM-10", "Done", Some(1));
+    done.title = "Symphony self-defect: sym-self-1".into();
+    let mut open = linear_issue("open-managed", "SYM-11", "Todo", Some(1));
+    open.title = "Symphony self-defect: sym-self-1".into();
+    let client = RecordingLinearClient::new(vec![done, open]);
 
     let issue = client
         .find_managed_issue(project, "sym-self-1")
@@ -572,9 +572,7 @@ async fn linear_graphql_client_creates_managed_issue_in_configured_project() {
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
     let mut created = linear_issue_node_json("managed-1", "SYM-200", "Todo", 2);
-    created["description"] = serde_json::json!(
-        "panic evidence\n\n<!-- symphony:managed-self-bug fingerprint=sym-self-2 -->"
-    );
+    created["description"] = serde_json::json!("panic evidence");
     let transport = RecordingGraphqlTransport::new(vec![
         serde_json::json!({
             "data": {
@@ -628,11 +626,9 @@ async fn linear_graphql_client_creates_managed_issue_in_configured_project() {
     assert_eq!(input["stateId"], "state-todo");
     assert_eq!(input["projectMilestoneId"], "milestone-1");
     assert_eq!(input["labelIds"], serde_json::json!(["label-symphony"]));
-    assert!(
-        input["description"]
-            .as_str()
-            .expect("description")
-            .contains("fingerprint=sym-self-2")
+    assert_eq!(
+        input["description"].as_str().expect("description"),
+        "panic evidence"
     );
 }
 
@@ -641,8 +637,7 @@ async fn linear_managed_issue_creation_accepts_sdk_extracted_response_shapes() {
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
     let mut created = linear_issue_node_json("managed-sdk", "SYM-202", "Backlog", 1);
-    created["description"] =
-        serde_json::json!("sdk evidence\n\n<!-- symphony:managed-self-bug fingerprint=sym-sdk -->");
+    created["description"] = serde_json::json!("sdk evidence");
     let transport = RecordingGraphqlTransport::new(vec![
         serde_json::json!({
             "nodes": [{
@@ -722,10 +717,9 @@ async fn linear_graphql_client_creates_relation_and_uses_related_for_self_deadlo
 
 #[tokio::test]
 async fn duplicate_managed_issue_reuse_records_occurrence_comment() {
-    let client = RecordingLinearClient::new(vec![
-        linear_issue("managed-duplicate", "SYM-201", "Todo", Some(1))
-            .with_description("<!-- symphony:managed-self-bug fingerprint=sym-self-3 -->"),
-    ]);
+    let mut managed_duplicate = linear_issue("managed-duplicate", "SYM-201", "Todo", Some(1));
+    managed_duplicate.title = "Symphony self-defect: sym-self-3".into();
+    let client = RecordingLinearClient::new(vec![managed_duplicate]);
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
 

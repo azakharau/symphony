@@ -18,15 +18,6 @@ pub use types::{
     ManagedLinearIssueState, ManagedLinearRelation,
 };
 
-const CANDIDATE_STATES: &[&str] = &[
-    "Backlog",
-    "Todo",
-    "In Progress",
-    "Need Owner Input",
-    "Done",
-    "Canceled",
-];
-
 #[async_trait::async_trait]
 pub trait LinearClient: Sync {
     async fn fetch_candidate_issues(
@@ -39,6 +30,17 @@ pub trait LinearClient: Sync {
         issue_id: &str,
         transition: LinearTransition,
     ) -> Result<(), LinearClientError>;
+
+    async fn transition_issue_to_state(
+        &self,
+        issue_id: &str,
+        state_name: &str,
+    ) -> Result<(), LinearClientError> {
+        let transition = LinearTransition::from_state_name(state_name).ok_or_else(|| {
+            LinearClientError::Message(format!("unsupported workflow state `{state_name}`"))
+        })?;
+        self.transition_issue(issue_id, transition).await
+    }
 
     async fn record_issue_evidence(
         &self,
@@ -53,11 +55,14 @@ pub trait LinearClient: Sync {
         project: &ProjectConfig,
         fingerprint: &str,
     ) -> Result<Option<LinearIssue>, LinearClientError> {
+        let expected_title = format!("Symphony self-defect: {fingerprint}");
         Ok(self
             .fetch_candidate_issues(project)
             .await?
             .into_iter()
-            .find(|issue| is_open_managed_issue(issue, fingerprint)))
+            .find(|issue| {
+                project.workflow.is_open_linear_state(&issue.state) && issue.title == expected_title
+            }))
     }
 
     async fn create_managed_issue(
@@ -270,6 +275,42 @@ impl LinearClient for LinearSdkClient {
         Ok(())
     }
 
+    async fn transition_issue_to_state(
+        &self,
+        issue_id: &str,
+        state_name: &str,
+    ) -> Result<(), LinearClientError> {
+        let state_id = state_id_for_issue_with(
+            |request| async move {
+                self.client
+                    .execute::<Value>(request.query, request.variables, request.data_path)
+                    .await
+                    .map_err(LinearClientError::from)
+            },
+            issue_id,
+            state_name,
+        )
+        .await?;
+        let response = self
+            .client
+            .execute::<Value>(
+                UPDATE_ISSUE_STATE_MUTATION,
+                json!({
+                    "issueId": issue_id,
+                    "stateId": state_id,
+                }),
+                "issueUpdate",
+            )
+            .await?;
+        ensure_success(&response, "/success", "issueUpdate")?;
+        info!(
+            issue_id,
+            state = state_name,
+            "Linear SDK transitioned issue"
+        );
+        Ok(())
+    }
+
     async fn record_issue_evidence(
         &self,
         issue_id: &str,
@@ -392,6 +433,30 @@ where
         info!(
             issue_id,
             state = transition.state_name(),
+            "Linear GraphQL transitioned issue"
+        );
+        Ok(())
+    }
+
+    async fn transition_issue_to_state(
+        &self,
+        issue_id: &str,
+        state_name: &str,
+    ) -> Result<(), LinearClientError> {
+        let state_id = self.state_id_for_issue(issue_id, state_name).await?;
+        let response = self
+            .post(json!({
+                "query": UPDATE_ISSUE_STATE_MUTATION,
+                "variables": {
+                    "issueId": issue_id,
+                    "stateId": state_id,
+                },
+            }))
+            .await?;
+        ensure_success(&response, "/data/issueUpdate/success", "issueUpdate")?;
+        info!(
+            issue_id,
+            state = state_name,
             "Linear GraphQL transitioned issue"
         );
         Ok(())
@@ -524,12 +589,13 @@ where
     let mut after: Option<String> = None;
 
     loop {
+        let states = project.workflow.processed_state_names();
         let connection = execute(GraphqlRequest {
             query: CANDIDATE_ISSUES_QUERY,
             variables: json!({
                 "teamKey": project.linear.team_key,
                 "projectId": project_id,
-                "states": CANDIDATE_STATES,
+                "states": states,
                 "after": after,
             }),
             data_path: "issues",
@@ -620,7 +686,7 @@ where
         "teamId": team_id,
         "projectId": project_id,
         "title": request.title,
-        "description": request.description_with_fingerprint(),
+        "description": request.description,
         "priority": request.priority,
         "stateId": state_id,
     });
@@ -694,14 +760,6 @@ fn state_id_from_team(team: &Value, state_name: &str) -> Result<String, LinearCl
         .find(|state| state.name == state_name)
         .map(|state| state.id)
         .ok_or_else(|| LinearClientError::Message(format!("missing state `{state_name}`")))
-}
-
-fn is_open_managed_issue(issue: &LinearIssue, fingerprint: &str) -> bool {
-    !matches!(issue.state.as_str(), "Done" | "Canceled")
-        && issue
-            .description
-            .as_deref()
-            .is_some_and(|description| description.contains(fingerprint))
 }
 
 fn ensure_success(

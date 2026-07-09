@@ -1,4 +1,8 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::{
+    collections::{BTreeSet, HashSet},
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -20,6 +24,39 @@ impl RootConfig {
         let config: Self = toml::from_str(input)?;
         config.validate()?;
         Ok(config)
+    }
+
+    pub fn from_toml_file(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
+        let path = path.as_ref();
+        let input = fs::read_to_string(path).map_err(|source| ConfigError::RootIo {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let mut config: Self = toml::from_str(&input)?;
+        config.load_project_workflows()?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn load_project_workflows(&mut self) -> Result<(), ConfigError> {
+        for project in &mut self.projects {
+            let path = project.resolved_workflow_path();
+            let input = fs::read_to_string(&path).map_err(|source| ConfigError::WorkflowIo {
+                project_id: project.id.clone(),
+                path: path.clone(),
+                source,
+            })?;
+            let workflow = toml::from_str::<ProjectWorkflow>(&input).map_err(|source| {
+                ConfigError::WorkflowParse {
+                    project_id: project.id.clone(),
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+            workflow.validate(&project.id)?;
+            project.workflow = workflow;
+        }
+        Ok(())
     }
 
     pub fn projects(&self) -> &[ProjectConfig] {
@@ -86,6 +123,7 @@ impl RootConfig {
                     project.id
                 )));
             }
+            project.workflow.validate(&project.id)?;
         }
 
         Ok(())
@@ -189,6 +227,18 @@ pub struct ProjectConfig {
     pub omp_acp_providers: Vec<OhMyPiAcpProviderConfig>,
     pub eval: EvalDefaults,
     pub concurrency: ConcurrencyConfig,
+    #[serde(skip, default)]
+    pub workflow: ProjectWorkflow,
+}
+
+impl ProjectConfig {
+    pub fn resolved_workflow_path(&self) -> PathBuf {
+        if self.workflow_path.is_absolute() {
+            self.workflow_path.clone()
+        } else {
+            self.repo_path.join(&self.workflow_path)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -315,10 +365,646 @@ pub struct ConcurrencyConfig {
     pub max_sessions: u32,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowStage {
+    Backlog,
+    Todo,
+    InProgress,
+    InReview,
+    NeedOwnerInput,
+    Done,
+    Canceled,
+}
+
+impl WorkflowStage {
+    const REQUIRED: [Self; 6] = [
+        Self::Todo,
+        Self::InProgress,
+        Self::InReview,
+        Self::NeedOwnerInput,
+        Self::Done,
+        Self::Canceled,
+    ];
+
+    const ALL: [Self; 7] = [
+        Self::Backlog,
+        Self::Todo,
+        Self::InProgress,
+        Self::InReview,
+        Self::NeedOwnerInput,
+        Self::Done,
+        Self::Canceled,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Backlog => "backlog",
+            Self::Todo => "todo",
+            Self::InProgress => "in_progress",
+            Self::InReview => "in_review",
+            Self::NeedOwnerInput => "need_owner_input",
+            Self::Done => "done",
+            Self::Canceled => "canceled",
+        }
+    }
+
+    const fn default_linear_state(self) -> &'static str {
+        match self {
+            Self::Backlog => "Backlog",
+            Self::Todo => "Todo",
+            Self::InProgress => "In Progress",
+            Self::InReview => "In Review",
+            Self::NeedOwnerInput => "Need Owner Input",
+            Self::Done => "Done",
+            Self::Canceled => "Canceled",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectWorkflow {
+    pub states: WorkflowStates,
+    #[serde(default)]
+    pub processed_states: Vec<String>,
+    pub agents: WorkflowAgents,
+    pub owner_input: OwnerInputPolicy,
+    #[serde(default)]
+    pub self_defects: WorkflowSelfDefectPolicy,
+}
+
+impl Default for ProjectWorkflow {
+    fn default() -> Self {
+        Self {
+            states: WorkflowStates::default(),
+            processed_states: Vec::new(),
+            agents: WorkflowAgents::default(),
+            owner_input: OwnerInputPolicy::default(),
+            self_defects: WorkflowSelfDefectPolicy::default(),
+        }
+    }
+}
+
+impl ProjectWorkflow {
+    fn validate(&self, project_id: &str) -> Result<(), ConfigError> {
+        self.states.validate(project_id)?;
+        self.agents.validate(project_id)?;
+        self.owner_input.validate(project_id)?;
+        self.self_defects.validate(project_id)?;
+        for state in &self.processed_states {
+            if state.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "project `{project_id}` workflow.processed_states entries must not be empty"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn linear_state(&self, stage: WorkflowStage) -> Option<&str> {
+        self.states.linear_state(stage)
+    }
+
+    pub fn required_linear_state(&self, stage: WorkflowStage) -> &str {
+        self.linear_state(stage)
+            .expect("required workflow state validated")
+    }
+
+    pub fn stage_for_linear_state(&self, state: &str) -> Option<WorkflowStage> {
+        WorkflowStage::ALL
+            .into_iter()
+            .find(|stage| self.linear_state(*stage) == Some(state))
+    }
+
+    pub fn is_stage(&self, state: &str, stage: WorkflowStage) -> bool {
+        self.linear_state(stage) == Some(state)
+    }
+
+    pub fn is_terminal_stage(&self, stage: WorkflowStage) -> bool {
+        matches!(stage, WorkflowStage::Done | WorkflowStage::Canceled)
+    }
+
+    pub fn is_open_linear_state(&self, state: &str) -> bool {
+        !self
+            .stage_for_linear_state(state)
+            .is_some_and(|stage| self.is_terminal_stage(stage))
+    }
+
+    pub fn processed_state_names(&self) -> Vec<&str> {
+        let mut states = Vec::new();
+        for stage in WorkflowStage::ALL {
+            if let Some(state) = self.linear_state(stage)
+                && !states.contains(&state)
+            {
+                states.push(state);
+            }
+        }
+        for state in &self.processed_states {
+            let state = state.as_str();
+            if !states.contains(&state) {
+                states.push(state);
+            }
+        }
+        states
+    }
+
+    pub fn agent_for_stage(&self, stage: WorkflowStage, labels: &[String]) -> Option<&str> {
+        self.agents.agent_for_stage(stage, labels)
+    }
+
+    pub fn block_project_dispatch_for_owner_input(&self) -> bool {
+        self.owner_input.block_project_dispatch
+    }
+
+    pub fn owner_input_return_stage(&self) -> WorkflowStage {
+        self.owner_input.return_stage
+    }
+
+    pub fn self_defect_execution_promoted(&self, labels: &[String]) -> bool {
+        self.self_defects
+            .executable_label
+            .as_deref()
+            .is_some_and(|expected| labels.iter().any(|label| label == expected))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowStates {
+    pub todo: String,
+    pub in_progress: String,
+    pub in_review: String,
+    pub need_owner_input: String,
+    pub done: String,
+    pub canceled: String,
+    pub backlog: Option<String>,
+}
+
+impl Default for WorkflowStates {
+    fn default() -> Self {
+        Self {
+            todo: WorkflowStage::Todo.default_linear_state().into(),
+            in_progress: WorkflowStage::InProgress.default_linear_state().into(),
+            in_review: WorkflowStage::InReview.default_linear_state().into(),
+            need_owner_input: WorkflowStage::NeedOwnerInput.default_linear_state().into(),
+            done: WorkflowStage::Done.default_linear_state().into(),
+            canceled: WorkflowStage::Canceled.default_linear_state().into(),
+            backlog: Some(WorkflowStage::Backlog.default_linear_state().into()),
+        }
+    }
+}
+
+impl WorkflowStates {
+    fn validate(&self, project_id: &str) -> Result<(), ConfigError> {
+        for stage in WorkflowStage::REQUIRED {
+            let state = self.linear_state(stage).unwrap_or_default();
+            if state.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "project `{project_id}` workflow.states.{} must not be empty",
+                    stage.as_str()
+                )));
+            }
+        }
+        if self
+            .backlog
+            .as_deref()
+            .is_some_and(|state| state.trim().is_empty())
+        {
+            return Err(ConfigError::Validation(format!(
+                "project `{project_id}` workflow.states.backlog must not be empty when configured"
+            )));
+        }
+        Ok(())
+    }
+
+    fn linear_state(&self, stage: WorkflowStage) -> Option<&str> {
+        match stage {
+            WorkflowStage::Backlog => self.backlog.as_deref(),
+            WorkflowStage::Todo => Some(&self.todo),
+            WorkflowStage::InProgress => Some(&self.in_progress),
+            WorkflowStage::InReview => Some(&self.in_review),
+            WorkflowStage::NeedOwnerInput => Some(&self.need_owner_input),
+            WorkflowStage::Done => Some(&self.done),
+            WorkflowStage::Canceled => Some(&self.canceled),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowAgents {
+    pub default: WorkflowDefaultAgents,
+    #[serde(default)]
+    pub labels: Vec<LabelAgentMapping>,
+}
+
+impl Default for WorkflowAgents {
+    fn default() -> Self {
+        Self {
+            default: WorkflowDefaultAgents::default(),
+            labels: Vec::new(),
+        }
+    }
+}
+
+impl WorkflowAgents {
+    fn validate(&self, project_id: &str) -> Result<(), ConfigError> {
+        self.default.validate(project_id)?;
+        let mut seen = BTreeSet::new();
+        for mapping in &self.labels {
+            mapping.validate(project_id)?;
+            for stage in mapping.effective_stages() {
+                let key = (mapping.label.as_str(), stage);
+                if !seen.insert(key) {
+                    return Err(ConfigError::Validation(format!(
+                        "project `{project_id}` workflow.agents.labels has duplicate label mapping `{}` for stage `{}`",
+                        mapping.label,
+                        stage.as_str()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn agent_for_stage(&self, stage: WorkflowStage, labels: &[String]) -> Option<&str> {
+        let selected = self
+            .labels
+            .iter()
+            .filter(|mapping| {
+                mapping.matches_stage(stage)
+                    && labels
+                        .iter()
+                        .any(|label| label.as_str() == mapping.label.as_str())
+            })
+            .max_by(|left, right| {
+                left.precedence
+                    .cmp(&right.precedence)
+                    .then_with(|| right.label.cmp(&left.label))
+            });
+        selected
+            .map(|mapping| mapping.agent.as_str())
+            .or_else(|| self.default.agent_for_stage(stage))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefaultAgents {
+    pub todo: String,
+    pub in_progress: String,
+    pub in_review: String,
+    pub need_owner_input: String,
+    pub done: String,
+    pub canceled: String,
+    pub backlog: Option<String>,
+}
+
+impl Default for WorkflowDefaultAgents {
+    fn default() -> Self {
+        Self {
+            todo: "build".into(),
+            in_progress: "build".into(),
+            in_review: "build".into(),
+            need_owner_input: "build".into(),
+            done: "build".into(),
+            canceled: "build".into(),
+            backlog: Some("build".into()),
+        }
+    }
+}
+
+impl WorkflowDefaultAgents {
+    fn validate(&self, project_id: &str) -> Result<(), ConfigError> {
+        for stage in WorkflowStage::REQUIRED {
+            let agent = self.agent_for_stage(stage).unwrap_or_default();
+            if agent.trim().is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "project `{project_id}` workflow.agents.default.{} must not be empty",
+                    stage.as_str()
+                )));
+            }
+        }
+        if self
+            .backlog
+            .as_deref()
+            .is_some_and(|agent| agent.trim().is_empty())
+        {
+            return Err(ConfigError::Validation(format!(
+                "project `{project_id}` workflow.agents.default.backlog must not be empty when configured"
+            )));
+        }
+        Ok(())
+    }
+
+    fn agent_for_stage(&self, stage: WorkflowStage) -> Option<&str> {
+        match stage {
+            WorkflowStage::Backlog => self.backlog.as_deref(),
+            WorkflowStage::Todo => Some(&self.todo),
+            WorkflowStage::InProgress => Some(&self.in_progress),
+            WorkflowStage::InReview => Some(&self.in_review),
+            WorkflowStage::NeedOwnerInput => Some(&self.need_owner_input),
+            WorkflowStage::Done => Some(&self.done),
+            WorkflowStage::Canceled => Some(&self.canceled),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LabelAgentMapping {
+    pub label: String,
+    pub agent: String,
+    #[serde(default)]
+    pub precedence: i32,
+    #[serde(default)]
+    pub stages: Vec<WorkflowStage>,
+}
+
+impl LabelAgentMapping {
+    fn validate(&self, project_id: &str) -> Result<(), ConfigError> {
+        if self.label.trim().is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "project `{project_id}` workflow.agents.labels.label must not be empty"
+            )));
+        }
+        if self.agent.trim().is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "project `{project_id}` workflow.agents.labels `{}` agent must not be empty",
+                self.label
+            )));
+        }
+        Ok(())
+    }
+
+    fn effective_stages(&self) -> impl Iterator<Item = WorkflowStage> + '_ {
+        let fallback = self.stages.is_empty().then_some(WorkflowStage::Todo);
+        self.stages.iter().copied().chain(fallback)
+    }
+
+    fn matches_stage(&self, stage: WorkflowStage) -> bool {
+        self.effective_stages().any(|candidate| candidate == stage)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerInputPolicy {
+    #[serde(default = "default_owner_input_blocks_project")]
+    pub block_project_dispatch: bool,
+    #[serde(default = "default_owner_input_return_stage")]
+    pub return_stage: WorkflowStage,
+}
+
+impl Default for OwnerInputPolicy {
+    fn default() -> Self {
+        Self {
+            block_project_dispatch: default_owner_input_blocks_project(),
+            return_stage: default_owner_input_return_stage(),
+        }
+    }
+}
+
+impl OwnerInputPolicy {
+    fn validate(&self, project_id: &str) -> Result<(), ConfigError> {
+        if !matches!(
+            self.return_stage,
+            WorkflowStage::Todo | WorkflowStage::Backlog
+        ) {
+            return Err(ConfigError::Validation(format!(
+                "project `{project_id}` workflow.owner_input.return_stage must be todo or backlog"
+            )));
+        }
+        Ok(())
+    }
+}
+
+const fn default_owner_input_blocks_project() -> bool {
+    true
+}
+
+const fn default_owner_input_return_stage() -> WorkflowStage {
+    WorkflowStage::Todo
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowSelfDefectPolicy {
+    pub executable_label: Option<String>,
+}
+
+impl Default for WorkflowSelfDefectPolicy {
+    fn default() -> Self {
+        Self {
+            executable_label: Some("self-defect-executable".into()),
+        }
+    }
+}
+
+impl WorkflowSelfDefectPolicy {
+    fn validate(&self, project_id: &str) -> Result<(), ConfigError> {
+        if self
+            .executable_label
+            .as_deref()
+            .is_some_and(|label| label.trim().is_empty())
+        {
+            return Err(ConfigError::Validation(format!(
+                "project `{project_id}` workflow.self_defects.executable_label must not be empty when configured"
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error("read root config {path}: {source}")]
+    RootIo { path: PathBuf, source: io::Error },
     #[error("invalid root config: {0}")]
     Parse(#[from] toml::de::Error),
+    #[error("read workflow config for project `{project_id}` at {path}: {source}")]
+    WorkflowIo {
+        project_id: String,
+        path: PathBuf,
+        source: io::Error,
+    },
+    #[error("invalid workflow config for project `{project_id}` at {path}: {source}")]
+    WorkflowParse {
+        project_id: String,
+        path: PathBuf,
+        source: toml::de::Error,
+    },
     #[error("invalid root config: {0}")]
     Validation(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn root_config_toml(repo_path: &Path) -> String {
+        format!(
+            r#"
+[[projects]]
+id = "symphony"
+name = "Symphony"
+enabled = true
+workflow_path = "symphony.workflow.toml"
+repo_path = "{}"
+
+[projects.branch]
+base = "main"
+worktree_root = "/tmp/worktrees"
+
+[projects.linear]
+team_key = "SYM"
+project_id = "linear-project"
+
+[projects.runner]
+command = "/usr/local/bin/omp"
+args = ["acp"]
+agent = "build"
+model = "openai/gpt-5.5"
+effort = "high"
+permission_policy = "reject"
+
+[projects.eval]
+default_suite = "symphony-validation"
+
+[projects.concurrency]
+max_sessions = 1
+"#,
+            repo_path.display()
+        )
+    }
+
+    fn valid_workflow_toml() -> &'static str {
+        r#"
+processed_states = ["Backlog"]
+
+[states]
+todo = "Todo"
+in_progress = "In Progress"
+in_review = "In Review"
+need_owner_input = "Need Owner Input"
+done = "Done"
+canceled = "Canceled"
+backlog = "Backlog"
+
+[agents.default]
+todo = "build"
+in_progress = "build"
+in_review = "code-reviewer"
+need_owner_input = "build"
+done = "build"
+canceled = "build"
+backlog = "build"
+
+[[agents.labels]]
+label = "rust"
+agent = "rust-engineer"
+precedence = 50
+stages = ["todo"]
+
+[[agents.labels]]
+label = "urgent"
+agent = "integrator"
+precedence = 100
+stages = ["todo"]
+
+
+[self_defects]
+executable_label = "self-defect-executable"
+[owner_input]
+block_project_dispatch = true
+return_stage = "todo"
+"#
+    }
+
+    #[test]
+    fn config_loads_valid_project_workflow_contract() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("symphony.workflow.toml"),
+            valid_workflow_toml(),
+        )
+        .expect("workflow");
+        let root = dir.path().join("symphony.projects.toml");
+        fs::write(&root, root_config_toml(dir.path())).expect("root config");
+
+        let config = RootConfig::from_toml_file(&root).expect("config");
+        let project = config.project("symphony").expect("project");
+
+        assert_eq!(
+            project.workflow.processed_state_names(),
+            vec![
+                "Backlog",
+                "Todo",
+                "In Progress",
+                "In Review",
+                "Need Owner Input",
+                "Done",
+                "Canceled"
+            ]
+        );
+        assert_eq!(
+            project
+                .workflow
+                .agent_for_stage(WorkflowStage::Todo, &["rust".into(), "urgent".into()]),
+            Some("integrator")
+        );
+        assert_eq!(
+            project
+                .workflow
+                .agent_for_stage(WorkflowStage::InReview, &["rust".into()]),
+            Some("code-reviewer")
+        );
+    }
+
+    #[test]
+    fn config_rejects_missing_required_workflow_state() {
+        let workflow = valid_workflow_toml().replace("in_review = \"In Review\"\n", "");
+
+        let err =
+            toml::from_str::<ProjectWorkflow>(&workflow).expect_err("missing in_review must fail");
+
+        assert!(err.to_string().contains("in_review"), "{err}");
+    }
+
+    #[test]
+    fn config_rejects_unknown_workflow_stage() {
+        let workflow =
+            valid_workflow_toml().replace("stages = [\"todo\"]", "stages = [\"triage\"]");
+
+        let err =
+            toml::from_str::<ProjectWorkflow>(&workflow).expect_err("unknown stage must fail");
+
+        assert!(err.to_string().contains("triage"), "{err}");
+    }
+
+    #[test]
+    fn config_rejects_duplicate_label_mapping_for_stage() {
+        let duplicate = format!(
+            "{}\n[[agents.labels]]\nlabel = \"rust\"\nagent = \"integrator\"\nprecedence = 60\nstages = [\"todo\"]\n",
+            valid_workflow_toml()
+        );
+        let workflow =
+            toml::from_str::<ProjectWorkflow>(&duplicate).expect("workflow parse succeeds");
+
+        let err = workflow.validate("symphony").expect_err("duplicate label");
+
+        assert!(err.to_string().contains("duplicate label mapping"), "{err}");
+    }
+
+    #[test]
+    fn config_rejects_missing_workflow_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("symphony.projects.toml");
+        fs::write(&root, root_config_toml(dir.path())).expect("root config");
+
+        let err = RootConfig::from_toml_file(&root).expect_err("missing workflow");
+
+        assert!(err.to_string().contains("symphony.workflow.toml"), "{err}");
+    }
 }

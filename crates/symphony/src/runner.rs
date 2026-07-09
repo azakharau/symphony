@@ -21,7 +21,7 @@ use tokio::{
 use tracing::{debug, info, warn};
 
 use crate::{
-    config::{OhMyPiAcpCwdPolicy, OhMyPiAcpProviderConfig, ProjectConfig},
+    config::{OhMyPiAcpCwdPolicy, OhMyPiAcpProviderConfig, ProjectConfig, WorkflowStage},
     linear::LinearIssue,
     state::{LifecycleStage, RunnerSessionRecord, RunnerStage, RuntimeProviderMode},
 };
@@ -1242,6 +1242,7 @@ pub fn build_acp_launch_spec(project: &ProjectConfig, issue: &LinearIssue) -> Ru
         return build_omp_acp_launch_spec(project, issue, provider);
     }
     let branch_name = issue_branch_name(issue);
+    let agent = workflow_agent_for_issue(project, issue, WorkflowStage::Todo);
     RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
@@ -1255,7 +1256,7 @@ pub fn build_acp_launch_spec(project: &ProjectConfig, issue: &LinearIssue) -> Ru
         repo_path: Some(project.repo_path.clone()),
         recall_workspace_root: None,
         base_ref: Some(project.branch.base.clone()),
-        agent: project.runner.agent.clone(),
+        agent,
         model: project.runner.model.clone(),
         effort: project.runner.effort.clone(),
         prompt: build_issue_prompt(project, issue, &branch_name),
@@ -1274,6 +1275,7 @@ pub fn build_omp_acp_launch_spec(
         OhMyPiAcpCwdPolicy::IssueWorktree => issue_worktree,
         OhMyPiAcpCwdPolicy::ProjectRepo => project.repo_path.clone(),
     };
+    let agent = workflow_agent_for_issue(project, issue, WorkflowStage::Todo);
     RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::OmpAcp,
         provider_id: Some(provider.id.clone()),
@@ -1287,10 +1289,7 @@ pub fn build_omp_acp_launch_spec(
         repo_path: Some(project.repo_path.clone()),
         recall_workspace_root: None,
         base_ref: Some(project.branch.base.clone()),
-        agent: provider
-            .agent
-            .clone()
-            .unwrap_or_else(|| project.runner.agent.clone()),
+        agent,
         model: provider
             .model
             .clone()
@@ -1302,6 +1301,18 @@ pub fn build_omp_acp_launch_spec(
         prompt: build_issue_prompt(project, issue, &branch_name),
         permission_policy: project.runner.permission_policy.clone(),
     }
+}
+
+fn workflow_agent_for_issue(
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+    stage: WorkflowStage,
+) -> String {
+    project
+        .workflow
+        .agent_for_stage(stage, &issue.labels)
+        .unwrap_or(&project.runner.agent)
+        .to_owned()
 }
 
 fn repair_prompt(

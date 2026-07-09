@@ -7,7 +7,7 @@ enabled = true
 interval_secs = 300
 retention_secs = 86400
 
-[opencode_storage]
+[runner_archive]
 database_path = "/home/agent/.local/share/opencode/opencode.db"
 archive_root = "/home/agent/recall-benchmark-runs/symphony-opencode-session-archives"
 
@@ -15,11 +15,9 @@ archive_root = "/home/agent/recall-benchmark-runs/symphony-opencode-session-arch
 id = "symphony"
 name = "Symphony"
 enabled = true
-workflow_path = "/home/agent/proj/symphony/SPEC.md"
+workflow_path = "symphony.workflow.toml"
 repo_path = "/home/agent/proj/symphony"
 
-[projects.recall]
-workspace_root = "/home/agent/proj/symphony"
 
 [projects.branch]
 base = "main"
@@ -29,7 +27,7 @@ worktree_root = "/home/agent/.symphony/workspaces/opencode/symphony"
 team_key = "SYM"
 project_id = "07df87ce-4e93-4d2c-a73d-84aee1f27e07"
 
-[projects.opencode]
+[projects.runner]
 command = "/usr/local/bin/opencode"
 args = ["acp"]
 agent = "build"
@@ -48,11 +46,9 @@ max_sessions = 1
 id = "agent-forge"
 name = "Neryva Agent Forge"
 enabled = true
-workflow_path = "/home/agent/proj/neryva-agent-forge/WORKFLOW.md"
+workflow_path = "symphony.workflow.toml"
 repo_path = "/home/agent/proj/neryva-agent-forge"
 
-[projects.recall]
-workspace_root = "/home/agent/proj/neryva-agent-forge"
 
 [projects.branch]
 base = "main"
@@ -62,7 +58,7 @@ worktree_root = "/home/agent/.symphony/workspaces/opencode/agent-forge"
 team_key = "AGF"
 project_id = "d83dd1c1-38b9-4896-a38e-ded7b9fe8ba4"
 
-[projects.opencode]
+[projects.runner]
 command = "/usr/local/bin/opencode"
 args = ["acp"]
 agent = "build"
@@ -81,11 +77,9 @@ max_sessions = 1
 id = "recall"
 name = "Recall"
 enabled = true
-workflow_path = "/home/agent/proj/recall/WORKFLOW.md"
+workflow_path = "symphony.workflow.toml"
 repo_path = "/home/agent/proj/recall"
 
-[projects.recall]
-workspace_root = "/home/agent/proj/recall"
 
 [projects.branch]
 base = "master"
@@ -95,7 +89,7 @@ worktree_root = "/home/agent/.symphony/workspaces/opencode/recall"
 team_key = "MNE"
 project_id = "30e7f914-0310-4074-8e98-7862ef5e366b"
 
-[projects.opencode]
+[projects.runner]
 command = "/usr/local/bin/opencode"
 args = ["acp"]
 agent = "build"
@@ -114,11 +108,9 @@ max_sessions = 1
 id = "nervure"
 name = "Nervure"
 enabled = true
-workflow_path = "/home/agent/proj/nervure/WORKFLOW.md"
+workflow_path = "symphony.workflow.toml"
 repo_path = "/home/agent/proj/nervure"
 
-[projects.recall]
-workspace_root = "/home/agent/proj/nervure"
 
 [projects.branch]
 base = "main"
@@ -128,7 +120,7 @@ worktree_root = "/home/agent/.symphony/workspaces/opencode/nervure"
 team_key = "NRV"
 project_id = "fc0bbd97-7f24-46ca-be14-d6332d4d48fb"
 
-[projects.opencode]
+[projects.runner]
 command = "/usr/local/bin/opencode"
 args = ["acp"]
 agent = "build"

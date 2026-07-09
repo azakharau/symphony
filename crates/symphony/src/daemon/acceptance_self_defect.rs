@@ -5,7 +5,7 @@ use crate::{
     storage::SqliteStore,
 };
 
-use super::self_defects::{RuntimeSelfDefectInput, record_runtime_self_defect};
+use super::self_defects::{RuntimeSelfDefectInput, record_observational_self_defect};
 
 const LIVE_ACCEPTANCE_SELF_DEFECT_FINGERPRINT: &str = "live_acceptance_related_only";
 
@@ -62,7 +62,7 @@ pub(super) async fn record_acceptance_self_defect_with_linear_client(
     };
     let session = acceptance_session_record(project, &issue, input.session_id, input.process_id);
 
-    record_runtime_self_defect(
+    record_observational_self_defect(
         project,
         managed_project,
         store,
@@ -205,7 +205,7 @@ mod tests {
             evidence[0]
                 .1
                 .body
-                .contains("skipped_blocker_reason: active_symphony_self_deadlock_prevention")
+                .contains("skipped_blocker_reason: observational_occurrence")
         );
     }
 
@@ -388,6 +388,7 @@ max_sessions = 1
                 project_id: Some("symphony-project".into()),
             },
             runner: RunnerRuntimeConfig {
+                provider_mode: crate::state::RuntimeProviderMode::Acp,
                 command: PathBuf::from("runner"),
                 args: vec!["acp".into()],
                 agent: "build".into(),

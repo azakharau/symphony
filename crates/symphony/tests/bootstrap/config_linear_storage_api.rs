@@ -61,6 +61,7 @@ async fn multiproject_toml_config_loads_deterministically_and_validates_required
         PathBuf::from("/usr/local/bin/opencode")
     );
     assert_eq!(project.runner.args, vec!["acp"]);
+    assert_eq!(project.runner.provider_mode, RuntimeProviderMode::Acp);
     assert_eq!(project.concurrency.max_sessions, 2);
     assert!(first.cleanup.enabled);
     assert_eq!(first.cleanup.interval_secs, 300);
@@ -71,6 +72,14 @@ async fn multiproject_toml_config_loads_deterministically_and_validates_required
         valid_config_toml().replace("repo_path = \"/home/agent/proj/symphony\"\n", "");
     let err = RootConfig::from_toml_str(&missing_required).expect_err("repo_path is required");
     assert!(err.to_string().contains("repo_path"), "{err}");
+
+    let missing_omp_provider = valid_config_toml().replace(
+        "permission_policy = \"reject\"",
+        "permission_policy = \"reject\"\nprovider_mode = \"omp_acp\"",
+    );
+    let err = RootConfig::from_toml_str(&missing_omp_provider)
+        .expect_err("explicit OMP ACP mode requires provider config");
+    assert!(err.to_string().contains("omp_acp_providers"), "{err}");
 }
 
 #[tokio::test]
@@ -122,6 +131,27 @@ inverse_bridge_reference = true
     assert!(provider.capabilities.rpc_secondary_mode);
     assert!(provider.capabilities.inverse_bridge_reference);
     let issue = linear_issue("issue-omp", "SYM-204", "Todo", Some(1));
+    let launch_spec = runner::build_acp_launch_spec(project, &issue);
+    assert_eq!(launch_spec.provider_mode, RuntimeProviderMode::Acp);
+    assert_eq!(launch_spec.provider_id, None);
+    assert_eq!(
+        launch_spec.command,
+        PathBuf::from("/usr/local/bin/opencode")
+    );
+    assert_eq!(launch_spec.agent, "build");
+    assert_eq!(launch_spec.model.as_deref(), Some("openai/gpt-5.5"));
+    assert_eq!(launch_spec.effort.as_deref(), Some("high"));
+    assert_eq!(
+        launch_spec.cwd,
+        PathBuf::from("/home/agent/.symphony/workspaces/opencode/symphony/SYM-204")
+    );
+
+    let switched = configured.replace(
+        "permission_policy = \"reject\"",
+        "permission_policy = \"reject\"\nprovider_mode = \"omp_acp\"",
+    );
+    let config = RootConfig::from_toml_str(&switched).expect("explicit OMP ACP provider mode");
+    let project = config.project("symphony").expect("project");
     let launch_spec = runner::build_acp_launch_spec(project, &issue);
     assert_eq!(launch_spec.provider_mode, RuntimeProviderMode::OmpAcp);
     assert_eq!(launch_spec.provider_id.as_deref(), Some("omp-primary"));

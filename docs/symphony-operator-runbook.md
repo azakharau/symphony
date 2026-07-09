@@ -36,12 +36,13 @@ Do not place Linear secrets in the dashboard unit or dashboard env file.
 The OMP integration contract is `docs/oh-my-pi-acp-orchestration-contract.md`.
 Treat that document as the source for supported surfaces, trust boundaries, and failure taxonomy.
 
-Configure OMP ACP per project in `/home/agent/.symphony/symphony/projects.toml` with a single
+Configure OMP ACP per project in `/home/agent/.symphony/symphony/projects.toml` with
+`[projects.runner].provider_mode = "omp_acp"` and a single
 `[[projects.omp_acp_providers]]` block for the project being cut over. Leave unrelated active
-projects unchanged. A provider block must declare `id`, absolute `command`, `args = ["acp"]`,
-`cwd = "issue_worktree"` or `cwd = "project_repo"`, an explicit `env_allowlist`, optional
-`agent`/`model`/`effort`, and capabilities with `acp_stdio = true`. Keep `live_smoke = false`
-unless the operator is deliberately running live OMP validation.
+projects on `provider_mode = "acp"`. A provider block must declare `id`, absolute `command`,
+`args = ["acp"]`, `cwd = "issue_worktree"` or `cwd = "project_repo"`, an explicit
+`env_allowlist`, optional `agent`/`model`/`effort`, and capabilities with `acp_stdio = true`.
+Keep `live_smoke = false` unless the operator is deliberately running live OMP validation.
 
 Supported Symphony surfaces:
 
@@ -197,6 +198,9 @@ OMP ACP dashboard expectations:
 Cut over one project at a time:
 
 - Add or enable one `omp_acp_providers` block for the target project only.
+- Set `[projects.runner].provider_mode = "omp_acp"` for the target project only.
+- To return a project to OpenCode, set `[projects.runner].provider_mode = "acp"` and keep the OMP
+  provider block disabled or inert for future cutover attempts.
 - Run `symphony validate-config --config /home/agent/.symphony/symphony/projects.toml` before restart.
 - Restart only `symphony.service` during a safe restart window; do not restart the dashboard unless its own deployment changed.
 - Confirm `/api/projects/<project>` eligibility and `/api/dashboard` telemetry before allowing new issue starts.

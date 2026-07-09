@@ -359,50 +359,7 @@ pub(super) async fn process_recoverable_failed_handoff(
 
     let handoff = match runner.latest_handoff(&session).await {
         Ok(Some(handoff)) => handoff,
-        Ok(None) => {
-            request_runner_repair(
-                project,
-                self_defect_project,
-                store,
-                runner,
-                linear,
-                issue,
-                existing_issue.as_ref(),
-                "malformed_handoff",
-                ".symphony/runner-handoff.json was not produced before the runner ACP process ended".to_string(),
-                FailureRecord {
-                    kind: "malformed_handoff".into(),
-                    message: "missing handoff sidecar".into(),
-                    fingerprint: Some("missing_handoff_sidecar".into()),
-                    occurrence_count: 1,
-                },
-                &session,
-            )
-            .await?;
-            return Ok(true);
-        }
-        Err(RunnerError::MalformedHandoff(message)) => {
-            request_runner_repair(
-                project,
-                self_defect_project,
-                store,
-                runner,
-                linear,
-                issue,
-                existing_issue.as_ref(),
-                "malformed_handoff",
-                message.clone(),
-                FailureRecord {
-                    kind: "malformed_handoff".into(),
-                    message,
-                    fingerprint: Some("malformed_handoff_sidecar".into()),
-                    occurrence_count: 1,
-                },
-                &session,
-            )
-            .await?;
-            return Ok(true);
-        }
+        Ok(None) | Err(RunnerError::MalformedHandoff(_)) => return Ok(false),
         Err(error) => return Err(error.into()),
     };
 
@@ -1499,7 +1456,7 @@ fn successful_handoff_worktree_error(
         ));
     }
     if !worktree_path_allowed(&project.branch.worktree_root, &path)
-        && session.provider_mode != RuntimeProviderMode::OmpAcp
+        && session.provider_mode == project.runner.provider_mode
     {
         return Some(format!(
             "git closure worktree path `{}` is outside configured worktree root `{}`",

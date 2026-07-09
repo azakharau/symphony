@@ -476,7 +476,7 @@ async fn todo_issue_with_recoverable_failed_success_handoff_closes_without_new_l
 }
 
 #[tokio::test]
-async fn omp_handoff_with_semantic_session_id_closes_from_runtime_session() {
+async fn omp_handoff_closes_after_switching_to_acp_and_a_new_worktree_root() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let repo = dir.path().join("repo");
@@ -508,8 +508,8 @@ async fn omp_handoff_with_semantic_session_id_closes_from_runtime_session() {
         &repo,
         ["push", "origin", "agent-server/opencode-runner-extension"],
     );
-    let worktree_root = dir.path().join("allowed-worktrees");
-    let worktree = worktree_root.join("SYM-235");
+    let legacy_worktree_root = dir.path().join("omp-worktrees");
+    let worktree = legacy_worktree_root.join("SYM-235");
     run_git(
         &repo,
         [
@@ -529,6 +529,7 @@ async fn omp_handoff_with_semantic_session_id_closes_from_runtime_session() {
     let issue_branch = "symphony/SYM-235";
     let issue_refspec = format!("HEAD:refs/heads/{issue_branch}");
     run_git(&worktree, ["push", "origin", &issue_refspec]);
+    let next_worktree_root = dir.path().join("opencode-worktrees");
     let config_toml = valid_config_toml()
         .replace(
             "repo_path = \"/home/agent/proj/symphony\"",
@@ -536,7 +537,7 @@ async fn omp_handoff_with_semantic_session_id_closes_from_runtime_session() {
         )
         .replace(
             "/home/agent/.symphony/workspaces/opencode/symphony",
-            &worktree_root.display().to_string(),
+            &next_worktree_root.display().to_string(),
         );
     let config = RootConfig::from_toml_str(&config_toml).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
@@ -1631,7 +1632,7 @@ async fn successful_handoff_with_worktree_outside_configured_root_is_parked_with
         .await
         .expect("orchestrate once");
 
-    assert_backlog_transition(&client.transitions(), "completed");
+    assert_todo_transition(&client.transitions(), "completed");
     assert!(outside.exists(), "outside path must not be removed");
     assert!(
         client
@@ -1701,7 +1702,7 @@ async fn successful_handoff_with_sibling_worktree_is_parked_without_cleanup() {
         .await
         .expect("orchestrate once");
 
-    assert_backlog_transition(&client.transitions(), "completed");
+    assert_todo_transition(&client.transitions(), "completed");
     assert!(active.exists(), "active worktree must not be removed");
     assert!(sibling.exists(), "sibling worktree must not be removed");
     assert!(client.evidence().iter().any(|(_, evidence)| {
@@ -1769,7 +1770,7 @@ async fn successful_handoff_with_whitespace_worktree_path_is_parked_without_clea
         .await
         .expect("orchestrate once");
 
-    assert_backlog_transition(&client.transitions(), "completed");
+    assert_todo_transition(&client.transitions(), "completed");
     assert!(active.exists(), "active worktree must not be removed");
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff"
@@ -1954,7 +1955,7 @@ async fn repeated_session_id_mismatch_hits_runtime_repair_threshold() {
         .expect("orchestrate once");
 
     assert!(opencode.repairs().is_empty());
-    assert_backlog_transition(&client.transitions(), "session-mismatch");
+    assert_todo_transition(&client.transitions(), "session-mismatch");
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff"
             && evidence.body.contains("reached bounded repair threshold")
@@ -2177,7 +2178,7 @@ async fn malformed_success_handoff_fails_fast_without_opencode_repair_or_owner_i
         .await
         .expect("orchestrate once");
 
-    assert_backlog_transition(&client.transitions(), "malformed");
+    assert_todo_transition(&client.transitions(), "malformed");
     assert!(client.evidence().iter().any(|(_, evidence)| {
         evidence.kind == "malformed_handoff"
             && evidence
@@ -3019,9 +3020,9 @@ async fn orchestration_processes_multiple_projects_in_config_order() {
         ),
     ]);
 
-    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+    let report = run_todo_promotion_then_stage_entry(&config, &store, &client)
         .await
-        .expect("orchestrate once");
+        .expect("promote then dispatch");
 
     assert_eq!(report.dispatched, vec!["ALPHA-1", "SYM-70"]);
     assert_eq!(

@@ -7,7 +7,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{linear::LinearProjectConfig, runner::RunnerRuntimeConfig};
+use crate::{linear::LinearProjectConfig, runner::RunnerRuntimeConfig, state::RuntimeProviderMode};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -112,6 +112,14 @@ impl RootConfig {
             if project.runner.agent.trim().is_empty() {
                 return Err(ConfigError::Validation(format!(
                     "project `{}` runner.agent must not be empty",
+                    project.id
+                )));
+            }
+            if project.runner.provider_mode == RuntimeProviderMode::OmpAcp
+                && project.omp_acp_providers.is_empty()
+            {
+                return Err(ConfigError::Validation(format!(
+                    "project `{}` runner.provider_mode `omp_acp` requires at least one omp_acp_providers entry",
                     project.id
                 )));
             }

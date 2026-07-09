@@ -876,6 +876,7 @@ mod tests {
                 project_id: Some("linear-project".into()),
             },
             runner: RunnerRuntimeConfig {
+                provider_mode: crate::state::RuntimeProviderMode::Acp,
                 command: PathBuf::from("runner"),
                 args: Vec::new(),
                 agent: "build".into(),

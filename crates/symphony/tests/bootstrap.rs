@@ -718,7 +718,7 @@ fn linear_issue_node_json(
 
 #[derive(Debug)]
 struct RecordingLinearClient {
-    issues: Vec<LinearIssue>,
+    issues: std::sync::Mutex<Vec<LinearIssue>>,
     transitions: std::sync::Mutex<Vec<(String, LinearTransition)>>,
     evidence: std::sync::Mutex<Vec<(String, LinearIssueEvidence)>>,
     managed_issues: std::sync::Mutex<Vec<ManagedLinearIssueCreate>>,
@@ -726,9 +726,9 @@ struct RecordingLinearClient {
 }
 
 impl RecordingLinearClient {
-    const fn new(issues: Vec<LinearIssue>) -> Self {
+    fn new(issues: Vec<LinearIssue>) -> Self {
         Self {
-            issues,
+            issues: std::sync::Mutex::new(issues),
             transitions: std::sync::Mutex::new(Vec::new()),
             evidence: std::sync::Mutex::new(Vec::new()),
             managed_issues: std::sync::Mutex::new(Vec::new()),
@@ -761,17 +761,27 @@ fn assert_todo_transition(transitions: &[(String, LinearTransition)], issue_id: 
         transitions
             .iter()
             .any(|(id, transition)| id == issue_id && *transition == LinearTransition::Todo),
-        "expected {issue_id} to leave Linear In Progress via Todo transition, got {transitions:?}"
+        "expected {issue_id} to return to Linear Todo behind its runtime-defect blocker, got {transitions:?}"
     );
 }
 
-fn assert_backlog_transition(transitions: &[(String, LinearTransition)], issue_id: &str) {
-    assert!(
-        transitions
-            .iter()
-            .any(|(id, transition)| id == issue_id && *transition == LinearTransition::Backlog),
-        "expected {issue_id} to leave Linear In Progress via Backlog transition, got {transitions:?}"
-    );
+async fn run_todo_promotion_then_stage_entry(
+    config: &RootConfig,
+    store: &SqliteStore,
+    linear: &impl LinearClient,
+) -> anyhow::Result<daemon::OrchestrationReport> {
+    daemon::run_once_with_linear_client(config, store, linear).await?;
+    daemon::run_once_with_linear_client(config, store, linear).await
+}
+
+async fn run_todo_promotion_then_stage_entry_with_runner(
+    config: &RootConfig,
+    store: &SqliteStore,
+    linear: &impl LinearClient,
+    runner: &impl RunnerLauncher,
+) -> anyhow::Result<daemon::OrchestrationReport> {
+    daemon::run_once_with_clients(config, store, linear, runner).await?;
+    daemon::run_once_with_clients(config, store, linear, runner).await
 }
 
 #[async_trait::async_trait]
@@ -780,7 +790,7 @@ impl LinearClient for RecordingLinearClient {
         &self,
         _project: &symphony::config::ProjectConfig,
     ) -> Result<Vec<LinearIssue>, LinearClientError> {
-        Ok(self.issues.clone())
+        Ok(self.issues.lock().expect("issues lock").clone())
     }
 
     async fn transition_issue(
@@ -788,6 +798,15 @@ impl LinearClient for RecordingLinearClient {
         issue_id: &str,
         transition: LinearTransition,
     ) -> Result<(), LinearClientError> {
+        if let Some(issue) = self
+            .issues
+            .lock()
+            .expect("issues lock")
+            .iter_mut()
+            .find(|issue| issue.id == issue_id)
+        {
+            issue.state = transition.state_name().into();
+        }
         self.transitions
             .lock()
             .expect("transitions lock")
@@ -856,17 +875,19 @@ impl LinearClient for RecordingLinearClient {
 
 #[derive(Debug)]
 struct ProjectAwareLinearClient {
-    issues_by_project: std::collections::HashMap<String, Vec<LinearIssue>>,
+    issues_by_project: std::sync::Mutex<std::collections::HashMap<String, Vec<LinearIssue>>>,
     transitions: std::sync::Mutex<Vec<(String, LinearTransition)>>,
 }
 
 impl ProjectAwareLinearClient {
     fn new<const N: usize>(issues: [(&str, Vec<LinearIssue>); N]) -> Self {
         Self {
-            issues_by_project: issues
-                .into_iter()
-                .map(|(project_id, issues)| (project_id.to_string(), issues))
-                .collect(),
+            issues_by_project: std::sync::Mutex::new(
+                issues
+                    .into_iter()
+                    .map(|(project_id, issues)| (project_id.to_string(), issues))
+                    .collect(),
+            ),
             transitions: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -884,6 +905,8 @@ impl LinearClient for ProjectAwareLinearClient {
     ) -> Result<Vec<LinearIssue>, LinearClientError> {
         Ok(self
             .issues_by_project
+            .lock()
+            .expect("issues by project lock")
             .get(&project.id)
             .cloned()
             .unwrap_or_default())
@@ -894,6 +917,17 @@ impl LinearClient for ProjectAwareLinearClient {
         issue_id: &str,
         transition: LinearTransition,
     ) -> Result<(), LinearClientError> {
+        for issues in self
+            .issues_by_project
+            .lock()
+            .expect("issues by project lock")
+            .values_mut()
+        {
+            if let Some(issue) = issues.iter_mut().find(|issue| issue.id == issue_id) {
+                issue.state = transition.state_name().into();
+                break;
+            }
+        }
         self.transitions
             .lock()
             .expect("transitions lock")
@@ -905,7 +939,7 @@ impl LinearClient for ProjectAwareLinearClient {
 #[derive(Debug)]
 struct PartiallyFailingProjectLinearClient {
     failing_project_id: String,
-    issues_by_project: std::collections::HashMap<String, Vec<LinearIssue>>,
+    issues_by_project: std::sync::Mutex<std::collections::HashMap<String, Vec<LinearIssue>>>,
     transitions: std::sync::Mutex<Vec<(String, LinearTransition)>>,
 }
 
@@ -916,10 +950,12 @@ impl PartiallyFailingProjectLinearClient {
     ) -> Self {
         Self {
             failing_project_id: failing_project_id.into(),
-            issues_by_project: issues
-                .into_iter()
-                .map(|(project_id, issues)| (project_id.to_string(), issues))
-                .collect(),
+            issues_by_project: std::sync::Mutex::new(
+                issues
+                    .into_iter()
+                    .map(|(project_id, issues)| (project_id.to_string(), issues))
+                    .collect(),
+            ),
             transitions: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -943,6 +979,8 @@ impl LinearClient for PartiallyFailingProjectLinearClient {
         }
         Ok(self
             .issues_by_project
+            .lock()
+            .expect("issues by project lock")
             .get(&project.id)
             .cloned()
             .unwrap_or_default())
@@ -953,6 +991,17 @@ impl LinearClient for PartiallyFailingProjectLinearClient {
         issue_id: &str,
         transition: LinearTransition,
     ) -> Result<(), LinearClientError> {
+        for issues in self
+            .issues_by_project
+            .lock()
+            .expect("issues by project lock")
+            .values_mut()
+        {
+            if let Some(issue) = issues.iter_mut().find(|issue| issue.id == issue_id) {
+                issue.state = transition.state_name().into();
+                break;
+            }
+        }
         self.transitions
             .lock()
             .expect("transitions lock")

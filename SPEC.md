@@ -1,15 +1,20 @@
 # Symphony Service Specification
 
-Status: Rust/OpenCode-only Symphony contract
+Status: Rust ACP-runner Symphony contract
 
 Purpose: Define the active Symphony runtime that orchestrates project work through the Rust
-`symphony` binary and OpenCode ACP sessions.
+`symphony` binary and configured ACP runner sessions.
 
 ## Runtime Contract
 
 - The active service implementation is the Rust crate at `crates/symphony`.
-- OpenCode ACP is the only implementation runner. The runtime launches `/usr/local/bin/opencode acp`
-  from an isolated per-issue worktree.
+- OpenCode ACP is the default implementation runner. The runtime launches
+  `/usr/local/bin/opencode acp` from an isolated per-issue worktree when
+  `[projects.runner].provider_mode = "acp"`.
+- Alternative ACP providers are opt-in only. OMP ACP requires
+  `[projects.runner].provider_mode = "omp_acp"` plus a matching
+  `[[projects.omp_acp_providers]]` block; merely declaring an OMP provider must not change the
+  active runner.
 - Codex runner integration is not an active runtime path.
 - The removed Elixir implementation is not a compatibility target.
 - Configuration is loaded from a root multiproject TOML file. Configuration contains generic
@@ -18,10 +23,11 @@ Purpose: Define the active Symphony runtime that orchestrates project work throu
 - Per-project policy may point at a repository `WORKFLOW.md`, but lifecycle ownership is enforced by
   the Rust runtime and OpenCode handoff contract, not by legacy workflow-local state aliases.
 
-## OpenCode ACP Launch Contract
+## ACP Launch Contract
 
-- `opencode.command` and `opencode.args` are explicit project config fields; the checked-in
-  Symphony project config sets `/usr/local/bin/opencode` with `["acp"]`.
+- `runner.command`, `runner.args`, and `runner.provider_mode` are explicit project config fields;
+  the checked-in Symphony project config sets `provider_mode = "acp"`,
+  `/usr/local/bin/opencode`, and `["acp"]`.
 - `opencode acp` is an ACP subprocess transport: Symphony writes one JSON-RPC object per line to
   stdin and reads newline-delimited JSON responses/events from stdout.
 - The launch sequence is deterministic: create the per-issue git worktree, start OpenCode with that

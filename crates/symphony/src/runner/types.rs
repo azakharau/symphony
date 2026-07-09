@@ -7,6 +7,8 @@ use crate::state::{RunnerStage, RuntimeProviderMode};
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerRuntimeConfig {
+    #[serde(default = "default_provider_mode")]
+    pub provider_mode: RuntimeProviderMode,
     pub command: PathBuf,
     #[serde(default)]
     pub args: Vec<String>,
@@ -14,6 +16,10 @@ pub struct RunnerRuntimeConfig {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub permission_policy: PermissionPolicy,
+}
+
+const fn default_provider_mode() -> RuntimeProviderMode {
+    RuntimeProviderMode::Acp
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

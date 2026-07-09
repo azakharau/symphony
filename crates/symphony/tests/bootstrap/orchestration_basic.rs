@@ -122,9 +122,9 @@ async fn orchestration_continues_other_projects_when_one_project_poll_fails() {
         )],
     );
 
-    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+    let report = run_todo_promotion_then_stage_entry(&config, &store, &client)
         .await
-        .expect("one project failure must not abort global poll");
+        .expect("one project failure must not abort either global poll");
 
     assert_eq!(report.dispatched, vec!["SYM-64"]);
     assert_eq!(
@@ -165,9 +165,9 @@ async fn orchestration_records_blocked_issues_liveness_when_candidates_are_block
         }]);
     let client = RecordingLinearClient::new(vec![blocked]);
 
-    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+    let report = run_todo_promotion_then_stage_entry(&config, &store, &client)
         .await
-        .expect("orchestrate once");
+        .expect("promote then dispatch");
 
     assert!(report.dispatched.is_empty());
     assert_eq!(report.blocked, vec!["SYM-40"]);
@@ -289,9 +289,9 @@ async fn orchestration_dispatches_one_eligible_todo_by_project_capacity_and_orde
         linear_issue("todo-high-priority", "SYM-22", "Todo", Some(1)),
     ]);
 
-    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+    let report = run_todo_promotion_then_stage_entry(&config, &store, &client)
         .await
-        .expect("orchestrate once");
+        .expect("promote then dispatch");
 
     assert_eq!(report.dispatched, vec!["SYM-22"]);
     assert_eq!(
@@ -335,9 +335,9 @@ async fn orchestration_p0_self_bug_does_not_preempt_unrelated_product_work() {
         ),
     ]);
 
-    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+    let report = run_todo_promotion_then_stage_entry(&config, &store, &client)
         .await
-        .expect("orchestrate once");
+        .expect("promote then dispatch");
 
     assert_eq!(report.dispatched, vec!["SYM-900", "ALPHA-1"]);
     assert_eq!(
@@ -421,9 +421,9 @@ async fn orchestration_suppresses_p1_p2_self_bugs_unless_promoted() {
         promoted,
     ]);
 
-    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+    let report = run_todo_promotion_then_stage_entry(&config, &store, &client)
         .await
-        .expect("orchestrate once");
+        .expect("promote then dispatch");
 
     assert_eq!(report.blocked, vec!["SYM-902"]);
     assert_eq!(report.dispatched, vec!["SYM-903"]);
@@ -530,9 +530,10 @@ async fn orchestration_dispatches_without_recall_workspace_root() {
     )]);
     let opencode = ResumeRecordingRunnerLauncher::new(4242);
 
-    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
-        .await
-        .expect("orchestrate once");
+    let report =
+        run_todo_promotion_then_stage_entry_with_runner(&config, &store, &client, &opencode)
+            .await
+            .expect("promote then dispatch");
 
     assert_eq!(report.dispatched, vec!["SYM-250"]);
     assert!(report.parked_owner_input.is_empty());
@@ -556,9 +557,14 @@ async fn orchestration_dispatches_without_recall_workspace_root() {
 async fn orchestration_dispatches_omp_issue_without_recall_service_context() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
-    let config_toml = valid_config_toml().replace(
-        "[projects.eval]\n",
-        r#"[[projects.omp_acp_providers]]
+    let config_toml = valid_config_toml()
+        .replace(
+            "permission_policy = \"reject\"\n",
+            "permission_policy = \"reject\"\nprovider_mode = \"omp_acp\"\n",
+        )
+        .replace(
+            "[projects.eval]\n",
+            r#"[[projects.omp_acp_providers]]
 id = "omp-primary"
 command = "/tmp/mock-omp"
 args = ["acp"]
@@ -574,7 +580,7 @@ inverse_bridge_reference = false
 
 [projects.eval]
 "#,
-    );
+        );
     let config = RootConfig::from_toml_str(&config_toml).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
@@ -587,9 +593,10 @@ inverse_bridge_reference = false
     )]);
     let opencode = ResumeRecordingRunnerLauncher::new(4242);
 
-    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
-        .await
-        .expect("orchestrate once");
+    let report =
+        run_todo_promotion_then_stage_entry_with_runner(&config, &store, &client, &opencode)
+            .await
+            .expect("promote then dispatch");
 
     assert_eq!(report.dispatched, vec!["SYM-251"]);
     assert!(report.blocked.is_empty());
@@ -634,9 +641,9 @@ async fn orchestration_never_dispatches_nonterminal_blockers_or_backlog() {
         unblocked,
     ]);
 
-    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+    let report = run_todo_promotion_then_stage_entry(&config, &store, &client)
         .await
-        .expect("orchestrate once");
+        .expect("promote then dispatch");
 
     assert_eq!(report.dispatched, vec!["SYM-41"]);
     assert_eq!(
@@ -681,20 +688,24 @@ async fn orchestration_leaves_todo_queued_when_todo_spans_multiple_milestones() 
         .expect("orchestrate once");
 
     assert!(report.dispatched.is_empty());
-    assert!(report.blocked.is_empty());
+    assert_eq!(report.blocked, vec!["SYM-42", "SYM-43"]);
     assert!(client.transitions().is_empty());
     let first = store
         .issue("symphony", "first")
         .await
         .expect("query first")
         .expect("first issue");
-    assert_eq!(first.lifecycle_stage, LifecycleStage::Queued);
+    assert_eq!(first.lifecycle_stage, LifecycleStage::Blocked);
+    assert_eq!(
+        first.blocker.expect("milestone ambiguity").kind,
+        "ambiguous_runnable_milestones"
+    );
     let second = store
         .issue("symphony", "second")
         .await
         .expect("query second")
         .expect("second issue");
-    assert_eq!(second.lifecycle_stage, LifecycleStage::Queued);
+    assert_eq!(second.lifecycle_stage, LifecycleStage::Blocked);
 }
 
 #[tokio::test]
@@ -719,9 +730,9 @@ async fn orchestration_dispatches_unblocked_todo_when_future_milestone_todo_is_b
     });
     let client = RecordingLinearClient::new(vec![current, future]);
 
-    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+    let report = run_todo_promotion_then_stage_entry(&config, &store, &client)
         .await
-        .expect("orchestrate once");
+        .expect("promote then dispatch");
 
     assert_eq!(report.dispatched, vec!["MNE-105"]);
     assert_eq!(report.blocked, vec!["MNE-118"]);
@@ -760,9 +771,9 @@ async fn orchestration_reconciles_persisted_backlog_without_counting_capacity() 
         linear_issue("eligible", "SYM-47", "Todo", Some(2)),
     ]);
 
-    let report = daemon::run_once_with_linear_client(&config, &store, &client)
+    let report = run_todo_promotion_then_stage_entry(&config, &store, &client)
         .await
-        .expect("orchestrate once");
+        .expect("promote then dispatch");
 
     assert_eq!(report.dispatched, vec!["SYM-47"]);
     assert_eq!(
@@ -1432,17 +1443,15 @@ async fn orchestration_continues_requeued_provider_blocker_when_todo_is_unblocke
         RecordingLinearClient::new(vec![linear_issue("answered", "SYM-67", "Todo", Some(1))]);
     let opencode = ResumeRecordingRunnerLauncher::new(4242);
 
-    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
-        .await
-        .expect("orchestrate once");
+    let report =
+        run_todo_promotion_then_stage_entry_with_runner(&config, &store, &client, &opencode)
+            .await
+            .expect("promote then dispatch");
 
-    assert!(report.dispatched.is_empty());
-    assert!(opencode.launches().is_empty());
+    assert_eq!(report.dispatched, vec!["SYM-67"]);
+    assert_eq!(opencode.launches(), vec!["SYM-67"]);
     assert!(opencode.continuations().is_empty());
-    assert_eq!(
-        opencode.repairs(),
-        vec![("SYM-67".into(), "workspace-not-found".into())]
-    );
+    assert!(opencode.repairs().is_empty());
     assert_eq!(
         client.transitions(),
         vec![("answered".into(), LinearTransition::InProgress)]
@@ -1452,17 +1461,20 @@ async fn orchestration_continues_requeued_provider_blocker_when_todo_is_unblocke
         .await
         .expect("query continued provider blocker session")
         .expect("continued session");
-    assert_eq!(continued.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(continued.stage, RunnerStage::Running);
-    assert_eq!(continued.process_id, Some(4242));
+    assert_eq!(continued.lifecycle_stage, LifecycleStage::Canceled);
+    assert_eq!(continued.stage, RunnerStage::Completed);
+    assert_eq!(continued.process_id, None);
     assert_eq!(
         continued.lifecycle_marker.as_deref(),
-        Some("repair_prompted")
+        Some("linear_stage_reentered")
     );
-    assert_eq!(
-        continued.last_event.as_deref(),
-        Some("repair_prompted:workspace-not-found")
-    );
+    let fresh = store
+        .runner_session("symphony", "answered", "new:SYM-67")
+        .await
+        .expect("query fresh session")
+        .expect("fresh session");
+    assert_eq!(fresh.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(fresh.process_id, Some(4243));
     let issue = store
         .issue("symphony", "answered")
         .await
@@ -1517,16 +1529,13 @@ async fn orchestration_recovers_retired_provider_blocker_session_after_launch_fa
     )]);
     let opencode = ResumeRecordingRunnerLauncher::new(4268);
 
-    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+    run_todo_promotion_then_stage_entry_with_runner(&config, &store, &client, &opencode)
         .await
-        .expect("orchestrate once");
+        .expect("promote then dispatch");
 
-    assert!(opencode.launches().is_empty());
+    assert_eq!(opencode.launches(), vec!["SYM-68"]);
     assert!(opencode.continuations().is_empty());
-    assert_eq!(
-        opencode.repairs(),
-        vec![("SYM-68".into(), "launch_failed".into())]
-    );
+    assert!(opencode.repairs().is_empty());
     assert_eq!(
         client.transitions(),
         vec![("answered-dirty".into(), LinearTransition::InProgress)]
@@ -1537,14 +1546,20 @@ async fn orchestration_recovers_retired_provider_blocker_session_after_launch_fa
         .await
         .expect("query recovered session")
         .expect("recovered session");
-    assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(session.stage, RunnerStage::Running);
-    assert_eq!(session.process_id, Some(4268));
-    assert_eq!(session.lifecycle_marker.as_deref(), Some("repair_prompted"));
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Canceled);
+    assert_eq!(session.stage, RunnerStage::Completed);
+    assert_eq!(session.process_id, None);
     assert_eq!(
-        session.last_event.as_deref(),
-        Some("repair_prompted:launch_failed")
+        session.lifecycle_marker.as_deref(),
+        Some("linear_stage_reentered")
     );
+    let fresh = store
+        .runner_session("symphony", "answered-dirty", "new:SYM-68")
+        .await
+        .expect("query fresh session")
+        .expect("fresh session");
+    assert_eq!(fresh.lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(fresh.process_id, Some(4269));
 }
 
 #[tokio::test]
@@ -1905,7 +1920,7 @@ async fn orchestration_treats_canceled_blocker_as_not_accepted() {
 }
 
 #[tokio::test]
-async fn orchestration_restores_requeued_issue_with_existing_session_without_duplicate_launch() {
+async fn orchestration_retires_todo_session_before_new_stage_launch() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let worktree = dir.path().join("SYM-62-worktree");
@@ -1926,9 +1941,9 @@ async fn orchestration_restores_requeued_issue_with_existing_session_without_dup
     let client =
         RecordingLinearClient::new(vec![linear_issue("requeued", "SYM-62", "Todo", Some(1))]);
 
-    daemon::run_once_with_linear_client(&config, &store, &client)
+    run_todo_promotion_then_stage_entry(&config, &store, &client)
         .await
-        .expect("poll");
+        .expect("promote then reconcile existing session");
 
     assert_eq!(
         client.transitions(),
@@ -1944,12 +1959,13 @@ async fn orchestration_restores_requeued_issue_with_existing_session_without_dup
         .runner_sessions_for_issue("symphony", "requeued")
         .await
         .expect("sessions");
-    assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Running);
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Canceled);
     assert_eq!(
         sessions[0].lifecycle_marker.as_deref(),
-        Some("continuation_prompted")
+        Some("linear_stage_reentered")
     );
+    assert_eq!(sessions[1].lifecycle_stage, LifecycleStage::Running);
 }
 
 #[tokio::test]
@@ -2014,9 +2030,9 @@ async fn orchestration_does_not_repair_again_when_recoverable_issue_already_has_
         RecordingLinearClient::new(vec![linear_issue("requeued", "SYM-62", "Todo", Some(1))]);
     let opencode = ResumeRecordingRunnerLauncher::new(4242);
 
-    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+    run_todo_promotion_then_stage_entry_with_runner(&config, &store, &client, &opencode)
         .await
-        .expect("poll");
+        .expect("promote then dispatch");
 
     assert!(client.transitions().is_empty());
     assert!(opencode.launches().is_empty());
@@ -2084,9 +2100,9 @@ async fn orchestration_starts_fresh_session_after_failed_handoff_blocker_release
         RecordingLinearClient::new(vec![linear_issue("requeued", "SYM-62", "Todo", Some(1))]);
     let opencode = ResumeRecordingRunnerLauncher::new(4242);
 
-    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+    run_todo_promotion_then_stage_entry_with_runner(&config, &store, &client, &opencode)
         .await
-        .expect("poll");
+        .expect("promote then dispatch");
 
     assert_eq!(
         client.transitions(),
@@ -2101,8 +2117,8 @@ async fn orchestration_starts_fresh_session_after_failed_handoff_blocker_release
         .expect("sessions");
     assert_eq!(sessions.len(), 2);
     assert_eq!(sessions[0].session_id, "oc-62");
-    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Failed);
-    assert_eq!(sessions[0].stage, RunnerStage::Failed);
+    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Canceled);
+    assert_eq!(sessions[0].stage, RunnerStage::Completed);
     assert_eq!(sessions[1].session_id, "new:SYM-62");
     assert_eq!(sessions[1].lifecycle_stage, LifecycleStage::Running);
     assert_eq!(sessions[1].stage, RunnerStage::Starting);
@@ -2133,6 +2149,9 @@ async fn orchestration_records_process_while_acp_session_new_is_still_pending() 
         Some(1),
     )]);
     let opencode = runner::StdioRunnerLauncher;
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("promote Todo before stage-entry launch");
     let poll = daemon::run_once_with_clients(&config, &store, &client, &opencode);
     tokio::pin!(poll);
 
@@ -2259,6 +2278,19 @@ async fn orchestration_capacity_gates_requeued_issue_with_existing_session() {
         .upsert_issue(test_issue("symphony", "running-2", "SYM-61"))
         .await
         .expect("running issue 2");
+    for (issue_id, identifier) in [("running-1", "SYM-60"), ("running-2", "SYM-61")] {
+        let mut session = test_session(
+            "symphony",
+            issue_id,
+            format!("session-{issue_id}"),
+            dir.path().join(identifier),
+        );
+        session.process_id = Some(std::process::id());
+        store
+            .upsert_runner_session(session)
+            .await
+            .expect("active session");
+    }
     let mut requeued = test_issue("symphony", "requeued", "SYM-65");
     requeued.lifecycle_stage = LifecycleStage::Queued;
     store.upsert_issue(requeued).await.expect("requeued issue");
@@ -2267,8 +2299,11 @@ async fn orchestration_capacity_gates_requeued_issue_with_existing_session() {
         .await
         .expect("running session");
 
-    let client =
-        RecordingLinearClient::new(vec![linear_issue("requeued", "SYM-65", "Todo", Some(1))]);
+    let client = RecordingLinearClient::new(vec![
+        linear_issue("running-1", "SYM-60", "In Progress", Some(1)),
+        linear_issue("running-2", "SYM-61", "In Progress", Some(1)),
+        linear_issue("requeued", "SYM-65", "Todo", Some(1)),
+    ]);
 
     let report = daemon::run_once_with_linear_client(&config, &store, &client)
         .await
@@ -2287,11 +2322,11 @@ async fn orchestration_capacity_gates_requeued_issue_with_existing_session() {
         .await
         .expect("sessions");
     assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Queued);
+    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Canceled);
     assert_eq!(sessions[0].process_id, None);
     assert_eq!(
         sessions[0].lifecycle_marker.as_deref(),
-        Some("waiting_for_capacity")
+        Some("linear_stage_left")
     );
     let liveness = store
         .project_liveness("symphony")
@@ -2304,7 +2339,7 @@ async fn orchestration_capacity_gates_requeued_issue_with_existing_session() {
 }
 
 #[tokio::test]
-async fn orchestration_requeues_in_progress_issue_without_session_for_fresh_dispatch() {
+async fn orchestration_dispatches_in_progress_issue_without_session_from_stage_entry() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
@@ -2318,42 +2353,20 @@ async fn orchestration_requeues_in_progress_issue_without_session_for_fresh_disp
         Some(1),
     )]);
 
-    daemon::run_once_with_linear_client(&config, &store, &client)
+    let report = daemon::run_once_with_linear_client(&config, &store, &client)
         .await
         .expect("poll");
 
-    assert_todo_transition(&client.transitions(), "lost-session");
+    assert_eq!(report.dispatched, vec!["SYM-64"]);
+    assert!(client.transitions().is_empty());
     let issue = store
         .issue("symphony", "lost-session")
         .await
         .expect("query issue")
         .expect("issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Queued);
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
     assert!(issue.failure.is_none());
     assert!(issue.blocker.is_none());
-
-    let todo_client = RecordingLinearClient::new(vec![linear_issue(
-        "lost-session",
-        "SYM-64",
-        "Todo",
-        Some(1),
-    )]);
-    let report = daemon::run_once_with_linear_client(&config, &store, &todo_client)
-        .await
-        .expect("second poll");
-    assert_eq!(
-        report.dispatched,
-        vec!["SYM-64"],
-        "requeued issue should be eligible for fresh dispatch on the next Todo poll"
-    );
-    let running = store
-        .issue("symphony", "lost-session")
-        .await
-        .expect("query running issue")
-        .expect("running issue");
-    assert_eq!(running.lifecycle_stage, LifecycleStage::Running);
-    assert!(running.failure.is_none());
-    assert!(running.blocker.is_none());
 }
 
 #[tokio::test]
@@ -2449,9 +2462,14 @@ async fn orchestration_cancels_stale_queued_and_blocked_issues_missing_from_line
 async fn orchestration_records_launch_failure_without_aborting_poll_or_owner_input() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
-    let configured = valid_config_toml().replace(
-        "[projects.eval]\n",
-        r#"[[projects.omp_acp_providers]]
+    let configured = valid_config_toml()
+        .replace(
+            "permission_policy = \"reject\"\n",
+            "permission_policy = \"reject\"\nprovider_mode = \"omp_acp\"\n",
+        )
+        .replace(
+            "[projects.eval]\n",
+            r#"[[projects.omp_acp_providers]]
 id = "omp-primary"
 command = "/usr/local/bin/omp"
 args = ["--model", "openai/gpt-5.5", "acp"]
@@ -2470,7 +2488,7 @@ inverse_bridge_reference = true
 
 [projects.eval]
 "#,
-    );
+        );
     let config = RootConfig::from_toml_str(&configured).expect("config");
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
@@ -2481,17 +2499,18 @@ inverse_bridge_reference = true
     ]);
     let opencode = FailingLaunchRunnerLauncher::new("existing worktree is dirty");
 
-    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
-        .await
-        .expect("launch failure must not abort poll");
+    let report =
+        run_todo_promotion_then_stage_entry_with_runner(&config, &store, &client, &opencode)
+            .await
+            .expect("launch failure must not abort stage-entry poll");
 
     assert!(report.dispatched.is_empty());
     assert_eq!(
         client.transitions(),
         vec![
             ("launch-fails".into(), LinearTransition::InProgress),
-            ("launch-fails".into(), LinearTransition::Todo),
             ("still-runs".into(), LinearTransition::InProgress),
+            ("launch-fails".into(), LinearTransition::Todo),
             ("still-runs".into(), LinearTransition::Todo),
         ]
     );
@@ -2538,14 +2557,18 @@ inverse_bridge_reference = true
             .description
             .contains("failure_reason: invalid runner worktree: existing worktree is dirty")
     );
-    assert!(client.relations().iter().any(|relation| {
-        relation
-            == &(
-                "managed-1".into(),
-                "launch-fails".into(),
-                ManagedLinearRelation::Blocks,
-            )
-    }));
+    assert!(
+        client.relations().iter().any(|relation| {
+            relation
+                == &(
+                    "managed-1".into(),
+                    "launch-fails".into(),
+                    ManagedLinearRelation::Blocks,
+                )
+        }),
+        "relations={:?}",
+        client.relations()
+    );
     let session = store
         .runner_session("symphony", "launch-fails", "launch-failed:SYM-201")
         .await
@@ -2553,9 +2576,9 @@ inverse_bridge_reference = true
         .expect("launch failure session");
     assert_eq!(session.provider_mode, RuntimeProviderMode::OmpAcp);
     assert_eq!(session.provider_id.as_deref(), Some("omp-primary"));
-    assert_eq!(session.agent, "omp-agent");
+    assert_eq!(session.agent, "build");
     assert_eq!(session.model.as_deref(), Some("openai/gpt-5.5"));
-    assert_eq!(session.active_agent.as_deref(), Some("omp-agent"));
+    assert_eq!(session.active_agent.as_deref(), Some("build"));
     assert_eq!(session.active_model.as_deref(), Some("openai/gpt-5.5"));
     assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
     assert_eq!(session.stage, RunnerStage::Failed);
@@ -2601,9 +2624,10 @@ async fn orchestration_suppresses_repeated_launch_failure_and_dispatches_next_ca
     ]);
     let opencode = ResumeRecordingRunnerLauncher::new(6202);
 
-    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
-        .await
-        .expect("poll");
+    let report =
+        run_todo_promotion_then_stage_entry_with_runner(&config, &store, &client, &opencode)
+            .await
+            .expect("promote then dispatch");
 
     assert_eq!(report.blocked, vec!["SYM-201"]);
     assert_eq!(report.dispatched, vec!["SYM-202"]);
@@ -2639,9 +2663,14 @@ async fn orchestration_persists_setup_failure_session_for_liveness_projection() 
         Some(1),
     )]);
 
-    daemon::run_once_with_clients(&config, &store, &client, &SetupFailingRunnerLauncher)
-        .await
-        .expect("setup failure must not abort poll");
+    run_todo_promotion_then_stage_entry_with_runner(
+        &config,
+        &store,
+        &client,
+        &SetupFailingRunnerLauncher,
+    )
+    .await
+    .expect("setup failure must not abort stage-entry poll");
 
     let sessions = store
         .runner_sessions_for_issue("symphony", "setup-fails")
@@ -2676,7 +2705,7 @@ async fn orchestration_persists_setup_failure_session_for_liveness_projection() 
 }
 
 #[tokio::test]
-async fn orchestration_persists_stale_killed_session_event_through_continuation() {
+async fn orchestration_retires_todo_session_before_fresh_stage_entry() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
@@ -2706,30 +2735,23 @@ async fn orchestration_persists_stale_killed_session_event_through_continuation(
         RecordingLinearClient::new(vec![linear_issue("stale-live", "SYM-211", "Todo", Some(1))]);
     let opencode = ResumeRecordingRunnerLauncher::new(5151);
 
-    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+    run_todo_promotion_then_stage_entry_with_runner(&config, &store, &client, &opencode)
         .await
-        .expect("orchestrate stale continuation");
+        .expect("promote then continue stale session");
 
     let resumed = store
         .runner_session("symphony", "stale-live", "ses-stale-live")
         .await
         .expect("query session")
         .expect("session");
-    assert_eq!(resumed.lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(resumed.stage, RunnerStage::Running);
+    assert_eq!(resumed.lifecycle_stage, LifecycleStage::Canceled);
+    assert_eq!(resumed.stage, RunnerStage::Completed);
     assert_eq!(
         resumed.lifecycle_marker.as_deref(),
-        Some("continuation_prompted")
+        Some("linear_stage_reentered")
     );
-    assert!(
-        resumed
-            .last_event
-            .as_deref()
-            .expect("last event")
-            .starts_with(&format!("stale_killed:{}:", stale_process.id())),
-        "last_event={:?}",
-        resumed.last_event
-    );
+    assert_eq!(opencode.launches(), vec!["SYM-211"]);
+    assert!(opencode.continuations().is_empty());
 
     let no_candidates = RecordingLinearClient::new(Vec::new());
     daemon::run_once_with_linear_client(&config, &store, &no_candidates)
@@ -2740,13 +2762,13 @@ async fn orchestration_persists_stale_killed_session_event_through_continuation(
         .await
         .expect("query liveness")
         .expect("liveness row");
-    assert_eq!(liveness.status, RuntimeLivenessStatus::RunnerStaleKilled);
+    assert_eq!(liveness.status, RuntimeLivenessStatus::NoEligibleIssues);
     let _ = stale_process.kill();
     let _ = stale_process.wait();
 }
 
 #[tokio::test]
-async fn orchestration_ignores_historical_failed_session_for_in_progress_reconciliation() {
+async fn orchestration_retires_historical_failed_session_before_in_progress_dispatch() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let worktree = dir.path().join("SYM-203-worktree");
@@ -2784,27 +2806,31 @@ async fn orchestration_ignores_historical_failed_session_for_in_progress_reconci
 
     daemon::run_once_with_clients(&config, &store, &client, &opencode)
         .await
-        .expect("poll");
+        .expect("dispatch stage entry");
 
-    assert_todo_transition(&client.transitions(), "historical");
+    assert!(client.transitions().is_empty());
+    assert_eq!(opencode.launches(), vec!["SYM-203"]);
     assert!(client.evidence().is_empty());
     let issue = store
         .issue("symphony", "historical")
         .await
         .expect("query issue")
         .expect("issue");
-    assert_eq!(issue.lifecycle_stage, LifecycleStage::Queued);
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Running);
     assert!(issue.failure.is_none());
     assert!(issue.blocker.is_none());
     let sessions = store
         .runner_sessions_for_issue("symphony", "historical")
         .await
         .expect("sessions");
+    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Canceled);
     assert_eq!(sessions[0].process_id, None);
     assert_eq!(
         sessions[0].last_event.as_deref(),
-        Some("stale_failed_session_ignored")
+        Some("linear_stage_reentered")
     );
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[1].lifecycle_stage, LifecycleStage::Running);
 }
 
 #[tokio::test]
@@ -2837,9 +2863,9 @@ async fn orchestration_does_not_reuse_failed_launch_session_for_todo_dispatch() 
     )]);
     let opencode = ResumeRecordingRunnerLauncher::new(6204);
 
-    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+    run_todo_promotion_then_stage_entry_with_runner(&config, &store, &client, &opencode)
         .await
-        .expect("poll");
+        .expect("promote then dispatch");
 
     assert_eq!(opencode.launches(), vec!["SYM-204"]);
     assert!(opencode.continuations().is_empty());
@@ -2849,8 +2875,8 @@ async fn orchestration_does_not_reuse_failed_launch_session_for_todo_dispatch() 
         .expect("sessions");
     assert_eq!(sessions.len(), 2);
     assert_eq!(sessions[0].session_id, "ses-failed");
-    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Queued);
-    assert_eq!(sessions[0].stage, RunnerStage::Failed);
+    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Canceled);
+    assert_eq!(sessions[0].stage, RunnerStage::Completed);
     assert_eq!(sessions[1].session_id, "new:SYM-204");
     assert_eq!(sessions[1].lifecycle_stage, LifecycleStage::Running);
     assert_eq!(sessions[1].stage, RunnerStage::Starting);
@@ -2886,10 +2912,14 @@ async fn orchestration_existing_session_continue_failure_does_not_leave_running_
         Some(1),
     )]);
 
-    let report =
-        daemon::run_once_with_clients(&config, &store, &client, &FailingContinueRunnerLauncher)
-            .await
-            .expect("poll");
+    let report = run_todo_promotion_then_stage_entry_with_runner(
+        &config,
+        &store,
+        &client,
+        &FailingContinueRunnerLauncher,
+    )
+    .await
+    .expect("promote then dispatch");
 
     assert_eq!(
         client.transitions(),
@@ -2910,19 +2940,12 @@ async fn orchestration_existing_session_continue_failure_does_not_leave_running_
         .await
         .expect("query session")
         .expect("session");
-    assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
-    assert_eq!(session.stage, RunnerStage::Failed);
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Canceled);
+    assert_eq!(session.stage, RunnerStage::Completed);
     assert_eq!(session.process_id, None);
     assert_eq!(
         session.lifecycle_marker.as_deref(),
-        Some("failed:resume_launch_failed")
-    );
-    assert!(
-        session
-            .last_event
-            .as_deref()
-            .expect("last event")
-            .contains("continue failed")
+        Some("linear_stage_reentered")
     );
     let fresh = store
         .runner_session("symphony", "existing-continue-fails", "new:SYM-209")
@@ -2975,21 +2998,17 @@ async fn orchestration_releases_runtime_defect_with_fresh_session_after_linear_b
     )]);
     let opencode = ResumeRecordingRunnerLauncher::new(6206);
 
-    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+    run_todo_promotion_then_stage_entry_with_runner(&config, &store, &client, &opencode)
         .await
-        .expect("poll");
+        .expect("promote then dispatch");
 
-    assert!(
-        client.transitions().is_empty(),
-        "released recoverable handoff defect should repair the existing session without redundant state transition, got {:?}",
-        client.transitions()
-    );
-    assert!(opencode.launches().is_empty());
-    assert!(opencode.continuations().is_empty());
     assert_eq!(
-        opencode.repairs(),
-        vec![("SYM-206".into(), "missing_handoff_sidecar".into())]
+        client.transitions(),
+        vec![("runtime-released".into(), LinearTransition::InProgress)]
     );
+    assert_eq!(opencode.launches(), vec!["SYM-206"]);
+    assert!(opencode.continuations().is_empty());
+    assert!(opencode.repairs().is_empty());
     let record = store
         .issue("symphony", "runtime-released")
         .await
@@ -3001,11 +3020,13 @@ async fn orchestration_releases_runtime_defect_with_fresh_session_after_linear_b
         .runner_sessions_for_issue("symphony", "runtime-released")
         .await
         .expect("sessions");
-    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions.len(), 2);
     assert_eq!(sessions[0].session_id, "ses-failed");
-    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(sessions[0].stage, RunnerStage::Running);
-    assert_eq!(sessions[0].process_id, Some(6206));
+    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Canceled);
+    assert_eq!(sessions[0].stage, RunnerStage::Completed);
+    assert_eq!(sessions[0].process_id, None);
+    assert_eq!(sessions[1].session_id, "new:SYM-206");
+    assert_eq!(sessions[1].lifecycle_stage, LifecycleStage::Running);
 }
 
 #[tokio::test]
@@ -3149,22 +3170,19 @@ async fn orchestration_does_not_self_block_managed_runtime_defect_issue() {
     )]);
     let opencode = ResumeRecordingRunnerLauncher::new(6210);
 
-    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
-        .await
-        .expect("poll");
+    let report =
+        run_todo_promotion_then_stage_entry_with_runner(&config, &store, &client, &opencode)
+            .await
+            .expect("promote then dispatch");
 
     assert!(report.blocked.is_empty());
-    assert!(
-        client.transitions().is_empty(),
-        "managed self-defect issue should repair without self-blocking or redundant state transition, got {:?}",
-        client.transitions()
-    );
-    assert!(opencode.launches().is_empty());
-    assert!(opencode.continuations().is_empty());
     assert_eq!(
-        opencode.repairs(),
-        vec![("SYM-210".into(), "missing_handoff_sidecar".into())]
+        client.transitions(),
+        vec![("managed-self".into(), LinearTransition::InProgress)]
     );
+    assert_eq!(opencode.launches(), vec!["SYM-210"]);
+    assert!(opencode.continuations().is_empty());
+    assert!(opencode.repairs().is_empty());
     let record = store
         .issue("symphony", "managed-self")
         .await
@@ -3176,11 +3194,13 @@ async fn orchestration_does_not_self_block_managed_runtime_defect_issue() {
         .runner_sessions_for_issue("symphony", "managed-self")
         .await
         .expect("sessions");
-    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions.len(), 2);
     assert_eq!(sessions[0].session_id, "ses-failed");
-    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Running);
-    assert_eq!(sessions[0].stage, RunnerStage::Running);
-    assert_eq!(sessions[0].process_id, Some(6210));
+    assert_eq!(sessions[0].lifecycle_stage, LifecycleStage::Canceled);
+    assert_eq!(sessions[0].stage, RunnerStage::Completed);
+    assert_eq!(sessions[0].process_id, None);
+    assert_eq!(sessions[1].session_id, "new:SYM-210");
+    assert_eq!(sessions[1].lifecycle_stage, LifecycleStage::Running);
 }
 
 #[tokio::test]
@@ -3279,9 +3299,9 @@ async fn orchestration_dispatches_managed_self_defect_without_milestone() {
     let client = RecordingLinearClient::new(vec![issue]);
     let opencode = ResumeRecordingRunnerLauncher::new(6207);
 
-    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+    run_todo_promotion_then_stage_entry_with_runner(&config, &store, &client, &opencode)
         .await
-        .expect("poll");
+        .expect("promote then dispatch");
 
     assert_eq!(
         client.transitions(),

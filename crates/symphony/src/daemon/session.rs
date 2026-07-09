@@ -171,6 +171,23 @@ pub(super) async fn mark_issue_sessions_stage_reentered(
     project: &ProjectConfig,
     issue: &LinearIssue,
 ) -> anyhow::Result<bool> {
+    mark_issue_sessions_stage_boundary(store, project, issue, "linear_stage_reentered").await
+}
+
+pub(super) async fn mark_issue_sessions_stage_left(
+    store: &SqliteStore,
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+) -> anyhow::Result<bool> {
+    mark_issue_sessions_stage_boundary(store, project, issue, "linear_stage_left").await
+}
+
+async fn mark_issue_sessions_stage_boundary(
+    store: &SqliteStore,
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+    marker: &str,
+) -> anyhow::Result<bool> {
     let mut changed = false;
     for mut session in store
         .runner_sessions_for_issue(&project.id, &issue.id)
@@ -179,7 +196,7 @@ pub(super) async fn mark_issue_sessions_stage_reentered(
         if session.process_id.is_none()
             && session.lifecycle_stage == LifecycleStage::Canceled
             && session.stage == RunnerStage::Completed
-            && session.lifecycle_marker.as_deref() == Some("linear_stage_reentered")
+            && session.lifecycle_marker.as_deref() == Some(marker)
             && !session.silence_observed
         {
             continue;
@@ -188,8 +205,8 @@ pub(super) async fn mark_issue_sessions_stage_reentered(
         session.process_id = None;
         session.lifecycle_stage = LifecycleStage::Canceled;
         session.stage = RunnerStage::Completed;
-        session.lifecycle_marker = Some("linear_stage_reentered".into());
-        session.last_event = Some("linear_stage_reentered".into());
+        session.lifecycle_marker = Some(marker.into());
+        session.last_event = Some(marker.into());
         session.silence_observed = false;
         store.upsert_runner_session(&session).await?;
         changed = true;

@@ -8,30 +8,27 @@ mod policy;
 mod records;
 mod self_defects;
 mod session;
+mod stage_dispatch;
 mod task_selection;
 
-use std::{collections::HashSet, error::Error as StdError, path::PathBuf};
+use std::{collections::HashSet, path::PathBuf};
 
 use anyhow::Context;
-use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use crate::{
     config::{ProjectConfig, RootConfig, RunnerArchiveConfig, WorkflowStage},
     linear::{
-        EmptyLinearClient, LinearClient, LinearGraphqlClient, LinearIssue, LinearIssueEvidence,
-        ReqwestGraphqlTransport,
+        EmptyLinearClient, LinearClient, LinearGraphqlClient, LinearIssue, ReqwestGraphqlTransport,
     },
     runner::{
-        DeterministicRunnerLauncher, ProcessTreeTerminationEvidence, RunnerLaunchObserver,
-        RunnerLauncher, RunnerProcessStarted, RunnerSessionCreated, RunnerStartedSession,
-        StdioRunnerLauncher, apply_session_tree_metrics_preserving_marker, build_acp_launch_spec,
-        new_session_record, read_latest_session_tree_error, read_session_tree_metrics,
+        DeterministicRunnerLauncher, RunnerLauncher, StdioRunnerLauncher,
+        apply_session_tree_metrics_preserving_marker, read_latest_session_tree_error,
+        read_session_tree_metrics,
     },
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, IssueStateRecord, LifecycleStage,
-        RunnerSessionRecord, RunnerStage, RuntimeLivenessStatus, SelfDefectResolutionState,
-        StageInvocationRecord,
+        RuntimeLivenessStatus, SelfDefectResolutionState,
     },
     storage::SqliteStore,
 };
@@ -47,17 +44,20 @@ use policy::{
     blocker_record, compare_issues_for_dispatch, has_new_owner_response, unaccepted_blocker,
 };
 use records::issue_record;
-use self_defects::{RuntimeSelfDefectInput, record_runtime_self_defect};
 use session::{
     latest_running_session_for_issue, mark_existing_session_blocked,
     mark_existing_session_failed_for_unresolved_runtime_defect,
     mark_existing_session_waiting_for_project_owner_input, mark_historical_sessions_ignored,
-    mark_issue_sessions_stage_reentered, mark_issue_sessions_terminal, resume_stale_runner_session,
-    session_has_live_process, unresolved_runtime_defect,
+    mark_issue_sessions_stage_left, mark_issue_sessions_stage_reentered,
+    mark_issue_sessions_terminal, resume_stale_runner_session, session_has_live_process,
+    unresolved_runtime_defect,
+};
+use stage_dispatch::{
+    DispatchCandidate, blockers_hash, dispatch_candidate, labels_hash, stage_invocation_is_open,
 };
 use task_selection::{
     DispatchSelection, compare_dispatch_selections, is_managed_self_defect_issue,
-    self_bug_default_suppression,
+    partition_ambiguous_milestone_promotions, self_bug_default_suppression,
 };
 
 #[derive(Debug)]
@@ -139,135 +139,6 @@ pub struct OrchestrationReport {
     pub parked_owner_input: Vec<String>,
     pub terminal_reconciled: Vec<String>,
 }
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum DispatchCandidate {
-    New(LinearIssue),
-}
-
-impl DispatchCandidate {
-    pub(super) const fn issue(&self) -> &LinearIssue {
-        match self {
-            Self::New(issue) => issue,
-        }
-    }
-}
-
-fn stage_invocation_fingerprint(project: &ProjectConfig, issue: &LinearIssue) -> String {
-    stable_hash(&[
-        "stage-entry-v1",
-        &project.id,
-        &issue.id,
-        issue.state_id.as_deref().unwrap_or_default(),
-        &issue.state,
-        issue.updated_at.as_deref().unwrap_or_default(),
-    ])
-}
-
-fn stage_invocation_is_open(invocation: &StageInvocationRecord) -> bool {
-    !matches!(
-        invocation.status.as_str(),
-        "left_stage" | "completed" | "canceled"
-    )
-}
-
-fn stage_invocation_record(
-    project: &ProjectConfig,
-    issue: &LinearIssue,
-    launch_spec: &crate::runner::RunnerLaunchSpec,
-    fingerprint: &str,
-) -> StageInvocationRecord {
-    let route = project
-        .workflow
-        .agent_route_for_stage(crate::config::WorkflowStage::InProgress, &issue.labels);
-    StageInvocationRecord {
-        project_id: project.id.clone(),
-        issue_id: issue.id.clone(),
-        fingerprint: fingerprint.to_owned(),
-        state_id: issue.state_id.clone(),
-        state_name: issue.state.clone(),
-        issue_updated_at: issue.updated_at.clone(),
-        labels_hash: labels_hash(&issue.labels),
-        blockers_hash: blockers_hash(issue),
-        selected_agent: launch_spec.agent.clone(),
-        agent_routing_reason: route
-            .as_ref()
-            .map(|route| route.reason.as_str().to_owned())
-            .unwrap_or_else(|| "fallback".into()),
-        agent_routing_label: route.and_then(|route| route.selected_label),
-        provider: launch_spec
-            .provider_id
-            .clone()
-            .unwrap_or_else(|| launch_spec.provider_mode.as_str().to_owned()),
-        session_id: None,
-        status: "reserved".into(),
-        created_at: None,
-        updated_at: None,
-    }
-}
-
-fn labels_hash(labels: &[String]) -> String {
-    let mut labels = labels.iter().map(String::as_str).collect::<Vec<_>>();
-    labels.sort_unstable();
-    stable_hash_values("labels-v1", labels)
-}
-
-fn blockers_hash(issue: &LinearIssue) -> String {
-    let mut blockers = issue
-        .blocked_by
-        .iter()
-        .map(|blocker| {
-            format!(
-                "{}\u{1f}{}\u{1f}{}",
-                blocker.id.as_deref().unwrap_or_default(),
-                blocker.identifier.as_deref().unwrap_or_default(),
-                blocker.state.as_deref().unwrap_or_default()
-            )
-        })
-        .collect::<Vec<_>>();
-    blockers.sort_unstable();
-    stable_hash_owned_values("blockers-v1", &blockers)
-}
-
-fn stable_hash_values(prefix: &str, values: Vec<&str>) -> String {
-    let mut hash = FNV_OFFSET_BASIS;
-    update_stable_hash(&mut hash, prefix);
-    for value in values {
-        update_stable_hash(&mut hash, value);
-    }
-    format!("fnv1a64:{hash:016x}")
-}
-
-fn stable_hash_owned_values(prefix: &str, values: &[String]) -> String {
-    let mut hash = FNV_OFFSET_BASIS;
-    update_stable_hash(&mut hash, prefix);
-    for value in values {
-        update_stable_hash(&mut hash, value);
-    }
-    format!("fnv1a64:{hash:016x}")
-}
-
-fn stable_hash(values: &[&str]) -> String {
-    let mut hash = FNV_OFFSET_BASIS;
-    for value in values {
-        update_stable_hash(&mut hash, value);
-    }
-    format!("fnv1a64:{hash:016x}")
-}
-
-fn update_stable_hash(hash: &mut u64, value: &str) {
-    for byte in value.len().to_le_bytes() {
-        *hash ^= u64::from(byte);
-        *hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    for byte in value.as_bytes() {
-        *hash ^= u64::from(*byte);
-        *hash = hash.wrapping_mul(FNV_PRIME);
-    }
-}
-
-const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 pub async fn run_once_with_linear_client(
     config: &RootConfig,
@@ -409,7 +280,8 @@ async fn reconcile_project(
         runner,
     } = context;
     validate_configured_linear_states(linear, project).await?;
-    let mut eligible = Vec::new();
+    let mut stage_entries = Vec::new();
+    let mut promotions = Vec::new();
     let mut issues = linear.fetch_candidate_issues(project).await?;
     issues.sort_by(compare_issues_for_dispatch);
     reconcile_missing_candidate_issues(project, store, &issues, report).await?;
@@ -666,9 +538,7 @@ async fn reconcile_project(
                         reason = if has_running_session { "stage_reentered" } else { "missing_active_session" },
                         "In Progress issue queued for stage-entry dispatch"
                     );
-                    if latest_invocation_closed {
-                        mark_issue_sessions_stage_reentered(store, project, &issue).await?;
-                    }
+                    mark_issue_sessions_stage_reentered(store, project, &issue).await?;
                     let mut record = issue_record(
                         project,
                         &issue,
@@ -681,7 +551,7 @@ async fn reconcile_project(
                         record.cleanup_status = existing.cleanup_status;
                     }
                     store.upsert_issue(&record).await?;
-                    eligible.push(DispatchCandidate::New(issue));
+                    stage_entries.push(DispatchCandidate::StageEntry(issue));
                     continue;
                 }
                 if let Some(storage) = runner_archive
@@ -817,9 +687,12 @@ async fn reconcile_project(
                 .await?
                 {
                     continue;
-                } else if let Some(failure) =
-                    unresolved_runtime_defect(store, project, &issue).await?
-                {
+                }
+                store
+                    .mark_latest_stage_invocation_status(&project.id, &issue.id, "left_stage")
+                    .await?;
+                mark_issue_sessions_stage_left(store, project, &issue).await?;
+                if let Some(failure) = unresolved_runtime_defect(store, project, &issue).await? {
                     info!(
                         project_id = %project.id,
                         issue = %issue.identifier,
@@ -853,30 +726,12 @@ async fn reconcile_project(
                 {
                     report.blocked.push(issue.identifier);
                 } else {
-                    info!(
+                    debug!(
                         project_id = %project.id,
                         issue = %issue.identifier,
-                        "Todo issue is eligible; promoting to In Progress"
+                        "Todo issue is eligible for capacity-gated promotion"
                     );
-                    transition_issue_to_stage(
-                        linear,
-                        project,
-                        &issue.id,
-                        WorkflowStage::InProgress,
-                    )
-                    .await?;
-                    let mut record = issue_record(
-                        project,
-                        &issue,
-                        LifecycleStage::Queued,
-                        None,
-                        CleanupStatus::Clean,
-                    );
-                    if let Some(existing) = &existing {
-                        record.git_ref.clone_from(&existing.git_ref);
-                        record.cleanup_status = existing.cleanup_status;
-                    }
-                    store.upsert_issue(&record).await?;
+                    promotions.push(DispatchCandidate::Promote(issue));
                 }
             }
             _ => {
@@ -901,6 +756,32 @@ async fn reconcile_project(
         }
     }
 
+    let (allowed_promotions, suppressed_promotions, runnable_milestone_count) =
+        partition_ambiguous_milestone_promotions(promotions);
+    promotions = allowed_promotions;
+    for candidate in suppressed_promotions {
+        let issue = candidate.issue();
+        info!(
+            project_id = %project.id,
+            issue = %issue.identifier,
+            runnable_milestones = runnable_milestone_count,
+            "Todo promotion suppressed because unblocked candidates span multiple milestones"
+        );
+        let record = issue_record(
+                project,
+                issue,
+                LifecycleStage::Blocked,
+                Some(BlockerRecord {
+                    kind: "ambiguous_runnable_milestones".into(),
+                    message: "unblocked Todo candidates span multiple milestones; repair the Linear blocker graph before dispatch".into(),
+                    observed_at: issue.updated_at.clone(),
+                }),
+                CleanupStatus::Clean,
+            );
+        store.upsert_issue(&record).await?;
+        report.blocked.push(issue.identifier.clone());
+    }
+
     let running = store
         .issues_for_project(&project.id)
         .await?
@@ -914,11 +795,12 @@ async fn reconcile_project(
         .into_iter()
         .filter(|issue| issue.lifecycle_stage == LifecycleStage::Blocked)
         .count();
+    let eligible_count = stage_entries.len() + promotions.len();
     let (liveness, liveness_reason) = project_liveness_projection(
         store,
         project,
         running,
-        eligible.len(),
+        eligible_count,
         blocked_count,
         capacity,
     )
@@ -937,12 +819,13 @@ async fn reconcile_project(
         project_id = %project.id,
         running,
         capacity,
-        eligible = eligible.len(),
+        stage_entries = stage_entries.len(),
+        promotions = promotions.len(),
         liveness = %liveness,
         "project dispatch capacity evaluated"
     );
 
-    for candidate in eligible.into_iter().take(capacity) {
+    for candidate in stage_entries.into_iter().chain(promotions).take(capacity) {
         dispatch_queue.push(DispatchSelection::new(
             project_index,
             project,
@@ -1064,247 +947,6 @@ async fn missing_candidate_runtime_is_stale(
     Ok(!session_has_live_process(&session).await)
 }
 
-async fn dispatch_candidate(
-    project: &ProjectConfig,
-    self_defect_project: &ProjectConfig,
-    store: &SqliteStore,
-    linear: &impl LinearClient,
-    runner: &impl RunnerLauncher,
-    candidate: DispatchCandidate,
-    report: &mut OrchestrationReport,
-) -> anyhow::Result<()> {
-    let issue = candidate.issue();
-    let launch_spec = build_acp_launch_spec(project, issue);
-    let stage_fingerprint = matches!(candidate, DispatchCandidate::New(_))
-        .then(|| stage_invocation_fingerprint(project, issue));
-    if let Some(fingerprint) = stage_fingerprint.as_deref()
-        && store
-            .stage_invocation(&project.id, &issue.id, fingerprint)
-            .await?
-            .is_some()
-    {
-        info!(
-            project_id = %project.id,
-            issue = %issue.identifier,
-            stage_fingerprint = %fingerprint,
-            "stage-entry invocation already recorded; skipping duplicate runner launch"
-        );
-        return Ok(());
-    }
-    info!(
-        project_id = %project.id,
-        issue = %issue.identifier,
-        "dispatching issue to runner"
-    );
-    transition_issue_to_stage(linear, project, &issue.id, WorkflowStage::InProgress).await?;
-    let existing_record = store.issue(&project.id, &issue.id).await?;
-    let mut record = issue_record(
-        project,
-        issue,
-        LifecycleStage::Running,
-        None,
-        CleanupStatus::Clean,
-    );
-    if let Some(existing) = &existing_record {
-        record.failure.clone_from(&existing.failure);
-        record.git_ref.clone_from(&existing.git_ref);
-        record.cleanup_status = existing.cleanup_status;
-    }
-    store.upsert_issue(&record).await?;
-    if let Some(fingerprint) = stage_fingerprint.as_deref() {
-        let invocation = stage_invocation_record(project, issue, &launch_spec, fingerprint);
-        if !store.insert_stage_invocation_if_absent(&invocation).await? {
-            info!(
-                project_id = %project.id,
-                issue = %issue.identifier,
-                stage_fingerprint = %fingerprint,
-                "stage-entry invocation was concurrently recorded; skipping duplicate runner launch"
-            );
-            return Ok(());
-        }
-    }
-    match candidate {
-        DispatchCandidate::New(issue) => {
-            let observer = RuntimeLaunchObserver::new(project, &issue, &launch_spec, store);
-            match runner.launch_observed(&launch_spec, &observer).await {
-                Ok(started) => {
-                    let session = new_session_record(project, &issue, started, &launch_spec);
-                    info!(
-                        project_id = %project.id,
-                        issue = %issue.identifier,
-                        session_id = %session.session_id,
-                        worktree_path = %session.worktree_path,
-                        "runner session recorded"
-                    );
-                    if let Some(fingerprint) = stage_fingerprint.as_deref() {
-                        store
-                            .mark_stage_invocation_started(
-                                &project.id,
-                                &issue.id,
-                                fingerprint,
-                                &session.session_id,
-                            )
-                            .await?;
-                    }
-                    upsert_observed_launch_session(store, session).await?;
-                    report.dispatched.push(issue.identifier);
-                }
-                Err(error) => {
-                    if let Some(fingerprint) = stage_fingerprint.as_deref() {
-                        store
-                            .mark_stage_invocation_status(
-                                &project.id,
-                                &issue.id,
-                                fingerprint,
-                                "launch_failed",
-                            )
-                            .await?;
-                    }
-                    handle_launch_failure(
-                        project,
-                        self_defect_project,
-                        store,
-                        linear,
-                        &issue,
-                        &launch_spec,
-                        error,
-                    )
-                    .await?;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn upsert_observed_launch_session(
-    store: &SqliteStore,
-    mut session: RunnerSessionRecord,
-) -> anyhow::Result<()> {
-    if let Some(existing) = store
-        .runner_session(&session.project_id, &session.issue_id, &session.session_id)
-        .await?
-        && is_observed_launch_marker(existing.lifecycle_marker.as_deref())
-    {
-        session.lifecycle_marker = existing.lifecycle_marker;
-        session.last_event = existing.last_event;
-    }
-
-    store.upsert_runner_session(&session).await?;
-    Ok(())
-}
-
-fn is_observed_launch_marker(marker: Option<&str>) -> bool {
-    matches!(marker, Some("acp_process_started" | "acp_session_attached"))
-}
-
-struct RuntimeLaunchObserver<'a> {
-    project: &'a ProjectConfig,
-    issue: &'a LinearIssue,
-    launch_spec: &'a crate::runner::RunnerLaunchSpec,
-    store: &'a SqliteStore,
-    provisional_session_id: Mutex<Option<String>>,
-}
-
-impl<'a> RuntimeLaunchObserver<'a> {
-    fn new(
-        project: &'a ProjectConfig,
-        issue: &'a LinearIssue,
-        launch_spec: &'a crate::runner::RunnerLaunchSpec,
-        store: &'a SqliteStore,
-    ) -> Self {
-        Self {
-            project,
-            issue,
-            launch_spec,
-            store,
-            provisional_session_id: Mutex::new(None),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl RunnerLaunchObserver for RuntimeLaunchObserver<'_> {
-    async fn process_started(
-        &self,
-        event: RunnerProcessStarted,
-    ) -> Result<(), crate::runner::RunnerError> {
-        let session_id = provisional_session_id(self.issue, event.process_id);
-        {
-            let mut provisional_session_id = self.provisional_session_id.lock().await;
-            *provisional_session_id = Some(session_id.clone());
-        }
-
-        let mut session = new_session_record(
-            self.project,
-            self.issue,
-            RunnerStartedSession {
-                session_id,
-                process_id: event.process_id,
-                acp_frame_count: 0,
-                session_evidence_refs: Vec::new(),
-            },
-            self.launch_spec,
-        );
-        session.lifecycle_marker = Some("acp_process_started".into());
-        session.last_event = Some(
-            event
-                .process_id
-                .map(|process_id| format!("acp_process_started:{process_id}"))
-                .unwrap_or_else(|| "acp_process_started:no_pid".into()),
-        );
-        self.store
-            .upsert_runner_session(&session)
-            .await
-            .map_err(|error| crate::runner::RunnerError::LaunchObserver(error.to_string()))
-    }
-
-    async fn session_created(
-        &self,
-        event: RunnerSessionCreated,
-    ) -> Result<(), crate::runner::RunnerError> {
-        let provisional_session_id = {
-            let mut provisional_session_id = self.provisional_session_id.lock().await;
-            provisional_session_id.take()
-        };
-        if let Some(session_id) = provisional_session_id {
-            self.store
-                .delete_runner_session(&self.project.id, &self.issue.id, &session_id)
-                .await
-                .map_err(|error| crate::runner::RunnerError::LaunchObserver(error.to_string()))?;
-        }
-
-        let mut session = new_session_record(
-            self.project,
-            self.issue,
-            RunnerStartedSession {
-                session_id: event.session_id,
-                process_id: event.process_id,
-                acp_frame_count: 0,
-                session_evidence_refs: Vec::new(),
-            },
-            self.launch_spec,
-        );
-        session.lifecycle_marker = Some("acp_session_attached".into());
-        session.last_event = Some(
-            event
-                .process_id
-                .map(|process_id| format!("acp_session_attached:{process_id}"))
-                .unwrap_or_else(|| "acp_session_attached:no_pid".into()),
-        );
-        self.store
-            .upsert_runner_session(&session)
-            .await
-            .map_err(|error| crate::runner::RunnerError::LaunchObserver(error.to_string()))
-    }
-}
-
-fn provisional_session_id(issue: &LinearIssue, process_id: Option<u32>) -> String {
-    process_id
-        .map(|process_id| format!("starting:{}:{process_id}", issue.identifier))
-        .unwrap_or_else(|| format!("starting:{}:no_pid", issue.identifier))
-}
-
 async fn retain_typed_non_owner_blocker(
     project: &ProjectConfig,
     store: &SqliteStore,
@@ -1403,271 +1045,6 @@ fn is_typed_non_owner_blocker_kind(kind: &str) -> bool {
 
 fn retryable_todo_blocker_kind(kind: &str) -> bool {
     matches!(kind, "provider_blocker")
-}
-
-async fn handle_launch_failure(
-    project: &ProjectConfig,
-    self_defect_project: &ProjectConfig,
-    store: &SqliteStore,
-    linear: &impl LinearClient,
-    issue: &LinearIssue,
-    launch_spec: &crate::runner::RunnerLaunchSpec,
-    error: crate::runner::RunnerError,
-) -> anyhow::Result<()> {
-    let failure_reason = error_chain(&error);
-    let occurrence_count = launch_failure_occurrence_count(store, project, issue).await?;
-    warn!(
-        project_id = %project.id,
-        issue_id = %issue.id,
-        issue = %issue.identifier,
-        worktree_path = %launch_spec.cwd.display(),
-        expected_branch = %launch_spec.branch_name,
-        failure_reason = %failure_reason,
-        "runner launch failed after Linear transition"
-    );
-    linear
-        .record_issue_evidence(
-            &issue.id,
-            LinearIssueEvidence {
-                kind: "runtime_defect".into(),
-                body: launch_failure_evidence_body(issue, launch_spec, &failure_reason),
-            },
-        )
-        .await?;
-
-    let failure = FailureRecord {
-        kind: "runtime_defect".into(),
-        message: failure_reason,
-        fingerprint: Some("launch_failed".into()),
-        occurrence_count,
-    };
-    let mut record = issue_record(
-        project,
-        issue,
-        LifecycleStage::Failed,
-        Some(BlockerRecord {
-            kind: "runtime_defect".into(),
-            message: "runner launch failed after Linear transition".into(),
-            observed_at: issue.updated_at.clone(),
-        }),
-        CleanupStatus::Clean,
-    );
-    record.failure = Some(failure.clone());
-    store.upsert_issue(&record).await?;
-    let session = launch_failure_session(project, issue, launch_spec, &error);
-    record_runtime_self_defect(
-        project,
-        self_defect_project,
-        store,
-        linear,
-        RuntimeSelfDefectInput {
-            issue,
-            evidence_kind: "runtime_defect",
-            message: "runner launch failed after Linear transition",
-            failure: &failure,
-            session: &session,
-        },
-    )
-    .await?;
-    transition_issue_to_stage(linear, project, &issue.id, WorkflowStage::Todo).await?;
-    if matches!(
-        launch_spec.provider_mode,
-        crate::state::RuntimeProviderMode::OmpAcp
-    ) || matches!(error, crate::runner::RunnerError::AcpSetupFailed { .. })
-    {
-        store.upsert_runner_session(&session).await?;
-    }
-    Ok(())
-}
-
-async fn launch_failure_occurrence_count(
-    store: &SqliteStore,
-    project: &ProjectConfig,
-    issue: &LinearIssue,
-) -> anyhow::Result<u32> {
-    let previous_count = store
-        .issue(&project.id, &issue.id)
-        .await?
-        .and_then(|record| record.failure)
-        .filter(|failure| failure.fingerprint.as_deref() == Some("launch_failed"))
-        .map(|failure| failure.occurrence_count.max(1))
-        .unwrap_or(0);
-    Ok(previous_count.saturating_add(1))
-}
-
-fn launch_failure_session(
-    project: &ProjectConfig,
-    issue: &LinearIssue,
-    launch_spec: &crate::runner::RunnerLaunchSpec,
-    error: &crate::runner::RunnerError,
-) -> RunnerSessionRecord {
-    let route = project
-        .workflow
-        .agent_route_for_stage(crate::config::WorkflowStage::InProgress, &issue.labels);
-    let agent_routing_reason = route
-        .as_ref()
-        .map(|route| route.reason.as_str().to_owned())
-        .unwrap_or_else(|| "fallback".into());
-    let agent_routing_label = route.and_then(|route| route.selected_label);
-    setup_failure_session(project, issue, launch_spec, error).unwrap_or_else(|| {
-        RunnerSessionRecord {
-            project_id: project.id.clone(),
-            issue_id: issue.id.clone(),
-            session_id: format!("launch-failed:{}", issue.identifier),
-            provider_mode: launch_spec.provider_mode,
-            provider_id: launch_spec.provider_id.clone(),
-            agent: launch_spec.agent.clone(),
-            agent_routing_reason,
-            agent_routing_label,
-            model: launch_spec.model.clone(),
-            worktree_path: launch_spec.cwd.display().to_string(),
-            process_id: None,
-            lifecycle_stage: LifecycleStage::Failed,
-            stage: RunnerStage::Failed,
-            active_agent: Some(launch_spec.agent.clone()),
-            active_model: launch_spec.model.clone(),
-            message_count: 0,
-            todo_count: 0,
-            part_count: 0,
-            token_count: 0,
-            tokens_input: 0,
-            tokens_output: 0,
-            tokens_reasoning: 0,
-            tokens_cache_read: 0,
-            tokens_cache_write: 0,
-            tokens_reported_total: 0,
-            token_usage_status: "missing".into(),
-            token_usage_source: "none".into(),
-            cost_micros: 0,
-            subagent_count: 0,
-            eval_stage: None,
-            lifecycle_marker: Some("launch_failed".into()),
-            last_event: Some("launch_failed".into()),
-            runtime_failure_kind: launch_failure_kind(error),
-            acp_frame_count: 0,
-            session_evidence_refs: Vec::new(),
-            silence_observed: false,
-        }
-    })
-}
-
-fn setup_failure_session(
-    project: &ProjectConfig,
-    issue: &LinearIssue,
-    launch_spec: &crate::runner::RunnerLaunchSpec,
-    error: &crate::runner::RunnerError,
-) -> Option<RunnerSessionRecord> {
-    let crate::runner::RunnerError::AcpSetupFailed {
-        process_id,
-        session_id,
-        reason,
-        termination,
-        ..
-    } = error
-    else {
-        return None;
-    };
-    let session_id = session_id
-        .clone()
-        .unwrap_or_else(|| format!("setup-failed:{}", issue.identifier));
-    let route = project
-        .workflow
-        .agent_route_for_stage(crate::config::WorkflowStage::InProgress, &issue.labels);
-    let agent_routing_reason = route
-        .as_ref()
-        .map(|route| route.reason.as_str().to_owned())
-        .unwrap_or_else(|| "fallback".into());
-    let agent_routing_label = route.and_then(|route| route.selected_label);
-    Some(RunnerSessionRecord {
-        project_id: project.id.clone(),
-        issue_id: issue.id.clone(),
-        session_id,
-        provider_mode: launch_spec.provider_mode,
-        provider_id: launch_spec.provider_id.clone(),
-        agent: launch_spec.agent.clone(),
-        agent_routing_reason,
-        agent_routing_label,
-        model: launch_spec.model.clone(),
-        worktree_path: launch_spec.cwd.display().to_string(),
-        process_id: *process_id,
-        lifecycle_stage: LifecycleStage::Failed,
-        stage: RunnerStage::Failed,
-        active_agent: Some(launch_spec.agent.clone()),
-        active_model: launch_spec.model.clone(),
-        message_count: 0,
-        todo_count: 0,
-        part_count: 0,
-        token_count: 0,
-        tokens_input: 0,
-        tokens_output: 0,
-        tokens_reasoning: 0,
-        tokens_cache_read: 0,
-        tokens_cache_write: 0,
-        tokens_reported_total: 0,
-        token_usage_status: "missing".into(),
-        token_usage_source: "none".into(),
-        cost_micros: 0,
-        subagent_count: 0,
-        eval_stage: Some(project.eval.default_suite.clone()),
-        lifecycle_marker: Some(format!("setup_failed:{reason}")),
-        last_event: Some(setup_failure_last_event(*process_id, termination)),
-        runtime_failure_kind: (launch_spec.provider_mode
-            == crate::state::RuntimeProviderMode::OmpAcp)
-            .then(|| crate::runner::classify_omp_acp_failure_kind(reason)),
-        acp_frame_count: 0,
-        session_evidence_refs: Vec::new(),
-        silence_observed: false,
-    })
-}
-
-fn launch_failure_kind(
-    error: &crate::runner::RunnerError,
-) -> Option<crate::state::RuntimeFailureKind> {
-    match error {
-        crate::runner::RunnerError::RuntimeFailure { kind, .. } => Some(kind.clone()),
-        crate::runner::RunnerError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
-            Some(crate::state::RuntimeFailureKind::MissingBinary)
-        }
-        _ => None,
-    }
-}
-
-fn setup_failure_last_event(
-    process_id: Option<u32>,
-    termination: &ProcessTreeTerminationEvidence,
-) -> String {
-    let process = process_id
-        .map(|pid| pid.to_string())
-        .unwrap_or_else(|| "no_pid".into());
-    format!(
-        "setup_failed:{process}:term={}:kill={}:alive={}",
-        termination.term_signal_sent, termination.kill_signal_sent, termination.still_alive
-    )
-}
-
-fn launch_failure_evidence_body(
-    issue: &LinearIssue,
-    launch_spec: &crate::runner::RunnerLaunchSpec,
-    failure_reason: &str,
-) -> String {
-    format!(
-        "runtime_defect: launch_failed\nissue_id: {}\nissue_identifier: {}\nattempted_worktree_path: {}\nexpected_branch: {}\nelapsed_seconds: unknown\nfailure_reason: {}",
-        issue.id,
-        issue.identifier,
-        launch_spec.cwd.display(),
-        launch_spec.branch_name,
-        failure_reason
-    )
-}
-
-fn error_chain(error: &(dyn StdError + 'static)) -> String {
-    let mut parts = vec![error.to_string()];
-    let mut source = error.source();
-    while let Some(error) = source {
-        parts.push(error.to_string());
-        source = error.source();
-    }
-    parts.join(": ")
 }
 
 async fn refresh_runner_session_metrics(
@@ -1832,7 +1209,7 @@ fn runner_provider_error_is_stale(
         && metrics.tokens_total > 0
 }
 
-async fn transition_issue_to_stage(
+pub(super) async fn transition_issue_to_stage(
     linear: &impl LinearClient,
     project: &ProjectConfig,
     issue_id: &str,
@@ -1876,7 +1253,9 @@ mod tests {
         config::{BranchPolicy, ConcurrencyConfig, EvalDefaults, ProjectWorkflow},
         linear::{LinearBlocker, LinearMilestone, LinearProjectConfig},
         runner::{PermissionPolicy, RunnerRuntimeConfig, RunnerStartedSession},
+        state::RunnerSessionRecord,
     };
+    use tokio::sync::Mutex;
 
     #[derive(Debug)]
     struct StateListLinearClient {
@@ -1928,6 +1307,7 @@ mod tests {
                 project_id: Some("linear-project".into()),
             },
             runner: RunnerRuntimeConfig {
+                provider_mode: crate::state::RuntimeProviderMode::Acp,
                 command: PathBuf::from("runner"),
                 args: Vec::new(),
                 agent: "build".into(),

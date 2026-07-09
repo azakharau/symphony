@@ -22,6 +22,43 @@ pub(super) async fn record_runtime_self_defect(
     linear: &impl LinearClient,
     input: RuntimeSelfDefectInput<'_>,
 ) -> anyhow::Result<SelfDefectRecord> {
+    record_self_defect(
+        project,
+        managed_project,
+        store,
+        linear,
+        input,
+        SourceRelationPolicy::BlockingWhenSafe,
+    )
+    .await
+}
+
+pub(super) async fn record_observational_self_defect(
+    project: &ProjectConfig,
+    managed_project: &ProjectConfig,
+    store: &SqliteStore,
+    linear: &impl LinearClient,
+    input: RuntimeSelfDefectInput<'_>,
+) -> anyhow::Result<SelfDefectRecord> {
+    record_self_defect(
+        project,
+        managed_project,
+        store,
+        linear,
+        input,
+        SourceRelationPolicy::RelatedOnly,
+    )
+    .await
+}
+
+async fn record_self_defect(
+    project: &ProjectConfig,
+    managed_project: &ProjectConfig,
+    store: &SqliteStore,
+    linear: &impl LinearClient,
+    input: RuntimeSelfDefectInput<'_>,
+    relation_policy: SourceRelationPolicy,
+) -> anyhow::Result<SelfDefectRecord> {
     let RuntimeSelfDefectInput {
         issue,
         evidence_kind,
@@ -90,7 +127,7 @@ pub(super) async fn record_runtime_self_defect(
         }
     };
 
-    let relation = self_defect_relation(project, managed_project, issue, &managed_issue);
+    let relation = self_defect_relation(issue, &managed_issue, relation_policy);
     let evidence_summary = runtime_self_defect_evidence_summary(
         &summary,
         relation.mode,
@@ -368,7 +405,7 @@ struct SelfDefectRelation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SkippedBlockerReason {
     SameIssue,
-    ActiveSymphonySelfDeadlock,
+    ObservationalOccurrence,
     RelationCyclePrevention,
 }
 
@@ -376,17 +413,16 @@ impl SkippedBlockerReason {
     const fn as_str(self) -> &'static str {
         match self {
             Self::SameIssue => "same_issue",
-            Self::ActiveSymphonySelfDeadlock => "active_symphony_self_deadlock_prevention",
+            Self::ObservationalOccurrence => "observational_occurrence",
             Self::RelationCyclePrevention => "relation_cycle_prevention",
         }
     }
 }
 
 fn self_defect_relation(
-    project: &ProjectConfig,
-    managed_project: &ProjectConfig,
     source_issue: &LinearIssue,
     managed_issue: &LinearIssue,
+    policy: SourceRelationPolicy,
 ) -> SelfDefectRelation {
     if source_issue.id == managed_issue.id {
         return related_only_relation(
@@ -396,11 +432,11 @@ fn self_defect_relation(
         );
     }
 
-    if project.id == managed_project.id && source_issue.state == "In Progress" {
+    if policy == SourceRelationPolicy::RelatedOnly {
         return related_only_relation(
             &source_issue.id,
             &managed_issue.id,
-            SkippedBlockerReason::ActiveSymphonySelfDeadlock,
+            SkippedBlockerReason::ObservationalOccurrence,
         );
     }
 
@@ -419,6 +455,12 @@ fn self_defect_relation(
         mode: SelfDefectRelationMode::Blocking,
         skipped_blocker_reason: None,
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceRelationPolicy {
+    BlockingWhenSafe,
+    RelatedOnly,
 }
 
 fn related_only_relation(
@@ -549,7 +591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_symphony_source_issue_gets_related_only_relation() {
+    async fn active_symphony_source_issue_is_blocked_by_distinct_runtime_defect() {
         let store = test_store().await;
         let project = test_project();
         let source = linear_issue_with_state("source-issue", "SYM-55", "In Progress");
@@ -574,18 +616,18 @@ mod tests {
         .await
         .expect("record self-defect");
 
-        assert_eq!(record.relation_mode, SelfDefectRelationMode::RelatedOnly);
+        assert_eq!(record.relation_mode, SelfDefectRelationMode::Blocking);
         assert!(
             record
                 .latest_evidence_summary
-                .contains("skipped_blocker_reason: active_symphony_self_deadlock_prevention")
+                .contains("relation_mode: blocking")
         );
         assert_eq!(
             linear.relations(),
             vec![(
-                "source-issue".into(),
                 "managed-issue".into(),
-                ManagedLinearRelation::Related
+                "source-issue".into(),
+                ManagedLinearRelation::Blocks
             )]
         );
     }
@@ -1308,6 +1350,7 @@ mod tests {
                 project_id: None,
             },
             runner: RunnerRuntimeConfig {
+                provider_mode: crate::state::RuntimeProviderMode::Acp,
                 command: PathBuf::from("runner"),
                 args: Vec::new(),
                 agent: "build".into(),

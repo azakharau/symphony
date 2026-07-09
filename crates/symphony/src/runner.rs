@@ -1238,8 +1238,14 @@ fn canonical_handoff_stage(stage: &str) -> Option<&'static str> {
 }
 
 pub fn build_acp_launch_spec(project: &ProjectConfig, issue: &LinearIssue) -> RunnerLaunchSpec {
-    if let Some(provider) = project.omp_acp_providers.first() {
-        return build_omp_acp_launch_spec(project, issue, provider);
+    if project.runner.provider_mode == RuntimeProviderMode::OmpAcp {
+        if let Some(provider) = project.omp_acp_providers.first() {
+            return build_omp_acp_launch_spec(project, issue, provider);
+        }
+        warn!(
+            project_id = %project.id,
+            "runner.provider_mode=omp_acp has no configured provider; falling back to ACP"
+        );
     }
     let branch_name = issue_branch_name(issue);
     let (agent, _, _) = workflow_agent_route_for_issue(project, issue, WorkflowStage::InProgress);

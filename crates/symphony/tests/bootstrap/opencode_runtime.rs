@@ -502,8 +502,11 @@ async fn acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_issue_pro
 #[tokio::test]
 async fn omp_acp_launch_spec_uses_provider_command_cwd_env_and_mode() {
     let config_toml = valid_config_toml().replace(
-        "[projects.eval]\n",
-        r#"[[projects.omp_acp_providers]]
+        "permission_policy = \"reject\"\n\n[projects.eval]\n",
+        r#"permission_policy = "reject"
+provider_mode = "omp_acp"
+
+[[projects.omp_acp_providers]]
 id = "omp-primary"
 command = "/tmp/mock-omp"
 args = ["--model=openai/gpt-5.5", "--thinking=medium", "acp"]
@@ -1395,11 +1398,18 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
             );
 
             let session = test_session("symphony", "issue-27", "ses-test", &worktree);
-            let handoff = launcher
-                .latest_handoff(&session)
-                .await
-                .expect("handoff read")
-                .expect("fake acp handoff");
+            let mut handoff = None;
+            for _ in 0..50 {
+                handoff = launcher
+                    .latest_handoff(&session)
+                    .await
+                    .expect("handoff read");
+                if handoff.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let handoff = handoff.expect("fake acp handoff");
             assert_eq!(handoff.session_id, "ses-test");
             assert_eq!(handoff.stop_reason, RunnerStopReason::Success);
             return;

@@ -521,6 +521,14 @@ impl ProjectWorkflow {
         self.agents.agent_for_stage(stage, labels)
     }
 
+    pub fn agent_route_for_stage(
+        &self,
+        stage: WorkflowStage,
+        labels: &[String],
+    ) -> Option<AgentRoutingDecision> {
+        self.agents.route_for_stage(stage, labels)
+    }
+
     pub fn block_project_dispatch_for_owner_input(&self) -> bool {
         self.owner_input.block_project_dispatch
     }
@@ -611,7 +619,7 @@ impl Default for WorkflowAgents {
     fn default() -> Self {
         Self {
             default: WorkflowDefaultAgents::default(),
-            labels: Vec::new(),
+            labels: default_label_agent_mappings(),
         }
     }
 }
@@ -637,8 +645,41 @@ impl WorkflowAgents {
     }
 
     fn agent_for_stage(&self, stage: WorkflowStage, labels: &[String]) -> Option<&str> {
-        let selected = self
-            .labels
+        self.selected_label_mapping(stage, labels)
+            .map(|mapping| mapping.agent.as_str())
+            .or_else(|| self.default.agent_for_stage(stage))
+    }
+
+    fn route_for_stage(
+        &self,
+        stage: WorkflowStage,
+        labels: &[String],
+    ) -> Option<AgentRoutingDecision> {
+        self.selected_label_mapping(stage, labels)
+            .map(|mapping| AgentRoutingDecision {
+                stage,
+                selected_agent: mapping.agent.clone(),
+                selected_label: Some(mapping.label.clone()),
+                reason: AgentRoutingReason::Label,
+            })
+            .or_else(|| {
+                self.default
+                    .agent_for_stage(stage)
+                    .map(|agent| AgentRoutingDecision {
+                        stage,
+                        selected_agent: agent.to_owned(),
+                        selected_label: None,
+                        reason: AgentRoutingReason::Fallback,
+                    })
+            })
+    }
+
+    fn selected_label_mapping(
+        &self,
+        stage: WorkflowStage,
+        labels: &[String],
+    ) -> Option<&LabelAgentMapping> {
+        self.labels
             .iter()
             .filter(|mapping| {
                 mapping.matches_stage(stage)
@@ -650,10 +691,30 @@ impl WorkflowAgents {
                 left.precedence
                     .cmp(&right.precedence)
                     .then_with(|| right.label.cmp(&left.label))
-            });
-        selected
-            .map(|mapping| mapping.agent.as_str())
-            .or_else(|| self.default.agent_for_stage(stage))
+            })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentRoutingDecision {
+    pub stage: WorkflowStage,
+    pub selected_agent: String,
+    pub selected_label: Option<String>,
+    pub reason: AgentRoutingReason,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentRoutingReason {
+    Label,
+    Fallback,
+}
+
+impl AgentRoutingReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Label => "label",
+            Self::Fallback => "fallback",
+        }
     }
 }
 
@@ -674,7 +735,7 @@ impl Default for WorkflowDefaultAgents {
         Self {
             todo: "build".into(),
             in_progress: "build".into(),
-            in_review: "build".into(),
+            in_review: "code-reviewer".into(),
             need_owner_input: "build".into(),
             done: "build".into(),
             canceled: "build".into(),
@@ -747,13 +808,44 @@ impl LabelAgentMapping {
     }
 
     fn effective_stages(&self) -> impl Iterator<Item = WorkflowStage> + '_ {
-        let fallback = self.stages.is_empty().then_some(WorkflowStage::Todo);
+        let fallback = self.stages.is_empty().then_some(WorkflowStage::InProgress);
         self.stages.iter().copied().chain(fallback)
     }
 
     fn matches_stage(&self, stage: WorkflowStage) -> bool {
         self.effective_stages().any(|candidate| candidate == stage)
     }
+}
+
+fn default_label_agent_mappings() -> Vec<LabelAgentMapping> {
+    [
+        ("rust", WorkflowStage::InProgress, "rust-engineer"),
+        ("rust", WorkflowStage::InReview, "rust-reviewer"),
+        (
+            "typescript",
+            WorkflowStage::InProgress,
+            "typescript-engineer",
+        ),
+        ("typescript", WorkflowStage::InReview, "typescript-reviewer"),
+        ("frontend", WorkflowStage::InProgress, "typescript-engineer"),
+        ("frontend", WorkflowStage::InReview, "typescript-reviewer"),
+        ("ui", WorkflowStage::InProgress, "typescript-engineer"),
+        ("ui", WorkflowStage::InReview, "ux-ui-reviewer"),
+        ("python", WorkflowStage::InProgress, "python-engineer"),
+        ("python", WorkflowStage::InReview, "python-reviewer"),
+        ("contract", WorkflowStage::InProgress, "build"),
+        ("contract", WorkflowStage::InReview, "contract-reviewer"),
+        ("api", WorkflowStage::InProgress, "build"),
+        ("api", WorkflowStage::InReview, "contract-reviewer"),
+    ]
+    .into_iter()
+    .map(|(label, stage, agent)| LabelAgentMapping {
+        label: label.into(),
+        agent: agent.into(),
+        precedence: 100,
+        stages: vec![stage],
+    })
+    .collect()
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -913,14 +1005,19 @@ backlog = "build"
 label = "rust"
 agent = "rust-engineer"
 precedence = 50
-stages = ["todo"]
+stages = ["in_progress"]
+
+[[agents.labels]]
+label = "rust"
+agent = "rust-reviewer"
+precedence = 50
+stages = ["in_review"]
 
 [[agents.labels]]
 label = "urgent"
 agent = "integrator"
 precedence = 100
-stages = ["todo"]
-
+stages = ["in_progress"]
 
 [self_defects]
 executable_label = "self-defect-executable"
@@ -959,15 +1056,28 @@ return_stage = "todo"
         assert_eq!(
             project
                 .workflow
-                .agent_for_stage(WorkflowStage::Todo, &["rust".into(), "urgent".into()]),
-            Some("integrator")
+                .agent_route_for_stage(WorkflowStage::InProgress, &["rust".into(), "urgent".into()])
+                .expect("route")
+                .selected_agent,
+            "integrator"
         );
-        assert_eq!(
-            project
-                .workflow
-                .agent_for_stage(WorkflowStage::InReview, &["rust".into()]),
-            Some("code-reviewer")
-        );
+        let review_route = project
+            .workflow
+            .agent_route_for_stage(WorkflowStage::InReview, &["rust".into()])
+            .expect("review route");
+        assert_eq!(review_route.selected_agent, "rust-reviewer");
+        assert_eq!(review_route.selected_label.as_deref(), Some("rust"));
+        let fallback_route = project
+            .workflow
+            .agent_route_for_stage(WorkflowStage::InProgress, &[])
+            .expect("fallback route");
+        assert_eq!(fallback_route.selected_agent, "build");
+        assert_eq!(fallback_route.reason, AgentRoutingReason::Fallback);
+        let contract_review = ProjectWorkflow::default()
+            .agent_route_for_stage(WorkflowStage::InReview, &["contract".into()])
+            .expect("contract review route");
+        assert_eq!(contract_review.selected_agent, "contract-reviewer");
+        assert_eq!(contract_review.selected_label.as_deref(), Some("contract"));
     }
 
     #[test]
@@ -983,7 +1093,7 @@ return_stage = "todo"
     #[test]
     fn config_rejects_unknown_workflow_stage() {
         let workflow =
-            valid_workflow_toml().replace("stages = [\"todo\"]", "stages = [\"triage\"]");
+            valid_workflow_toml().replace("stages = [\"in_progress\"]", "stages = [\"triage\"]");
 
         let err =
             toml::from_str::<ProjectWorkflow>(&workflow).expect_err("unknown stage must fail");
@@ -994,7 +1104,7 @@ return_stage = "todo"
     #[test]
     fn config_rejects_duplicate_label_mapping_for_stage() {
         let duplicate = format!(
-            "{}\n[[agents.labels]]\nlabel = \"rust\"\nagent = \"integrator\"\nprecedence = 60\nstages = [\"todo\"]\n",
+            "{}\n[[agents.labels]]\nlabel = \"rust\"\nagent = \"integrator\"\nprecedence = 60\nstages = [\"in_progress\"]\n",
             valid_workflow_toml()
         );
         let workflow =

@@ -141,6 +141,22 @@ impl SqliteStore {
         self.backfill_legacy_runner_token_metrics().await?;
         self.ensure_column("runner_sessions", "session_evidence_refs_json", "TEXT")
             .await?;
+        self.ensure_column(
+            "stage_invocations",
+            "agent_routing_reason",
+            "TEXT NOT NULL DEFAULT 'fallback'",
+        )
+        .await?;
+        self.ensure_column("stage_invocations", "agent_routing_label", "TEXT")
+            .await?;
+        self.ensure_column(
+            "runner_sessions",
+            "agent_routing_reason",
+            "TEXT NOT NULL DEFAULT 'fallback'",
+        )
+        .await?;
+        self.ensure_column("runner_sessions", "agent_routing_label", "TEXT")
+            .await?;
         self.drop_issue_linear_state_column().await?;
         Ok(())
     }
@@ -773,11 +789,13 @@ impl SqliteStore {
                     labels_hash,
                     blockers_hash,
                     selected_agent,
+                    agent_routing_reason,
+                    agent_routing_label,
                     provider,
                     session_id,
                     status
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                 "#,
                 params![
                     invocation.project_id.as_str(),
@@ -789,6 +807,8 @@ impl SqliteStore {
                     invocation.labels_hash.as_str(),
                     invocation.blockers_hash.as_str(),
                     invocation.selected_agent.as_str(),
+                    invocation.agent_routing_reason.as_str(),
+                    invocation.agent_routing_label.as_deref(),
                     invocation.provider.as_str(),
                     invocation.session_id.as_deref(),
                     invocation.status.as_str(),
@@ -809,8 +829,8 @@ impl SqliteStore {
             .query(
                 r#"
                 SELECT project_id, issue_id, fingerprint, state_id, state_name, issue_updated_at,
-                       labels_hash, blockers_hash, selected_agent, provider, session_id, status,
-                       created_at, updated_at
+                       labels_hash, blockers_hash, selected_agent, agent_routing_reason,
+                       agent_routing_label, provider, session_id, status, created_at, updated_at
                 FROM stage_invocations
                 WHERE project_id = ?1 AND issue_id = ?2 AND fingerprint = ?3
                 "#,
@@ -830,8 +850,8 @@ impl SqliteStore {
             .query(
                 r#"
                 SELECT project_id, issue_id, fingerprint, state_id, state_name, issue_updated_at,
-                       labels_hash, blockers_hash, selected_agent, provider, session_id, status,
-                       created_at, updated_at
+                       labels_hash, blockers_hash, selected_agent, agent_routing_reason,
+                       agent_routing_label, provider, session_id, status, created_at, updated_at
                 FROM stage_invocations
                 WHERE project_id = ?1 AND issue_id = ?2
                 ORDER BY created_at ASC, rowid ASC
@@ -852,8 +872,8 @@ impl SqliteStore {
             .query(
                 r#"
                 SELECT project_id, issue_id, fingerprint, state_id, state_name, issue_updated_at,
-                       labels_hash, blockers_hash, selected_agent, provider, session_id, status,
-                       created_at, updated_at
+                       labels_hash, blockers_hash, selected_agent, agent_routing_reason,
+                       agent_routing_label, provider, session_id, status, created_at, updated_at
                 FROM stage_invocations
                 WHERE project_id = ?1 AND issue_id = ?2
                 ORDER BY created_at DESC, rowid DESC
@@ -1008,6 +1028,8 @@ impl SqliteStore {
                     provider_mode,
                     provider_id,
                     agent,
+                    agent_routing_reason,
+                    agent_routing_label,
                     model,
                     worktree_path,
                     process_id,
@@ -1037,11 +1059,13 @@ impl SqliteStore {
                     session_evidence_refs_json,
                     silence_observed
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36)
                 ON CONFLICT(project_id, issue_id, session_id) DO UPDATE SET
                     provider_mode = excluded.provider_mode,
                     provider_id = excluded.provider_id,
                     agent = excluded.agent,
+                    agent_routing_reason = excluded.agent_routing_reason,
+                    agent_routing_label = excluded.agent_routing_label,
                     model = excluded.model,
                     worktree_path = excluded.worktree_path,
                     process_id = excluded.process_id,
@@ -1079,6 +1103,8 @@ impl SqliteStore {
                     session.provider_mode.as_str(),
                     session.provider_id.as_deref(),
                     session.agent.as_str(),
+                    session.agent_routing_reason.as_str(),
+                    session.agent_routing_label.as_deref(),
                     session.model.as_deref(),
                     session.worktree_path.as_str(),
                     session.process_id.map(i64::from),
@@ -1123,7 +1149,8 @@ impl SqliteStore {
             .conn
             .query(
                 r#"
-                SELECT project_id, issue_id, session_id, provider_mode, provider_id, agent, model, worktree_path,
+                SELECT project_id, issue_id, session_id, provider_mode, provider_id, agent,
+                       agent_routing_reason, agent_routing_label, model, worktree_path,
                        process_id, lifecycle_stage, stage, active_agent, active_model, message_count,
                        todo_count, part_count, token_count, tokens_input, tokens_output,
                        tokens_reasoning, tokens_cache_read, tokens_cache_write, tokens_reported_total,
@@ -1166,7 +1193,8 @@ impl SqliteStore {
             .conn
             .query(
                 r#"
-                SELECT project_id, issue_id, session_id, provider_mode, provider_id, agent, model, worktree_path,
+                SELECT project_id, issue_id, session_id, provider_mode, provider_id, agent,
+                       agent_routing_reason, agent_routing_label, model, worktree_path,
                        process_id, lifecycle_stage, stage, active_agent, active_model, message_count,
                        todo_count, part_count, token_count, tokens_input, tokens_output,
                        tokens_reasoning, tokens_cache_read, tokens_cache_write, tokens_reported_total,
@@ -1188,7 +1216,8 @@ impl SqliteStore {
             .conn
             .query(
                 r#"
-                SELECT project_id, issue_id, session_id, provider_mode, provider_id, agent, model, worktree_path,
+                SELECT project_id, issue_id, session_id, provider_mode, provider_id, agent,
+                       agent_routing_reason, agent_routing_label, model, worktree_path,
                        process_id, lifecycle_stage, stage, active_agent, active_model, message_count,
                        todo_count, part_count, token_count, tokens_input, tokens_output,
                        tokens_reasoning, tokens_cache_read, tokens_cache_write, tokens_reported_total,

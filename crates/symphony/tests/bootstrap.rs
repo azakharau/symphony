@@ -28,7 +28,7 @@ use symphony::{
         LifecycleStage, ProjectStateRecord, RunnerSessionRecord, RunnerStage,
         RunnerStageEventRecord, RuntimeFailureKind, RuntimeLivenessStatus, RuntimeProviderMode,
         SelfDefectOccurrenceRecord, SelfDefectRecommendationConfidence,
-        SelfDefectRecommendationRecord, SelfDefectRelationMode,
+        SelfDefectRecommendationRecord, SelfDefectRelationMode, StageInvocationRecord,
     },
     storage::SqliteStore,
 };
@@ -107,7 +107,13 @@ backlog = "build"
 label = "rust"
 agent = "rust-engineer"
 precedence = 100
-stages = ["todo"]
+stages = ["in_progress"]
+
+[[agents.labels]]
+label = "rust"
+agent = "rust-reviewer"
+precedence = 100
+stages = ["in_review"]
 
 
 [self_defects]
@@ -256,6 +262,8 @@ fn test_session(
         provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
         agent: "build".into(),
+        agent_routing_reason: "fallback".into(),
+        agent_routing_label: None,
         model: None,
         worktree_path: worktree_path.as_ref().display().to_string(),
         process_id: None,

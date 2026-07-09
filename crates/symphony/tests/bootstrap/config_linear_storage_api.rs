@@ -957,6 +957,8 @@ async fn runtime_state_persists_and_reloads_by_project_issue_and_session() {
                 provider_mode: RuntimeProviderMode::Acp,
                 provider_id: None,
                 agent: "build".into(),
+                agent_routing_reason: "fallback".into(),
+                agent_routing_label: None,
                 model: None,
                 worktree_path: "/home/agent/.symphony/workspaces/opencode/symphony/SYM-25".into(),
                 process_id: None,
@@ -1657,6 +1659,27 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
     session.last_event = Some("eval_failed:clippy-needless-collect".into());
     store.upsert_runner_session(session).await.expect("session");
     store
+        .insert_stage_invocation_if_absent(StageInvocationRecord {
+            project_id: "symphony".into(),
+            issue_id: "repair".into(),
+            fingerprint: "stage-routing-fixture".into(),
+            state_id: Some("state-in-progress".into()),
+            state_name: "In Progress".into(),
+            issue_updated_at: Some("2026-01-01T00:00:00Z".into()),
+            labels_hash: "labels-rust".into(),
+            blockers_hash: "blockers-none".into(),
+            selected_agent: "rust-engineer".into(),
+            agent_routing_reason: "label".into(),
+            agent_routing_label: Some("rust".into()),
+            provider: "acp".into(),
+            session_id: Some("oc-repair".into()),
+            status: "started".into(),
+            created_at: None,
+            updated_at: None,
+        })
+        .await
+        .expect("stage invocation");
+    store
         .upsert_runner_stage_event(RunnerStageEventRecord {
             project_id: "symphony".into(),
             issue_id: "repair".into(),
@@ -1804,6 +1827,8 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
           "agent": "build",
           "model": null,
           "active_agent": "evaluator",
+          "agent_routing_reason": "fallback",
+          "agent_routing_label": null,
           "active_model": "gpt-5",
           "token_count": 4096,
           "cached_token_count": 0,
@@ -1849,11 +1874,28 @@ async fn dashboard_api_snapshots_aggregate_project_drilldown_and_issue_detail() 
         issue_detail.runner_sessions[0].stage_history,
         vec![RunnerStage::Running, RunnerStage::Eval]
     );
+    assert_eq!(
+        issue_detail.stage_invocations[0].selected_agent,
+        "rust-engineer"
+    );
+    assert_eq!(
+        issue_detail.stage_invocations[0]
+            .agent_routing_label
+            .as_deref(),
+        Some("rust")
+    );
+    assert_eq!(
+        issue_detail.runner_sessions[0].agent_routing_reason,
+        "fallback"
+    );
     assert!(issue_json.contains(r#""subagents_used": 2"#));
     assert!(issue_json.contains(r#""eval_results""#));
     assert!(issue_json.contains(r#""pr_url": "https://example.test/pr/91""#));
     assert!(aggregate_json.contains(r#""running_cost_micros": 123456"#));
     assert!(issue_json.contains(r#""cost_micros": 123456"#));
+    assert!(issue_json.contains(r#""selected_agent": "rust-engineer""#));
+    assert!(issue_json.contains(r#""agent_routing_reason": "label""#));
+    assert!(issue_json.contains(r#""agent_routing_label": "rust""#));
 
     let ui_aggregate =
         symphony::api::runtime_api_json_response(&config, &store, "/api/dashboard/ui")

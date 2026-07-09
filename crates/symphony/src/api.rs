@@ -10,6 +10,7 @@ use crate::{
     state::{
         CleanupStatus, EvalRunRecord, GitRefRecord, IssueStateRecord, LifecycleStage,
         ProjectRuntimeLivenessRecord, RunnerSessionRecord, RunnerStage, RuntimeLivenessStatus,
+        StageInvocationRecord,
     },
     storage::{SqliteStore, StorageError},
 };
@@ -302,6 +303,8 @@ pub struct RunningIssueSummary {
     pub agent: Option<String>,
     pub model: Option<String>,
     pub active_agent: Option<String>,
+    pub agent_routing_reason: Option<String>,
+    pub agent_routing_label: Option<String>,
     pub active_model: Option<String>,
     pub token_count: u64,
     pub cached_token_count: u64,
@@ -521,6 +524,8 @@ fn running_issue_summary(
         lifecycle_stage: session.map(|session| session.lifecycle_stage),
         stage: session.map(|session| session.current_stage),
         agent: session.map(|session| session.agent.clone()),
+        agent_routing_reason: session.map(|session| session.agent_routing_reason.clone()),
+        agent_routing_label: session.and_then(|session| session.agent_routing_label.clone()),
         model: session.and_then(|session| session.model.clone()),
         active_agent: session.and_then(|session| session.active_agent.clone()),
         active_model: session.and_then(|session| session.active_model.clone()),
@@ -579,8 +584,23 @@ pub struct IssueDetailResponse {
     pub last_runner_event: Option<String>,
     pub preferred_runner_session_id: Option<String>,
     pub token_metrics: DashboardTokenMetrics,
+    pub stage_invocations: Vec<StageInvocationDetail>,
     pub runner_sessions: Vec<RunnerSessionDetail>,
     pub eval_results: Vec<EvalRunRecord>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StageInvocationDetail {
+    pub fingerprint: String,
+    pub state_name: String,
+    pub selected_agent: String,
+    pub agent_routing_reason: String,
+    pub agent_routing_label: Option<String>,
+    pub provider: String,
+    pub session_id: Option<String>,
+    pub status: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -597,6 +617,8 @@ pub struct RunnerSessionDetail {
     pub provider_mode: crate::state::RuntimeProviderMode,
     pub provider_id: Option<String>,
     pub agent: String,
+    pub agent_routing_reason: String,
+    pub agent_routing_label: Option<String>,
     pub model: Option<String>,
     pub worktree_path: String,
     pub process_id: Option<u32>,
@@ -638,6 +660,21 @@ async fn issue_read_model(
         issue,
         runner_sessions,
     })
+}
+
+fn stage_invocation_detail(invocation: StageInvocationRecord) -> StageInvocationDetail {
+    StageInvocationDetail {
+        fingerprint: invocation.fingerprint,
+        state_name: invocation.state_name,
+        selected_agent: invocation.selected_agent,
+        agent_routing_reason: invocation.agent_routing_reason,
+        agent_routing_label: invocation.agent_routing_label,
+        provider: invocation.provider,
+        session_id: invocation.session_id,
+        status: invocation.status,
+        created_at: invocation.created_at,
+        updated_at: invocation.updated_at,
+    }
 }
 
 async fn project_dashboard_response(
@@ -1027,6 +1064,12 @@ async fn issue_detail_response(
     let eval_results = store
         .eval_runs_for_issue(&issue.issue.project_id, &issue.issue.issue_id)
         .await?;
+    let stage_invocations = store
+        .stage_invocations_for_issue(&issue.issue.project_id, &issue.issue.issue_id)
+        .await?
+        .into_iter()
+        .map(stage_invocation_detail)
+        .collect::<Vec<_>>();
     let mut sessions = Vec::new();
     for session in issue.runner_sessions {
         sessions.push(session_detail(store, session, runner_archive_database_path).await?);
@@ -1075,6 +1118,7 @@ async fn issue_detail_response(
         last_runner_event,
         preferred_runner_session_id,
         token_metrics,
+        stage_invocations,
         runner_sessions: sessions,
         eval_results,
     })
@@ -1171,6 +1215,8 @@ async fn session_detail(
         provider_mode: session.provider_mode,
         provider_id: session.provider_id,
         agent: session.agent,
+        agent_routing_reason: session.agent_routing_reason,
+        agent_routing_label: session.agent_routing_label,
         model: session.model,
         worktree_path: session.worktree_path,
         process_id,
@@ -1518,6 +1564,8 @@ mod tests {
             agent: Some("build".into()),
             model: Some("gpt-5.5".into()),
             active_agent: Some("build".into()),
+            agent_routing_reason: Some("fallback".into()),
+            agent_routing_label: None,
             active_model: Some("gpt-5.5".into()),
             token_count,
             cached_token_count,
@@ -1583,6 +1631,7 @@ mod tests {
             last_runner_event: None,
             preferred_runner_session_id: None,
             token_metrics,
+            stage_invocations: Vec::new(),
             runner_sessions,
             eval_results: Vec::new(),
         }
@@ -1600,6 +1649,8 @@ mod tests {
             provider_mode: crate::state::RuntimeProviderMode::OmpAcp,
             provider_id: Some("omp".into()),
             agent: "build".into(),
+            agent_routing_reason: "fallback".into(),
+            agent_routing_label: None,
             model: Some("gpt-5.5".into()),
             worktree_path: "/tmp/worktree".into(),
             process_id: None,

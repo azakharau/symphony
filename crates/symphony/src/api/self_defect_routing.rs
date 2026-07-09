@@ -356,6 +356,7 @@ mod tests {
                 metrics_freshness: "unavailable".into(),
                 metrics_reason: Some("no token metrics collected".into()),
             },
+            stage_invocations: Vec::new(),
             runner_sessions: Vec::new(),
             eval_results: Vec::new(),
         }

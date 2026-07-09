@@ -384,6 +384,8 @@ mod tests {
             provider_mode: RuntimeProviderMode::OmpAcp,
             provider_id: Some("omp".into()),
             agent: "build".into(),
+            agent_routing_reason: "fallback".into(),
+            agent_routing_label: None,
             model: Some("gpt-5.5".into()),
             worktree_path: "/tmp/worktree".into(),
             process_id: None,

@@ -853,6 +853,8 @@ for line in sys.stdin:
         provider_mode: RuntimeProviderMode::OmpAcp,
         provider_id: Some("omp-primary".into()),
         agent: String::new(),
+        agent_routing_reason: "fallback".into(),
+        agent_routing_label: None,
         model: None,
         worktree_path: worktree.display().to_string(),
         process_id: None,

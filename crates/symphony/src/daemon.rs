@@ -177,6 +177,9 @@ fn stage_invocation_record(
     launch_spec: &crate::runner::RunnerLaunchSpec,
     fingerprint: &str,
 ) -> StageInvocationRecord {
+    let route = project
+        .workflow
+        .agent_route_for_stage(crate::config::WorkflowStage::InProgress, &issue.labels);
     StageInvocationRecord {
         project_id: project.id.clone(),
         issue_id: issue.id.clone(),
@@ -187,6 +190,11 @@ fn stage_invocation_record(
         labels_hash: labels_hash(&issue.labels),
         blockers_hash: blockers_hash(issue),
         selected_agent: launch_spec.agent.clone(),
+        agent_routing_reason: route
+            .as_ref()
+            .map(|route| route.reason.as_str().to_owned())
+            .unwrap_or_else(|| "fallback".into()),
+        agent_routing_label: route.and_then(|route| route.selected_label),
         provider: launch_spec
             .provider_id
             .clone()
@@ -1493,6 +1501,14 @@ fn launch_failure_session(
     launch_spec: &crate::runner::RunnerLaunchSpec,
     error: &crate::runner::RunnerError,
 ) -> RunnerSessionRecord {
+    let route = project
+        .workflow
+        .agent_route_for_stage(crate::config::WorkflowStage::InProgress, &issue.labels);
+    let agent_routing_reason = route
+        .as_ref()
+        .map(|route| route.reason.as_str().to_owned())
+        .unwrap_or_else(|| "fallback".into());
+    let agent_routing_label = route.and_then(|route| route.selected_label);
     setup_failure_session(project, issue, launch_spec, error).unwrap_or_else(|| {
         RunnerSessionRecord {
             project_id: project.id.clone(),
@@ -1501,6 +1517,8 @@ fn launch_failure_session(
             provider_mode: launch_spec.provider_mode,
             provider_id: launch_spec.provider_id.clone(),
             agent: launch_spec.agent.clone(),
+            agent_routing_reason,
+            agent_routing_label,
             model: launch_spec.model.clone(),
             worktree_path: launch_spec.cwd.display().to_string(),
             process_id: None,
@@ -1552,6 +1570,14 @@ fn setup_failure_session(
     let session_id = session_id
         .clone()
         .unwrap_or_else(|| format!("setup-failed:{}", issue.identifier));
+    let route = project
+        .workflow
+        .agent_route_for_stage(crate::config::WorkflowStage::InProgress, &issue.labels);
+    let agent_routing_reason = route
+        .as_ref()
+        .map(|route| route.reason.as_str().to_owned())
+        .unwrap_or_else(|| "fallback".into());
+    let agent_routing_label = route.and_then(|route| route.selected_label);
     Some(RunnerSessionRecord {
         project_id: project.id.clone(),
         issue_id: issue.id.clone(),
@@ -1559,6 +1585,8 @@ fn setup_failure_session(
         provider_mode: launch_spec.provider_mode,
         provider_id: launch_spec.provider_id.clone(),
         agent: launch_spec.agent.clone(),
+        agent_routing_reason,
+        agent_routing_label,
         model: launch_spec.model.clone(),
         worktree_path: launch_spec.cwd.display().to_string(),
         process_id: *process_id,

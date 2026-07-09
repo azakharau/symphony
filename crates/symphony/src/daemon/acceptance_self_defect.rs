@@ -91,6 +91,8 @@ fn acceptance_session_record(
         provider_mode: crate::state::RuntimeProviderMode::Acp,
         provider_id: None,
         agent: "acceptance-self-defect".into(),
+        agent_routing_reason: "fallback".into(),
+        agent_routing_label: None,
         model: None,
         worktree_path: project.repo_path.to_string_lossy().into_owned(),
         process_id,

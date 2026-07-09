@@ -1242,7 +1242,7 @@ pub fn build_acp_launch_spec(project: &ProjectConfig, issue: &LinearIssue) -> Ru
         return build_omp_acp_launch_spec(project, issue, provider);
     }
     let branch_name = issue_branch_name(issue);
-    let agent = workflow_agent_for_issue(project, issue, WorkflowStage::InProgress);
+    let (agent, _, _) = workflow_agent_route_for_issue(project, issue, WorkflowStage::InProgress);
     RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
@@ -1275,7 +1275,7 @@ pub fn build_omp_acp_launch_spec(
         OhMyPiAcpCwdPolicy::IssueWorktree => issue_worktree,
         OhMyPiAcpCwdPolicy::ProjectRepo => project.repo_path.clone(),
     };
-    let agent = workflow_agent_for_issue(project, issue, WorkflowStage::InProgress);
+    let (agent, _, _) = workflow_agent_route_for_issue(project, issue, WorkflowStage::InProgress);
     RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::OmpAcp,
         provider_id: Some(provider.id.clone()),
@@ -1303,16 +1303,22 @@ pub fn build_omp_acp_launch_spec(
     }
 }
 
-fn workflow_agent_for_issue(
+fn workflow_agent_route_for_issue(
     project: &ProjectConfig,
     issue: &LinearIssue,
     stage: WorkflowStage,
-) -> String {
+) -> (String, String, Option<String>) {
     project
         .workflow
-        .agent_for_stage(stage, &issue.labels)
-        .unwrap_or(&project.runner.agent)
-        .to_owned()
+        .agent_route_for_stage(stage, &issue.labels)
+        .map(|route| {
+            (
+                route.selected_agent,
+                route.reason.as_str().to_owned(),
+                route.selected_label,
+            )
+        })
+        .unwrap_or_else(|| (project.runner.agent.clone(), "fallback".into(), None))
 }
 
 fn repair_prompt(
@@ -1380,6 +1386,8 @@ pub fn new_session_record(
     started: RunnerStartedSession,
     spec: &RunnerLaunchSpec,
 ) -> RunnerSessionRecord {
+    let (_, agent_routing_reason, agent_routing_label) =
+        workflow_agent_route_for_issue(project, issue, WorkflowStage::InProgress);
     RunnerSessionRecord {
         project_id: project.id.clone(),
         issue_id: issue.id.clone(),
@@ -1387,6 +1395,8 @@ pub fn new_session_record(
         provider_mode: spec.provider_mode,
         provider_id: spec.provider_id.clone(),
         agent: spec.agent.clone(),
+        agent_routing_reason,
+        agent_routing_label,
         model: spec.model.clone(),
         worktree_path: spec.cwd.display().to_string(),
         process_id: started.process_id,

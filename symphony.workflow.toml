@@ -22,24 +22,84 @@ backlog = "build"
 label = "rust"
 agent = "rust-engineer"
 precedence = 100
-stages = ["todo"]
+stages = ["in_progress"]
+
+[[agents.labels]]
+label = "rust"
+agent = "rust-reviewer"
+precedence = 100
+stages = ["in_review"]
 
 [[agents.labels]]
 label = "typescript"
 agent = "typescript-engineer"
 precedence = 100
-stages = ["todo"]
+stages = ["in_progress"]
+
+[[agents.labels]]
+label = "typescript"
+agent = "typescript-reviewer"
+precedence = 100
+stages = ["in_review"]
+
+[[agents.labels]]
+label = "frontend"
+agent = "typescript-engineer"
+precedence = 100
+stages = ["in_progress"]
+
+[[agents.labels]]
+label = "frontend"
+agent = "typescript-reviewer"
+precedence = 100
+stages = ["in_review"]
+
+[[agents.labels]]
+label = "ui"
+agent = "typescript-engineer"
+precedence = 100
+stages = ["in_progress"]
+
+[[agents.labels]]
+label = "ui"
+agent = "ux-ui-reviewer"
+precedence = 100
+stages = ["in_review"]
 
 [[agents.labels]]
 label = "python"
 agent = "python-engineer"
 precedence = 100
-stages = ["todo"]
+stages = ["in_progress"]
 
 [[agents.labels]]
-label = "review"
-agent = "code-reviewer"
-precedence = 50
+label = "python"
+agent = "python-reviewer"
+precedence = 100
+stages = ["in_review"]
+
+[[agents.labels]]
+label = "contract"
+agent = "build"
+precedence = 100
+stages = ["in_progress"]
+
+[[agents.labels]]
+label = "contract"
+agent = "contract-reviewer"
+precedence = 100
+stages = ["in_review"]
+
+[[agents.labels]]
+label = "api"
+agent = "build"
+precedence = 100
+stages = ["in_progress"]
+
+[[agents.labels]]
+label = "api"
+agent = "contract-reviewer"
+precedence = 100
 stages = ["in_review"]
 
 

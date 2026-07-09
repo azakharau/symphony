@@ -74,11 +74,13 @@ pub(super) fn stage_invocation_from_row(row: &Row) -> Result<StageInvocationReco
         labels_hash: row.get(6)?,
         blockers_hash: row.get(7)?,
         selected_agent: row.get(8)?,
-        provider: row.get(9)?,
-        session_id: row.get(10)?,
-        status: row.get(11)?,
-        created_at: row.get(12)?,
-        updated_at: row.get(13)?,
+        agent_routing_reason: row.get(9)?,
+        agent_routing_label: row.get(10)?,
+        provider: row.get(11)?,
+        session_id: row.get(12)?,
+        status: row.get(13)?,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
     })
 }
 
@@ -98,13 +100,13 @@ pub(super) fn liveness_from_row(row: &Row) -> Result<ProjectRuntimeLivenessRecor
 
 pub(super) fn session_from_row(row: &Row) -> Result<RunnerSessionRecord, StorageError> {
     let provider_mode: String = row.get(3)?;
-    let lifecycle_stage: String = row.get(9)?;
-    let stage: String = row.get(10)?;
+    let lifecycle_stage: String = row.get(11)?;
+    let stage: String = row.get(12)?;
     let process_id = row
-        .get::<Option<i64>>(8)?
+        .get::<Option<i64>>(10)?
         .and_then(|value| u32::try_from(value).ok());
-    let runtime_failure_kind: Option<String> = row.get(30)?;
-    let session_evidence_refs_json: Option<String> = row.get(32)?;
+    let runtime_failure_kind: Option<String> = row.get(32)?;
+    let session_evidence_refs_json: Option<String> = row.get(34)?;
     Ok(RunnerSessionRecord {
         project_id: row.get(0)?,
         issue_id: row.get(1)?,
@@ -113,41 +115,43 @@ pub(super) fn session_from_row(row: &Row) -> Result<RunnerSessionRecord, Storage
             .map_err(StorageError::State)?,
         provider_id: row.get(4)?,
         agent: row.get(5)?,
-        model: row.get(6)?,
-        worktree_path: row.get(7)?,
+        agent_routing_reason: row.get(6)?,
+        agent_routing_label: row.get(7)?,
+        model: row.get(8)?,
+        worktree_path: row.get(9)?,
         process_id,
         lifecycle_stage: parse_lifecycle(&lifecycle_stage)?,
         stage: parse_runner_stage(&stage)?,
-        active_agent: row.get(11)?,
-        active_model: row.get(12)?,
-        message_count: get_u64(row, 13)?,
-        todo_count: get_u64(row, 14)?,
-        part_count: get_u64(row, 15)?,
-        token_count: get_u64(row, 16)?,
-        tokens_input: get_u64(row, 17)?,
-        tokens_output: get_u64(row, 18)?,
-        tokens_reasoning: get_u64(row, 19)?,
-        tokens_cache_read: get_u64(row, 20)?,
-        tokens_cache_write: get_u64(row, 21)?,
-        tokens_reported_total: get_u64(row, 22)?,
-        token_usage_status: row.get(23)?,
-        token_usage_source: row.get(24)?,
-        cost_micros: get_u64(row, 25)?,
-        subagent_count: get_u64(row, 26)?,
-        eval_stage: row.get(27)?,
-        lifecycle_marker: row.get(28)?,
-        last_event: row.get(29)?,
+        active_agent: row.get(13)?,
+        active_model: row.get(14)?,
+        message_count: get_u64(row, 15)?,
+        todo_count: get_u64(row, 16)?,
+        part_count: get_u64(row, 17)?,
+        token_count: get_u64(row, 18)?,
+        tokens_input: get_u64(row, 19)?,
+        tokens_output: get_u64(row, 20)?,
+        tokens_reasoning: get_u64(row, 21)?,
+        tokens_cache_read: get_u64(row, 22)?,
+        tokens_cache_write: get_u64(row, 23)?,
+        tokens_reported_total: get_u64(row, 24)?,
+        token_usage_status: row.get(25)?,
+        token_usage_source: row.get(26)?,
+        cost_micros: get_u64(row, 27)?,
+        subagent_count: get_u64(row, 28)?,
+        eval_stage: row.get(29)?,
+        lifecycle_marker: row.get(30)?,
+        last_event: row.get(31)?,
         runtime_failure_kind: runtime_failure_kind
             .as_deref()
             .map(RuntimeFailureKind::from_str)
             .transpose()
             .map_err(StorageError::State)?,
-        acp_frame_count: get_u64(row, 31)?,
+        acp_frame_count: get_u64(row, 33)?,
         session_evidence_refs: session_evidence_refs_json
             .map(|json| serde_json::from_str(&json))
             .transpose()?
             .unwrap_or_default(),
-        silence_observed: row.get::<bool>(33)?,
+        silence_observed: row.get::<bool>(35)?,
     })
 }
 

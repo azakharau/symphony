@@ -1242,7 +1242,7 @@ pub fn build_acp_launch_spec(project: &ProjectConfig, issue: &LinearIssue) -> Ru
         return build_omp_acp_launch_spec(project, issue, provider);
     }
     let branch_name = issue_branch_name(issue);
-    let agent = workflow_agent_for_issue(project, issue, WorkflowStage::Todo);
+    let agent = workflow_agent_for_issue(project, issue, WorkflowStage::InProgress);
     RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
@@ -1275,7 +1275,7 @@ pub fn build_omp_acp_launch_spec(
         OhMyPiAcpCwdPolicy::IssueWorktree => issue_worktree,
         OhMyPiAcpCwdPolicy::ProjectRepo => project.repo_path.clone(),
     };
-    let agent = workflow_agent_for_issue(project, issue, WorkflowStage::Todo);
+    let agent = workflow_agent_for_issue(project, issue, WorkflowStage::InProgress);
     RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::OmpAcp,
         provider_id: Some(provider.id.clone()),

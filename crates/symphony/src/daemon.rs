@@ -49,10 +49,10 @@ use policy::{
 use records::issue_record;
 use self_defects::{RuntimeSelfDefectInput, record_runtime_self_defect};
 use session::{
-    has_reusable_existing_session, latest_running_session_for_issue, mark_existing_session_blocked,
-    mark_existing_session_failed_for_unresolved_runtime_defect, mark_existing_session_queued,
-    mark_existing_session_resume_failed, mark_existing_session_waiting_for_project_owner_input,
-    mark_historical_sessions_ignored, mark_issue_sessions_terminal, resume_stale_runner_session,
+    latest_running_session_for_issue, mark_existing_session_blocked,
+    mark_existing_session_failed_for_unresolved_runtime_defect,
+    mark_existing_session_waiting_for_project_owner_input, mark_historical_sessions_ignored,
+    mark_issue_sessions_stage_reentered, mark_issue_sessions_terminal, resume_stale_runner_session,
     session_has_live_process, unresolved_runtime_defect,
 };
 use task_selection::{
@@ -143,13 +143,12 @@ pub struct OrchestrationReport {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum DispatchCandidate {
     New(LinearIssue),
-    ExistingSession(LinearIssue),
 }
 
 impl DispatchCandidate {
     pub(super) const fn issue(&self) -> &LinearIssue {
         match self {
-            Self::New(issue) | Self::ExistingSession(issue) => issue,
+            Self::New(issue) => issue,
         }
     }
 }
@@ -413,28 +412,11 @@ async fn reconcile_project(
                 .is_stage(&issue.state, WorkflowStage::NeedOwnerInput)
                 && !issue.has_new_owner_answer
         });
-    let active_runnable_todo_milestone = active_runnable_todo_milestone(&project.workflow, &issues);
-    let runnable_todo_milestone_count = runnable_todo_milestone_count(&project.workflow, &issues);
     debug!(
         project_id = %project.id,
-        active_runnable_todo_milestone = active_runnable_todo_milestone.as_deref().unwrap_or("none"),
-        runnable_todo_milestone_count,
         issues = issues.len(),
         "fetched Linear candidate issues"
     );
-    if has_unanswered_owner_input {
-        info!(
-            project_id = %project.id,
-            "unanswered Need Owner Input blocks project dispatch"
-        );
-    }
-    if runnable_todo_milestone_count > 1 {
-        info!(
-            project_id = %project.id,
-            runnable_todo_milestone_count,
-            "Runnable Todo queue spans multiple Linear milestones; dispatch is suppressed until unblocked Todo contains one active milestone"
-        );
-    }
     for issue in issues {
         match project.workflow.stage_for_linear_state(&issue.state) {
             Some(WorkflowStage::Backlog) => {
@@ -659,18 +641,26 @@ async fn reconcile_project(
                         &blockers_hash,
                     )
                     .await?;
-                if latest_running_session_for_issue(store, &project.id, &issue.id)
-                    .await?
-                    .is_none()
-                {
+                let latest_invocation = store
+                    .latest_stage_invocation_for_issue(&project.id, &issue.id)
+                    .await?;
+                let has_running_session =
+                    latest_running_session_for_issue(store, &project.id, &issue.id)
+                        .await?
+                        .is_some();
+                let latest_invocation_closed = latest_invocation
+                    .as_ref()
+                    .is_some_and(|invocation| !stage_invocation_is_open(invocation));
+                if !has_running_session || latest_invocation_closed {
                     info!(
                         project_id = %project.id,
                         issue = %issue.identifier,
-                        reason = "missing_active_session",
-                        "In Progress issue has no active runner session; returning to Todo for fresh dispatch"
+                        reason = if has_running_session { "stage_reentered" } else { "missing_active_session" },
+                        "In Progress issue queued for stage-entry dispatch"
                     );
-                    transition_issue_to_stage(linear, project, &issue.id, WorkflowStage::Todo)
-                        .await?;
+                    if latest_invocation_closed {
+                        mark_issue_sessions_stage_reentered(store, project, &issue).await?;
+                    }
                     let mut record = issue_record(
                         project,
                         &issue,
@@ -678,9 +668,12 @@ async fn reconcile_project(
                         None,
                         CleanupStatus::Clean,
                     );
-                    record.failure = None;
+                    if let Some(existing) = &existing {
+                        record.git_ref.clone_from(&existing.git_ref);
+                        record.cleanup_status = existing.cleanup_status;
+                    }
                     store.upsert_issue(&record).await?;
-                    mark_historical_sessions_ignored(store, project, &issue).await?;
+                    eligible.push(DispatchCandidate::New(issue));
                     continue;
                 }
                 if let Some(storage) = runner_archive
@@ -744,6 +737,26 @@ async fn reconcile_project(
                         .await?;
                     continue;
                 }
+                if let Some(blocker) = unaccepted_blocker(&issue.blocked_by) {
+                    info!(
+                        project_id = %project.id,
+                        issue = %issue.identifier,
+                        blocker_id = blocker.id.as_deref().unwrap_or("unknown"),
+                        blocker_state = blocker.state.as_deref().unwrap_or("unknown"),
+                        "Todo issue suppressed by nonterminal blocker"
+                    );
+                    let record = issue_record(
+                        project,
+                        &issue,
+                        LifecycleStage::Blocked,
+                        Some(blocker_record(blocker)),
+                        CleanupStatus::Clean,
+                    );
+                    store.upsert_issue(&record).await?;
+                    mark_existing_session_blocked(store, project, &issue).await?;
+                    report.blocked.push(issue.identifier);
+                    continue;
+                }
                 if let Some(blocker) = self_bug_default_suppression(project, &issue) {
                     info!(
                         project_id = %project.id,
@@ -763,16 +776,13 @@ async fn reconcile_project(
                     continue;
                 }
                 let managed_self_defect = is_managed_self_defect_issue(&issue);
-                let issue_milestone = match issue.project_milestone.as_ref() {
-                    Some(milestone) => Some(milestone),
-                    None if managed_self_defect => None,
-                    None => {
-                        info!(
-                            project_id = %project.id,
-                            issue = %issue.identifier,
-                            "Todo issue suppressed because it has no Linear milestone"
-                        );
-                        let record = issue_record(
+                if issue.project_milestone.is_none() && !managed_self_defect {
+                    info!(
+                        project_id = %project.id,
+                        issue = %issue.identifier,
+                        "Todo issue suppressed because it has no Linear milestone"
+                    );
+                    let record = issue_record(
                         project,
                         &issue,
                         LifecycleStage::Blocked,
@@ -783,30 +793,11 @@ async fn reconcile_project(
                         }),
                         CleanupStatus::Clean,
                     );
-                        store.upsert_issue(&record).await?;
-                        report.blocked.push(issue.identifier);
-                        continue;
-                    }
-                };
-                if let Some(blocker) = unaccepted_blocker(&issue.blocked_by) {
-                    info!(
-                        project_id = %project.id,
-                        issue = %issue.identifier,
-                        blocker_id = blocker.id.as_deref().unwrap_or("unknown"),
-                        blocker_state = blocker.state.as_deref().unwrap_or("unknown"),
-                        "Todo issue suppressed by nonterminal blocker"
-                    );
-                    let record = issue_record(
-                        project,
-                        &issue,
-                        LifecycleStage::Blocked,
-                        Some(blocker_record(blocker)),
-                        CleanupStatus::Clean,
-                    );
                     store.upsert_issue(&record).await?;
-                    mark_existing_session_blocked(store, project, &issue).await?;
                     report.blocked.push(issue.identifier);
-                } else if process_recoverable_failed_handoff(
+                    continue;
+                }
+                if process_recoverable_failed_handoff(
                     project,
                     self_defect_project,
                     store,
@@ -853,103 +844,31 @@ async fn reconcile_project(
                     .await?
                 {
                     report.blocked.push(issue.identifier);
-                } else if issue_milestone.is_some() && runnable_todo_milestone_count > 1 {
-                    let record = issue_record(
-                        project,
-                        &issue,
-                        LifecycleStage::Queued,
-                        None,
-                        CleanupStatus::Clean,
-                    );
-                    store.upsert_issue(&record).await?;
-                } else if let Some(issue_milestone) = issue_milestone
-                    && active_runnable_todo_milestone.as_deref()
-                        != Some(issue_milestone.id.as_str())
-                {
-                    debug!(
+                } else {
+                    info!(
                         project_id = %project.id,
                         issue = %issue.identifier,
-                        issue_milestone = %issue_milestone.id,
-                        active_runnable_todo_milestone = active_runnable_todo_milestone.as_deref().unwrap_or("none"),
-                        "Todo issue is outside the active runnable Todo milestone; leaving queued"
+                        "Todo issue is eligible; promoting to In Progress"
                     );
-                    let record = issue_record(
+                    transition_issue_to_stage(
+                        linear,
+                        project,
+                        &issue.id,
+                        WorkflowStage::InProgress,
+                    )
+                    .await?;
+                    let mut record = issue_record(
                         project,
                         &issue,
                         LifecycleStage::Queued,
                         None,
                         CleanupStatus::Clean,
                     );
-                    store.upsert_issue(&record).await?;
-                } else {
-                    let stage_fingerprint = stage_invocation_fingerprint(project, &issue);
-                    let latest_invocation = store
-                        .latest_stage_invocation_for_issue(&project.id, &issue.id)
-                        .await?;
-                    if latest_invocation
-                        .as_ref()
-                        .is_some_and(stage_invocation_is_open)
-                    {
-                        debug!(
-                            project_id = %project.id,
-                            issue = %issue.identifier,
-                            stage_fingerprint = %stage_fingerprint,
-                            "Todo issue already has an open stage-entry invocation; recording observation without runner invocation"
-                        );
-                        let labels_hash = labels_hash(&issue.labels);
-                        let blockers_hash = blockers_hash(&issue);
-                        store
-                            .update_latest_stage_invocation_observation(
-                                &project.id,
-                                &issue.id,
-                                issue.updated_at.as_deref(),
-                                &labels_hash,
-                                &blockers_hash,
-                            )
-                            .await?;
-                        let mut record = issue_record(
-                            project,
-                            &issue,
-                            LifecycleStage::Queued,
-                            None,
-                            CleanupStatus::Clean,
-                        );
-                        if let Some(existing) = &existing {
-                            record.failure.clone_from(&existing.failure);
-                            record.git_ref.clone_from(&existing.git_ref);
-                        }
-                        store.upsert_issue(&record).await?;
-                    } else if latest_invocation.is_none()
-                        && has_reusable_existing_session(store, &project.id, &issue.id).await?
-                    {
-                        info!(
-                            project_id = %project.id,
-                            issue = %issue.identifier,
-                            "legacy runner session without stage ledger found; queued for capacity-gated resume"
-                        );
-                        let mut record = issue_record(
-                            project,
-                            &issue,
-                            LifecycleStage::Queued,
-                            None,
-                            CleanupStatus::Clean,
-                        );
-                        if let Some(existing) = &existing {
-                            record.failure.clone_from(&existing.failure);
-                            record.git_ref.clone_from(&existing.git_ref);
-                        }
-                        store.upsert_issue(&record).await?;
-                        mark_existing_session_queued(store, project, &issue).await?;
-                        eligible.push(DispatchCandidate::ExistingSession(issue));
-                    } else {
-                        debug!(
-                            project_id = %project.id,
-                            issue = %issue.identifier,
-                            stage_fingerprint = %stage_fingerprint,
-                            "Todo issue is eligible for a new stage-entry invocation"
-                        );
-                        eligible.push(DispatchCandidate::New(issue));
+                    if let Some(existing) = &existing {
+                        record.git_ref.clone_from(&existing.git_ref);
+                        record.cleanup_status = existing.cleanup_status;
                     }
+                    store.upsert_issue(&record).await?;
                 }
             }
             _ => {
@@ -1244,52 +1163,6 @@ async fn dispatch_candidate(
                     )
                     .await?;
                 }
-            }
-        }
-        DispatchCandidate::ExistingSession(issue) => {
-            if let Err(error) = resume_stale_runner_session(project, store, runner, &issue)
-                .await
-                .context("continue existing runner session")
-            {
-                let failure_reason = error_chain(error.as_ref());
-                mark_existing_session_resume_failed(store, project, &issue, &failure_reason)
-                    .await?;
-                let observer = RuntimeLaunchObserver::new(project, &issue, &launch_spec, store);
-                match runner.launch_observed(&launch_spec, &observer).await {
-                    Ok(started) => {
-                        let session = new_session_record(project, &issue, started, &launch_spec);
-                        info!(
-                            project_id = %project.id,
-                            issue = %issue.identifier,
-                            session_id = %session.session_id,
-                            worktree_path = %session.worktree_path,
-                            previous_failure_reason = %failure_reason,
-                            "fresh runner session recorded after failed resume"
-                        );
-                        upsert_observed_launch_session(store, session).await?;
-                        report.dispatched.push(issue.identifier);
-                    }
-                    Err(error) => {
-                        handle_launch_failure(
-                            project,
-                            self_defect_project,
-                            store,
-                            linear,
-                            &issue,
-                            &launch_spec,
-                            crate::runner::RunnerError::InvalidWorktree(format!(
-                                "{failure_reason}; fresh launch also failed: {error}"
-                            )),
-                        )
-                        .await?;
-                    }
-                }
-            } else {
-                info!(
-                    project_id = %project.id,
-                    issue = %issue.identifier,
-                    "existing runner session continued without duplicate launch"
-                );
             }
         }
     }
@@ -1942,24 +1815,6 @@ async fn transition_issue_to_stage(
         .await
 }
 
-fn active_runnable_todo_milestone(
-    workflow: &crate::config::ProjectWorkflow,
-    issues: &[LinearIssue],
-) -> Option<String> {
-    issues
-        .iter()
-        .filter(|issue| {
-            workflow.is_stage(&issue.state, WorkflowStage::Todo)
-                && unaccepted_blocker(&issue.blocked_by).is_none()
-        })
-        .find_map(|issue| {
-            issue
-                .project_milestone
-                .as_ref()
-                .map(|milestone| milestone.id.clone())
-        })
-}
-
 fn self_defect_resolution_for_workflow_stage(
     stage: WorkflowStage,
 ) -> Option<SelfDefectResolutionState> {
@@ -1984,25 +1839,6 @@ fn preserves_need_owner_input_blocker_kind(kind: &str) -> bool {
     )
 }
 
-fn runnable_todo_milestone_count(
-    workflow: &crate::config::ProjectWorkflow,
-    issues: &[LinearIssue],
-) -> usize {
-    let mut milestones = Vec::<&str>::new();
-    for issue in issues.iter().filter(|issue| {
-        workflow.is_stage(&issue.state, WorkflowStage::Todo)
-            && unaccepted_blocker(&issue.blocked_by).is_none()
-    }) {
-        let Some(milestone) = issue.project_milestone.as_ref() else {
-            continue;
-        };
-        if !milestones.contains(&milestone.id.as_str()) {
-            milestones.push(milestone.id.as_str());
-        }
-    }
-    milestones.len()
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -2010,7 +1846,7 @@ mod tests {
     use super::*;
     use crate::{
         config::{BranchPolicy, ConcurrencyConfig, EvalDefaults, ProjectWorkflow},
-        linear::{LinearMilestone, LinearProjectConfig},
+        linear::{LinearBlocker, LinearMilestone, LinearProjectConfig},
         runner::{PermissionPolicy, RunnerRuntimeConfig, RunnerStartedSession},
     };
 
@@ -2143,6 +1979,34 @@ max_sessions = 4
         }
     }
 
+    fn issue_with_milestone(
+        id: &str,
+        identifier: &str,
+        state: &str,
+        priority: Option<i64>,
+        milestone_id: Option<&str>,
+        blockers: Vec<LinearBlocker>,
+    ) -> LinearIssue {
+        let mut issue = ledger_issue(state, "2026-01-01T00:00:00Z", &[]);
+        issue.id = id.into();
+        issue.identifier = identifier.into();
+        issue.priority = priority;
+        issue.project_milestone = milestone_id.map(|milestone_id| LinearMilestone {
+            id: milestone_id.into(),
+            name: format!("Milestone {milestone_id}"),
+        });
+        issue.blocked_by = blockers;
+        issue
+    }
+
+    fn blocker(identifier: &str, state: &str) -> LinearBlocker {
+        LinearBlocker {
+            id: Some(identifier.to_ascii_lowercase()),
+            identifier: Some(identifier.into()),
+            state: Some(state.into()),
+        }
+    }
+
     #[derive(Debug, Default)]
     struct LedgerLinearClient {
         issues: Mutex<Vec<LinearIssue>>,
@@ -2152,6 +2016,10 @@ max_sessions = 4
     impl LedgerLinearClient {
         async fn set_issues(&self, issues: Vec<LinearIssue>) {
             *self.issues.lock().await = issues;
+        }
+
+        async fn transitions(&self) -> Vec<(String, String)> {
+            self.transitions.lock().await.clone()
         }
     }
 
@@ -2215,7 +2083,7 @@ max_sessions = 4
             launches.push(spec.issue_identifier.clone());
             Ok(RunnerStartedSession {
                 session_id: format!("session-{}", launches.len()),
-                process_id: Some(std::process::id()),
+                process_id: None,
                 acp_frame_count: 0,
                 session_evidence_refs: Vec::new(),
             })
@@ -2233,7 +2101,7 @@ max_sessions = 4
                 .push(session.session_id.clone());
             Ok(RunnerStartedSession {
                 session_id: session.session_id.clone(),
-                process_id: Some(std::process::id()),
+                process_id: None,
                 acp_frame_count: session.acp_frame_count,
                 session_evidence_refs: session.session_evidence_refs.clone(),
             })
@@ -2247,7 +2115,36 @@ max_sessions = 4
     }
 
     #[tokio::test]
-    async fn stage_invocation_ledger_prevents_duplicate_launch_across_restart() {
+    async fn todo_promotes_to_in_progress_without_runner_launch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("runtime.sqlite3");
+        let store = ledger_store(&db_path).await;
+        let config = ledger_config();
+        let linear = LedgerLinearClient::default();
+        let runner = CountingRunner::default();
+        linear
+            .set_issues(vec![ledger_issue("Todo", "2026-01-01T00:00:00Z", &[])])
+            .await;
+
+        let report = run_once_with_clients(&config, &store, &linear, &runner)
+            .await
+            .expect("Todo promotion");
+
+        assert!(report.dispatched.is_empty());
+        assert_eq!(runner.launch_count().await, 0);
+        assert_eq!(
+            linear.transitions().await,
+            vec![("issue-id".into(), "In Progress".into())]
+        );
+        let invocations = store
+            .stage_invocations_for_issue("project", "issue-id")
+            .await
+            .expect("invocations");
+        assert!(invocations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn in_progress_stage_entry_launches_once_across_restart() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("runtime.sqlite3");
         let config = ledger_config();
@@ -2261,7 +2158,22 @@ max_sessions = 4
             let store = ledger_store(&db_path).await;
             let report = run_once_with_clients(&config, &store, &linear, &runner)
                 .await
-                .expect("first run");
+                .expect("Todo promotion");
+            assert!(report.dispatched.is_empty());
+        }
+
+        linear
+            .set_issues(vec![ledger_issue(
+                "In Progress",
+                "2026-01-01T00:01:00Z",
+                &[],
+            )])
+            .await;
+        {
+            let store = ledger_store(&db_path).await;
+            let report = run_once_with_clients(&config, &store, &linear, &runner)
+                .await
+                .expect("In Progress launch");
             assert_eq!(report.dispatched, vec!["SYM-141"]);
         }
 
@@ -2269,13 +2181,14 @@ max_sessions = 4
             let store = ledger_store(&db_path).await;
             let report = run_once_with_clients(&config, &store, &linear, &runner)
                 .await
-                .expect("second run");
+                .expect("duplicate In Progress observation");
             assert!(report.dispatched.is_empty());
             let invocations = store
                 .stage_invocations_for_issue("project", "issue-id")
                 .await
                 .expect("invocations");
             assert_eq!(invocations.len(), 1);
+            assert_eq!(invocations[0].state_name, "In Progress");
         }
 
         assert_eq!(runner.launch_count().await, 1);
@@ -2294,31 +2207,53 @@ max_sessions = 4
         linear
             .set_issues(vec![ledger_issue("Todo", "2026-01-01T00:00:00Z", &[])])
             .await;
-        run_once_with_clients(&config, &store, &linear, &runner)
+        let report = run_once_with_clients(&config, &store, &linear, &runner)
             .await
-            .expect("first Todo");
+            .expect("first Todo promotion");
+        assert!(report.dispatched.is_empty());
 
         linear
-            .set_issues(vec![ledger_issue("Backlog", "2026-01-01T00:01:00Z", &[])])
+            .set_issues(vec![ledger_issue(
+                "In Progress",
+                "2026-01-01T00:01:00Z",
+                &[],
+            )])
+            .await;
+        let report = run_once_with_clients(&config, &store, &linear, &runner)
+            .await
+            .expect("first In Progress launch");
+        assert_eq!(report.dispatched, vec!["SYM-141"]);
+
+        linear
+            .set_issues(vec![ledger_issue("Backlog", "2026-01-01T00:02:00Z", &[])])
             .await;
         run_once_with_clients(&config, &store, &linear, &runner)
             .await
             .expect("away state");
 
         linear
-            .set_issues(vec![ledger_issue("Todo", "2026-01-01T00:02:00Z", &[])])
+            .set_issues(vec![ledger_issue("Todo", "2026-01-01T00:03:00Z", &[])])
             .await;
         let report = run_once_with_clients(&config, &store, &linear, &runner)
             .await
-            .expect("second Todo");
-        assert_eq!(report.dispatched, vec!["SYM-141"]);
+            .expect("second Todo promotion");
+        assert!(report.dispatched.is_empty());
 
         linear
-            .set_issues(vec![ledger_issue("Todo", "2026-01-01T00:02:00Z", &[])])
+            .set_issues(vec![ledger_issue(
+                "In Progress",
+                "2026-01-01T00:04:00Z",
+                &[],
+            )])
             .await;
         let report = run_once_with_clients(&config, &store, &linear, &runner)
             .await
-            .expect("duplicate second Todo");
+            .expect("second In Progress launch");
+        assert_eq!(report.dispatched, vec!["SYM-141"]);
+
+        let report = run_once_with_clients(&config, &store, &linear, &runner)
+            .await
+            .expect("duplicate second In Progress");
         assert!(report.dispatched.is_empty());
 
         let invocations = store
@@ -2326,58 +2261,108 @@ max_sessions = 4
             .await
             .expect("invocations");
         assert_eq!(invocations.len(), 2);
+        let sessions = store
+            .runner_sessions_for_issue("project", "issue-id")
+            .await
+            .expect("sessions");
+        assert_eq!(
+            sessions
+                .iter()
+                .filter(|session| session.lifecycle_stage == crate::state::LifecycleStage::Running)
+                .count(),
+            1
+        );
+        assert!(
+            sessions.iter().any(
+                |session| session.lifecycle_marker.as_deref() == Some("linear_stage_reentered")
+            )
+        );
         assert_eq!(runner.launch_count().await, 2);
     }
 
     #[tokio::test]
-    async fn todo_label_change_updates_open_invocation_without_duplicate_launch() {
+    async fn blocked_future_milestone_todo_does_not_suppress_current_runnable_milestone() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("runtime.sqlite3");
         let store = ledger_store(&db_path).await;
         let config = ledger_config();
         let linear = LedgerLinearClient::default();
         let runner = CountingRunner::default();
+        let current = issue_with_milestone(
+            "issue-current",
+            "SYM-142",
+            "Todo",
+            Some(1),
+            Some("m1"),
+            Vec::new(),
+        );
+        let future = issue_with_milestone(
+            "issue-future",
+            "SYM-143",
+            "Todo",
+            Some(2),
+            Some("m2"),
+            vec![blocker("SYM-142", "Todo")],
+        );
+        linear.set_issues(vec![current, future]).await;
 
-        linear
-            .set_issues(vec![ledger_issue(
-                "Todo",
-                "2026-01-01T00:00:00Z",
-                &["alpha"],
-            )])
-            .await;
-        run_once_with_clients(&config, &store, &linear, &runner)
-            .await
-            .expect("first Todo");
-        let before = store
-            .stage_invocations_for_issue("project", "issue-id")
-            .await
-            .expect("before");
-        let first_labels_hash = before[0].labels_hash.clone();
-
-        linear
-            .set_issues(vec![ledger_issue(
-                "Todo",
-                "2026-01-01T00:01:00Z",
-                &["alpha", "beta"],
-            )])
-            .await;
         let report = run_once_with_clients(&config, &store, &linear, &runner)
             .await
-            .expect("same Todo label update");
-        assert!(report.dispatched.is_empty());
+            .expect("runnable milestone promotion");
 
-        let after = store
-            .stage_invocations_for_issue("project", "issue-id")
-            .await
-            .expect("after");
-        assert_eq!(after.len(), 1);
-        assert_ne!(after[0].labels_hash, first_labels_hash);
+        assert!(report.dispatched.is_empty());
+        assert_eq!(report.blocked, vec!["SYM-143"]);
         assert_eq!(
-            after[0].issue_updated_at.as_deref(),
-            Some("2026-01-01T00:01:00Z")
+            linear.transitions().await,
+            vec![("issue-current".into(), "In Progress".into())]
         );
-        assert_eq!(runner.launch_count().await, 1);
-        assert_eq!(runner.continuation_count().await, 0);
+        assert_eq!(runner.launch_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn owner_input_project_blocking_respects_workflow_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("runtime.sqlite3");
+        let store = ledger_store(&db_path).await;
+        let mut config = ledger_config();
+        config
+            .project_mut_for_test("project")
+            .workflow
+            .owner_input
+            .block_project_dispatch = false;
+        let linear = LedgerLinearClient::default();
+        let runner = CountingRunner::default();
+        linear
+            .set_issues(vec![
+                issue_with_milestone(
+                    "issue-owner",
+                    "SYM-140",
+                    "Need Owner Input",
+                    Some(1),
+                    Some("m1"),
+                    Vec::new(),
+                ),
+                issue_with_milestone(
+                    "issue-work",
+                    "SYM-142",
+                    "Todo",
+                    Some(1),
+                    Some("m1"),
+                    Vec::new(),
+                ),
+            ])
+            .await;
+
+        let report = run_once_with_clients(&config, &store, &linear, &runner)
+            .await
+            .expect("owner input config");
+
+        assert_eq!(report.parked_owner_input, vec!["SYM-140"]);
+        assert_eq!(
+            linear.transitions().await,
+            vec![("issue-work".into(), "In Progress".into())]
+        );
+        assert_eq!(runner.launch_count().await, 0);
     }
 
     #[tokio::test]
@@ -2391,14 +2376,15 @@ max_sessions = 4
 
         linear
             .set_issues(vec![ledger_issue(
-                "Todo",
+                "In Progress",
                 "2026-01-01T00:00:00Z",
                 &["alpha"],
             )])
             .await;
-        run_once_with_clients(&config, &store, &linear, &runner)
+        let report = run_once_with_clients(&config, &store, &linear, &runner)
             .await
-            .expect("first Todo");
+            .expect("first In Progress launch");
+        assert_eq!(report.dispatched, vec!["SYM-141"]);
         let before = store
             .stage_invocations_for_issue("project", "issue-id")
             .await

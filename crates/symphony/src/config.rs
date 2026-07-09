@@ -67,6 +67,14 @@ impl RootConfig {
         self.projects.iter().find(|project| project.id == id)
     }
 
+    #[cfg(test)]
+    pub(crate) fn project_mut_for_test(&mut self, id: &str) -> &mut ProjectConfig {
+        self.projects
+            .iter_mut()
+            .find(|project| project.id == id)
+            .expect("test project")
+    }
+
     fn validate(&self) -> Result<(), ConfigError> {
         if self.projects.is_empty() {
             return Err(ConfigError::Validation("projects must not be empty".into()));

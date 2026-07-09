@@ -37,31 +37,6 @@ pub(super) async fn mark_historical_sessions_ignored(
     Ok(())
 }
 
-pub(super) async fn mark_existing_session_queued(
-    store: &SqliteStore,
-    project: &ProjectConfig,
-    issue: &LinearIssue,
-) -> anyhow::Result<()> {
-    let Some(mut session) = latest_session_for_issue(store, &project.id, &issue.id).await? else {
-        return Ok(());
-    };
-    terminate_current_session_process(project, issue, &mut session).await?;
-    session.process_id = None;
-    session.lifecycle_stage = LifecycleStage::Queued;
-    session.stage = RunnerStage::Silent;
-    session.lifecycle_marker = Some("waiting_for_capacity".into());
-    if !session
-        .last_event
-        .as_deref()
-        .is_some_and(|event| event.starts_with("stale_killed:"))
-    {
-        session.last_event = Some("existing_session_waiting_for_capacity".into());
-    }
-    session.silence_observed = false;
-    store.upsert_runner_session(&session).await?;
-    Ok(())
-}
-
 pub(super) async fn unresolved_runtime_defect(
     store: &SqliteStore,
     project: &ProjectConfig,
@@ -155,27 +130,6 @@ pub(super) async fn mark_existing_session_failed_for_unresolved_runtime_defect(
     Ok(())
 }
 
-pub(super) async fn mark_existing_session_resume_failed(
-    store: &SqliteStore,
-    project: &ProjectConfig,
-    issue: &LinearIssue,
-    reason: &str,
-) -> anyhow::Result<()> {
-    let Some(mut session) = latest_active_session_for_issue(store, &project.id, &issue.id).await?
-    else {
-        return Ok(());
-    };
-    terminate_current_session_process(project, issue, &mut session).await?;
-    session.process_id = None;
-    session.lifecycle_stage = LifecycleStage::Failed;
-    session.stage = RunnerStage::Failed;
-    session.lifecycle_marker = Some("failed:resume_launch_failed".into());
-    session.last_event = Some(format!("failed:resume_launch_failed:{reason}"));
-    session.silence_observed = false;
-    store.upsert_runner_session(&session).await?;
-    Ok(())
-}
-
 pub(super) async fn mark_issue_sessions_terminal(
     store: &SqliteStore,
     project: &ProjectConfig,
@@ -205,6 +159,37 @@ pub(super) async fn mark_issue_sessions_terminal(
         session.stage = RunnerStage::Completed;
         session.lifecycle_marker = Some("linear_terminal_reconciled".into());
         session.last_event = Some(terminal_event);
+        session.silence_observed = false;
+        store.upsert_runner_session(&session).await?;
+        changed = true;
+    }
+    Ok(changed)
+}
+
+pub(super) async fn mark_issue_sessions_stage_reentered(
+    store: &SqliteStore,
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+) -> anyhow::Result<bool> {
+    let mut changed = false;
+    for mut session in store
+        .runner_sessions_for_issue(&project.id, &issue.id)
+        .await?
+    {
+        if session.process_id.is_none()
+            && session.lifecycle_stage == LifecycleStage::Canceled
+            && session.stage == RunnerStage::Completed
+            && session.lifecycle_marker.as_deref() == Some("linear_stage_reentered")
+            && !session.silence_observed
+        {
+            continue;
+        }
+        terminate_current_session_process(project, issue, &mut session).await?;
+        session.process_id = None;
+        session.lifecycle_stage = LifecycleStage::Canceled;
+        session.stage = RunnerStage::Completed;
+        session.lifecycle_marker = Some("linear_stage_reentered".into());
+        session.last_event = Some("linear_stage_reentered".into());
         session.silence_observed = false;
         store.upsert_runner_session(&session).await?;
         changed = true;
@@ -310,16 +295,6 @@ pub(super) async fn latest_running_session_for_issue(
         })
         .collect();
     Ok(sessions.pop())
-}
-
-pub(super) async fn has_reusable_existing_session(
-    store: &SqliteStore,
-    project_id: &str,
-    issue_id: &str,
-) -> anyhow::Result<bool> {
-    Ok(latest_active_session_for_issue(store, project_id, issue_id)
-        .await?
-        .is_some())
 }
 
 fn reusable_session_record(session: &RunnerSessionRecord) -> bool {

@@ -292,6 +292,7 @@ async fn reconcile_project(
         linear,
         runner,
     } = context;
+    validate_configured_linear_states(linear, project).await?;
     let mut eligible = Vec::new();
     let mut issues = linear.fetch_candidate_issues(project).await?;
     issues.sort_by(compare_issues_for_dispatch);
@@ -835,6 +836,29 @@ async fn reconcile_project(
     }
 
     Ok(())
+}
+
+async fn validate_configured_linear_states(
+    linear: &impl LinearClient,
+    project: &ProjectConfig,
+) -> Result<(), crate::linear::LinearClientError> {
+    let actual_states = linear.fetch_workflow_state_names(project).await?;
+    let mut missing_states = Vec::new();
+    for configured_state in project.workflow.processed_state_names() {
+        if !actual_states.iter().any(|state| state == configured_state) {
+            missing_states.push(configured_state.to_owned());
+        }
+    }
+    if missing_states.is_empty() {
+        Ok(())
+    } else {
+        Err(
+            crate::linear::LinearClientError::MissingConfiguredWorkflowStates {
+                project_id: project.id.clone(),
+                missing_states,
+            },
+        )
+    }
 }
 
 async fn reconcile_missing_candidate_issues(
@@ -1739,4 +1763,111 @@ fn runnable_todo_milestone_count(
         }
     }
     milestones.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::{
+        config::{BranchPolicy, ConcurrencyConfig, EvalDefaults, ProjectWorkflow},
+        linear::LinearProjectConfig,
+        runner::{PermissionPolicy, RunnerRuntimeConfig},
+    };
+
+    #[derive(Debug)]
+    struct StateListLinearClient {
+        states: Vec<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl LinearClient for StateListLinearClient {
+        async fn fetch_candidate_issues(
+            &self,
+            _project: &ProjectConfig,
+        ) -> Result<Vec<LinearIssue>, crate::linear::LinearClientError> {
+            panic!("candidate issues must not be fetched before configured states validate");
+        }
+
+        async fn fetch_workflow_state_names(
+            &self,
+            _project: &ProjectConfig,
+        ) -> Result<Vec<String>, crate::linear::LinearClientError> {
+            Ok(self.states.clone())
+        }
+
+        async fn transition_issue(
+            &self,
+            _issue_id: &str,
+            _transition: crate::linear::LinearTransition,
+        ) -> Result<(), crate::linear::LinearClientError> {
+            Ok(())
+        }
+    }
+
+    fn test_project() -> ProjectConfig {
+        let mut workflow = ProjectWorkflow::default();
+        workflow.states.in_review = "Code Review".into();
+        workflow.processed_states = vec!["Accepted".into()];
+
+        ProjectConfig {
+            id: "project".into(),
+            name: "Project".into(),
+            enabled: true,
+            workflow_path: PathBuf::from("workflow.toml"),
+            repo_path: PathBuf::from("/repo"),
+            branch: BranchPolicy {
+                base: "main".into(),
+                worktree_root: PathBuf::from("/worktrees"),
+            },
+            linear: LinearProjectConfig {
+                team_key: "SYM".into(),
+                project_id: Some("linear-project".into()),
+            },
+            runner: RunnerRuntimeConfig {
+                command: PathBuf::from("runner"),
+                args: Vec::new(),
+                agent: "build".into(),
+                model: None,
+                effort: None,
+                permission_policy: PermissionPolicy::Reject,
+            },
+            omp_acp_providers: Vec::new(),
+            eval: EvalDefaults {
+                default_suite: "suite".into(),
+                max_identical_failure_fingerprints: 3,
+            },
+            concurrency: ConcurrencyConfig { max_sessions: 1 },
+            workflow,
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_linear_states_are_validated_before_candidate_dispatch() {
+        let project = test_project();
+        let linear = StateListLinearClient {
+            states: vec![
+                "Backlog".into(),
+                "Todo".into(),
+                "In Progress".into(),
+                "Need Owner Input".into(),
+                "Done".into(),
+                "Canceled".into(),
+            ],
+        };
+
+        let err = validate_configured_linear_states(&linear, &project)
+            .await
+            .expect_err("missing configured states must fail");
+
+        assert!(matches!(
+            err,
+            crate::linear::LinearClientError::MissingConfiguredWorkflowStates { .. }
+        ));
+        assert_eq!(
+            err.to_string(),
+            "configured Linear workflow states are missing for project `project`: Code Review, Accepted"
+        );
+    }
 }

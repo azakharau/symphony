@@ -25,6 +25,18 @@ pub trait LinearClient: Sync {
         project: &ProjectConfig,
     ) -> Result<Vec<LinearIssue>, LinearClientError>;
 
+    async fn fetch_workflow_state_names(
+        &self,
+        project: &ProjectConfig,
+    ) -> Result<Vec<String>, LinearClientError> {
+        Ok(project
+            .workflow
+            .processed_state_names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect())
+    }
+
     async fn transition_issue(
         &self,
         issue_id: &str,
@@ -239,6 +251,22 @@ impl LinearClient for LinearSdkClient {
         Ok(issues)
     }
 
+    async fn fetch_workflow_state_names(
+        &self,
+        project: &ProjectConfig,
+    ) -> Result<Vec<String>, LinearClientError> {
+        fetch_workflow_state_names_with(
+            |request| async move {
+                self.client
+                    .execute::<Value>(request.query, request.variables, request.data_path)
+                    .await
+                    .map_err(LinearClientError::from)
+            },
+            project,
+        )
+        .await
+    }
+
     async fn transition_issue(
         &self,
         issue_id: &str,
@@ -412,6 +440,23 @@ where
         Ok(issues)
     }
 
+    async fn fetch_workflow_state_names(
+        &self,
+        project: &ProjectConfig,
+    ) -> Result<Vec<String>, LinearClientError> {
+        fetch_workflow_state_names_with(
+            |request| async move {
+                self.post(json!({
+                    "query": request.query,
+                    "variables": request.variables,
+                }))
+                .await
+            },
+            project,
+        )
+        .await
+    }
+
     async fn transition_issue(
         &self,
         issue_id: &str,
@@ -578,7 +623,7 @@ async fn fetch_candidate_issues_with<F, Fut>(
 ) -> Result<Vec<LinearIssue>, LinearClientError>
 where
     F: FnMut(GraphqlRequest) -> Fut,
-    Fut: std::future::Future<Output = Result<LinearIssueConnection, LinearClientError>>,
+    Fut: Future<Output = Result<LinearIssueConnection, LinearClientError>>,
 {
     let project_id = project
         .linear
@@ -621,6 +666,34 @@ where
     }
 }
 
+async fn fetch_workflow_state_names_with<F, Fut>(
+    execute: F,
+    project: &ProjectConfig,
+) -> Result<Vec<String>, LinearClientError>
+where
+    F: FnOnce(GraphqlRequest) -> Fut,
+    Fut: Future<Output = Result<Value, LinearClientError>>,
+{
+    let context = execute(GraphqlRequest {
+        query: TEAM_CREATE_CONTEXT_QUERY,
+        variables: json!({ "teamKey": project.linear.team_key }),
+        data_path: "teams",
+    })
+    .await?;
+    let team = context
+        .pointer("/nodes/0")
+        .or_else(|| context.pointer("/teams/nodes/0"))
+        .or_else(|| context.pointer("/data/teams/nodes/0"))
+        .ok_or_else(|| LinearClientError::Message("missing Linear team context".into()))?;
+    let states = team
+        .pointer("/states/nodes")
+        .cloned()
+        .ok_or_else(|| LinearClientError::Message("missing team workflow states".into()))?;
+
+    serde_json::from_value::<Vec<WorkflowStateNode>>(states)
+        .map_err(|error| LinearClientError::Message(format!("decode states: {error}")))
+        .map(|states| states.into_iter().map(|state| state.name).collect())
+}
 async fn state_id_for_issue_with<F, Fut>(
     execute: F,
     issue_id: &str,
@@ -628,7 +701,7 @@ async fn state_id_for_issue_with<F, Fut>(
 ) -> Result<String, LinearClientError>
 where
     F: FnOnce(GraphqlRequest) -> Fut,
-    Fut: std::future::Future<Output = Result<Value, LinearClientError>>,
+    Fut: Future<Output = Result<Value, LinearClientError>>,
 {
     let response = execute(GraphqlRequest {
         query: ISSUE_STATES_QUERY,
@@ -772,5 +845,157 @@ fn ensure_success(
         _ => Err(LinearClientError::Message(format!(
             "{mutation} did not return success"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use serde_json::json;
+
+    use super::*;
+    use crate::{
+        config::{BranchPolicy, ConcurrencyConfig, EvalDefaults, ProjectWorkflow, WorkflowStage},
+        runner::{PermissionPolicy, RunnerRuntimeConfig},
+    };
+
+    fn test_project() -> ProjectConfig {
+        ProjectConfig {
+            id: "project".into(),
+            name: "Project".into(),
+            enabled: true,
+            workflow_path: PathBuf::from("workflow.toml"),
+            repo_path: PathBuf::from("/repo"),
+            branch: BranchPolicy {
+                base: "main".into(),
+                worktree_root: PathBuf::from("/worktrees"),
+            },
+            linear: LinearProjectConfig {
+                team_key: "SYM".into(),
+                project_id: Some("linear-project".into()),
+            },
+            runner: RunnerRuntimeConfig {
+                command: PathBuf::from("runner"),
+                args: Vec::new(),
+                agent: "build".into(),
+                model: None,
+                effort: None,
+                permission_policy: PermissionPolicy::Reject,
+            },
+            omp_acp_providers: Vec::new(),
+            eval: EvalDefaults {
+                default_suite: "suite".into(),
+                max_identical_failure_fingerprints: 3,
+            },
+            concurrency: ConcurrencyConfig { max_sessions: 1 },
+            workflow: ProjectWorkflow::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn candidate_query_uses_configured_workflow_states() {
+        let mut project = test_project();
+        project.workflow.states.in_review = "Code Review".into();
+        project.workflow.processed_states = vec!["Accepted".into()];
+
+        let _issues = fetch_candidate_issues_with(
+            |request| {
+                let states = request
+                    .variables
+                    .get("states")
+                    .and_then(Value::as_array)
+                    .expect("states");
+                assert!(
+                    states.iter().any(|state| state == "Code Review"),
+                    "configured In Review state must be queried: {states:?}"
+                );
+                assert!(
+                    states.iter().any(|state| state == "Accepted"),
+                    "configured processed state must be queried: {states:?}"
+                );
+                assert!(
+                    states
+                        .iter()
+                        .all(|state| state != "Preparing" && state != "RCA Required"),
+                    "legacy candidate states must not be queried: {states:?}"
+                );
+                async {
+                    serde_json::from_value::<LinearIssueConnection>(json!({
+                        "nodes": [],
+                        "pageInfo": { "hasNextPage": false, "endCursor": null }
+                    }))
+                    .map_err(|error| LinearClientError::Message(error.to_string()))
+                }
+            },
+            &project,
+        )
+        .await
+        .expect("issues");
+    }
+
+    #[tokio::test]
+    async fn team_state_names_support_configured_runtime_validation() {
+        let project = test_project();
+
+        let names = fetch_workflow_state_names_with(
+            |request| {
+                assert_eq!(request.query, TEAM_CREATE_CONTEXT_QUERY);
+                assert_eq!(request.variables["teamKey"], "SYM");
+                async {
+                    Ok(json!({
+                        "data": {
+                            "teams": {
+                                "nodes": [{
+                                    "id": "team",
+                                    "states": {
+                                        "nodes": [
+                                            { "id": "state-todo", "name": "Ready" },
+                                            { "id": "state-review", "name": "Code Review" }
+                                        ]
+                                    }
+                                }]
+                            }
+                        }
+                    }))
+                }
+            },
+            &project,
+        )
+        .await
+        .expect("state names");
+
+        assert_eq!(names, vec!["Ready", "Code Review"]);
+    }
+
+    #[tokio::test]
+    async fn arbitrary_configured_state_name_resolves_to_state_id() {
+        let state_id = state_id_for_issue_with(
+            |request| {
+                assert_eq!(request.variables["issueId"], "issue-id");
+                async {
+                    Ok(json!({
+                        "team": {
+                            "states": {
+                                "nodes": [
+                                    { "id": "state-ready", "name": "Ready" },
+                                    { "id": "state-review", "name": "Code Review" }
+                                ]
+                            }
+                        }
+                    }))
+                }
+            },
+            "issue-id",
+            "Code Review",
+        )
+        .await
+        .expect("state id");
+
+        assert_eq!(state_id, "state-review");
+        assert_eq!(
+            ProjectWorkflow::default().linear_state(WorkflowStage::InReview),
+            Some("In Review")
+        );
     }
 }

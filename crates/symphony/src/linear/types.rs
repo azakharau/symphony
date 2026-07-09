@@ -176,6 +176,14 @@ impl LinearTransition {
 pub enum LinearClientError {
     #[error("linear client error: {0}")]
     Message(String),
+    #[error(
+        "configured Linear workflow states are missing for project `{project_id}`: {}",
+        missing_states.join(", ")
+    )]
+    MissingConfiguredWorkflowStates {
+        project_id: String,
+        missing_states: Vec<String>,
+    },
     #[error("linear sdk error: {0}")]
     Sdk(#[from] lineark_sdk::LinearError),
 }

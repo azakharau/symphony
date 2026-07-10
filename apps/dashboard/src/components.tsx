@@ -2,7 +2,7 @@ import Link from "next/link";
 
 import { currentRunnerSession } from "@/src/current-runner-session";
 import { LiveDuration } from "@/src/live-duration";
-import type { AggregateDashboard, DashboardProjectCard, DashboardTokenMetrics, IssueDetail, ProjectDetail, RunningIssueSummary, SelfDefectRouteSummary } from "@/src/types";
+import type { AggregateDashboard, DashboardProjectCard, DashboardTokenMetrics, IssueDetail, ProjectDetail, RunnerSession, RunningIssueSummary, SelfDefectRouteSummary, StageInvocation } from "@/src/types";
 import type { QuotaBucket, QuotaResult, QuotaWindow } from "@/src/quota";
 
 const RECENT_HISTORY_LIMIT = 5;
@@ -71,8 +71,8 @@ export function OverviewSurface({ dashboard, quota }: { dashboard: AggregateDash
         <ProjectHealthCapacityTable projects={dashboard.projects} />
       </Panel>
 
-      <Panel title="Blockers and idle reasons">
-        {attentionProjects.length ? <ProjectReasonTable projects={attentionProjects} /> : <EmptyState message="No blockers reported. Idle projects are waiting for eligible work or capacity." />}
+      <Panel title="Waiting and idle reasons">
+        {attentionProjects.length ? <ProjectReasonTable projects={attentionProjects} /> : <EmptyState message="No owner-input, blocker, or idle reason is reported. Idle projects are waiting for eligible work or capacity." />}
       </Panel>
     </div>
   );
@@ -84,7 +84,7 @@ export function ProjectsSurface({ dashboard }: { dashboard: AggregateDashboard }
       <div className="mb-3 flex flex-wrap gap-2 text-xs text-slate-600">
         <span className="rounded-full border bg-slate-50 px-2 py-1">health</span>
         <span className="rounded-full border bg-slate-50 px-2 py-1">enabled</span>
-        <span className="rounded-full border bg-slate-50 px-2 py-1">blocked</span>
+        <span className="rounded-full border bg-slate-50 px-2 py-1">waiting</span>
       </div>
       <ProjectTable projects={dashboard.projects} detailed />
     </Panel>
@@ -95,8 +95,11 @@ export function ProjectSurface({ project }: { project: ProjectDetail }) {
   const allIssues = project.active_issues.concat(project.history_issues);
   const runningIssues = project.active_issues.filter(isLiveIssue);
   const queueIssues = project.active_issues.filter((issue) => !isLiveIssue(issue));
-  const blockers = queueIssues.concat(project.history_issues).filter((issue) => issue.blocker || issue.lifecycle_stage === "blocked");
+  const waitingIssues = queueIssues.concat(project.history_issues).filter((issue) => issue.blocker || issue.lifecycle_stage === "blocked");
   const defects = allIssues.filter((issue) => issue.runtime_defect || issue.self_defect_routing || issue.failure);
+  const currentIssue = runningIssues[0] ?? project.active_issues[0];
+  const currentSession = currentIssue ? currentRunnerSession(currentIssue) : undefined;
+  const currentInvocation = currentIssue ? currentStageInvocation(currentIssue, currentSession) : undefined;
 
   return (
     <div className="flex flex-col gap-5">
@@ -104,19 +107,19 @@ export function ProjectSurface({ project }: { project: ProjectDetail }) {
         {runningIssues.length ? <IssueTable issues={runningIssues} projectId={project.project_id} /> : <EmptyState message="No live execution is currently reported for this project. Queue state is shown below." />}
       </Panel>
 
-      <Panel title="Queue and blockers" action={<span>{project.selected_candidate ? `next ${project.selected_candidate.identifier}` : "no selected candidate"}</span>}>
-        {project.selected_candidate || blockers.length || project.suppression_reasons.length ? (
-          <BlockerTable selectedCandidate={project.selected_candidate} issues={blockers} suppressions={project.suppression_reasons} projectId={project.project_id} />
+      <Panel title="Queue, owner input, and blockers" action={<span>{project.selected_candidate ? `next ${project.selected_candidate.identifier}` : nextProjectAction(project)}</span>}>
+        {project.selected_candidate || waitingIssues.length || project.suppression_reasons.length ? (
+          <BlockerTable selectedCandidate={project.selected_candidate} issues={waitingIssues} suppressions={project.suppression_reasons} projectId={project.project_id} />
         ) : (
-          <EmptyState message="No blockers or suppression reasons are currently reported. The project is waiting for eligible work." />
+          <EmptyState message="No owner-input waits, blockers, or suppression reasons are currently reported. The project is waiting for eligible work." />
         )}
       </Panel>
 
       <section className="grid gap-3 lg:grid-cols-4">
         <MetricCard title="Runtime" value={humanizeLabel(project.liveness.status)} detail={humanizeLabel(project.liveness.primary_reason_detail || project.liveness.reason)} tone={statusTone(project.liveness.status)} />
-        <MetricCard title="Capacity" value={`${project.capacity.running_sessions}/${project.capacity.max_sessions}`} detail={`${project.capacity.available_sessions} slots available`} />
-        <MetricCard title="Queue" value={project.selected_candidate?.identifier ?? "idle"} detail={humanizeLabel(project.selected_candidate?.reason ?? "no selected candidate")} />
-        <MetricCard title="Cleanup" value={humanizeLabel(project.cleanup_status)} detail={project.enabled ? "enabled" : "disabled"} />
+        <MetricCard title="Current stage" value={currentIssue ? issueStageLabel(currentIssue, currentSession) : "idle"} detail={currentIssue ? linearStateDetail(currentIssue) : nextProjectAction(project)} tone={statusTone(currentSession?.current_stage ?? currentIssue?.lifecycle_stage)} />
+        <MetricCard title="Selected agent" value={currentInvocation?.selected_agent ?? currentSession?.active_agent ?? currentSession?.agent ?? "none"} detail={routingDetail(currentInvocation ?? currentSession) ?? "no active routing"} />
+        <MetricCard title="Next action" value={project.selected_candidate?.identifier ?? humanizeLabel(project.liveness.primary_reason_code)} detail={nextProjectAction(project)} />
       </section>
 
       <Panel title="Recent run history" action={<span>{historySummary(project.history_issues.length)}</span>}>
@@ -220,7 +223,7 @@ function RunningTable({ issues }: { issues: RunningIssueSummary[] }) {
               <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${issue.project_id}/issues/${issue.issue_id}`}>{issue.identifier}</Link><div className="text-xs text-slate-500">{issue.title}</div></td>
               <td className="px-3 py-3"><Badge tone={statusTone(issue.stage)}>{humanizeLabel(issue.stage ?? issue.display_status)}</Badge></td>
               <td className="px-3 py-3"><ProviderStateBlock providerMode={issue.provider_mode} providerId={issue.provider_id} sessionId={issue.session_id} processId={issue.process_id} processAlive={issue.process_alive} runtimeFailureKind={issue.runtime_failure_kind} acpFrameCount={issue.acp_frame_count} evidenceCount={issue.session_evidence_refs?.length} silenceObserved={issue.silence_observed} /></td>
-              <td className="px-3 py-3">{issue.active_agent ?? issue.agent ?? "—"}<div className="text-xs text-slate-500">{issue.active_model ?? issue.model ?? "model unknown"}</div></td>
+              <td className="px-3 py-3">{issue.active_agent ?? issue.agent ?? "—"}<div className="text-xs text-slate-500">{issue.active_model ?? issue.model ?? "model unknown"}</div><RoutingLine label={issue.agent_routing_label} reason={issue.agent_routing_reason} /></td>
               <td className="px-3 py-3"><TokenCell total={issue.token_count} cached={issue.cached_token_count} metrics={issue.token_metrics} /></td>
               <td className="px-3 py-3"><LiveDuration startedAtMs={issue.started_at_ms} fallbackMs={issue.duration_ms} /></td>
             </tr>
@@ -242,7 +245,7 @@ function ProjectTable({ projects, detailed = false }: { projects: DashboardProje
             <th className="px-3 py-2">enabled</th>
             <th className="w-16 whitespace-nowrap px-2 py-2 text-center tabular-nums" title="running/slots">slots</th>
             <th className="px-3 py-2">active</th>
-            <th className="px-3 py-2">blocked</th>
+            <th className="px-3 py-2">waiting</th>
             {detailed ? <th className="px-3 py-2">terminal</th> : null}
             <th className="px-3 py-2">primary reason</th>
             <th className="px-3 py-2">cleanup</th>
@@ -279,7 +282,7 @@ function ProjectHealthCapacityTable({ projects }: { projects: DashboardProjectCa
             <th className="px-3 py-2">enabled</th>
             <th className="w-16 whitespace-nowrap px-2 py-2 text-center tabular-nums">slots</th>
             <th className="px-3 py-2">active</th>
-            <th className="px-3 py-2">blocked</th>
+            <th className="px-3 py-2">waiting</th>
             <th className="px-3 py-2">primary reason</th>
           </tr>
         </thead>
@@ -353,11 +356,12 @@ function IssueTable({ issues, projectId }: { issues: IssueDetail[]; projectId: s
         <tbody className="divide-y divide-slate-100">
           {issues.map((issue) => {
             const session = currentRunnerSession(issue);
+            const invocation = currentStageInvocation(issue, session);
             return (
               <tr key={issue.issue_id}>
                 <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${projectId}/issues/${issue.issue_id}`}>{issue.identifier}</Link><div className="text-xs text-slate-500">{issue.title}</div></td>
-                <td className="px-3 py-3"><Badge tone={statusTone(issue.lifecycle_stage)}>{humanizeLabel(issue.display_status)}</Badge></td>
-                <td className="px-3 py-3">{session?.active_agent ?? session?.agent ?? "—"}<div className="text-xs text-slate-500">{session?.active_model ?? session?.model ?? "model unknown"}</div></td>
+                <td className="px-3 py-3"><Badge tone={statusTone(session?.current_stage ?? issue.lifecycle_stage)}>{issueStageLabel(issue, session)}</Badge><div className="text-xs text-slate-500">{linearStateDetail(issue)}</div></td>
+                <td className="px-3 py-3">{invocation?.selected_agent ?? session?.active_agent ?? session?.agent ?? "—"}<div className="text-xs text-slate-500">{session?.active_model ?? session?.model ?? "model unknown"}</div><RoutingLine label={(invocation ?? session)?.agent_routing_label} reason={(invocation ?? session)?.agent_routing_reason} /></td>
                 <td className="px-3 py-3">{session ? <ProviderStateBlock providerMode={session.provider_mode} providerId={session.provider_id} sessionId={session.runner_session_id} processId={session.process_id} processAlive={session.process_alive} runtimeFailureKind={session.runtime_failure_kind} acpFrameCount={session.acp_frame_count} evidenceCount={session.session_evidence_refs.length} silenceObserved={session.silence_observed} /> : "—"}</td>
                 <td className="px-3 py-3">{session ? processStateLabel(session.process_id, session.process_alive) : "—"}</td>
                 <td className="px-3 py-3"><TokenCell total={session?.token_count ?? 0} cached={session?.cached_token_count} metrics={session?.token_metrics} /></td>
@@ -415,8 +419,8 @@ function BlockerTable({
             <tr key={issue.issue_id}>
               <td className="px-3 py-3"><Link className="font-semibold text-blue-700" href={`/projects/${projectId}/issues/${issue.issue_id}`}>{issue.identifier}</Link><div className="text-xs text-slate-500">{issue.title}</div></td>
               <td className="px-3 py-3"><Badge tone={statusTone(issue.lifecycle_stage)}>{humanizeLabel(issue.display_status)}</Badge></td>
-              <td className="px-3 py-3">{issue.blocker?.message ?? issue.stop_reason ?? "blocked"}</td>
-              <td className="px-3 py-3">{issue.runtime_defect?.next_action ?? issue.self_defect_routing?.next_action ?? issue.failure?.message ?? "inspect issue evidence"}</td>
+              <td className="px-3 py-3">{issue.blocker?.message ?? issue.stop_reason ?? humanWaitingLabel(issue)}</td>
+              <td className="px-3 py-3">{issueNextAction(issue)}</td>
             </tr>
           ))}
           {supplementalSuppressions.map((suppression) => (
@@ -569,6 +573,11 @@ function ProviderStateBlock({
   );
 }
 
+function RoutingLine({ label, reason }: { label?: string | null; reason?: string | null }) {
+  const detail = routingDetail({ agent_routing_label: label, agent_routing_reason: reason });
+  return detail ? <div className="text-xs text-slate-500">routing {detail}</div> : null;
+}
+
 export function Panel({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
   return (
     <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -714,6 +723,66 @@ export function processStateLabel(processId?: number | null, alive?: boolean | n
 function isLiveIssue(issue: IssueDetail): boolean {
   const session = currentRunnerSession(issue);
   return issue.lifecycle_stage === "running" || session?.process_alive === true;
+}
+
+function issueStageLabel(issue: IssueDetail, session?: RunnerSession): string {
+  if (session?.current_stage) return `stage ${humanizeLabel(session.current_stage)}`;
+  return humanizeLabel(issue.lifecycle_stage);
+}
+
+function linearStateDetail(issue: IssueDetail): string {
+  return `Linear ${humanizeLabel(currentStageInvocation(issue)?.state_name ?? issue.display_status)}`;
+}
+
+function currentStageInvocation(issue: IssueDetail, session?: RunnerSession): StageInvocation | undefined {
+  const invocations = issue.stage_invocations;
+  if (!invocations.length) return undefined;
+  const sessionMatches = session?.runner_session_id ? invocations.filter((invocation) => invocation.session_id === session.runner_session_id) : [];
+  const candidates = sessionMatches.length ? sessionMatches : invocations;
+  const active = candidates.filter((invocation) => isActiveStatus(invocation.status));
+  return latestStageInvocation(active.length ? active : candidates);
+}
+
+function latestStageInvocation(invocations: StageInvocation[]): StageInvocation | undefined {
+  return invocations.reduce<StageInvocation | undefined>((latest, invocation) => {
+    if (!latest) return invocation;
+    return invocationTimestamp(invocation) >= invocationTimestamp(latest) ? invocation : latest;
+  }, undefined);
+}
+
+function invocationTimestamp(invocation: StageInvocation): number {
+  const timestamp = Date.parse(invocation.updated_at ?? invocation.created_at ?? "");
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function routingDetail(route?: Pick<RunnerSession, "agent_routing_label" | "agent_routing_reason"> | Pick<StageInvocation, "agent_routing_label" | "agent_routing_reason"> | null): string | undefined {
+  const label = route?.agent_routing_label?.trim();
+  const reason = route?.agent_routing_reason?.trim();
+  const labelText = humanizeLabel(label);
+  const reasonText = humanizeLabel(reason);
+  if (label && reason && labelText !== reasonText) return `${labelText} · ${reasonText}`;
+  if (label) return labelText;
+  if (reason) return reasonText;
+  return undefined;
+}
+
+function nextProjectAction(project: ProjectDetail): string {
+  if (project.active_issues.some((issue) => issue.blocker?.kind === "owner_input" || issue.blocker?.kind === "owner_question")) return "waiting for owner input";
+  if (project.active_issues.some((issue) => issue.blocker)) return "clear blocker or dependency";
+  if (project.selected_candidate) return "run when capacity is available";
+  if (project.capacity.available_sessions === 0) return "wait for runner capacity";
+  return humanizeLabel(project.liveness.primary_reason_detail || project.liveness.reason || "waiting for eligible work");
+}
+
+function humanWaitingLabel(issue: IssueDetail): string {
+  if (issue.blocker?.kind === "owner_input" || issue.blocker?.kind === "owner_question") return "waiting for owner input";
+  if (issue.lifecycle_stage === "blocked") return "waiting on blocker";
+  return "waiting";
+}
+
+function issueNextAction(issue: IssueDetail): string {
+  if (issue.blocker?.kind === "owner_input" || issue.blocker?.kind === "owner_question") return "owner response required";
+  return issue.runtime_defect?.next_action ?? issue.self_defect_routing?.next_action ?? issue.failure?.message ?? "inspect issue evidence";
 }
 
 type DefectGroup = {

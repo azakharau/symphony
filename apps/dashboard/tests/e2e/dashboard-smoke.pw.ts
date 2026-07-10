@@ -80,7 +80,7 @@ test.describe("SYM-126 dashboard responsive smoke", () => {
     await expect(page.getByText("Build dashboard surfaces")).toBeVisible();
     await expect(page.getByRole("link", { name: /5h quota 76% remaining/ })).toHaveAttribute("href", "/quota");
     await expect(page.getByRole("heading", { name: "Project health and capacity" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Blockers and idle reasons" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Waiting and idle reasons" })).toBeVisible();
     await expect(page.getByRole("link", { name: "Atlas" }).last()).toBeVisible();
     await expect(page.getByText("waiting for quota reset").last()).toBeVisible();
     await page.screenshot({
@@ -96,6 +96,9 @@ test.describe("SYM-126 dashboard responsive smoke", () => {
     await expect(page.getByRole("link", { name: "SYM-97" }).first()).toBeVisible();
     await expect(page.getByText("next eligible").first()).toBeVisible();
     await expect(page.getByText("provider quota exhausted").first()).toBeVisible();
+    await expect(page.getByRole("link", { name: "SYM-105" })).toBeVisible();
+    await expect(page.getByText("human waiting for release owner response")).toBeVisible();
+    await expect(page.getByText("owner response required")).toBeVisible();
     await expect(page.getByText("Showing newest 5")).toHaveCount(0);
     await page.screenshot({
       path: `../../artifacts/screenshots/sym-126/${testInfo.project.name}-project-active.png`,
@@ -114,6 +117,15 @@ test.describe("SYM-126 dashboard responsive smoke", () => {
     });
   });
 
+  test("project owner-input issue reads as human waiting", async ({ page }) => {
+    await page.goto("/projects/symphony/issues/sym-105");
+    await expect(page.getByRole("heading", { level: 2, name: "Clarify release owner approval" })).toBeVisible();
+    await expect(page.getByText("Linear Owner Input").first()).toBeVisible();
+    await expect(page.getByText("Waiting for owner input: human waiting for release owner response")).toBeVisible();
+    await expect(page.getByText("runtime defect")).toHaveCount(0);
+    await expect(page.getByText("runtime failure")).toHaveCount(0);
+  });
+
   test("overview project issue link opens running issue execution drilldown", async ({ page }, testInfo) => {
     await page.goto("/");
     await page.getByRole("link", { name: "Symphony" }).first().click();
@@ -122,6 +134,7 @@ test.describe("SYM-126 dashboard responsive smoke", () => {
     await expect(page).toHaveURL(/\/projects\/symphony\/issues\/sym-97$/);
     await expect(page.getByRole("heading", { level: 2, name: "Build dashboard surfaces" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Current runner status" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Stage invocation history" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Lifecycle timeline" })).toBeVisible();
     await expect(page.getByText("stage review").first()).toBeVisible();
     await expect(page.getByText("Desktop and mobile route coverage in progress.").first()).toBeVisible();
@@ -130,6 +143,8 @@ test.describe("SYM-126 dashboard responsive smoke", () => {
     await expect(page.getByRole("heading", { name: "Eval state" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Git and worktree" })).toBeVisible();
     await expect(page.getByText("Last event:")).toHaveCount(0);
+    await expect(page.getByText("Linear In Review").first()).toBeVisible();
+    await expect(page.getByText("typescript-reviewer").first()).toBeVisible();
     await expect(page.getByText("Raw issue JSON")).toBeVisible();
     await page.screenshot({
       path: `../../artifacts/screenshots/sym-130/${testInfo.project.name}-issue-running.png`,

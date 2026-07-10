@@ -53,6 +53,8 @@ export type RunningIssueSummary = {
   lifecycle_stage?: LifecycleStage | null;
   stage?: string | null;
   agent?: string | null;
+  agent_routing_reason?: string | null;
+  agent_routing_label?: string | null;
   model?: string | null;
   active_agent?: string | null;
   active_model?: string | null;
@@ -231,6 +233,8 @@ export type RunnerSession = {
   provider_mode: string;
   provider_id?: string | null;
   agent: string;
+  agent_routing_reason?: string | null;
+  agent_routing_label?: string | null;
   model?: string | null;
   worktree_path: string;
   process_id?: number | null;
@@ -276,6 +280,20 @@ export type SelfDefectRouting = {
   next_action?: string | null;
 };
 
+
+export type StageInvocation = {
+  fingerprint: string;
+  state_name: string;
+  selected_agent: string;
+  agent_routing_reason: string;
+  agent_routing_label?: string | null;
+  provider: string;
+  session_id?: string | null;
+  status: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
 export type IssueDetail = {
   metadata?: DashboardMetadata;
   project_id: string;
@@ -293,6 +311,7 @@ export type IssueDetail = {
   stop_reason?: string | null;
   last_runner_event?: string | null;
   preferred_runner_session_id?: string | null;
+  stage_invocations: StageInvocation[];
   runner_sessions: RunnerSession[];
   token_metrics?: DashboardTokenMetrics;
   eval_results: EvalRun[];

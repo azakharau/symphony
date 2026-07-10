@@ -3,7 +3,7 @@
 import { currentRunnerSession } from "@/src/current-runner-session";
 import { Badge, Panel, processStateLabel, providerModeLabel, runtimeFailureText } from "@/src/components";
 import { LiveDuration } from "@/src/live-duration";
-import type { DashboardTokenMetrics, EvalRun, IssueDetail, RunnerSession, SessionActivity, TimelineEvent, TodoActivity } from "@/src/types";
+import type { DashboardTokenMetrics, EvalRun, IssueDetail, RunnerSession, SessionActivity, StageInvocation, TimelineEvent, TodoActivity } from "@/src/types";
 
 type BadgeTone = "good" | "warn" | "bad" | "idle";
 const DEFAULT_LINEAR_WORKSPACE_SLUG = "alexey-zakharov";
@@ -30,6 +30,7 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
               <Badge tone={inspectorTone(issue.lifecycle_stage)}>{humanizeLabel(issue.display_status)}</Badge>
               <Badge tone={processTone}>{session ? processStateLabel(session.process_id, session.process_alive) : "process unavailable"}</Badge>
               <Badge tone={inspectorTone(session?.current_stage ?? issue.lifecycle_stage)}>stage {humanizeLabel(session?.current_stage ?? issue.lifecycle_stage)}</Badge>
+              <Badge tone={inspectorTone(issue.lifecycle_stage)}>{linearStateLabel(issue)}</Badge>
             </div>
             <p className="mt-3 max-w-3xl break-words text-sm text-slate-600">{executionSummary(issue, session, timeline)}</p>
           </div>
@@ -48,6 +49,10 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
 
       <Panel title="Current runner status" action={session?.runner_session_id ?? "No runner session reported by API"}>
         <RunnerEvidence issue={issue} session={session} />
+      </Panel>
+
+      <Panel title="Stage invocation history" action={issue.stage_invocations.length ? `${issue.stage_invocations.length.toString()} invocations` : "no invocation ledger rows"}>
+        <StageInvocationHistory invocations={issue.stage_invocations} session={session} />
       </Panel>
 
       <Panel title="Lifecycle timeline" action="stage history and recent activity">
@@ -90,18 +95,41 @@ export function IssueInspector({ issue }: { issue: IssueDetail }) {
 
 function RunnerEvidence({ issue, session }: { issue: IssueDetail; session?: RunnerSession }) {
   const tokens = tokenBreakdown(session?.token_count ?? 0, session?.cached_token_count, session?.token_metrics ?? issue.token_metrics);
+  const invocation = currentStageInvocation(issue, session);
   return (
     <dl className="grid gap-2 text-sm sm:grid-cols-2 xl:grid-cols-4">
-      <KeyValue label="runner identity" value={session?.active_agent ?? session?.agent ?? "unavailable"} detail={session?.active_model ?? session?.model ?? "model unavailable"} />
+      <KeyValue label="runner identity" value={invocation?.selected_agent ?? session?.active_agent ?? session?.agent ?? "unavailable"} detail={session?.active_model ?? session?.model ?? "model unavailable"} />
+      <KeyValue label="routing" value={routingSummary(invocation ?? session) ?? "routing unavailable"} detail={(invocation ?? session)?.agent_routing_reason ? humanizeLabel((invocation ?? session)?.agent_routing_reason) : undefined} />
       <KeyValue label="provider" value={providerModeLabel(session?.provider_mode)} detail={session?.provider_id ? `provider ${session.provider_id}` : "provider id unavailable"} />
       <KeyValue label="session id" value={session?.runner_session_id ?? "unavailable"} detail={session ? processStateLabel(session.process_id, session.process_alive) : "process not checked"} mono />
-      <KeyValue label="stage" value={humanizeLabel(session?.current_stage ?? issue.lifecycle_stage)} detail={`lifecycle ${humanizeLabel(session?.lifecycle_stage ?? issue.lifecycle_stage)}`} />
+      <KeyValue label="stage" value={humanizeLabel(session?.current_stage ?? issue.lifecycle_stage)} detail={linearStateLabel(issue)} />
       <KeyValue label="duration" value={<LiveDuration startedAtMs={session?.started_at_ms} fallbackMs={session?.duration_ms} />} detail={sessionLastUpdated(session)} />
       <KeyValue label="tokens" value={`${formatCompactNumber(tokens.accounted)} total`} detail={tokens.detail} />
       <KeyValue label="ACP telemetry" value={`${session?.acp_frame_count ?? 0} frames`} detail={sessionEvidenceSummary(session?.session_evidence_refs)} />
       {session?.runtime_failure_kind ? <KeyValue label="runtime failure" value={runtimeFailureText(session.runtime_failure_kind)} detail={session.silence_observed ? "session is quiet or stale" : undefined} /> : null}
       {session?.silence_observed && !session.runtime_failure_kind ? <KeyValue label="runtime silence" value="session is quiet or stale" /> : null}
     </dl>
+  );
+}
+
+function StageInvocationHistory({ invocations, session }: { invocations: StageInvocation[]; session?: RunnerSession }) {
+  if (!invocations.length) return <Limited message="No stage invocation rows were reported for this issue." />;
+  const preferredSessionId = session?.runner_session_id;
+  return (
+    <ol className="grid gap-2 text-sm">
+      {invocations.map((invocation) => (
+        <li key={invocation.fingerprint} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="font-semibold text-slate-950">{humanizeLabel(invocation.state_name)}</span>
+            <Badge tone={inspectorTone(invocation.status)}>{humanizeLabel(invocation.status)}</Badge>
+            {preferredSessionId && invocation.session_id === preferredSessionId ? <span className="text-xs font-medium text-blue-700">current session</span> : null}
+          </div>
+          <p className="mt-1 break-words text-slate-700">{invocation.selected_agent} · {routingSummary(invocation) ?? "routing unavailable"}</p>
+          <p className="mt-1 break-words text-xs text-slate-500">provider {invocation.provider} · session {invocation.session_id ?? "unavailable"}</p>
+          <p className="mt-1 text-xs text-slate-500">{shortInvocationTime(invocation.created_at)} → {shortInvocationTime(invocation.updated_at)}</p>
+        </li>
+      ))}
+    </ol>
   );
 }
 
@@ -358,20 +386,66 @@ function buildAgentTree(agents: SessionActivity[]): AgentNode[] {
 }
 
 function executionSummary(issue: IssueDetail, session: RunnerSession | undefined, events: TimelineEvent[]): string {
+  if (issue.blocker?.kind === "owner_input" || issue.blocker?.kind === "owner_question") return `Waiting for owner input: ${issue.blocker.message}`;
   if (issue.blocker?.message) return `Blocked: ${issue.blocker.message}`;
   if (issue.runtime_defect?.next_action) return `Runtime defect: ${issue.runtime_defect.next_action}`;
   if (issue.failure?.message) return `Failed: ${issue.failure.message}`;
   if (!session) return `No runner session is reported; lifecycle is ${humanizeLabel(issue.lifecycle_stage)}.`;
 
   const activity = session.activity;
-  const activeAgent = session.active_agent ?? session.agent ?? "runner";
+  const invocation = currentStageInvocation(issue, session);
+  const activeAgent = invocation?.selected_agent ?? session.active_agent ?? session.agent ?? "runner";
   const provider = providerModeLabel(session.provider_mode);
   const stage = humanizeLabel(session.current_stage);
+  const routing = routingSummary(invocation ?? session);
   const tools = activity
     ? `${activity.running_tool_count} running / ${activity.pending_tool_count} pending tools`
     : sourceUnavailable(session, "tool activity unavailable");
   const recent = latestMeaningfulActivity(events);
-  return `${activeAgent} is executing ${stage} through ${provider}; ${tools}. ${recent}`;
+  return `${activeAgent} is executing ${stage} through ${provider}${routing ? ` (${routing})` : ""}; ${tools}. ${recent}`;
+}
+
+function currentStageInvocation(issue: IssueDetail, session?: RunnerSession): StageInvocation | undefined {
+  const invocations = issue.stage_invocations;
+  if (!invocations.length) return undefined;
+  const sessionMatches = session?.runner_session_id ? invocations.filter((invocation) => invocation.session_id === session.runner_session_id) : [];
+  const candidates = sessionMatches.length ? sessionMatches : invocations;
+  const active = candidates.filter((invocation) => isActiveStatus(invocation.status));
+  return latestStageInvocation(active.length ? active : candidates);
+}
+
+function latestStageInvocation(invocations: StageInvocation[]): StageInvocation | undefined {
+  return invocations.reduce<StageInvocation | undefined>((latest, invocation) => {
+    if (!latest) return invocation;
+    return invocationTimestamp(invocation) >= invocationTimestamp(latest) ? invocation : latest;
+  }, undefined);
+}
+
+function invocationTimestamp(invocation: StageInvocation): number {
+  const timestamp = Date.parse(invocation.updated_at ?? invocation.created_at ?? "");
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function linearStateLabel(issue: IssueDetail): string {
+  return `Linear ${humanizeLabel(currentStageInvocation(issue)?.state_name ?? issue.display_status)}`;
+}
+
+function routingSummary(route?: { agent_routing_label?: string | null; agent_routing_reason?: string | null } | null): string | undefined {
+  const label = route?.agent_routing_label?.trim();
+  const reason = route?.agent_routing_reason?.trim();
+  const labelText = humanizeLabel(label);
+  const reasonText = humanizeLabel(reason);
+  if (label && reason && labelText !== reasonText) return `${labelText} · ${reasonText}`;
+  if (label) return labelText;
+  if (reason) return reasonText;
+  return undefined;
+}
+
+function shortInvocationTime(value?: string | null): string {
+  if (!value) return "time unavailable";
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) return value;
+  return formatEpochMs(timestamp);
 }
 
 function latestMeaningfulActivity(events: TimelineEvent[]): string {

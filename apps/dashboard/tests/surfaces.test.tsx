@@ -29,10 +29,10 @@ describe("dashboard surfaces", () => {
     const html = render(<OverviewSurface dashboard={acceptanceDashboard} quota={quotaNormal} />);
     const runningIndex = html.indexOf("Running now");
     const healthIndex = html.indexOf("Project health and capacity");
-    const blockersIndex = html.indexOf("Blockers and idle reasons");
+    const blockersIndex = html.indexOf("Waiting and idle reasons");
     const running = sectionText(html, "Running now", "Project health and capacity");
-    const health = sectionText(html, "Project health and capacity", "Blockers and idle reasons");
-    const blockers = sectionText(html, "Blockers and idle reasons", "overview preserves OMP cacheRead");
+    const health = sectionText(html, "Project health and capacity", "Waiting and idle reasons");
+    const blockers = sectionText(html, "Waiting and idle reasons", "overview preserves OMP cacheRead");
 
     expect(runningIndex).toBeGreaterThanOrEqual(0);
     expect(healthIndex).toBeGreaterThan(runningIndex);
@@ -93,8 +93,8 @@ describe("dashboard surfaces", () => {
     dashboard.projects = [activeProject, dashboard.projects[2]];
 
     const html = render(<OverviewSurface dashboard={dashboard} quota={quotaNormal} />);
-    const health = sectionText(html, "Project health and capacity", "Blockers and idle reasons");
-    const blockers = sectionText(html, "Blockers and idle reasons", "overview preserves OMP cacheRead");
+    const health = sectionText(html, "Project health and capacity", "Waiting and idle reasons");
+    const blockers = sectionText(html, "Waiting and idle reasons", "overview preserves OMP cacheRead");
     expect(blockers).not.toContain("Symphony");
     expect(blockers).toContain("Atlas");
     expect(blockers).toContain("waiting for quota reset");
@@ -291,7 +291,7 @@ describe("dashboard surfaces", () => {
     expect(html).toContain(">slots</th>");
     expect(html).toContain(">health</th>");
     expect(html).toContain(">active</th>");
-    expect(html).toContain(">blocked</th>");
+    expect(html).toContain(">waiting</th>");
     expect(html).toContain(">primary reason</th>");
     expect(html).toContain(">cleanup</th>");
     expect(html).toContain("title=\"running/slots\"");
@@ -308,8 +308,8 @@ describe("dashboard surfaces", () => {
   test("project detail prioritizes current execution and concise queue blockers", () => {
     const blocked = render(<ProjectSurface project={acceptanceProject} />);
     const failed = render(<ProjectSurface project={failedProject} />);
-    const current = sectionText(blocked, "Symphony current execution", "Queue and blockers");
-    const queue = sectionText(blocked, "Queue and blockers", "Runtime");
+    const current = sectionText(blocked, "Symphony current execution", "Queue, owner input, and blockers");
+    const queue = sectionText(blocked, "Queue, owner input, and blockers", "Runtime");
 
     expect(blocked.indexOf("Symphony current execution")).toBeLessThan(blocked.indexOf("Runtime"));
     expect(current).toContain("SYM-97");
@@ -327,6 +327,9 @@ describe("dashboard surfaces", () => {
     expect(queue).toContain("provider quota exhausted");
     expect(queue).toContain("repair managed defect");
     expect(queue).toContain("provider/infra blocker");
+    expect(queue).toContain("SYM-105");
+    expect(queue).toContain("human waiting for release owner response");
+    expect(queue).toContain("owner response required");
     expect(queue).not.toContain("provider_blocker");
     expect(failed).toContain("runtime process exit");
     expect(failed).not.toContain("runtime_process_exit");
@@ -356,7 +359,8 @@ describe("dashboard surfaces", () => {
   test("issue inspector renders an execution-model drilldown without placeholder cards", () => {
     const html = render(<IssueInspector issue={acceptanceProject.active_issues[0]} />);
     const hero = sectionText(html, "Build dashboard surfaces", "Current runner status");
-    const inspector = sectionText(html, "Current runner status", "Lifecycle timeline");
+    const inspector = sectionText(html, "Current runner status", "Stage invocation history");
+    const invocations = sectionText(html, "Stage invocation history", "Lifecycle timeline");
     const detailedActivity = sectionText(html, "OMP workers", "Eval state");
     const timeline = sectionText(html, "Lifecycle timeline", "OMP workers");
 
@@ -366,6 +370,7 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("Open in runner");
     expect(html).toContain("https://runner.vestalink.net/L3dvcmtzcGFjZXMvc3ltcGhvbnkvU1lNLTk3/session/oc-sym-97");
     expect(html).not.toContain("https://runner.vestalink.net/session/oc-sym-97");
+    expect(html).toContain("Stage invocation history");
     expect(html).toContain("Lifecycle timeline");
     expect(html).toContain("OMP workers");
     expect(html).toContain("Todo activity");
@@ -377,7 +382,7 @@ describe("dashboard surfaces", () => {
     expect(html).toContain("Git and worktree");
     expect(html).toContain("Debug details");
     expect(html).toContain("Raw issue JSON");
-    expect(hero).toContain("typescript-engineer is executing review through runner ACP");
+    expect(hero).toContain("typescript-reviewer is executing review through runner ACP (review gate)");
     expect(hero).not.toContain("Last event:");
     expect(hero).not.toContain("0 todos");
     expect(hero).not.toContain("0 agents");
@@ -385,6 +390,13 @@ describe("dashboard surfaces", () => {
     expect(hero).not.toContain("0 timeline events");
     expect(html).not.toContain(">Evidence</h2>");
     expect(html).toContain("Desktop and mobile route coverage in progress.");
+    expect(invocations).toContain("Implementation");
+    expect(invocations).toContain("In Review");
+    expect(hero).toContain("Linear In Review");
+    expect(inspector).toContain("Linear In Review");
+    expect(inspector).toContain(">typescript-reviewer</dd>");
+    expect(invocations).toContain("typescript-reviewer");
+    expect(invocations).toContain("review gate");
     expect(timeline).toContain("stage starting");
     expect(timeline).toContain("stage running");
     expect(timeline).toContain("stage review");
@@ -415,6 +427,23 @@ describe("dashboard surfaces", () => {
     expect(html).not.toContain("Todo details are unavailable; only aggregate todo counts are exposed.");
     expect(html).not.toContain("No timeline activity is available; lifecycle stage history is shown above.");
     expect(html).not.toContain("No running, pending, or recent tool events were reported.");
+  });
+
+  test("owner-input issue renders as human waiting without runtime failure", () => {
+    const issue = acceptanceProject.active_issues.find((entry) => entry.issue_id === "sym-105");
+    if (!issue) throw new Error("owner-input fixture missing");
+
+    const projectHtml = render(<ProjectSurface project={acceptanceProject} />);
+    const queue = sectionText(projectHtml, "Queue, owner input, and blockers", "Runtime");
+    const issueHtml = render(<IssueInspector issue={issue} />);
+
+    expect(queue).toContain("SYM-105");
+    expect(queue).toContain("human waiting for release owner response");
+    expect(queue).toContain("owner response required");
+    expect(issueHtml).toContain("Linear Owner Input");
+    expect(issueHtml).toContain("Waiting for owner input: human waiting for release owner response");
+    expect(issueHtml).not.toContain("runtime failure");
+    expect(issueHtml).not.toContain("runtime defect");
   });
 
   test("issue inspector uses OMP update event timestamp when activity is unavailable", () => {
@@ -549,12 +578,12 @@ describe("dashboard surfaces", () => {
   test("project detail uses preferred runner session instead of a stale tail session", () => {
     const project = withStaleTailSession();
     const html = render(<ProjectSurface project={project} />);
-    const currentExecution = sectionText(html, "Symphony current execution", "Queue and blockers");
+    const currentExecution = sectionText(html, "Symphony current execution", "Queue, owner input, and blockers");
 
     expect(currentRunnerSession(project.active_issues[0])?.runner_session_id).toBe("oc-sym-97");
     expect(currentExecution).toContain("oc-sym-97");
     expect(currentExecution).toContain("runner-primary");
-    expect(currentExecution).toContain("typescript-engineer");
+    expect(currentExecution).toContain("typescript-reviewer");
     expect(currentExecution).toContain("gpt-5.5");
     expect(currentExecution).toContain("1/2");
     expect(currentExecution).toContain(">5</td>");

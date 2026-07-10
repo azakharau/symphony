@@ -1118,7 +1118,11 @@ async fn open_managed_runtime_defect_blocker(
 fn is_typed_non_owner_blocker_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "provider_blocker" | "repeated_eval_failure" | "runtime_defect"
+        "provider_blocker"
+            | "auth_blocker"
+            | "unsupported_omp_surface"
+            | "repeated_eval_failure"
+            | "runtime_defect"
     )
 }
 

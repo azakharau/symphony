@@ -2210,6 +2210,111 @@ async fn provider_blocker_parks_without_need_owner_input() {
 }
 
 #[tokio::test]
+async fn auth_blocker_parks_without_need_owner_input() {
+    typed_blocker_handoff_parks_without_need_owner_input(
+        "auth",
+        "SYM-86",
+        "oc-auth",
+        "auth_blocker",
+        "provider credentials expired",
+        RunnerStopReason::AuthBlocker {
+            message: "provider credentials expired".into(),
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn unsupported_omp_surface_parks_without_need_owner_input() {
+    typed_blocker_handoff_parks_without_need_owner_input(
+        "unsupported",
+        "SYM-87",
+        "oc-unsupported",
+        "unsupported_omp_surface",
+        "tool surface is unavailable",
+        RunnerStopReason::UnsupportedOmpSurface {
+            message: "tool surface is unavailable".into(),
+        },
+    )
+    .await;
+}
+
+async fn typed_blocker_handoff_parks_without_need_owner_input(
+    issue_id: &str,
+    identifier: &str,
+    session_id: &str,
+    expected_kind: &str,
+    expected_message: &str,
+    stop_reason: RunnerStopReason,
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let worktree = dir.path().join(format!("{identifier}-worktree"));
+    store
+        .upsert_issue(test_issue("symphony", issue_id, identifier))
+        .await
+        .expect("running issue");
+    store
+        .upsert_runner_session(test_session("symphony", issue_id, session_id, &worktree))
+        .await
+        .expect("running session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        issue_id,
+        identifier,
+        "In Progress",
+        Some(1),
+    )]);
+    let opencode = ScriptedRunnerLauncher::new(Some(RunnerHandoff {
+        session_id: session_id.into(),
+        lifecycle_stages: vec![RunnerStage::Running, RunnerStage::Failed],
+        subagents: vec!["rust-engineer".into()],
+        eval_results: Vec::new(),
+        changed_files: Vec::new(),
+        git: None,
+        risks: Vec::new(),
+        stop_reason,
+    }));
+
+    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert!(report.parked_owner_input.is_empty());
+    assert!(client.transitions().is_empty());
+    let evidence = client.evidence();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].1.kind, expected_kind);
+    assert_eq!(evidence[0].1.body, expected_message);
+    assert!(!evidence[0].1.body.contains("Owner input needed"));
+    let issue = store
+        .issue("symphony", issue_id)
+        .await
+        .expect("query parked")
+        .expect("parked issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Blocked);
+    assert_eq!(issue.blocker.as_ref().expect("blocker").kind, expected_kind);
+    let failure = issue.failure.as_ref().expect("failure");
+    assert_eq!(failure.kind, expected_kind);
+    assert_eq!(failure.message, expected_message);
+    let parked_session = store
+        .runner_session("symphony", issue_id, session_id)
+        .await
+        .expect("query parked session")
+        .expect("parked session");
+    assert_eq!(parked_session.lifecycle_stage, LifecycleStage::Blocked);
+    let expected_last_event = format!("parked:{expected_kind}");
+    assert_eq!(
+        parked_session.last_event.as_deref(),
+        Some(expected_last_event.as_str())
+    );
+}
+
+#[tokio::test]
 async fn owner_question_parks_with_owner_visible_question() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

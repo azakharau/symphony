@@ -1522,6 +1522,114 @@ async fn orchestration_continues_requeued_provider_blocker_when_todo_is_unblocke
 }
 
 #[tokio::test]
+async fn orchestration_retains_auth_blocker_when_seen_in_progress_again() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let mut issue = test_issue("symphony", "auth", "SYM-69");
+    issue.lifecycle_stage = LifecycleStage::Blocked;
+    issue.blocker = Some(BlockerRecord {
+        kind: "auth_blocker".into(),
+        message: "provider credentials expired".into(),
+        observed_at: Some("2026-06-11T15:14:00Z".into()),
+    });
+    issue.failure = Some(FailureRecord {
+        kind: "auth_blocker".into(),
+        message: "provider credentials expired".into(),
+        fingerprint: Some("provider-credentials-expired".into()),
+        occurrence_count: 1,
+    });
+    store.upsert_issue(issue).await.expect("issue");
+    let client =
+        RecordingLinearClient::new(vec![linear_issue("auth", "SYM-69", "In Progress", Some(1))]);
+    let opencode = ResumeRecordingRunnerLauncher::new(4242);
+
+    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert_eq!(report.blocked, vec!["SYM-69"]);
+    assert!(report.parked_owner_input.is_empty());
+    assert_eq!(
+        client.transitions(),
+        vec![("auth".into(), LinearTransition::Todo)]
+    );
+    assert!(client.evidence().is_empty());
+    assert!(opencode.launches().is_empty());
+    let retained = store
+        .issue("symphony", "auth")
+        .await
+        .expect("query retained auth blocker")
+        .expect("retained issue");
+    assert_eq!(retained.lifecycle_stage, LifecycleStage::Blocked);
+    assert_eq!(
+        retained.blocker.as_ref().expect("blocker").kind,
+        "auth_blocker"
+    );
+    assert_eq!(
+        retained.failure.as_ref().expect("failure").kind,
+        "auth_blocker"
+    );
+}
+
+#[tokio::test]
+async fn orchestration_retains_unsupported_omp_surface_when_seen_todo_again() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+
+    let mut issue = test_issue("symphony", "unsupported", "SYM-70");
+    issue.lifecycle_stage = LifecycleStage::Blocked;
+    issue.blocker = Some(BlockerRecord {
+        kind: "unsupported_omp_surface".into(),
+        message: "tool surface is unavailable".into(),
+        observed_at: Some("2026-06-11T15:14:00Z".into()),
+    });
+    issue.failure = Some(FailureRecord {
+        kind: "unsupported_omp_surface".into(),
+        message: "tool surface is unavailable".into(),
+        fingerprint: Some("tool-surface-unavailable".into()),
+        occurrence_count: 1,
+    });
+    store.upsert_issue(issue).await.expect("issue");
+    let client =
+        RecordingLinearClient::new(vec![linear_issue("unsupported", "SYM-70", "Todo", Some(1))]);
+    let opencode = ResumeRecordingRunnerLauncher::new(4242);
+
+    let report = daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate once");
+
+    assert_eq!(report.blocked, vec!["SYM-70"]);
+    assert!(report.dispatched.is_empty());
+    assert!(report.parked_owner_input.is_empty());
+    assert!(client.transitions().is_empty());
+    assert!(client.evidence().is_empty());
+    assert!(opencode.launches().is_empty());
+    let retained = store
+        .issue("symphony", "unsupported")
+        .await
+        .expect("query retained unsupported blocker")
+        .expect("retained issue");
+    assert_eq!(retained.lifecycle_stage, LifecycleStage::Blocked);
+    assert_eq!(
+        retained.blocker.as_ref().expect("blocker").kind,
+        "unsupported_omp_surface"
+    );
+    assert_eq!(
+        retained.failure.as_ref().expect("failure").kind,
+        "unsupported_omp_surface"
+    );
+}
+
+#[tokio::test]
 async fn orchestration_recovers_retired_provider_blocker_session_after_launch_failed_retry() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

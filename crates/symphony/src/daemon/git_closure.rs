@@ -14,7 +14,7 @@ pub(super) enum GitClosureResult {
     Integrated { base_branch: String },
 }
 
-pub(super) async fn verify_and_integrate_git_closure(
+pub(super) async fn verify_git_closure_ready(
     project: &ProjectConfig,
     git: &GitClosureEvidence,
     changed_files: &[String],
@@ -44,12 +44,28 @@ pub(super) async fn verify_and_integrate_git_closure(
     ensure_commit_exists(&project.repo_path, head_sha).await?;
     ensure_origin_remote(&project.repo_path).await?;
     ensure_issue_branch_pushed(&project.repo_path, git.branch.trim(), head_sha).await?;
-    integrate_base_branch(&project.repo_path, &project.branch.base, head_sha).await?;
-    ensure_remote_base_points_at(&project.repo_path, &project.branch.base, head_sha).await?;
 
     Ok(GitClosureResult::Integrated {
         base_branch: project.branch.base.clone(),
     })
+}
+
+pub(super) async fn verify_and_integrate_git_closure(
+    project: &ProjectConfig,
+    git: &GitClosureEvidence,
+    changed_files: &[String],
+) -> anyhow::Result<GitClosureResult> {
+    let result = verify_git_closure_ready(project, git, changed_files).await?;
+    if let Some(head_sha) = git
+        .head_sha
+        .as_deref()
+        .map(str::trim)
+        .filter(|sha| !sha.is_empty())
+    {
+        integrate_base_branch(&project.repo_path, &project.branch.base, head_sha).await?;
+        ensure_remote_base_points_at(&project.repo_path, &project.branch.base, head_sha).await?;
+    }
+    Ok(result)
 }
 
 async fn ensure_clean_worktree(worktree_path: &Path) -> anyhow::Result<()> {

@@ -1238,9 +1238,17 @@ fn canonical_handoff_stage(stage: &str) -> Option<&'static str> {
 }
 
 pub fn build_acp_launch_spec(project: &ProjectConfig, issue: &LinearIssue) -> RunnerLaunchSpec {
+    build_acp_launch_spec_for_stage(project, issue, WorkflowStage::InProgress)
+}
+
+pub fn build_acp_launch_spec_for_stage(
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+    stage: WorkflowStage,
+) -> RunnerLaunchSpec {
     if project.runner.provider_mode == RuntimeProviderMode::OmpAcp {
         if let Some(provider) = project.omp_acp_providers.first() {
-            return build_omp_acp_launch_spec(project, issue, provider);
+            return build_omp_acp_launch_spec_for_stage(project, issue, provider, stage);
         }
         warn!(
             project_id = %project.id,
@@ -1248,7 +1256,7 @@ pub fn build_acp_launch_spec(project: &ProjectConfig, issue: &LinearIssue) -> Ru
         );
     }
     let branch_name = issue_branch_name(issue);
-    let (agent, _, _) = workflow_agent_route_for_issue(project, issue, WorkflowStage::InProgress);
+    let (agent, _, _) = workflow_agent_route_for_issue(project, issue, stage);
     RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
@@ -1275,13 +1283,22 @@ pub fn build_omp_acp_launch_spec(
     issue: &LinearIssue,
     provider: &OhMyPiAcpProviderConfig,
 ) -> RunnerLaunchSpec {
+    build_omp_acp_launch_spec_for_stage(project, issue, provider, WorkflowStage::InProgress)
+}
+
+pub fn build_omp_acp_launch_spec_for_stage(
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+    provider: &OhMyPiAcpProviderConfig,
+    stage: WorkflowStage,
+) -> RunnerLaunchSpec {
     let branch_name = issue_branch_name(issue);
     let issue_worktree = project.branch.worktree_root.join(&issue.identifier);
     let cwd = match provider.cwd {
         OhMyPiAcpCwdPolicy::IssueWorktree => issue_worktree,
         OhMyPiAcpCwdPolicy::ProjectRepo => project.repo_path.clone(),
     };
-    let (agent, _, _) = workflow_agent_route_for_issue(project, issue, WorkflowStage::InProgress);
+    let (agent, _, _) = workflow_agent_route_for_issue(project, issue, stage);
     RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::OmpAcp,
         provider_id: Some(provider.id.clone()),
@@ -1392,8 +1409,18 @@ pub fn new_session_record(
     started: RunnerStartedSession,
     spec: &RunnerLaunchSpec,
 ) -> RunnerSessionRecord {
+    new_session_record_for_stage(project, issue, started, spec, WorkflowStage::InProgress)
+}
+
+pub fn new_session_record_for_stage(
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+    started: RunnerStartedSession,
+    spec: &RunnerLaunchSpec,
+    stage: WorkflowStage,
+) -> RunnerSessionRecord {
     let (_, agent_routing_reason, agent_routing_label) =
-        workflow_agent_route_for_issue(project, issue, WorkflowStage::InProgress);
+        workflow_agent_route_for_issue(project, issue, stage);
     RunnerSessionRecord {
         project_id: project.id.clone(),
         issue_id: issue.id.clone(),

@@ -28,9 +28,11 @@ use crate::{
 
 use super::{
     cleanup::cleanup_worktree,
-    git_closure::{GitClosureResult, verify_and_integrate_git_closure},
+    git_closure::{GitClosureResult, verify_and_integrate_git_closure, verify_git_closure_ready},
     policy::{matching_failure_count, stable_fingerprint},
-    records::{git_closure_evidence_body, issue_record},
+    records::{
+        git_closure_evidence_body, implementation_ready_for_review_evidence_body, issue_record,
+    },
     self_defects::{RuntimeSelfDefectInput, record_runtime_self_defect},
 };
 
@@ -563,7 +565,12 @@ async fn close_successful_handoff<L: LinearClient, O: RunnerLauncher>(
         session,
     } = ctx;
 
-    if let Some(message) = successful_handoff_error(handoff) {
+    let stage = project
+        .workflow
+        .stage_for_linear_state(&issue.state)
+        .unwrap_or(WorkflowStage::InProgress);
+
+    if let Some(message) = successful_handoff_error(stage, handoff) {
         warn!(
             project_id = %project.id,
             issue = %issue.identifier,
@@ -591,7 +598,44 @@ async fn close_successful_handoff<L: LinearClient, O: RunnerLauncher>(
         return Ok(());
     }
 
-    let Some(git) = handoff.git.as_ref() else {
+    let fallback_git;
+    let git = if let Some(git) = handoff.git.as_ref() {
+        git
+    } else if stage == WorkflowStage::InReview && handoff.changed_files.is_empty() {
+        let Some(git_ref) = existing_issue.and_then(|issue| issue.git_ref.as_ref()) else {
+            warn!(
+                project_id = %project.id,
+                issue = %issue.identifier,
+                session_id = %session.session_id,
+                "successful review handoff missing implementation git evidence"
+            );
+            fail_runtime_defect(
+                project,
+                self_defect_project,
+                store,
+                linear,
+                issue,
+                "malformed_handoff",
+                "successful review handoff did not include git evidence and no stored implementation git_ref was available".into(),
+                FailureRecord {
+                    kind: "malformed_handoff".into(),
+                    message: "missing review git closure evidence".into(),
+                    fingerprint: Some("missing_review_git_closure".into()),
+                    occurrence_count: 1,
+                },
+                session,
+            )
+            .await?;
+            return Ok(());
+        };
+        fallback_git = crate::runner::GitClosureEvidence {
+            branch: git_ref.branch.clone(),
+            head_sha: git_ref.head_sha.clone(),
+            pr_url: git_ref.pr_url.clone(),
+            worktree_path: git_ref.worktree_path.clone(),
+        };
+        &fallback_git
+    } else {
         warn!(
             project_id = %project.id,
             issue = %issue.identifier,
@@ -645,9 +689,12 @@ async fn close_successful_handoff<L: LinearClient, O: RunnerLauncher>(
         return Ok(());
     }
 
-    let integration = match verify_and_integrate_git_closure(project, git, &handoff.changed_files)
-        .await
-    {
+    let integration_result = if stage == WorkflowStage::InProgress {
+        verify_git_closure_ready(project, git, &handoff.changed_files).await
+    } else {
+        verify_and_integrate_git_closure(project, git, &handoff.changed_files).await
+    };
+    let integration = match integration_result {
         Ok(integration) => integration,
         Err(error) => {
             let message = error.to_string();
@@ -684,22 +731,71 @@ async fn close_successful_handoff<L: LinearClient, O: RunnerLauncher>(
         }
     };
 
-    let integrated_base = match &integration {
-        GitClosureResult::NoGitChanges => None,
-        GitClosureResult::Integrated { base_branch } => Some(base_branch.as_str()),
+    let (evidence_kind, evidence_body) = if stage == WorkflowStage::InProgress {
+        (
+            "runner_implementation_ready_for_review",
+            implementation_ready_for_review_evidence_body(handoff, git),
+        )
+    } else {
+        let integrated_base = match &integration {
+            GitClosureResult::NoGitChanges => None,
+            GitClosureResult::Integrated { base_branch } => Some(base_branch.as_str()),
+        };
+        (
+            "runner_git_closure",
+            git_closure_evidence_body(handoff, git, integrated_base),
+        )
     };
-    let evidence_body = git_closure_evidence_body(handoff, git, integrated_base);
     linear
         .record_issue_evidence(
             &issue.id,
             LinearIssueEvidence {
-                kind: "runner_git_closure".into(),
+                kind: evidence_kind.into(),
                 body: evidence_body,
             },
         )
         .await?;
     let mut terminating_session = session.clone();
     terminate_current_session_process(project, issue, &mut terminating_session).await?;
+    if stage == WorkflowStage::InProgress {
+        linear
+            .transition_issue_to_state(
+                &issue.id,
+                project
+                    .workflow
+                    .required_linear_state(WorkflowStage::InReview),
+            )
+            .await?;
+        let record = IssueStateRecord {
+            project_id: project.id.clone(),
+            issue_id: issue.id.clone(),
+            identifier: issue.identifier.clone(),
+            title: issue.title.clone(),
+            lifecycle_stage: LifecycleStage::Queued,
+            blocker: None,
+            failure: None,
+            git_ref: Some(GitRefRecord {
+                branch: git.branch.clone(),
+                worktree_path: git.worktree_path.clone(),
+                head_sha: git.head_sha.clone(),
+                pr_url: git.pr_url.clone(),
+            }),
+            cleanup_status: CleanupStatus::Clean,
+        };
+        store.upsert_issue(&record).await?;
+        let mut completed_session = session.clone();
+        completed_session.process_id = None;
+        completed_session.lifecycle_stage = LifecycleStage::Completed;
+        completed_session.stage = crate::state::RunnerStage::Completed;
+        completed_session.lifecycle_marker = Some("implementation_handoff_accepted".into());
+        completed_session.last_event = Some("implementation_ready_for_review".into());
+        completed_session.silence_observed = false;
+        store.upsert_runner_session(&completed_session).await?;
+        store
+            .mark_latest_stage_invocation_status(&project.id, &issue.id, "completed")
+            .await?;
+        return Ok(());
+    }
     linear
         .transition_issue_to_state(
             &issue.id,
@@ -779,6 +875,9 @@ async fn close_successful_handoff<L: LinearClient, O: RunnerLauncher>(
     });
     completed_session.silence_observed = false;
     store.upsert_runner_session(&completed_session).await?;
+    store
+        .mark_latest_stage_invocation_status(&project.id, &issue.id, "completed")
+        .await?;
     Ok(())
 }
 
@@ -802,6 +901,64 @@ async fn handle_eval_failure(
     );
     let occurrence_count = previous_count.saturating_add(1);
     let max_identical = project.eval.max_identical_failure_fingerprints.max(1);
+    if project
+        .workflow
+        .is_stage(&issue.state, WorkflowStage::InReview)
+    {
+        let failure = FailureRecord {
+            kind: "review_failure".into(),
+            message: failure_fingerprint.into(),
+            fingerprint: Some(failure_fingerprint.into()),
+            occurrence_count,
+        };
+        linear
+            .record_issue_evidence(
+                &issue.id,
+                LinearIssueEvidence {
+                    kind: "review_failure".into(),
+                    body: format!(
+                        "Review rejected the implementation.\n\nsession_id: {session_id}\nfingerprint: {failure_fingerprint}\nrepair_attempt: {occurrence_count}\nnext_action: return_to_in_progress_for_bounded_repair\n\nThis is a review failure, not owner input.",
+                        session_id = session.session_id,
+                    ),
+                },
+            )
+            .await?;
+        let mut terminating_session = session.clone();
+        terminate_current_session_process(project, issue, &mut terminating_session).await?;
+        linear
+            .transition_issue_to_state(
+                &issue.id,
+                project
+                    .workflow
+                    .required_linear_state(WorkflowStage::InProgress),
+            )
+            .await?;
+        let mut record = issue_record(
+            project,
+            issue,
+            LifecycleStage::Queued,
+            None,
+            CleanupStatus::Clean,
+        );
+        record.failure = Some(failure);
+        if let Some(existing) = existing_issue {
+            record.git_ref.clone_from(&existing.git_ref);
+            record.cleanup_status = existing.cleanup_status;
+        }
+        store.upsert_issue(&record).await?;
+        let mut rejected_session = session.clone();
+        rejected_session.process_id = None;
+        rejected_session.lifecycle_stage = LifecycleStage::Failed;
+        rejected_session.stage = crate::state::RunnerStage::Failed;
+        rejected_session.lifecycle_marker = Some("review_rejected".into());
+        rejected_session.last_event = Some(format!("review_rejected:{failure_fingerprint}"));
+        rejected_session.silence_observed = false;
+        store.upsert_runner_session(&rejected_session).await?;
+        store
+            .mark_latest_stage_invocation_status(&project.id, &issue.id, "failed")
+            .await?;
+        return Ok(());
+    }
     if occurrence_count >= max_identical {
         warn!(
             project_id = %project.id,
@@ -1391,7 +1548,7 @@ fn recoverable_failed_handoff_session(session: &crate::state::RunnerSessionRecor
         })
 }
 
-fn successful_handoff_error(handoff: &RunnerHandoff) -> Option<String> {
+fn successful_handoff_error(stage: WorkflowStage, handoff: &RunnerHandoff) -> Option<String> {
     if handoff.eval_results.is_empty() {
         return Some("successful handoff did not include eval results".into());
     }
@@ -1399,6 +1556,9 @@ fn successful_handoff_error(handoff: &RunnerHandoff) -> Option<String> {
         return Some(format!("eval `{}` did not pass", eval.suite));
     }
     let Some(git) = &handoff.git else {
+        if stage == WorkflowStage::InReview && handoff.changed_files.is_empty() {
+            return None;
+        }
         return Some("successful handoff did not include git closure evidence".into());
     };
     if git.branch.trim().is_empty() {

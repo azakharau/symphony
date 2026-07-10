@@ -8,7 +8,8 @@ use crate::{
     linear::{LinearClient, LinearIssue, LinearIssueEvidence},
     runner::{
         ProcessTreeTerminationEvidence, RunnerLaunchObserver, RunnerLauncher, RunnerProcessStarted,
-        RunnerSessionCreated, RunnerStartedSession, build_acp_launch_spec, new_session_record,
+        RunnerSessionCreated, RunnerStartedSession, build_acp_launch_spec_for_stage,
+        new_session_record_for_stage,
     },
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, LifecycleStage, RunnerSessionRecord,
@@ -142,8 +143,11 @@ async fn launch_stage_entry(
     let DispatchCandidate::StageEntry(issue) = candidate else {
         unreachable!("Todo promotion returns before runner launch")
     };
-    let launch_spec = build_acp_launch_spec(project, &issue);
-    let stage_fingerprint = stage_invocation_fingerprint(project, &issue);
+    let Some(stage) = executable_stage(project, &issue) else {
+        return Ok(());
+    };
+    let launch_spec = build_acp_launch_spec_for_stage(project, &issue, stage);
+    let stage_fingerprint = stage_invocation_fingerprint(project, &issue, stage);
     if store
         .stage_invocation(&project.id, &issue.id, &stage_fingerprint)
         .await?
@@ -178,7 +182,8 @@ async fn launch_stage_entry(
     }
     store.upsert_issue(&record).await?;
 
-    let invocation = stage_invocation_record(project, &issue, &launch_spec, &stage_fingerprint);
+    let invocation =
+        stage_invocation_record(project, &issue, &launch_spec, stage, &stage_fingerprint);
     if !store.insert_stage_invocation_if_absent(&invocation).await? {
         info!(
             project_id = %project.id,
@@ -189,10 +194,11 @@ async fn launch_stage_entry(
         return Ok(());
     }
 
-    let observer = RuntimeLaunchObserver::new(project, &issue, &launch_spec, store);
+    let observer = RuntimeLaunchObserver::new(project, &issue, &launch_spec, stage, store);
     match runner.launch_observed(&launch_spec, &observer).await {
         Ok(started) => {
-            let session = new_session_record(project, &issue, started, &launch_spec);
+            let session =
+                new_session_record_for_stage(project, &issue, started, &launch_spec, stage);
             info!(
                 project_id = %project.id,
                 issue = %issue.identifier,
@@ -235,9 +241,21 @@ async fn launch_stage_entry(
     Ok(())
 }
 
-fn stage_invocation_fingerprint(project: &ProjectConfig, issue: &LinearIssue) -> String {
+fn executable_stage(project: &ProjectConfig, issue: &LinearIssue) -> Option<WorkflowStage> {
+    match project.workflow.stage_for_linear_state(&issue.state) {
+        Some(stage @ (WorkflowStage::InProgress | WorkflowStage::InReview)) => Some(stage),
+        _ => None,
+    }
+}
+
+fn stage_invocation_fingerprint(
+    project: &ProjectConfig,
+    issue: &LinearIssue,
+    stage: WorkflowStage,
+) -> String {
     stable_hash(&[
-        "stage-entry-v1",
+        "stage-entry-v2",
+        stage.as_str(),
         &project.id,
         &issue.id,
         issue.state_id.as_deref().unwrap_or_default(),
@@ -250,11 +268,10 @@ fn stage_invocation_record(
     project: &ProjectConfig,
     issue: &LinearIssue,
     launch_spec: &crate::runner::RunnerLaunchSpec,
+    stage: WorkflowStage,
     fingerprint: &str,
 ) -> StageInvocationRecord {
-    let route = project
-        .workflow
-        .agent_route_for_stage(WorkflowStage::InProgress, &issue.labels);
+    let route = project.workflow.agent_route_for_stage(stage, &issue.labels);
     StageInvocationRecord {
         project_id: project.id.clone(),
         issue_id: issue.id.clone(),
@@ -306,6 +323,7 @@ struct RuntimeLaunchObserver<'a> {
     project: &'a ProjectConfig,
     issue: &'a LinearIssue,
     launch_spec: &'a crate::runner::RunnerLaunchSpec,
+    stage: WorkflowStage,
     store: &'a SqliteStore,
     provisional_session_id: Mutex<Option<String>>,
 }
@@ -315,12 +333,14 @@ impl<'a> RuntimeLaunchObserver<'a> {
         project: &'a ProjectConfig,
         issue: &'a LinearIssue,
         launch_spec: &'a crate::runner::RunnerLaunchSpec,
+        stage: WorkflowStage,
         store: &'a SqliteStore,
     ) -> Self {
         Self {
             project,
             issue,
             launch_spec,
+            stage,
             store,
             provisional_session_id: Mutex::new(None),
         }
@@ -339,7 +359,7 @@ impl RunnerLaunchObserver for RuntimeLaunchObserver<'_> {
             *provisional_session_id = Some(session_id.clone());
         }
 
-        let mut session = new_session_record(
+        let mut session = new_session_record_for_stage(
             self.project,
             self.issue,
             RunnerStartedSession {
@@ -349,6 +369,7 @@ impl RunnerLaunchObserver for RuntimeLaunchObserver<'_> {
                 session_evidence_refs: Vec::new(),
             },
             self.launch_spec,
+            self.stage,
         );
         session.lifecycle_marker = Some("acp_process_started".into());
         session.last_event = Some(
@@ -378,7 +399,7 @@ impl RunnerLaunchObserver for RuntimeLaunchObserver<'_> {
                 .map_err(|error| crate::runner::RunnerError::LaunchObserver(error.to_string()))?;
         }
 
-        let mut session = new_session_record(
+        let mut session = new_session_record_for_stage(
             self.project,
             self.issue,
             RunnerStartedSession {
@@ -388,6 +409,7 @@ impl RunnerLaunchObserver for RuntimeLaunchObserver<'_> {
                 session_evidence_refs: Vec::new(),
             },
             self.launch_spec,
+            self.stage,
         );
         session.lifecycle_marker = Some("acp_session_attached".into());
         session.last_event = Some(

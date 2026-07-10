@@ -224,6 +224,82 @@ async fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_wo
 
     assert_eq!(
         client.transitions(),
+        vec![("completed".into(), LinearTransition::InReview)]
+    );
+    let implementation_evidence = client.evidence();
+    assert_eq!(implementation_evidence.len(), 1);
+    assert_eq!(
+        implementation_evidence[0].1.kind,
+        "runner_implementation_ready_for_review"
+    );
+    let implementation_comment = &implementation_evidence[0].1.body;
+    assert!(implementation_comment.contains("## runner Implementation Ready for Review"));
+    assert!(implementation_comment.contains("review is pending"));
+    assert!(implementation_comment.contains("Status: In Review"));
+    assert!(implementation_comment.contains(&head_sha));
+    assert!(implementation_comment.contains(issue_branch));
+    assert!(!implementation_comment.contains("Status: Done"));
+    assert!(!implementation_comment.contains("Symphony integrated it into the canonical branch"));
+    assert!(!implementation_comment.contains("Integrated base"));
+    let ready_for_review = store
+        .issue("symphony", "completed")
+        .await
+        .expect("query ready for review")
+        .expect("ready for review issue");
+    assert_eq!(ready_for_review.lifecycle_stage, LifecycleStage::Queued);
+    assert_eq!(ready_for_review.cleanup_status, CleanupStatus::Clean);
+    assert!(
+        worktree.exists(),
+        "implementation handoff must preserve worktree for review"
+    );
+    let implementation_session = store
+        .runner_session("symphony", "completed", "oc-80")
+        .await
+        .expect("query implementation session")
+        .expect("implementation session");
+    assert_eq!(
+        implementation_session.lifecycle_stage,
+        LifecycleStage::Completed
+    );
+    assert_eq!(implementation_session.stage, RunnerStage::Completed);
+    assert_eq!(implementation_session.process_id, None);
+    assert_eq!(
+        implementation_session.lifecycle_marker.as_deref(),
+        Some("implementation_handoff_accepted")
+    );
+    assert_eq!(
+        implementation_session.last_event.as_deref(),
+        Some("implementation_ready_for_review")
+    );
+
+    store
+        .upsert_runner_session(test_session(
+            "symphony",
+            "completed",
+            "review-80",
+            &worktree,
+        ))
+        .await
+        .expect("review session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "completed",
+        "SYM-80",
+        "In Review",
+        Some(1),
+    )]);
+    let opencode = ScriptedRunnerLauncher::new(Some(success_handoff(
+        "review-80",
+        &worktree,
+        issue_branch,
+        &head_sha,
+    )));
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("orchestrate review handoff");
+
+    assert_eq!(
+        client.transitions(),
         vec![("completed".into(), LinearTransition::Done)]
     );
     let handoff_comment = client
@@ -232,6 +308,9 @@ async fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_wo
         .find_map(|(_, evidence)| (evidence.kind == "runner_git_closure").then_some(evidence.body))
         .expect("accepted handoff comment");
     assert!(handoff_comment.contains("## runner Handoff Accepted"));
+    assert!(handoff_comment.contains("- Status: Done"));
+    assert!(handoff_comment.contains("Symphony integrated it into the canonical branch"));
+    assert!(handoff_comment.contains("Integrated base"));
     assert!(handoff_comment.contains("### Validation"));
     assert!(handoff_comment.contains("### Changed Files"));
     assert!(handoff_comment.contains(&head_sha));
@@ -274,7 +353,7 @@ async fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_wo
         "accepted handoff must unregister the git worktree"
     );
     let session = store
-        .runner_session("symphony", "completed", "oc-80")
+        .runner_session("symphony", "completed", "review-80")
         .await
         .expect("query completed session")
         .expect("completed session");
@@ -313,6 +392,70 @@ async fn passing_opencode_handoff_moves_done_records_git_metadata_and_removes_wo
             "agent-server/opencode-runner-extension",
         ],
     );
+}
+
+#[tokio::test]
+async fn review_eval_failure_returns_issue_to_in_progress_without_owner_input() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let worktree = dir.path().join("SYM-81");
+    fs::create_dir_all(&worktree).expect("worktree");
+    store
+        .upsert_issue(test_issue("symphony", "review-rejected", "SYM-81"))
+        .await
+        .expect("issue");
+    store
+        .upsert_runner_session(test_session(
+            "symphony",
+            "review-rejected",
+            "review-81",
+            &worktree,
+        ))
+        .await
+        .expect("review session");
+    let client = RecordingLinearClient::new(vec![linear_issue(
+        "review-rejected",
+        "SYM-81",
+        "In Review",
+        Some(1),
+    )]);
+    let opencode =
+        ScriptedRunnerLauncher::new(Some(eval_failed_handoff("review-81", "review-blocked")));
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("process review rejection");
+
+    assert_eq!(
+        client.transitions(),
+        vec![("review-rejected".into(), LinearTransition::InProgress)]
+    );
+    assert!(opencode.repairs().is_empty());
+    let evidence = client.evidence();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].1.kind, "review_failure");
+    assert!(evidence[0].1.body.contains("not owner input"));
+    let issue = store
+        .issue("symphony", "review-rejected")
+        .await
+        .expect("query issue")
+        .expect("issue");
+    assert_eq!(issue.lifecycle_stage, LifecycleStage::Queued);
+    assert!(issue.blocker.is_none());
+    let failure = issue.failure.expect("review failure");
+    assert_eq!(failure.kind, "review_failure");
+    assert_eq!(failure.fingerprint.as_deref(), Some("review-blocked"));
+    let session = store
+        .runner_session("symphony", "review-rejected", "review-81")
+        .await
+        .expect("query review session")
+        .expect("review session");
+    assert_eq!(session.lifecycle_stage, LifecycleStage::Failed);
+    assert_eq!(session.lifecycle_marker.as_deref(), Some("review_rejected"));
 }
 
 #[tokio::test]
@@ -560,7 +703,7 @@ async fn omp_handoff_closes_after_switching_to_acp_and_a_new_worktree_root() {
     let client = RecordingLinearClient::new(vec![linear_issue(
         "omp-semantic",
         "SYM-235",
-        "In Progress",
+        "In Review",
         Some(1),
     )]);
     let opencode = MismatchedHandoffRunnerLauncher::new(handoff);
@@ -669,7 +812,7 @@ async fn omp_handoff_from_active_legacy_provider_worktree_outside_current_root_c
     let client = RecordingLinearClient::new(vec![linear_issue(
         "legacy-omp",
         "SYM-236",
-        "In Progress",
+        "In Review",
         Some(1),
     )]);
     let opencode = ScriptedRunnerLauncher::new(Some(success_handoff(
@@ -800,7 +943,7 @@ async fn passing_handoff_closes_when_canonical_checkout_has_unrelated_dirty_file
     let client = RecordingLinearClient::new(vec![linear_issue(
         "dirty-canonical",
         "SYM-83",
-        "In Progress",
+        "In Review",
         Some(1),
     )]);
     let opencode = ScriptedRunnerLauncher::new(Some(success_handoff(
@@ -920,7 +1063,7 @@ async fn passing_handoff_stops_process_before_done_and_removes_worktree_immediat
         .expect("running session");
 
     let client = DoneRequiresStoppedProcessLinearClient::new(
-        linear_issue("close-order", "SYM-90", "In Progress", Some(1)),
+        linear_issue("close-order", "SYM-90", "In Review", Some(1)),
         process_id,
     );
     let opencode = ScriptedRunnerLauncher::new(Some(success_handoff(
@@ -1058,7 +1201,7 @@ async fn passing_handoff_accepts_force_updated_issue_branch_after_repair() {
     let client = RecordingLinearClient::new(vec![linear_issue(
         "force-repair",
         "SYM-88",
-        "In Progress",
+        "In Review",
         Some(1),
     )]);
     let opencode = ScriptedRunnerLauncher::new(Some(success_handoff(
@@ -1192,7 +1335,7 @@ async fn passing_handoff_merges_pushed_issue_branch_when_base_advanced() {
     let client = RecordingLinearClient::new(vec![linear_issue(
         "stale-base",
         "SYM-89",
-        "In Progress",
+        "In Review",
         Some(1),
     )]);
     let opencode = ScriptedRunnerLauncher::new(Some(success_handoff(
@@ -1394,7 +1537,7 @@ async fn no_code_success_handoff_can_close_without_commit_sha() {
     let client = RecordingLinearClient::new(vec![linear_issue(
         "no-code",
         "SYM-79",
-        "In Progress",
+        "In Review",
         Some(1),
     )]);
     let opencode = ScriptedRunnerLauncher::new(Some(RunnerHandoff {

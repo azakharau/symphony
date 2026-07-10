@@ -85,6 +85,53 @@ pub(super) fn git_closure_evidence_body(
             .map_or_else(|| "none".to_string(), |url| format!("[link]({url})"))
     );
 
+    append_handoff_details(&mut body, handoff);
+
+    body
+}
+
+pub(super) fn implementation_ready_for_review_evidence_body(
+    handoff: &RunnerHandoff,
+    git: &crate::runner::GitClosureEvidence,
+) -> String {
+    let mut body = String::new();
+    let _ = writeln!(body, "## runner Implementation Ready for Review\n");
+    let _ = writeln!(
+        body,
+        "runner completed implementation and pushed the issue branch. Symphony verified the branch is ready for review; review is pending and no canonical merge has been performed.\n"
+    );
+
+    let _ = writeln!(body, "### Result");
+    let _ = writeln!(body, "- Status: In Review (review pending)");
+    let _ = writeln!(body, "- Session: `{}`", handoff.session_id);
+    let _ = writeln!(
+        body,
+        "- Subagents: {}",
+        readable_list(&handoff.subagents, "none reported", 8)
+    );
+
+    let _ = writeln!(body, "\n### Git");
+    let _ = writeln!(body, "- Branch: `{}`", git.branch);
+    let _ = writeln!(
+        body,
+        "- Commit: `{}`",
+        git.head_sha.as_deref().unwrap_or("not reported")
+    );
+    let _ = writeln!(body, "- Canonical merge: pending review");
+    let _ = writeln!(
+        body,
+        "- PR: {}",
+        git.pr_url
+            .as_deref()
+            .map_or_else(|| "none".to_string(), |url| format!("[link]({url})"))
+    );
+
+    append_handoff_details(&mut body, handoff);
+
+    body
+}
+
+fn append_handoff_details(body: &mut String, handoff: &RunnerHandoff) {
     let _ = writeln!(body, "\n### Validation");
     if handoff.eval_results.is_empty() {
         let _ = writeln!(body, "- No validation suites were reported.");
@@ -119,8 +166,6 @@ pub(super) fn git_closure_evidence_body(
             let _ = writeln!(body, "- ...and {remaining} more");
         }
     }
-
-    body
 }
 
 fn readable_eval(eval: &RunnerEvalResult) -> String {

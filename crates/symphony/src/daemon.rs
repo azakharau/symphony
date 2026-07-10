@@ -591,6 +591,85 @@ async fn reconcile_project(
                 }
                 store.upsert_issue(&record).await?;
             }
+            Some(WorkflowStage::InReview) => {
+                debug!(
+                    project_id = %project.id,
+                    issue = %issue.identifier,
+                    "checking in-review runner handoff"
+                );
+                let existing = store.issue(&project.id, &issue.id).await?;
+                let mut record = issue_record(
+                    project,
+                    &issue,
+                    LifecycleStage::Running,
+                    None,
+                    CleanupStatus::Clean,
+                );
+                if let Some(existing) = &existing {
+                    record.git_ref.clone_from(&existing.git_ref);
+                    record.cleanup_status = existing.cleanup_status;
+                }
+                let labels_hash = labels_hash(&issue.labels);
+                let blockers_hash = blockers_hash(&issue);
+                store
+                    .update_latest_stage_invocation_observation(
+                        &project.id,
+                        &issue.id,
+                        issue.updated_at.as_deref(),
+                        &labels_hash,
+                        &blockers_hash,
+                    )
+                    .await?;
+                let latest_invocation = store
+                    .latest_stage_invocation_for_issue(&project.id, &issue.id)
+                    .await?;
+                let has_running_session =
+                    latest_running_session_for_issue(store, &project.id, &issue.id)
+                        .await?
+                        .is_some();
+                let latest_invocation_closed = latest_invocation
+                    .as_ref()
+                    .is_some_and(|invocation| !stage_invocation_is_open(invocation));
+                if !has_running_session || latest_invocation_closed {
+                    info!(
+                        project_id = %project.id,
+                        issue = %issue.identifier,
+                        reason = if has_running_session { "stage_reentered" } else { "missing_active_session" },
+                        "In Review issue queued for stage-entry dispatch"
+                    );
+                    mark_issue_sessions_stage_reentered(store, project, &issue).await?;
+                    let mut queued = issue_record(
+                        project,
+                        &issue,
+                        LifecycleStage::Queued,
+                        None,
+                        CleanupStatus::Clean,
+                    );
+                    if let Some(existing) = &existing {
+                        queued.git_ref.clone_from(&existing.git_ref);
+                        queued.cleanup_status = existing.cleanup_status;
+                    }
+                    store.upsert_issue(&queued).await?;
+                    stage_entries.push(DispatchCandidate::StageEntry(issue));
+                    continue;
+                }
+                if process_in_progress_handoff(
+                    project,
+                    self_defect_project,
+                    runner_archive,
+                    store,
+                    linear,
+                    runner,
+                    &issue,
+                    existing,
+                )
+                .await?
+                {
+                    continue;
+                }
+                resume_stale_runner_session(project, store, runner, &issue).await?;
+                store.upsert_issue(&record).await?;
+            }
             Some(WorkflowStage::Todo) => {
                 let existing = store.issue(&project.id, &issue.id).await?;
                 if has_unanswered_owner_input {

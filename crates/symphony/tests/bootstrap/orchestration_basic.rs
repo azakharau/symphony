@@ -554,6 +554,43 @@ async fn orchestration_dispatches_without_recall_workspace_root() {
 }
 
 #[tokio::test]
+async fn orchestration_dispatches_in_review_with_review_agent_route() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("runtime.sqlite3");
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let store = SqliteStore::open(&db_path).await.expect("open sqlite");
+    store.migrate().await.expect("migrate");
+    store.reconcile_projects(&config).await.expect("projects");
+    let mut issue = linear_issue("review-work", "SYM-252", "In Review", Some(1));
+    issue.labels.push("rust".into());
+    let client = RecordingLinearClient::new(vec![issue]);
+    let opencode = ResumeRecordingRunnerLauncher::new(4242);
+
+    daemon::run_once_with_clients(&config, &store, &client, &opencode)
+        .await
+        .expect("dispatch review");
+
+    assert_eq!(opencode.launches(), vec!["SYM-252"]);
+    assert!(client.transitions().is_empty());
+    let session = store
+        .runner_sessions_for_issue("symphony", "review-work")
+        .await
+        .expect("query sessions")
+        .pop()
+        .expect("review session");
+    assert_eq!(session.agent, "rust-reviewer");
+    assert_eq!(session.active_agent.as_deref(), Some("rust-reviewer"));
+    assert_eq!(session.agent_routing_label.as_deref(), Some("rust"));
+    let invocation = store
+        .latest_stage_invocation_for_issue("symphony", "review-work")
+        .await
+        .expect("query invocation")
+        .expect("review invocation");
+    assert_eq!(invocation.selected_agent, "rust-reviewer");
+    assert_eq!(invocation.agent_routing_label.as_deref(), Some("rust"));
+}
+
+#[tokio::test]
 async fn orchestration_dispatches_omp_issue_without_recall_service_context() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");

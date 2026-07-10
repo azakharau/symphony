@@ -42,7 +42,7 @@ pub(crate) use lifecycle::terminate_process_tree;
 pub use omp::{OmpAcpTelemetry, classify_omp_acp_failure_kind};
 pub use omp_metrics::{read_omp_session_tree_activity, read_omp_session_tree_metrics};
 use prompt::{
-    build_issue_prompt, commit_policy_text, delegated_subagent_contract_text,
+    build_stage_invocation_prompt, commit_policy_text, delegated_subagent_contract_text,
     mcp_tool_loop_guard_text, validation_policy_text,
 };
 pub use session_metrics::{
@@ -1257,6 +1257,7 @@ pub fn build_acp_launch_spec_for_stage(
     }
     let branch_name = issue_branch_name(issue);
     let (agent, _, _) = workflow_agent_route_for_issue(project, issue, stage);
+    let prompt = build_stage_invocation_prompt(project, issue, &branch_name, stage, &agent);
     RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
@@ -1273,7 +1274,7 @@ pub fn build_acp_launch_spec_for_stage(
         agent,
         model: project.runner.model.clone(),
         effort: project.runner.effort.clone(),
-        prompt: build_issue_prompt(project, issue, &branch_name),
+        prompt,
         permission_policy: project.runner.permission_policy.clone(),
     }
 }
@@ -1299,6 +1300,7 @@ pub fn build_omp_acp_launch_spec_for_stage(
         OhMyPiAcpCwdPolicy::ProjectRepo => project.repo_path.clone(),
     };
     let (agent, _, _) = workflow_agent_route_for_issue(project, issue, stage);
+    let prompt = build_stage_invocation_prompt(project, issue, &branch_name, stage, &agent);
     RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::OmpAcp,
         provider_id: Some(provider.id.clone()),
@@ -1321,7 +1323,7 @@ pub fn build_omp_acp_launch_spec_for_stage(
             .effort
             .clone()
             .or_else(|| project.runner.effort.clone()),
-        prompt: build_issue_prompt(project, issue, &branch_name),
+        prompt,
         permission_policy: project.runner.permission_policy.clone(),
     }
 }

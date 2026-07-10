@@ -247,11 +247,17 @@ async fn dashboard_issue_detail_embeds_live_opencode_activity_from_sqlite() {
 }
 
 #[tokio::test]
-async fn acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_issue_prompt() {
+async fn acp_launch_spec_uses_stdio_command_and_implementation_stage_packet() {
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
     let mut issue = linear_issue("issue-27", "SYM-27", "Todo", Some(1))
         .with_description("Implement the runner ACP lifecycle runner with stage telemetry.");
+    issue.labels = vec!["rust".into(), "review-required".into()];
+    issue.blocked_by = vec![LinearBlocker {
+        id: Some("blocker-1".into()),
+        identifier: Some("SYM-26".into()),
+        state: Some("Done".into()),
+    }];
     issue.upstream_context.push(LinearUpstreamContext {
         id: "upstream-55".into(),
         identifier: "NER-55".into(),
@@ -275,7 +281,130 @@ async fn acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_issue_pro
         PathBuf::from("/home/agent/.symphony/workspaces/opencode/symphony/SYM-27")
     );
     assert_eq!(spec.recall_workspace_root, None);
+    assert_stage_packet_snapshot(
+        &spec.prompt,
+        concat!(
+            "Runner stage invocation packet\n\n",
+            "Issue: SYM-27 — Test issue\n\n",
+            "Project: symphony\n",
+            "Repository: /home/agent/proj/symphony\n",
+            "Isolated worktree: /home/agent/.symphony/workspaces/opencode/symphony/SYM-27\n",
+            "Eval default suite: symphony-smoke (fallback metadata, not a blanket workspace gate)\n",
+            "Stage: in_progress\n",
+            "Selected agent: rust-engineer\n",
+            "Linear state: Todo\n",
+            "URL: none\n\n",
+            "Labels:\n",
+            "- rust\n",
+            "- review-required\n\n",
+            "Blockers:\n",
+            "- identifier: SYM-26; state: Done; id: blocker-1\n\n",
+            "Upstream accepted context:\n",
+            "- NER-55 (`Done`): Canon source authority map\n",
+            "  URL: https://linear.example/NER-55\n",
+            "  Branch: feature/ner-55-canon-source-authority-map\n",
+            "  Accepted artifacts: `docs/canon-source-authority-map.md`\n",
+            "  Latest handoff excerpt:\n",
+            "    ## runner Handoff Accepted\n",
+            "    Committed 61f216d docs: add canon source authority map\n",
+            "  Required use: treat this as accepted upstream input; inspect accepted artifacts and git context before rediscovering or replanning this surface.\n\n",
+            "Allowed transitions:\n",
+            "- success: write `\"stop_reason\": \"accepted\"`; Symphony may transition `in_progress` to `in_review` (`In Review`).\n",
+            "- validation failure: write `\"stop_reason\": {\"type\":\"eval_failed\",\"failure_fingerprint\":\"stable-id\"}`; Symphony keeps or relaunches `in_progress` (`In Progress`) as the runnable repair stage.\n",
+            "- provider/runtime blocker: write `\"stop_reason\": {\"type\":\"provider_blocker\",\"message\":\"...\"}`; Symphony parks the issue with provider-blocker evidence; no Linear stage transition is intended, and no owner-input transition is required.\n",
+            "- owner question: write `\"stop_reason\": {\"type\":\"owner_question\",\"question\":\"...\"}`; Symphony may transition the issue to `need_owner_input` (`Need Owner Input`).\n\n",
+            "Required result schema:\n",
+            "After validation, commit, and push are complete, write the structured Symphony handoff JSON to:\n",
+            "/home/agent/.symphony/workspaces/opencode/symphony/SYM-27/.symphony/runner-handoff.json\n\n",
+            "The handoff file must be valid JSON with durable execution evidence, not a Markdown result packet:\n",
+            "Use the sidecar JSON contract below for /home/agent/.symphony/workspaces/opencode/symphony/SYM-27/.symphony/runner-handoff.json; keep chat summaries separate from this file.\n",
+            "Symphony accepts runner orchestrator field names such as status, schema_version, subagents_used, object eval_results, and git.pushed, then normalizes them before strict validation.\n",
+            "{\n",
+            "\"session_id\": \"active runner session id supplied by the runtime adapter\",\n",
+            "\"lifecycle_stages\": [\"starting\", \"running\", \"eval\", \"review\", \"handoff\", \"completed\"],\n",
+            "\"subagents_used\": [\"agent-name:session-id\"],\n",
+            "\"eval_results\": {\"outcome\": \"accept\", \"details\": \"command outcomes\", \"commands\": [{\"command\": \"git diff --check\", \"status\": \"pass\"}]},\n",
+            "\"changed_files\": [\"path:start-end\"],\n",
+            "\"git\": {\"branch\": \"feature/sym-27\", \"head_sha\": \"commit-sha\", \"worktree_path\": \"/home/agent/.symphony/workspaces/opencode/symphony/SYM-27\", \"pushed\": true},\n",
+            "\"risks\": [\"remaining risk or omitted validation\"],\n",
+            "\"stop_reason\": \"accepted\"\n",
+            "}\n",
+            "Stop reasons must match the explicit allowed transitions above; do not infer transitions from prose.\n",
+            "Do not write only prose fields such as result, summary, tests_run, or next_action without the structured git/eval/stop_reason fields above.\n\n",
+            "Full issue spec:\n",
+            "Implement the runner ACP lifecycle runner with stage telemetry.\n"
+        ),
+    );
     assert!(spec.prompt.contains("SYM-27"), "{}", spec.prompt);
+    assert!(
+        spec.prompt.contains("Runner stage invocation packet"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains("Stage: in_progress"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains("Selected agent: rust-engineer"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains("Labels:\n- rust\n- review-required"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt
+            .contains("Blockers:\n- identifier: SYM-26; state: Done; id: blocker-1"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains("Allowed transitions:"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "success: write `\"stop_reason\": \"accepted\"`; Symphony may transition `in_progress` to `in_review` (`In Review`)"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "validation failure: write `\"stop_reason\": {\"type\":\"eval_failed\",\"failure_fingerprint\":\"stable-id\"}`; Symphony keeps or relaunches `in_progress` (`In Progress`) as the runnable repair stage"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "provider/runtime blocker: write `\"stop_reason\": {\"type\":\"provider_blocker\",\"message\":\"...\"}`; Symphony parks the issue with provider-blocker evidence; no Linear stage transition is intended, and no owner-input transition is required"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains("Required result schema:"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt
+            .contains("active runner session id supplied by the runtime adapter"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt
+            .contains("Stop reasons must match the explicit allowed transitions above"),
+        "{}",
+        spec.prompt
+    );
     assert!(!spec.prompt.contains("Run runner ACP"), "{}", spec.prompt);
     assert!(
         !spec.prompt.contains("runner ACP session id"),
@@ -341,7 +470,7 @@ async fn acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_issue_pro
     );
     assert!(
         spec.prompt
-            .contains("The parent ACP session owns final validation, git closure"),
+            .contains("The parent runner session owns final validation, git closure"),
         "{}",
         spec.prompt
     );
@@ -497,6 +626,186 @@ async fn acp_launch_spec_uses_stdio_command_isolated_worktree_and_full_issue_pro
         "{}",
         spec.prompt
     );
+}
+
+#[tokio::test]
+async fn acp_launch_spec_uses_review_stage_packet_with_review_transitions() {
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let project = config.project("symphony").expect("project");
+    let mut issue = linear_issue("issue-28", "SYM-28", "In Review", Some(1))
+        .with_description("Review the accepted implementation branch.");
+    issue.labels = vec!["rust".into()];
+    issue.upstream_context.push(LinearUpstreamContext {
+        id: "upstream-27".into(),
+        identifier: "SYM-27".into(),
+        title: "Implementation ready for review".into(),
+        state: "In Review".into(),
+        url: None,
+        branch_name: Some("feature/sym-27-runner-stage-packet".into()),
+        accepted_artifacts: vec!["crates/symphony/src/runner/prompt.rs".into()],
+        handoff_summary: Some("Implementation handoff accepted for review".into()),
+    });
+
+    let spec = runner::build_acp_launch_spec_for_stage(project, &issue, WorkflowStage::InReview);
+
+    assert_eq!(spec.agent, "rust-reviewer");
+    assert_stage_packet_snapshot(
+        &spec.prompt,
+        concat!(
+            "Runner stage invocation packet\n\n",
+            "Issue: SYM-28 — Test issue\n\n",
+            "Project: symphony\n",
+            "Repository: /home/agent/proj/symphony\n",
+            "Isolated worktree: /home/agent/.symphony/workspaces/opencode/symphony/SYM-28\n",
+            "Eval default suite: symphony-smoke (fallback metadata, not a blanket workspace gate)\n",
+            "Stage: in_review\n",
+            "Selected agent: rust-reviewer\n",
+            "Linear state: In Review\n",
+            "URL: none\n\n",
+            "Labels:\n",
+            "- rust\n\n",
+            "Blockers:\n",
+            "- none\n\n",
+            "Upstream accepted context:\n",
+            "- SYM-27 (`In Review`): Implementation ready for review\n",
+            "  Branch: feature/sym-27-runner-stage-packet\n",
+            "  Accepted artifacts: `crates/symphony/src/runner/prompt.rs`\n",
+            "  Latest handoff excerpt:\n",
+            "    Implementation handoff accepted for review\n",
+            "  Required use: treat this as accepted upstream input; inspect accepted artifacts and git context before rediscovering or replanning this surface.\n\n",
+            "Allowed transitions:\n",
+            "- success: write `\"stop_reason\": \"accepted\"`; Symphony may transition `in_review` to `done` (`Done`).\n",
+            "- validation failure: write `\"stop_reason\": {\"type\":\"eval_failed\",\"failure_fingerprint\":\"stable-id\"}`; Symphony returns `in_review` to `in_progress` (`In Progress`) for repair.\n",
+            "- provider/runtime blocker: write `\"stop_reason\": {\"type\":\"provider_blocker\",\"message\":\"...\"}`; Symphony parks the issue with provider-blocker evidence; no Linear stage transition is intended, and no owner-input transition is required.\n",
+            "- owner question: write `\"stop_reason\": {\"type\":\"owner_question\",\"question\":\"...\"}`; Symphony may transition the issue to `need_owner_input` (`Need Owner Input`).\n\n",
+            "Required result schema:\n",
+            "After validation, commit, and push are complete, write the structured Symphony handoff JSON to:\n",
+            "/home/agent/.symphony/workspaces/opencode/symphony/SYM-28/.symphony/runner-handoff.json\n\n",
+            "The handoff file must be valid JSON with durable execution evidence, not a Markdown result packet:\n",
+            "Use the sidecar JSON contract below for /home/agent/.symphony/workspaces/opencode/symphony/SYM-28/.symphony/runner-handoff.json; keep chat summaries separate from this file.\n",
+            "Symphony accepts runner orchestrator field names such as status, schema_version, subagents_used, object eval_results, and git.pushed, then normalizes them before strict validation.\n",
+            "{\n",
+            "\"session_id\": \"active runner session id supplied by the runtime adapter\",\n",
+            "\"lifecycle_stages\": [\"starting\", \"running\", \"eval\", \"review\", \"handoff\", \"completed\"],\n",
+            "\"subagents_used\": [\"agent-name:session-id\"],\n",
+            "\"eval_results\": {\"outcome\": \"accept\", \"details\": \"command outcomes\", \"commands\": [{\"command\": \"git diff --check\", \"status\": \"pass\"}]},\n",
+            "\"changed_files\": [\"path:start-end\"],\n",
+            "\"git\": {\"branch\": \"feature/sym-28\", \"head_sha\": \"commit-sha\", \"worktree_path\": \"/home/agent/.symphony/workspaces/opencode/symphony/SYM-28\", \"pushed\": true},\n",
+            "\"risks\": [\"remaining risk or omitted validation\"],\n",
+            "\"stop_reason\": \"accepted\"\n",
+            "}\n",
+            "Stop reasons must match the explicit allowed transitions above; do not infer transitions from prose.\n",
+            "Do not write only prose fields such as result, summary, tests_run, or next_action without the structured git/eval/stop_reason fields above.\n\n",
+            "Full issue spec:\n",
+            "Review the accepted implementation branch.\n"
+        ),
+    );
+    assert!(
+        spec.prompt.contains("Runner stage invocation packet"),
+        "{}",
+        spec.prompt
+    );
+    assert!(spec.prompt.contains("Stage: in_review"), "{}", spec.prompt);
+    assert!(
+        spec.prompt.contains("Selected agent: rust-reviewer"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "success: write `\"stop_reason\": \"accepted\"`; Symphony may transition `in_review` to `done` (`Done`)"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "validation failure: write `\"stop_reason\": {\"type\":\"eval_failed\",\"failure_fingerprint\":\"stable-id\"}`; Symphony returns `in_review` to `in_progress` (`In Progress`) for repair"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains(
+            "provider/runtime blocker: write `\"stop_reason\": {\"type\":\"provider_blocker\",\"message\":\"...\"}`; Symphony parks the issue with provider-blocker evidence; no Linear stage transition is intended, and no owner-input transition is required"
+        ),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt.contains("owner_question")
+            && spec.prompt.contains("need_owner_input")
+            && spec.prompt.contains("Need Owner Input"),
+        "{}",
+        spec.prompt
+    );
+    assert!(
+        spec.prompt
+            .contains("Stop reasons must match the explicit allowed transitions above"),
+        "{}",
+        spec.prompt
+    );
+    assert!(!spec.prompt.contains("ACP session"), "{}", spec.prompt);
+}
+
+#[test]
+fn core_runner_source_does_not_leak_opencode_specific_wording() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut leaks = Vec::new();
+    collect_provider_wording_leaks(&root, &root, &mut leaks);
+
+    assert!(
+        leaks.is_empty(),
+        "OpenCode-specific wording leaked outside adapter/runtime boundaries: {leaks:#?}"
+    );
+}
+
+fn collect_provider_wording_leaks(root: &Path, path: &Path, leaks: &mut Vec<String>) {
+    for entry in fs::read_dir(path).expect("read source directory") {
+        let entry = entry.expect("read source entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_provider_wording_leaks(root, &path, leaks);
+            continue;
+        }
+        if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+            continue;
+        }
+        let relative = path.strip_prefix(root).expect("source prefix");
+        if provider_wording_allowed(relative) {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("read source file");
+        for (line_index, line) in source.lines().enumerate() {
+            if line.contains("OpenCode") || line.contains("opencode") {
+                leaks.push(format!("{}:{}:{line}", relative.display(), line_index + 1));
+            }
+        }
+    }
+}
+
+fn assert_stage_packet_snapshot(prompt: &str, expected: &str) {
+    assert_eq!(stage_packet_contract_snapshot(prompt), expected);
+}
+
+fn stage_packet_contract_snapshot(prompt: &str) -> String {
+    let stage_contract = prompt
+        .split_once("\n\nMCP tool-schema loop guard:\n")
+        .expect("stage packet includes MCP guard after transition contract")
+        .0;
+    let result_schema = prompt
+        .split_once("Required result schema:\n")
+        .expect("stage packet includes required result schema")
+        .1;
+
+    format!("{stage_contract}\n\nRequired result schema:\n{result_schema}")
+}
+
+fn provider_wording_allowed(path: &Path) -> bool {
+    matches!(
+        path.to_str(),
+        Some("runner/adapter.rs" | "runner/acp.rs" | "runner/omp.rs" | "runner/omp_metrics.rs")
+    )
 }
 
 #[tokio::test]

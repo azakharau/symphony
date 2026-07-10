@@ -1,11 +1,16 @@
-use crate::{config::ProjectConfig, linear::LinearIssue};
+use crate::{
+    config::{ProjectConfig, WorkflowStage},
+    linear::{LinearBlocker, LinearIssue},
+};
 
 use super::worktree::handoff_sidecar_path;
 
-pub(super) fn build_issue_prompt(
+pub(super) fn build_stage_invocation_prompt(
     project: &ProjectConfig,
     issue: &LinearIssue,
     branch_name: &str,
+    stage: WorkflowStage,
+    selected_agent: &str,
 ) -> String {
     let description = issue
         .description
@@ -13,15 +18,24 @@ pub(super) fn build_issue_prompt(
         .unwrap_or("No description provided.");
     let worktree = project.branch.worktree_root.join(&issue.identifier);
     format!(
-        "Issue {identifier}: {title}\n\n\
+        "Runner stage invocation packet\n\n\
+         Issue: {identifier} — {title}\n\n\
          Project: {project_id}\n\
          Repository: {repo_path}\n\
          Isolated worktree: {worktree}\n\
          Eval default suite: {eval_suite} (fallback metadata, not a blanket workspace gate)\n\
+         Stage: {stage}\n\
+         Selected agent: {selected_agent}\n\
          Linear state: {state}\n\
          URL: {url}\n\n\
+         Labels:\n\
+         {labels}\n\n\
+         Blockers:\n\
+         {blockers}\n\n\
          Upstream accepted context:\n\
          {upstream_context}\n\n\
+         Allowed transitions:\n\
+         {allowed_transitions}\n\n\
          MCP tool-schema loop guard:\n\
          {mcp_tool_loop_guard}\n\n\
          Delegated review/evaluator subagent contract:\n\
@@ -32,13 +46,14 @@ pub(super) fn build_issue_prompt(
          {triage_policy}\n\n\
          Commit policy for successful handoff:\n\
          {commit_policy}\n\n\
+         Required result schema:\n\
          After validation, commit, and push are complete, write the structured Symphony handoff JSON to:\n\
          {handoff_path}\n\n\
          The handoff file must be valid JSON with durable execution evidence, not a Markdown result packet:\n\
          Use the sidecar JSON contract below for {handoff_path}; keep chat summaries separate from this file.\n\
          Symphony accepts runner orchestrator field names such as status, schema_version, subagents_used, object eval_results, and git.pushed, then normalizes them before strict validation.\n\
          {{\n\
-           \"session_id\": \"{session_id}\",\n\
+           \"session_id\": \"active runner session id supplied by the runtime adapter\",\n\
            \"lifecycle_stages\": [\"starting\", \"running\", \"eval\", \"review\", \"handoff\", \"completed\"],\n\
            \"subagents_used\": [\"agent-name:session-id\"],\n\
            \"eval_results\": {{\"outcome\": \"accept\", \"details\": \"command outcomes\", \"commands\": [{{\"command\": \"git diff --check\", \"status\": \"pass\"}}]}},\n\
@@ -47,26 +62,103 @@ pub(super) fn build_issue_prompt(
            \"risks\": [\"remaining risk or omitted validation\"],\n\
            \"stop_reason\": \"accepted\"\n\
          }}\n\
-         For eval failures use \"stop_reason\": {{\"type\":\"eval_failed\",\"failure_fingerprint\":\"stable-id\"}}.\n\
-         For provider or owner blockers use {{\"type\":\"provider_blocker\",\"message\":\"...\"}} or {{\"type\":\"owner_question\",\"question\":\"...\"}}.\n\
+         Stop reasons must match the explicit allowed transitions above; do not infer transitions from prose.\n\
          Do not write only prose fields such as result, summary, tests_run, or next_action without the structured git/eval/stop_reason fields above.\n\n\
          Full issue spec:\n{description}\n",
         identifier = issue.identifier,
-        session_id = "the ACP session id",
         title = issue.title,
         project_id = project.id,
         repo_path = project.repo_path.display(),
         worktree = worktree.display(),
         handoff_path = handoff_sidecar_path(&worktree).display(),
         eval_suite = project.eval.default_suite,
+        stage = stage.as_str(),
+        selected_agent = selected_agent,
         state = issue.state,
         url = issue.url.as_deref().unwrap_or("none"),
+        labels = labels_text(issue),
+        blockers = blockers_text(issue),
         upstream_context = upstream_context_text(issue),
+        allowed_transitions = allowed_transitions_text(project, stage),
         validation_policy = validation_policy_text(),
         mcp_tool_loop_guard = mcp_tool_loop_guard_text(),
         delegated_subagent_contract = delegated_subagent_contract_text(),
         triage_policy = triage_policy_text(),
         commit_policy = commit_policy_text(),
+    )
+}
+
+fn labels_text(issue: &LinearIssue) -> String {
+    if issue.labels.is_empty() {
+        return "- none".to_owned();
+    }
+
+    issue
+        .labels
+        .iter()
+        .map(|label| format!("- {label}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn blockers_text(issue: &LinearIssue) -> String {
+    if issue.blocked_by.is_empty() {
+        return "- none".to_owned();
+    }
+
+    issue
+        .blocked_by
+        .iter()
+        .map(blocker_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn blocker_text(blocker: &LinearBlocker) -> String {
+    format!(
+        "- identifier: {identifier}; state: {state}; id: {id}",
+        identifier = blocker.identifier.as_deref().unwrap_or("none"),
+        state = blocker.state.as_deref().unwrap_or("none"),
+        id = blocker.id.as_deref().unwrap_or("none")
+    )
+}
+
+fn allowed_transitions_text(project: &ProjectConfig, stage: WorkflowStage) -> String {
+    let success_target = match stage {
+        WorkflowStage::InProgress => WorkflowStage::InReview,
+        WorkflowStage::InReview => WorkflowStage::Done,
+        _ => stage,
+    };
+    let in_progress = WorkflowStage::InProgress;
+    let eval_failure = match stage {
+        WorkflowStage::InProgress => format!(
+            "Symphony keeps or relaunches `{}` (`{}`) as the runnable repair stage",
+            in_progress.as_str(),
+            project.workflow.required_linear_state(in_progress)
+        ),
+        WorkflowStage::InReview => format!(
+            "Symphony returns `in_review` to `{}` (`{}`) for repair",
+            in_progress.as_str(),
+            project.workflow.required_linear_state(in_progress)
+        ),
+        _ => format!(
+            "Symphony uses the configured `{}` (`{}`) repair stage",
+            in_progress.as_str(),
+            project.workflow.required_linear_state(in_progress)
+        ),
+    };
+    format!(
+        "- success: write `\"stop_reason\": \"accepted\"`; Symphony may transition `{stage}` to `{success_target}` (`{success_state}`).\n\
+         - validation failure: write `\"stop_reason\": {{\"type\":\"eval_failed\",\"failure_fingerprint\":\"stable-id\"}}`; {eval_failure}.\n\
+         - provider/runtime blocker: write `\"stop_reason\": {{\"type\":\"provider_blocker\",\"message\":\"...\"}}`; Symphony parks the issue with provider-blocker evidence; no Linear stage transition is intended, and no owner-input transition is required.\n\
+         - owner question: write `\"stop_reason\": {{\"type\":\"owner_question\",\"question\":\"...\"}}`; Symphony may transition the issue to `{owner_input}` (`{owner_input_state}`).",
+        stage = stage.as_str(),
+        success_target = success_target.as_str(),
+        success_state = project.workflow.required_linear_state(success_target),
+        owner_input = WorkflowStage::NeedOwnerInput.as_str(),
+        owner_input_state = project
+            .workflow
+            .required_linear_state(WorkflowStage::NeedOwnerInput),
     )
 }
 
@@ -178,8 +270,8 @@ pub(super) const fn mcp_tool_loop_guard_text() -> &'static str {
 
 pub(super) const fn delegated_subagent_contract_text() -> &'static str {
     "- Delegated reviewer/evaluator subagents are read-only unless the issue spec explicitly says otherwise.\n\
-     - Delegated reviewer/evaluator subagents should inspect files/tests/evidence and return a concise structured verdict to the parent ACP session.\n\
-     - The parent ACP session owns final validation, git closure, and structured handoff sidecar writeback.\n\
+     - Delegated reviewer/evaluator subagents should inspect files/tests/evidence and return a concise structured verdict to the parent runner session.\n\
+     - The parent runner session owns final validation, git closure, and structured handoff sidecar writeback.\n\
      - If a delegated subagent reports a tool schema/version error, do not retry the same failing mutation from another delegated subagent; continue with a text verdict and parent-owned closure."
 }
 

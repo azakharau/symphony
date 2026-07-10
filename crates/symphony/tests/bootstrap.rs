@@ -11,7 +11,7 @@ use std::{
 use symphony::{
     api::{RuntimeDashboardApi, RuntimeReadModel},
     cli,
-    config::RootConfig,
+    config::{RootConfig, WorkflowStage},
     daemon,
     linear::{
         LinearBlocker, LinearClient, LinearClientError, LinearGraphqlClient,

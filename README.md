@@ -21,12 +21,12 @@ The Rust workspace contains:
 - runner-only ACP launch configuration with nd-JSON stdio, `session/set_config_option` model and
   effort selection, and per-issue git worktrees.
 - SQLite runtime state bootstrap and restart-safe state queries.
-- Issue orchestration for `Todo`, `In Progress`, `Need Owner Input`, backlog, blockers, terminal
-  reconciliation, eval repair loops, and git-closure handoffs.
+- Issue orchestration for `Todo`, `In Progress`, `In Review`, `Need Owner Input`, backlog,
+  blockers, terminal reconciliation, eval repair loops, and git-closure handoffs.
 - Dashboard/API read models for aggregate, project, and issue drilldown views.
 
-Symphony parks legacy steward states (`Preparing`, `In Review`, `RCA Required`) instead of treating
-them as executable runtime aliases.
+Symphony treats `In Review` as the executable review stage and parks only legacy steward states
+(`Preparing`, `RCA Required`) instead of treating them as executable runtime aliases.
 
 ## Configuration
 

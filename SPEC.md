@@ -72,14 +72,17 @@ Symphony uses this executable lifecycle:
 - `Todo`: queued executable work. Nonterminal blockers keep the issue blocked; otherwise the runtime
   moves eligible work to `In Progress` when capacity is available.
 - `In Progress`: OpenCode-owned implementation session. Symphony records the ACP session, observes
-  handoff evidence, and keeps repair loops in this state until closure or a typed blocker appears.
+  handoff evidence, and keeps repair loops in this state until closure, review handoff, or a typed
+  blocker appears.
+- `In Review`: executable review stage for implementation handoff evidence before deterministic git
+  closure and terminal reconciliation.
 - `Need Owner Input`: parked state only for real owner/product/permission questions that require a
   human decision before OpenCode can continue.
 - Terminal states: `Done`, `Canceled`, `Cancelled`, `Closed`, and `Duplicate`.
 
-Legacy steward states such as `Preparing`, `In Review`, and `RCA Required` are not executable runtime
-states in Symphony. If the Rust runtime sees them in the active queue, it parks the issue with typed
-evidence instead of preserving hidden compatibility aliases.
+Legacy steward states such as `Preparing` and `RCA Required` are not executable runtime states in
+Symphony. If the Rust runtime sees them in the active queue, it parks the issue with typed evidence
+instead of preserving hidden compatibility aliases.
 
 Runtime triage keeps owner questions separate from system failures and self-reference bugs:
 

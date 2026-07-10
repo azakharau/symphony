@@ -108,6 +108,37 @@ max_identical_failure_fingerprints = 2
 max_sessions = 1
 
 [[projects]]
+id = "neryva"
+name = "Neryva"
+enabled = true
+workflow_path = "symphony.workflow.toml"
+repo_path = "/home/agent/proj/neryva"
+
+[projects.branch]
+base = "main"
+worktree_root = "/home/agent/.symphony/workspaces/opencode/neryva"
+
+[projects.linear]
+team_key = "NER"
+project_id = "d6c28ceb-b35a-4a0a-8ffb-03cbb4228e9e"
+
+[projects.runner]
+command = "/usr/local/bin/opencode"
+args = ["acp"]
+agent = "build"
+model = "openai/gpt-5.5"
+effort = "high"
+permission_policy = "reject"
+provider_mode = "acp"
+
+[projects.eval]
+default_suite = "neryva-validation"
+max_identical_failure_fingerprints = 2
+
+[projects.concurrency]
+max_sessions = 1
+
+[[projects]]
 id = "nervure"
 name = "Nervure"
 enabled = true

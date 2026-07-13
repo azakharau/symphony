@@ -15,13 +15,16 @@ pub struct RootConfig {
     pub server: Option<ServerConfig>,
     #[serde(default)]
     pub cleanup: CleanupConfig,
+    #[serde(default)]
+    pub workflow: ProjectWorkflow,
     pub runner_archive: Option<RunnerArchiveConfig>,
     projects: Vec<ProjectConfig>,
 }
 
 impl RootConfig {
     pub fn from_toml_str(input: &str) -> Result<Self, ConfigError> {
-        let config: Self = toml::from_str(input)?;
+        let mut config: Self = toml::from_str(input)?;
+        config.apply_root_workflow_defaults()?;
         config.validate()?;
         Ok(config)
     }
@@ -40,23 +43,32 @@ impl RootConfig {
 
     fn load_project_workflows(&mut self) -> Result<(), ConfigError> {
         for project in &mut self.projects {
+            let mut workflow = self.workflow.clone();
             let path = project.resolved_workflow_path();
-            let input = fs::read_to_string(&path).map_err(|source| ConfigError::WorkflowIo {
-                project_id: project.id.clone(),
-                path: path.clone(),
-                source,
-            })?;
-            let workflow = toml::from_str::<ProjectWorkflow>(&input).map_err(|source| {
-                ConfigError::WorkflowParse {
-                    project_id: project.id.clone(),
-                    path: path.clone(),
-                    source,
-                }
-            })?;
+            if !path.exists() {
+                workflow.validate(&project.id)?;
+                project.workflow = workflow;
+                continue;
+            }
+            let workflow_override = load_workflow_override_file(&project.id, &path)?;
+            workflow.apply_override(workflow_override);
             workflow.validate(&project.id)?;
             project.workflow = workflow;
         }
         Ok(())
+    }
+
+    fn apply_root_workflow_defaults(&mut self) -> Result<(), ConfigError> {
+        for project in &mut self.projects {
+            let workflow = self.workflow.clone();
+            workflow.validate(&project.id)?;
+            project.workflow = workflow;
+        }
+        Ok(())
+    }
+
+    fn validate_root_workflow(&self) -> Result<(), ConfigError> {
+        self.workflow.validate("root")
     }
 
     pub fn projects(&self) -> &[ProjectConfig] {
@@ -79,6 +91,7 @@ impl RootConfig {
         if self.projects.is_empty() {
             return Err(ConfigError::Validation("projects must not be empty".into()));
         }
+        self.validate_root_workflow()?;
         self.cleanup.validate()?;
         if let Some(storage) = &self.runner_archive {
             storage.validate()?;
@@ -234,6 +247,7 @@ pub struct ProjectConfig {
     pub id: String,
     pub name: String,
     pub enabled: bool,
+    #[serde(default = "default_workflow_path")]
     pub workflow_path: PathBuf,
     pub repo_path: PathBuf,
     pub branch: BranchPolicy,
@@ -255,6 +269,10 @@ impl ProjectConfig {
             self.repo_path.join(&self.workflow_path)
         }
     }
+}
+
+fn default_workflow_path() -> PathBuf {
+    PathBuf::from("workflow.toml")
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -463,6 +481,24 @@ impl Default for ProjectWorkflow {
 }
 
 impl ProjectWorkflow {
+    fn apply_override(&mut self, workflow_override: ProjectWorkflowOverride) {
+        if let Some(states) = workflow_override.states {
+            self.states.apply_override(states);
+        }
+        if let Some(processed_states) = workflow_override.processed_states {
+            self.processed_states = processed_states;
+        }
+        if let Some(agents) = workflow_override.agents {
+            self.agents.apply_override(agents);
+        }
+        if let Some(owner_input) = workflow_override.owner_input {
+            self.owner_input.apply_override(owner_input);
+        }
+        if let Some(self_defects) = workflow_override.self_defects {
+            self.self_defects.apply_override(self_defects);
+        }
+    }
+
     fn validate(&self, project_id: &str) -> Result<(), ConfigError> {
         self.states.validate(project_id)?;
         self.agents.validate(project_id)?;
@@ -555,6 +591,16 @@ impl ProjectWorkflow {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+struct ProjectWorkflowOverride {
+    pub states: Option<WorkflowStatesOverride>,
+    pub processed_states: Option<Vec<String>>,
+    pub agents: Option<WorkflowAgentsOverride>,
+    pub owner_input: Option<OwnerInputPolicyOverride>,
+    pub self_defects: Option<WorkflowSelfDefectPolicyOverride>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowStates {
     pub todo: String,
     pub in_progress: String,
@@ -580,6 +626,30 @@ impl Default for WorkflowStates {
 }
 
 impl WorkflowStates {
+    fn apply_override(&mut self, workflow_override: WorkflowStatesOverride) {
+        if let Some(todo) = workflow_override.todo {
+            self.todo = todo;
+        }
+        if let Some(in_progress) = workflow_override.in_progress {
+            self.in_progress = in_progress;
+        }
+        if let Some(in_review) = workflow_override.in_review {
+            self.in_review = in_review;
+        }
+        if let Some(need_owner_input) = workflow_override.need_owner_input {
+            self.need_owner_input = need_owner_input;
+        }
+        if let Some(done) = workflow_override.done {
+            self.done = done;
+        }
+        if let Some(canceled) = workflow_override.canceled {
+            self.canceled = canceled;
+        }
+        if let Some(backlog) = workflow_override.backlog {
+            self.backlog = backlog;
+        }
+    }
+
     fn validate(&self, project_id: &str) -> Result<(), ConfigError> {
         for stage in WorkflowStage::REQUIRED {
             let state = self.linear_state(stage).unwrap_or_default();
@@ -617,6 +687,18 @@ impl WorkflowStates {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+struct WorkflowStatesOverride {
+    pub todo: Option<String>,
+    pub in_progress: Option<String>,
+    pub in_review: Option<String>,
+    pub need_owner_input: Option<String>,
+    pub done: Option<String>,
+    pub canceled: Option<String>,
+    pub backlog: Option<Option<String>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowAgents {
     pub default: WorkflowDefaultAgents,
     #[serde(default)]
@@ -633,6 +715,31 @@ impl Default for WorkflowAgents {
 }
 
 impl WorkflowAgents {
+    fn apply_override(&mut self, workflow_override: WorkflowAgentsOverride) {
+        if let Some(default) = workflow_override.default {
+            self.default.apply_override(default);
+        }
+        if let Some(labels) = workflow_override.labels {
+            self.merge_label_overrides(labels);
+        }
+    }
+
+    fn merge_label_overrides(&mut self, overrides: Vec<LabelAgentMapping>) {
+        for workflow_override in overrides {
+            let override_stages = workflow_override.effective_stages().collect::<Vec<_>>();
+            self.labels.retain(|existing| {
+                if existing.label != workflow_override.label {
+                    return true;
+                }
+                let existing_stages = existing.effective_stages().collect::<Vec<_>>();
+                !existing_stages
+                    .iter()
+                    .any(|stage| override_stages.contains(stage))
+            });
+            self.labels.push(workflow_override);
+        }
+    }
+
     fn validate(&self, project_id: &str) -> Result<(), ConfigError> {
         self.default.validate(project_id)?;
         let mut seen = BTreeSet::new();
@@ -703,6 +810,13 @@ impl WorkflowAgents {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WorkflowAgentsOverride {
+    pub default: Option<WorkflowDefaultAgentsOverride>,
+    pub labels: Option<Vec<LabelAgentMapping>>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentRoutingDecision {
     pub stage: WorkflowStage,
@@ -753,6 +867,30 @@ impl Default for WorkflowDefaultAgents {
 }
 
 impl WorkflowDefaultAgents {
+    fn apply_override(&mut self, workflow_override: WorkflowDefaultAgentsOverride) {
+        if let Some(todo) = workflow_override.todo {
+            self.todo = todo;
+        }
+        if let Some(in_progress) = workflow_override.in_progress {
+            self.in_progress = in_progress;
+        }
+        if let Some(in_review) = workflow_override.in_review {
+            self.in_review = in_review;
+        }
+        if let Some(need_owner_input) = workflow_override.need_owner_input {
+            self.need_owner_input = need_owner_input;
+        }
+        if let Some(done) = workflow_override.done {
+            self.done = done;
+        }
+        if let Some(canceled) = workflow_override.canceled {
+            self.canceled = canceled;
+        }
+        if let Some(backlog) = workflow_override.backlog {
+            self.backlog = backlog;
+        }
+    }
+
     fn validate(&self, project_id: &str) -> Result<(), ConfigError> {
         for stage in WorkflowStage::REQUIRED {
             let agent = self.agent_for_stage(stage).unwrap_or_default();
@@ -786,6 +924,18 @@ impl WorkflowDefaultAgents {
             WorkflowStage::Canceled => Some(&self.canceled),
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WorkflowDefaultAgentsOverride {
+    pub todo: Option<String>,
+    pub in_progress: Option<String>,
+    pub in_review: Option<String>,
+    pub need_owner_input: Option<String>,
+    pub done: Option<String>,
+    pub canceled: Option<String>,
+    pub backlog: Option<Option<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -875,6 +1025,15 @@ impl Default for OwnerInputPolicy {
 }
 
 impl OwnerInputPolicy {
+    fn apply_override(&mut self, workflow_override: OwnerInputPolicyOverride) {
+        if let Some(block_project_dispatch) = workflow_override.block_project_dispatch {
+            self.block_project_dispatch = block_project_dispatch;
+        }
+        if let Some(return_stage) = workflow_override.return_stage {
+            self.return_stage = return_stage;
+        }
+    }
+
     fn validate(&self, project_id: &str) -> Result<(), ConfigError> {
         if !matches!(
             self.return_stage,
@@ -886,6 +1045,13 @@ impl OwnerInputPolicy {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OwnerInputPolicyOverride {
+    pub block_project_dispatch: Option<bool>,
+    pub return_stage: Option<WorkflowStage>,
 }
 
 const fn default_owner_input_blocks_project() -> bool {
@@ -911,6 +1077,12 @@ impl Default for WorkflowSelfDefectPolicy {
 }
 
 impl WorkflowSelfDefectPolicy {
+    fn apply_override(&mut self, workflow_override: WorkflowSelfDefectPolicyOverride) {
+        if let Some(executable_label) = workflow_override.executable_label {
+            self.executable_label = executable_label;
+        }
+    }
+
     fn validate(&self, project_id: &str) -> Result<(), ConfigError> {
         if self
             .executable_label
@@ -923,6 +1095,28 @@ impl WorkflowSelfDefectPolicy {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WorkflowSelfDefectPolicyOverride {
+    pub executable_label: Option<Option<String>>,
+}
+
+fn load_workflow_override_file(
+    project_id: &str,
+    path: &Path,
+) -> Result<ProjectWorkflowOverride, ConfigError> {
+    let input = fs::read_to_string(path).map_err(|source| ConfigError::WorkflowIo {
+        project_id: project_id.to_owned(),
+        path: path.to_path_buf(),
+        source,
+    })?;
+    toml::from_str::<ProjectWorkflowOverride>(&input).map_err(|source| ConfigError::WorkflowParse {
+        project_id: project_id.to_owned(),
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 #[derive(Debug, Error)]
@@ -958,7 +1152,6 @@ mod tests {
 id = "symphony"
 name = "Symphony"
 enabled = true
-workflow_path = "symphony.workflow.toml"
 repo_path = "{}"
 
 [projects.branch]
@@ -1038,11 +1231,7 @@ return_stage = "todo"
     #[test]
     fn config_loads_valid_project_workflow_contract() {
         let dir = tempfile::tempdir().expect("tempdir");
-        fs::write(
-            dir.path().join("symphony.workflow.toml"),
-            valid_workflow_toml(),
-        )
-        .expect("workflow");
+        fs::write(dir.path().join("workflow.toml"), valid_workflow_toml()).expect("workflow");
         let root = dir.path().join("symphony.projects.toml");
         fs::write(&root, root_config_toml(dir.path())).expect("root config");
 
@@ -1124,13 +1313,76 @@ return_stage = "todo"
     }
 
     #[test]
-    fn config_rejects_missing_workflow_file() {
+    fn config_uses_root_workflow_when_project_workflow_file_is_missing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("symphony.projects.toml");
         fs::write(&root, root_config_toml(dir.path())).expect("root config");
 
-        let err = RootConfig::from_toml_file(&root).expect_err("missing workflow");
+        let config = RootConfig::from_toml_file(&root).expect("config");
+        let project = config.project("symphony").expect("project");
 
-        assert!(err.to_string().contains("symphony.workflow.toml"), "{err}");
+        assert_eq!(
+            project
+                .workflow
+                .required_linear_state(WorkflowStage::InReview),
+            "In Review"
+        );
+        assert_eq!(
+            project
+                .workflow
+                .agent_route_for_stage(WorkflowStage::InProgress, &["rust".into()])
+                .expect("route")
+                .selected_agent,
+            "rust-engineer"
+        );
+    }
+
+    #[test]
+    fn config_merges_project_workflow_override_over_root_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("workflow.toml"),
+            r#"
+[agents.default]
+in_review = "strict-reviewer"
+
+[[agents.labels]]
+label = "ops"
+agent = "incident-investigator"
+precedence = 200
+stages = ["in_progress"]
+"#,
+        )
+        .expect("workflow override");
+        let root = dir.path().join("symphony.projects.toml");
+        fs::write(&root, root_config_toml(dir.path())).expect("root config");
+
+        let config = RootConfig::from_toml_file(&root).expect("config");
+        let project = config.project("symphony").expect("project");
+
+        assert_eq!(
+            project
+                .workflow
+                .agent_route_for_stage(WorkflowStage::InReview, &[])
+                .expect("fallback review route")
+                .selected_agent,
+            "strict-reviewer"
+        );
+        assert_eq!(
+            project
+                .workflow
+                .agent_route_for_stage(WorkflowStage::InProgress, &["ops".into()])
+                .expect("label route")
+                .selected_agent,
+            "incident-investigator"
+        );
+        assert_eq!(
+            project
+                .workflow
+                .agent_route_for_stage(WorkflowStage::InProgress, &["rust".into()])
+                .expect("root default route")
+                .selected_agent,
+            "rust-engineer"
+        );
     }
 }

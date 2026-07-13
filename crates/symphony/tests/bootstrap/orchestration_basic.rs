@@ -5,7 +5,7 @@ async fn daemon_once_entrypoint_validates_config_migrates_and_reconciles_project
     let dir = tempfile::tempdir().expect("tempdir");
     let config_path = dir.path().join("projects.toml");
     let db_path = dir.path().join("runtime.sqlite3");
-    let workflow_path = dir.path().join("symphony.workflow.toml");
+    let workflow_path = dir.path().join("workflow.toml");
     fs::write(&workflow_path, valid_workflow_toml()).expect("write workflow");
     let config = valid_config_toml().replace(
         "workflow_path = \"/home/agent/proj/symphony/WORKFLOW.md\"",

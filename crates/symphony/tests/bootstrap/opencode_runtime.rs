@@ -1769,7 +1769,20 @@ async fn stdio_launcher_skips_logical_agent_even_when_advertised_as_acp_mode() {
             && transcript.contains(r#""method": "session/prompt""#)
         {
             assert!(
-                !transcript.contains(r#""configId": "mode""#),
+                transcript.matches(r#""agent": "build""#).count() == 2,
+                "{transcript}"
+            );
+            assert!(
+                !transcript.contains(r#""agent": "code-reviewer""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(r#""configId": "mode""#)
+                    && transcript.contains(r#""value": "build""#),
+                "{transcript}"
+            );
+            assert!(
+                !transcript.contains(r#""value": "code-reviewer""#),
                 "{transcript}"
             );
             assert!(

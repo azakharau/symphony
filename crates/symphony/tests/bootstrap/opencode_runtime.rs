@@ -1733,10 +1733,11 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
 }
 
 #[tokio::test]
-async fn stdio_launcher_skips_logical_agent_not_advertised_as_acp_mode() {
+async fn stdio_launcher_skips_logical_agent_even_when_advertised_as_acp_mode() {
     let dir = tempfile::tempdir().expect("tempdir");
     let transcript_path = dir.path().join("acp-review-transcript.jsonl");
-    let script_path = write_fake_acp_script(dir.path(), &transcript_path);
+    let script_path =
+        write_fake_acp_script_with_modes(dir.path(), &transcript_path, &["build", "code-reviewer"]);
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
     let issue = linear_issue("issue-201", "SYM-201", "In Review", Some(1));

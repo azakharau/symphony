@@ -380,9 +380,22 @@ fn git_output<const N: usize>(repo: &std::path::Path, args: [&str; N]) -> String
 }
 
 fn write_fake_acp_script(dir: &Path, transcript_path: &Path) -> PathBuf {
+    write_fake_acp_script_with_modes(dir, transcript_path, &["build"])
+}
+
+fn write_fake_acp_script_with_modes(
+    dir: &Path,
+    transcript_path: &Path,
+    advertised_modes: &[&str],
+) -> PathBuf {
     let script_path = dir.join("fake-opencode-acp.py");
     let transcript_literal =
         serde_json::to_string(&transcript_path.display().to_string()).expect("json path");
+    let advertised_modes = advertised_modes
+        .iter()
+        .map(|mode| serde_json::json!({"value": mode, "name": mode}))
+        .collect::<Vec<_>>();
+    let advertised_modes = serde_json::to_string(&advertised_modes).expect("advertised modes");
     fs::write(
         &script_path,
         format!(
@@ -406,7 +419,7 @@ def config_options():
             "category": "mode",
             "type": "select",
             "currentValue": config["mode"],
-            "options": [{{"value": "build", "name": "build"}}],
+            "options": {advertised_modes},
         }},
         {{
             "id": "model",
@@ -442,7 +455,7 @@ for line in sys.stdin:
         config_id = message["params"]["configId"]
         value = message["params"]["value"]
         option = next(option for option in config_options() if option["id"] == config_id)
-        if not any(item["value"] == value for item in option["options"]):
+        if (config_id == "mode" and value != "build") or not any(item["value"] == value for item in option["options"]):
             print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "error": {{"code": -32602, "message": f"{{config_id}} not found: {{value}}"}}}}), flush=True)
             continue
         config[config_id] = value

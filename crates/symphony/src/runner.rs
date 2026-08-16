@@ -187,10 +187,15 @@ async fn configure_acp_session(
     child: &mut AcpChildLifecycle,
     spec: &RunnerLaunchSpec,
     session_id: &str,
+    session_result: &Value,
     next_id: &mut u64,
 ) -> Result<(), RunnerError> {
     let adapter = AgentExecutionAdapter::for_spec(spec);
-    for option in adapter.config_options(spec) {
+    for option in adapter
+        .config_options(spec)
+        .into_iter()
+        .filter(|option| option.is_advertised_by(session_result))
+    {
         let (stdin, stdout) = child.io();
         set_session_config_option(
             stdin,
@@ -212,7 +217,7 @@ async fn resume_acp_session(
     spec: &RunnerLaunchSpec,
     session: &RunnerSessionRecord,
     request_id: u64,
-) -> Result<(), RunnerError> {
+) -> Result<Value, RunnerError> {
     let (stdin, stdout) = child.io();
     let resume_result = acp_request(
         stdin,
@@ -231,7 +236,7 @@ async fn resume_acp_session(
             session.session_id
         )));
     }
-    Ok(())
+    Ok(resume_result)
 }
 
 fn spawn_prompt_reader(
@@ -480,7 +485,8 @@ impl RunnerLauncher for StdioRunnerLauncher {
                     process_id,
                 })
                 .await?;
-            configure_acp_session(&mut child, spec, &session_id, &mut next_id).await?;
+            configure_acp_session(&mut child, spec, &session_id, &session_result, &mut next_id)
+                .await?;
             Ok::<String, RunnerError>(session_id)
         }
         .await;
@@ -550,9 +556,16 @@ impl RunnerLauncher for StdioRunnerLauncher {
         let setup = async {
             initialize_acp_child(&mut child, spec, next_id).await?;
             next_id += 1;
-            resume_acp_session(&mut child, spec, session, next_id).await?;
+            let session_result = resume_acp_session(&mut child, spec, session, next_id).await?;
             next_id += 1;
-            configure_acp_session(&mut child, spec, &session.session_id, &mut next_id).await?;
+            configure_acp_session(
+                &mut child,
+                spec,
+                &session.session_id,
+                &session_result,
+                &mut next_id,
+            )
+            .await?;
             Ok::<(), RunnerError>(())
         }
         .await;
@@ -609,9 +622,16 @@ impl RunnerLauncher for StdioRunnerLauncher {
         let setup = async {
             initialize_acp_child(&mut child, spec, next_id).await?;
             next_id += 1;
-            resume_acp_session(&mut child, spec, session, next_id).await?;
+            let session_result = resume_acp_session(&mut child, spec, session, next_id).await?;
             next_id += 1;
-            configure_acp_session(&mut child, spec, &session.session_id, &mut next_id).await?;
+            configure_acp_session(
+                &mut child,
+                spec,
+                &session.session_id,
+                &session_result,
+                &mut next_id,
+            )
+            .await?;
             Ok::<(), RunnerError>(())
         }
         .await;
@@ -688,9 +708,16 @@ impl RunnerLauncher for StdioRunnerLauncher {
         let setup = async {
             initialize_acp_child(&mut child, spec, next_id).await?;
             next_id += 1;
-            resume_acp_session(&mut child, spec, session, next_id).await?;
+            let session_result = resume_acp_session(&mut child, spec, session, next_id).await?;
             next_id += 1;
-            configure_acp_session(&mut child, spec, &session.session_id, &mut next_id).await?;
+            configure_acp_session(
+                &mut child,
+                spec,
+                &session.session_id,
+                &session_result,
+                &mut next_id,
+            )
+            .await?;
             Ok::<(), RunnerError>(())
         }
         .await;

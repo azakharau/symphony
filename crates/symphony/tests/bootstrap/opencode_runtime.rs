@@ -1733,6 +1733,68 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
 }
 
 #[tokio::test]
+async fn stdio_launcher_skips_logical_agent_not_advertised_as_acp_mode() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transcript_path = dir.path().join("acp-review-transcript.jsonl");
+    let script_path = write_fake_acp_script(dir.path(), &transcript_path);
+    let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
+    let project = config.project("symphony").expect("project");
+    let issue = linear_issue("issue-201", "SYM-201", "In Review", Some(1));
+    let mut spec =
+        runner::build_acp_launch_spec_for_stage(project, &issue, WorkflowStage::InReview);
+    spec.command = script_path;
+    spec.cwd = dir.path().join("worktree");
+    spec.worktree_root = None;
+    spec.repo_path = None;
+    spec.recall_workspace_root = None;
+    spec.base_ref = None;
+
+    let started = runner::StdioRunnerLauncher
+        .launch(&spec)
+        .await
+        .expect("unsupported logical mode is skipped");
+    let session = runner::new_session_record_for_stage(
+        project,
+        &issue,
+        started,
+        &spec,
+        WorkflowStage::InReview,
+    );
+
+    assert_eq!(session.agent, "code-reviewer");
+    assert_eq!(session.active_agent.as_deref(), Some("code-reviewer"));
+    for _ in 0..50 {
+        if let Ok(transcript) = fs::read_to_string(&transcript_path)
+            && transcript.contains(r#""method": "session/prompt""#)
+        {
+            assert!(
+                !transcript.contains(r#""configId": "mode""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(r#""configId": "model""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains(r#""configId": "effort""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains("Selected agent: code-reviewer"),
+                "{transcript}"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    panic!(
+        "ACP review prompt was not observed; transcript={:?}",
+        fs::read_to_string(transcript_path)
+    );
+}
+
+#[tokio::test]
 async fn stdio_launcher_kills_process_tree_when_setup_fails_before_session_attachment() {
     let dir = tempfile::tempdir().expect("tempdir");
     let child_pid_path = dir.path().join("child.pid");

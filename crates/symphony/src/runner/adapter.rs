@@ -20,6 +20,30 @@ pub(super) struct AcpConfigOption<'a> {
     pub value: Option<&'a str>,
 }
 
+impl AcpConfigOption<'_> {
+    pub(super) fn is_advertised_by(self, session_result: &Value) -> bool {
+        let Some(value) = self.value.filter(|value| !value.trim().is_empty()) else {
+            return false;
+        };
+        session_result
+            .get("configOptions")
+            .and_then(Value::as_array)
+            .is_some_and(|options| {
+                options.iter().any(|option| {
+                    option.get("id").and_then(Value::as_str) == Some(self.id)
+                        && option
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .is_some_and(|values| {
+                                values.iter().any(|option| {
+                                    option.get("value").and_then(Value::as_str) == Some(value)
+                                })
+                            })
+                })
+            })
+    }
+}
+
 impl AgentExecutionAdapter {
     pub(super) const fn for_provider_mode(provider_mode: RuntimeProviderMode) -> Self {
         match provider_mode {

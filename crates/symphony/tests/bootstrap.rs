@@ -439,7 +439,13 @@ for line in sys.stdin:
         (cwd / ".symphony").mkdir(parents=True, exist_ok=True)
         print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "result": {{"sessionId": "ses-test", "configOptions": config_options()}}}}), flush=True)
     elif method == "session/set_config_option":
-        config[message["params"]["configId"]] = message["params"]["value"]
+        config_id = message["params"]["configId"]
+        value = message["params"]["value"]
+        option = next(option for option in config_options() if option["id"] == config_id)
+        if not any(item["value"] == value for item in option["options"]):
+            print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "error": {{"code": -32602, "message": f"{{config_id}} not found: {{value}}"}}}}), flush=True)
+            continue
+        config[config_id] = value
         print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "result": {{"configOptions": config_options()}}}}), flush=True)
     elif method == "session/prompt":
         if config["model"] != "openai/gpt-5.5" or config["effort"] != "high":

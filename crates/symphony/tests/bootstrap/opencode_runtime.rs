@@ -2369,7 +2369,7 @@ async fn stdio_launcher_resume_without_config_options_skips_configuration() {
         repo_path: None,
         recall_workspace_root: Some(dir.path().to_path_buf()),
         base_ref: None,
-        agent: "build".into(),
+        agent: "code-reviewer".into(),
         model: Some("openai/gpt-5.5".into()),
         effort: Some("high".into()),
         prompt: "Original prompt must not be replayed on resume".into(),
@@ -2389,6 +2389,11 @@ async fn stdio_launcher_resume_without_config_options_skips_configuration() {
     let transcript = fs::read_to_string(&transcript_path).expect("transcript");
     assert!(
         transcript.contains(r#""method": "initialize""#),
+        "{transcript}"
+    );
+    assert!(transcript.contains(r#""agent": "build""#), "{transcript}");
+    assert!(
+        !transcript.contains(r#""agent": "code-reviewer""#),
         "{transcript}"
     );
     assert!(
@@ -2414,6 +2419,74 @@ async fn stdio_launcher_resume_without_config_options_skips_configuration() {
     assert!(
         !transcript.contains("Original prompt must not be replayed"),
         "{transcript}"
+    );
+}
+
+#[tokio::test]
+async fn stdio_launcher_repair_without_config_options_uses_build_mode_for_reviewer_agent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transcript_path = dir.path().join("acp-review-repair-transcript.jsonl");
+    let script_path = write_fake_acp_resume_script(dir.path(), &transcript_path);
+    let worktree = dir.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("worktree");
+    let spec = runner::RunnerLaunchSpec {
+        provider_mode: RuntimeProviderMode::Acp,
+        provider_id: None,
+        command: script_path,
+        args: Vec::new(),
+        cwd: worktree.clone(),
+        env_allowlist: Vec::new(),
+        worktree_root: None,
+        issue_identifier: "SYM-202".into(),
+        branch_name: "feature/sym-202".into(),
+        repo_path: None,
+        recall_workspace_root: None,
+        base_ref: None,
+        agent: "rust-reviewer".into(),
+        model: None,
+        effort: None,
+        prompt: "Selected agent: rust-reviewer".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+    let mut session = test_session("symphony", "issue-202", "ses-existing", &worktree);
+    session.agent = "rust-reviewer".into();
+    session.active_agent = Some("rust-reviewer".into());
+
+    let repaired = runner::StdioRunnerLauncher
+        .continue_repair(
+            &spec,
+            &session,
+            "review_validation_failed",
+            "repair the reviewed implementation",
+        )
+        .await
+        .expect("reviewer repair launches through build ACP mode");
+
+    assert_eq!(repaired.session_id, "ses-existing");
+    assert_eq!(session.agent, "rust-reviewer");
+    assert_eq!(session.active_agent.as_deref(), Some("rust-reviewer"));
+    for _ in 0..50 {
+        if let Ok(transcript) = fs::read_to_string(&transcript_path)
+            && transcript.contains(r#""method": "session/prompt""#)
+        {
+            assert!(transcript.contains(r#""agent": "build""#), "{transcript}");
+            assert!(
+                !transcript.contains(r#""method": "session/set_config_option""#),
+                "{transcript}"
+            );
+            assert!(!transcript.contains("rust-reviewer"), "{transcript}");
+            assert!(
+                transcript.contains("Active Symphony ACP session: `ses-existing`"),
+                "{transcript}"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    panic!(
+        "ACP reviewer repair prompt was not observed; transcript={:?}",
+        fs::read_to_string(transcript_path)
     );
 }
 

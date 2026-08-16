@@ -103,7 +103,7 @@ impl AgentExecutionAdapter {
             Self::Acp => vec![
                 AcpConfigOption {
                     id: "mode",
-                    // Workflow agents are logical labels; only `build` is also a known OpenCode mode.
+                    // Workflow agents are logical labels; expose only `build` as an ACP mode.
                     value: (spec.agent == "build").then_some(spec.agent.as_str()),
                 },
                 AcpConfigOption {

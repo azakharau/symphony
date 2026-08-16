@@ -22,12 +22,12 @@ pub(super) struct AcpConfigOption<'a> {
 }
 
 impl AcpConfigOption<'_> {
-    pub(super) fn is_supported_by(self, session_result: &Value, session_was_resumed: bool) -> bool {
+    pub(super) fn is_supported_by(self, session_result: &Value) -> bool {
         let Some(value) = self.value.filter(|value| !value.trim().is_empty()) else {
             return false;
         };
         let Some(config_options) = session_result.get("configOptions") else {
-            return session_was_resumed;
+            return false;
         };
         config_options.as_array().is_some_and(|options| {
             options.iter().any(|option| {

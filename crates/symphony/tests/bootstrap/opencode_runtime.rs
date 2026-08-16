@@ -2350,7 +2350,7 @@ async fn stdio_launcher_removes_stale_handoff_before_prompting_new_session() {
 }
 
 #[tokio::test]
-async fn stdio_launcher_resumes_existing_session_without_replaying_prompt() {
+async fn stdio_launcher_resume_without_config_options_skips_configuration() {
     let dir = tempfile::tempdir().expect("tempdir");
     let transcript_path = dir.path().join("acp-transcript.jsonl");
     let script_path = write_fake_acp_resume_script(dir.path(), &transcript_path);
@@ -2399,17 +2399,10 @@ async fn stdio_launcher_resumes_existing_session_without_replaying_prompt() {
         transcript.contains(r#""sessionId": "ses-existing""#),
         "{transcript}"
     );
-    for (config_id, value) in [
-        ("mode", "build"),
-        ("model", "openai/gpt-5.5"),
-        ("effort", "high"),
-    ] {
-        assert!(
-            transcript.contains(&format!(r#""configId": "{config_id}""#))
-                && transcript.contains(&format!(r#""value": "{value}""#)),
-            "{transcript}"
-        );
-    }
+    assert!(
+        !transcript.contains(r#""method": "session/set_config_option""#),
+        "{transcript}"
+    );
     assert!(
         !transcript.contains(r#""method": "session/new""#),
         "{transcript}"

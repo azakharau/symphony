@@ -608,7 +608,6 @@ import pathlib
 import sys
 
 transcript_path = pathlib.Path({transcript_literal})
-config = {{"mode": "build", "model": "opencode/big-pickle", "effort": "none"}}
 
 def ok(mid, result):
     print(json.dumps({{"jsonrpc": "2.0", "id": mid, "result": result}}), flush=True)
@@ -624,8 +623,8 @@ for line in sys.stdin:
     elif method == "session/resume":
         ok(message["id"], {{"sessionId": message["params"]["sessionId"], "resumed": True}})
     elif method == "session/set_config_option":
-        config[message["params"]["configId"]] = message["params"]["value"]
-        ok(message["id"], {{"configOptions": []}})
+        print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "error": {{"code": -32602, "message": "config options were not advertised"}}}}), flush=True)
+        break
     elif method == "session/new":
         print(json.dumps({{"jsonrpc": "2.0", "id": message["id"], "error": {{"code": -32000, "message": "session/new must not be called on resume"}}}}), flush=True)
         break

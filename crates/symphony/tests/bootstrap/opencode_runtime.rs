@@ -1733,11 +1733,10 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
 }
 
 #[tokio::test]
-async fn stdio_launcher_skips_logical_agent_even_when_advertised_as_acp_mode() {
+async fn stdio_launcher_uses_build_acp_mode_for_in_review_agent() {
     let dir = tempfile::tempdir().expect("tempdir");
     let transcript_path = dir.path().join("acp-review-transcript.jsonl");
-    let script_path =
-        write_fake_acp_script_with_modes(dir.path(), &transcript_path, &["code-reviewer"]);
+    let script_path = write_fake_acp_script(dir.path(), &transcript_path);
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
     let project = config.project("symphony").expect("project");
     let issue = linear_issue("issue-201", "SYM-201", "In Review", Some(1));
@@ -1753,7 +1752,7 @@ async fn stdio_launcher_skips_logical_agent_even_when_advertised_as_acp_mode() {
     let started = runner::StdioRunnerLauncher
         .launch(&spec)
         .await
-        .expect("unsupported logical mode is skipped");
+        .expect("review agent launches through build ACP mode");
     let session = runner::new_session_record_for_stage(
         project,
         &issue,
@@ -1777,7 +1776,8 @@ async fn stdio_launcher_skips_logical_agent_even_when_advertised_as_acp_mode() {
                 "{transcript}"
             );
             assert!(
-                !transcript.contains(r#""configId": "mode""#),
+                transcript.contains(r#""configId": "mode""#)
+                    && transcript.contains(r#""value": "build""#),
                 "{transcript}"
             );
             assert!(

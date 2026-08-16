@@ -188,13 +188,14 @@ async fn configure_acp_session(
     spec: &RunnerLaunchSpec,
     session_id: &str,
     session_result: &Value,
+    session_was_resumed: bool,
     next_id: &mut u64,
 ) -> Result<(), RunnerError> {
     let adapter = AgentExecutionAdapter::for_spec(spec);
     for option in adapter
         .config_options(spec)
         .into_iter()
-        .filter(|option| option.is_advertised_by(session_result))
+        .filter(|option| option.is_supported_by(session_result, session_was_resumed))
     {
         let (stdin, stdout) = child.io();
         set_session_config_option(
@@ -485,8 +486,15 @@ impl RunnerLauncher for StdioRunnerLauncher {
                     process_id,
                 })
                 .await?;
-            configure_acp_session(&mut child, spec, &session_id, &session_result, &mut next_id)
-                .await?;
+            configure_acp_session(
+                &mut child,
+                spec,
+                &session_id,
+                &session_result,
+                false,
+                &mut next_id,
+            )
+            .await?;
             Ok::<String, RunnerError>(session_id)
         }
         .await;
@@ -563,6 +571,7 @@ impl RunnerLauncher for StdioRunnerLauncher {
                 spec,
                 &session.session_id,
                 &session_result,
+                true,
                 &mut next_id,
             )
             .await?;
@@ -629,6 +638,7 @@ impl RunnerLauncher for StdioRunnerLauncher {
                 spec,
                 &session.session_id,
                 &session_result,
+                true,
                 &mut next_id,
             )
             .await?;
@@ -715,6 +725,7 @@ impl RunnerLauncher for StdioRunnerLauncher {
                 spec,
                 &session.session_id,
                 &session_result,
+                true,
                 &mut next_id,
             )
             .await?;

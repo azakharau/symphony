@@ -2387,6 +2387,17 @@ async fn stdio_launcher_resumes_existing_session_without_replaying_prompt() {
         transcript.contains(r#""sessionId": "ses-existing""#),
         "{transcript}"
     );
+    for (config_id, value) in [
+        ("mode", "build"),
+        ("model", "openai/gpt-5.5"),
+        ("effort", "high"),
+    ] {
+        assert!(
+            transcript.contains(&format!(r#""configId": "{config_id}""#))
+                && transcript.contains(&format!(r#""value": "{value}""#)),
+            "{transcript}"
+        );
+    }
     assert!(
         !transcript.contains(r#""method": "session/new""#),
         "{transcript}"

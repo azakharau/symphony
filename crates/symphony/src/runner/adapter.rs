@@ -21,26 +21,26 @@ pub(super) struct AcpConfigOption<'a> {
 }
 
 impl AcpConfigOption<'_> {
-    pub(super) fn is_advertised_by(self, session_result: &Value) -> bool {
+    pub(super) fn is_supported_by(self, session_result: &Value, session_was_resumed: bool) -> bool {
         let Some(value) = self.value.filter(|value| !value.trim().is_empty()) else {
             return false;
         };
-        session_result
-            .get("configOptions")
-            .and_then(Value::as_array)
-            .is_some_and(|options| {
-                options.iter().any(|option| {
-                    option.get("id").and_then(Value::as_str) == Some(self.id)
-                        && option
-                            .get("options")
-                            .and_then(Value::as_array)
-                            .is_some_and(|values| {
-                                values.iter().any(|option| {
-                                    option.get("value").and_then(Value::as_str) == Some(value)
-                                })
+        let Some(config_options) = session_result.get("configOptions") else {
+            return session_was_resumed;
+        };
+        config_options.as_array().is_some_and(|options| {
+            options.iter().any(|option| {
+                option.get("id").and_then(Value::as_str) == Some(self.id)
+                    && option
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .is_some_and(|values| {
+                            values.iter().any(|option| {
+                                option.get("value").and_then(Value::as_str) == Some(value)
                             })
-                })
+                        })
             })
+        })
     }
 }
 

@@ -380,22 +380,9 @@ fn git_output<const N: usize>(repo: &std::path::Path, args: [&str; N]) -> String
 }
 
 fn write_fake_acp_script(dir: &Path, transcript_path: &Path) -> PathBuf {
-    write_fake_acp_script_with_modes(dir, transcript_path, &["build"])
-}
-
-fn write_fake_acp_script_with_modes(
-    dir: &Path,
-    transcript_path: &Path,
-    advertised_modes: &[&str],
-) -> PathBuf {
     let script_path = dir.join("fake-opencode-acp.py");
     let transcript_literal =
         serde_json::to_string(&transcript_path.display().to_string()).expect("json path");
-    let advertised_modes = advertised_modes
-        .iter()
-        .map(|mode| serde_json::json!({"value": mode, "name": mode}))
-        .collect::<Vec<_>>();
-    let advertised_modes = serde_json::to_string(&advertised_modes).expect("advertised modes");
     fs::write(
         &script_path,
         format!(
@@ -419,7 +406,7 @@ def config_options():
             "category": "mode",
             "type": "select",
             "currentValue": config["mode"],
-            "options": {advertised_modes},
+            "options": [{{"value": "build", "name": "build"}}],
         }},
         {{
             "id": "model",

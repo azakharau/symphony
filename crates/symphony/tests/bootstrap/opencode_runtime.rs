@@ -1733,6 +1733,70 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
 }
 
 #[tokio::test]
+async fn stdio_launcher_rejects_advertised_unsupported_config_before_prompt() {
+    for (config_id, unsupported_value) in [
+        ("mode", "build"),
+        ("model", "openai/unsupported-model"),
+        ("effort", "unsupported-effort"),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let transcript_path = dir.path().join(format!("acp-{config_id}-transcript.jsonl"));
+        let script_path = write_fake_acp_script(dir.path(), &transcript_path);
+        if config_id == "mode" {
+            let script = fs::read_to_string(&script_path).expect("fake ACP script");
+            fs::write(
+                &script_path,
+                script.replace(
+                    r#""options": [{"value": "build", "name": "build"}]"#,
+                    r#""options": [{"value": "plan", "name": "plan"}]"#,
+                ),
+            )
+            .expect("unsupported mode script");
+        }
+        let mut spec = runner::RunnerLaunchSpec {
+            provider_mode: RuntimeProviderMode::Acp,
+            provider_id: None,
+            command: script_path,
+            args: Vec::new(),
+            cwd: dir.path().join("worktree"),
+            env_allowlist: Vec::new(),
+            worktree_root: None,
+            issue_identifier: "SYM-unsupported-config".into(),
+            branch_name: "feature/sym-unsupported-config".into(),
+            repo_path: None,
+            recall_workspace_root: None,
+            base_ref: None,
+            agent: "build".into(),
+            model: Some("openai/gpt-5.5".into()),
+            effort: Some("high".into()),
+            prompt: "must not be sent".into(),
+            permission_policy: PermissionPolicy::Reject,
+        };
+        match config_id {
+            "mode" => {}
+            "model" => spec.model = Some(unsupported_value.into()),
+            "effort" => spec.effort = Some(unsupported_value.into()),
+            _ => unreachable!("test config id is fixed"),
+        }
+
+        let error = runner::StdioRunnerLauncher
+            .launch(&spec)
+            .await
+            .expect_err("advertised unsupported config must fail setup");
+        let runner::RunnerError::AcpSetupFailed { reason, .. } = error else {
+            panic!("expected ACP setup failure");
+        };
+        assert!(reason.contains(config_id), "{reason}");
+        assert!(reason.contains(unsupported_value), "{reason}");
+        let transcript = fs::read_to_string(&transcript_path).expect("ACP transcript");
+        assert!(
+            !transcript.contains(r#""method": "session/prompt""#),
+            "{transcript}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn stdio_launcher_uses_build_acp_mode_for_in_review_agent() {
     let dir = tempfile::tempdir().expect("tempdir");
     let transcript_path = dir.path().join("acp-review-transcript.jsonl");

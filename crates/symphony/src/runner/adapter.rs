@@ -21,27 +21,42 @@ pub(super) struct AcpConfigOption<'a> {
     pub value: Option<&'a str>,
 }
 
-impl AcpConfigOption<'_> {
-    pub(super) fn is_supported_by(self, session_result: &Value) -> bool {
+pub(super) enum AcpConfigOptionSupport<'a> {
+    Skip,
+    Supported(&'a str),
+    Unsupported(&'a str),
+}
+
+impl<'a> AcpConfigOption<'a> {
+    pub(super) fn support(self, session_result: &Value) -> AcpConfigOptionSupport<'a> {
         let Some(value) = self.value.filter(|value| !value.trim().is_empty()) else {
-            return false;
+            return AcpConfigOptionSupport::Skip;
         };
-        let Some(config_options) = session_result.get("configOptions") else {
-            return false;
+        let Some(config_options) = session_result
+            .get("configOptions")
+            .and_then(Value::as_array)
+        else {
+            return AcpConfigOptionSupport::Skip;
         };
-        config_options.as_array().is_some_and(|options| {
-            options.iter().any(|option| {
-                option.get("id").and_then(Value::as_str) == Some(self.id)
-                    && option
-                        .get("options")
-                        .and_then(Value::as_array)
-                        .is_some_and(|values| {
-                            values.iter().any(|option| {
-                                option.get("value").and_then(Value::as_str) == Some(value)
-                            })
-                        })
+        let Some(option) = config_options
+            .iter()
+            .find(|option| option.get("id").and_then(Value::as_str) == Some(self.id))
+        else {
+            return AcpConfigOptionSupport::Skip;
+        };
+        if option
+            .get("options")
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values
+                    .iter()
+                    .any(|option| option.get("value").and_then(Value::as_str) == Some(value))
             })
-        })
+        {
+            AcpConfigOptionSupport::Supported(value)
+        } else {
+            AcpConfigOptionSupport::Unsupported(value)
+        }
     }
 }
 

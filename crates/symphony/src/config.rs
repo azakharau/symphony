@@ -35,13 +35,17 @@ impl RootConfig {
             path: path.to_path_buf(),
             source,
         })?;
+        let root_declares_workflow_labels = root_declares_workflow_labels(&input)?;
         let mut config: Self = toml::from_str(&input)?;
-        config.load_project_workflows()?;
+        config.load_project_workflows(root_declares_workflow_labels)?;
         config.validate()?;
         Ok(config)
     }
 
-    fn load_project_workflows(&mut self) -> Result<(), ConfigError> {
+    fn load_project_workflows(
+        &mut self,
+        root_declares_workflow_labels: bool,
+    ) -> Result<(), ConfigError> {
         for project in &mut self.projects {
             let mut workflow = self.workflow.clone();
             let path = project.resolved_workflow_path();
@@ -51,6 +55,15 @@ impl RootConfig {
                 continue;
             }
             let workflow_override = load_workflow_override_file(&project.id, &path)?;
+            if !root_declares_workflow_labels
+                && workflow_override
+                    .agents
+                    .as_ref()
+                    .and_then(|agents| agents.labels.as_ref())
+                    .is_none()
+            {
+                workflow.agents.labels.clear();
+            }
             workflow.apply_override(workflow_override);
             workflow.validate(&project.id)?;
             project.workflow = workflow;
@@ -157,6 +170,16 @@ impl RootConfig {
 
         Ok(())
     }
+}
+
+fn root_declares_workflow_labels(input: &str) -> Result<bool, toml::de::Error> {
+    let root = toml::from_str::<toml::Table>(input)?;
+    Ok(root
+        .get("workflow")
+        .and_then(toml::Value::as_table)
+        .and_then(|workflow| workflow.get("agents"))
+        .and_then(toml::Value::as_table)
+        .is_some_and(|agents| agents.contains_key("labels")))
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1384,5 +1407,71 @@ stages = ["in_progress"]
                 .selected_agent,
             "rust-engineer"
         );
+    }
+
+    #[test]
+    fn project_workflow_without_label_routes_uses_stage_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("workflow.toml"),
+            r#"
+[agents.default]
+in_review = "legacy-reviewer"
+"#,
+        )
+        .expect("workflow override");
+        let root = dir.path().join("symphony.projects.toml");
+        fs::write(&root, root_config_toml(dir.path())).expect("root config");
+
+        let config = RootConfig::from_toml_file(&root).expect("config");
+        let route = config
+            .project("symphony")
+            .expect("project")
+            .workflow
+            .agent_route_for_stage(WorkflowStage::InReview, &["ui".into()])
+            .expect("review route");
+
+        assert_eq!(route.selected_agent, "legacy-reviewer");
+        assert_eq!(route.reason, AgentRoutingReason::Fallback);
+        assert_eq!(route.selected_label, None);
+    }
+
+    #[test]
+    fn project_workflow_without_label_routes_keeps_explicit_root_label_routes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            dir.path().join("workflow.toml"),
+            r#"
+[agents.default]
+in_review = "legacy-reviewer"
+"#,
+        )
+        .expect("workflow override");
+        let root = dir.path().join("symphony.projects.toml");
+        let mut root_config =
+            RootConfig::from_toml_str(&root_config_toml(dir.path())).expect("root config");
+        root_config.workflow.agents.labels = vec![LabelAgentMapping {
+            label: "ui".into(),
+            agent: "ui-reviewer".into(),
+            precedence: 100,
+            stages: vec![WorkflowStage::InReview],
+        }];
+        fs::write(
+            &root,
+            toml::to_string(&root_config).expect("serialized root config"),
+        )
+        .expect("root config");
+
+        let config = RootConfig::from_toml_file(&root).expect("config");
+        let route = config
+            .project("symphony")
+            .expect("project")
+            .workflow
+            .agent_route_for_stage(WorkflowStage::InReview, &["ui".into()])
+            .expect("review route");
+
+        assert_eq!(route.selected_agent, "ui-reviewer");
+        assert_eq!(route.reason, AgentRoutingReason::Label);
+        assert_eq!(route.selected_label.as_deref(), Some("ui"));
     }
 }

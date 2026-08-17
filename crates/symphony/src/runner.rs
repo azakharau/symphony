@@ -29,7 +29,7 @@ use acp::{
     acp_request, drain_acp_stream, extract_session_id, read_acp_response,
     set_session_config_option, write_acp_request,
 };
-use adapter::AgentExecutionAdapter;
+use adapter::{AcpConfigOptionSupport, AgentExecutionAdapter};
 pub use archive::{
     RunnerSessionActivity, RunnerSessionArchiveReport, RunnerSessionArchiveRequest,
     RunnerSessionMessageError, RunnerSessionTreeActivity, RunnerSessionTreeMetrics,
@@ -191,11 +191,17 @@ async fn configure_acp_session(
     next_id: &mut u64,
 ) -> Result<(), RunnerError> {
     let adapter = AgentExecutionAdapter::for_spec(spec);
-    for option in adapter
-        .config_options(spec)
-        .into_iter()
-        .filter(|option| option.is_supported_by(session_result))
-    {
+    for option in adapter.config_options(spec) {
+        let value = match option.support(session_result) {
+            AcpConfigOptionSupport::Skip => continue,
+            AcpConfigOptionSupport::Supported(value) => value,
+            AcpConfigOptionSupport::Unsupported(value) => {
+                return Err(RunnerError::AcpProtocol(format!(
+                    "ACP session config option `{}` does not support configured value `{value}`",
+                    option.id
+                )));
+            }
+        };
         let (stdin, stdout) = child.io();
         set_session_config_option(
             stdin,
@@ -204,7 +210,7 @@ async fn configure_acp_session(
             *next_id,
             session_id,
             option.id,
-            option.value,
+            Some(value),
         )
         .await?;
         *next_id += 1;

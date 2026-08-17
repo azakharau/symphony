@@ -883,7 +883,7 @@ inverse_bridge_reference = true
 }
 
 #[tokio::test]
-async fn mocked_omp_acp_launch_returns_session_telemetry_and_evidence_refs() {
+async fn mocked_omp_acp_launch_writes_omp_handshake_without_opencode_config_options() {
     let dir = tempfile::tempdir().expect("tempdir");
     let transcript_path = dir.path().join("omp-acp-transcript.jsonl");
     let transcript_literal =

@@ -1863,6 +1863,11 @@ async fn assert_stdio_launcher_uses_build_acp_mode_for_code_reviewer(stage: Work
                 "{transcript}"
             );
             assert!(
+                transcript.find(r#""configId": "mode""#)
+                    < transcript.find(r#""method": "session/prompt""#),
+                "{transcript}"
+            );
+            assert!(
                 !transcript.contains(r#""value": "code-reviewer""#),
                 "{transcript}"
             );

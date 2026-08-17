@@ -2538,7 +2538,18 @@ async fn stdio_launcher_repair_without_config_options_uses_build_mode_for_review
                 !transcript.contains(r#""method": "session/set_config_option""#),
                 "{transcript}"
             );
-            assert!(!transcript.contains("rust-reviewer"), "{transcript}");
+            assert!(
+                !transcript.contains(r#""agent": "rust-reviewer""#),
+                "{transcript}"
+            );
+            assert!(
+                !transcript.contains(r#""value": "rust-reviewer""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains("Selected agent: rust-reviewer"),
+                "{transcript}"
+            );
             assert!(
                 transcript.contains("Active Symphony ACP session: `ses-existing`"),
                 "{transcript}"
@@ -2592,7 +2603,7 @@ async fn stdio_launcher_continues_existing_session_from_dirty_resumable_worktree
         repo_path: Some(repo),
         recall_workspace_root: Some(dir.path().to_path_buf()),
         base_ref: Some("main".into()),
-        agent: "build".into(),
+        agent: "code-reviewer".into(),
         model: Some("openai/gpt-5.5".into()),
         effort: Some("high".into()),
         prompt: "Original prompt must not be replayed on continue".into(),
@@ -2623,6 +2634,19 @@ async fn stdio_launcher_continues_existing_session_from_dirty_resumable_worktree
             );
             assert!(
                 transcript.contains("Active Symphony ACP session: `ses-existing`"),
+                "{transcript}"
+            );
+            assert!(transcript.contains(r#""agent": "build""#), "{transcript}");
+            assert!(
+                !transcript.contains(r#""agent": "code-reviewer""#),
+                "{transcript}"
+            );
+            assert!(
+                !transcript.contains(r#""value": "code-reviewer""#),
+                "{transcript}"
+            );
+            assert!(
+                transcript.contains("Selected agent: code-reviewer"),
                 "{transcript}"
             );
             assert!(

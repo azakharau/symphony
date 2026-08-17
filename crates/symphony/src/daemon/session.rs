@@ -1,13 +1,13 @@
 use tracing::{info, warn};
 
 use crate::{
-    config::ProjectConfig,
+    config::{ProjectConfig, WorkflowStage},
     linear::LinearIssue,
     runner::{
         OMP_CLEANUP_MARKER_ENV, RunnerLauncher, RunnerStartedSession, build_acp_launch_spec,
-        terminate_process_tree,
+        build_acp_launch_spec_for_stage, terminate_process_tree,
     },
-    state::{FailureRecord, LifecycleStage, RunnerSessionRecord, RunnerStage},
+    state::{FailureRecord, LifecycleStage, RunnerSessionRecord, RunnerStage, RuntimeProviderMode},
     storage::SqliteStore,
 };
 
@@ -246,7 +246,15 @@ pub(super) async fn resume_stale_runner_session(
     if !session_requires_resume(&session).await {
         return Ok(());
     }
-    let launch_spec = build_acp_launch_spec(project, issue);
+    let launch_spec = if project.runner.provider_mode == RuntimeProviderMode::Acp {
+        let stage = project
+            .workflow
+            .stage_for_linear_state(&issue.state)
+            .unwrap_or(WorkflowStage::InProgress);
+        build_acp_launch_spec_for_stage(project, issue, stage)
+    } else {
+        build_acp_launch_spec(project, issue)
+    };
     let existing_issue = store.issue(&project.id, &issue.id).await?;
     terminate_current_session_process(project, issue, &mut session).await?;
     if let Some(failure) = existing_issue
@@ -260,6 +268,10 @@ pub(super) async fn resume_stale_runner_session(
     } else {
         let started = continue_stale_session(runner, &launch_spec, &session).await?;
         apply_continued_process(&mut session, started);
+    }
+    if project.runner.provider_mode == RuntimeProviderMode::Acp {
+        session.agent.clone_from(&launch_spec.agent);
+        session.active_agent = Some(launch_spec.agent.clone());
     }
     info!(
         project_id = %project.id,
@@ -569,12 +581,16 @@ async fn continue_stale_session(
     spec: &crate::runner::RunnerLaunchSpec,
     session: &RunnerSessionRecord,
 ) -> anyhow::Result<RunnerStartedSession> {
+    let continuation_message = match spec.provider_mode {
+        RuntimeProviderMode::Acp => {
+            "The previous ACP stdio process ended or was killed while this Linear issue was still active. Inspect the current repository/session state, continue the remaining work in this same session, and write the structured Symphony handoff JSON when done."
+        }
+        RuntimeProviderMode::OmpAcp => {
+            "The previous ACP stdio process ended or was killed while this Linear issue was still In Progress. Inspect the current repository/session state, continue the remaining work in this same session, and write the structured Symphony handoff JSON when done."
+        }
+    };
     Ok(runner
-        .continue_session(
-            spec,
-            session,
-            "The previous ACP stdio process ended or was killed while this Linear issue was still In Progress. Inspect the current repository/session state, continue the remaining work in this same session, and write the structured Symphony handoff JSON when done.",
-        )
+        .continue_session(spec, session, continuation_message)
         .await?)
 }
 

@@ -1424,7 +1424,7 @@ fn continuation_prompt(spec: &RunnerLaunchSpec, continuation_message: &str) -> S
 
 fn provider_context_text(spec: &RunnerLaunchSpec) -> String {
     match spec.provider_mode {
-        RuntimeProviderMode::Acp => String::new(),
+        RuntimeProviderMode::Acp => format!("Selected agent: {}\n\n", spec.agent),
         RuntimeProviderMode::OmpAcp => String::new(),
     }
 }

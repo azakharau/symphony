@@ -1123,7 +1123,7 @@ struct ResumeRecordingRunnerLauncher {
     resumed_process_id: u32,
     launches: std::sync::Mutex<Vec<String>>,
     resumes: std::sync::Mutex<Vec<(String, String)>>,
-    continuations: std::sync::Mutex<Vec<(String, String)>>,
+    continuations: std::sync::Mutex<Vec<(String, String, String)>>,
     repairs: std::sync::Mutex<Vec<(String, String)>>,
 }
 
@@ -1146,7 +1146,7 @@ impl ResumeRecordingRunnerLauncher {
         self.resumes.lock().expect("resumes lock").clone()
     }
 
-    fn continuations(&self) -> Vec<(String, String)> {
+    fn continuations(&self) -> Vec<(String, String, String)> {
         self.continuations
             .lock()
             .expect("continuations lock")
@@ -1202,7 +1202,11 @@ impl RunnerLauncher for ResumeRecordingRunnerLauncher {
         self.continuations
             .lock()
             .expect("continuations lock")
-            .push((spec.issue_identifier.clone(), session.session_id.clone()));
+            .push((
+                spec.issue_identifier.clone(),
+                session.session_id.clone(),
+                spec.agent.clone(),
+            ));
         Ok(runner::RunnerStartedSession {
             session_id: session.session_id.clone(),
             process_id: Some(self.resumed_process_id),

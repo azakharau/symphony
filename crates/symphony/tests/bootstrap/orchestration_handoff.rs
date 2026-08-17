@@ -2649,7 +2649,7 @@ async fn dead_in_progress_session_without_handoff_sidecar_fails_fast_instead_of_
 }
 
 #[tokio::test]
-async fn dead_acp_process_with_active_opencode_child_session_resumes_instead_of_parking_capacity() {
+async fn dead_acp_process_with_active_opencode_child_session_resumes_with_review_agent() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let opencode_db_path = dir.path().join("opencode.sqlite3");
@@ -2684,7 +2684,7 @@ async fn dead_acp_process_with_active_opencode_child_session_resumes_instead_of_
     let client = RecordingLinearClient::new(vec![linear_issue(
         "active-child",
         "SYM-91",
-        "In Progress",
+        "In Review",
         Some(1),
     )]);
     let opencode = ResumeRecordingRunnerLauncher::new(4242);
@@ -2700,7 +2700,7 @@ async fn dead_acp_process_with_active_opencode_child_session_resumes_instead_of_
     assert!(opencode.repairs().is_empty());
     assert_eq!(
         opencode.continuations(),
-        vec![("SYM-91".into(), "ses-root".into())]
+        vec![("SYM-91".into(), "ses-root".into(), "code-reviewer".into())]
     );
     let issue = store
         .issue("symphony", "active-child")
@@ -2714,19 +2714,21 @@ async fn dead_acp_process_with_active_opencode_child_session_resumes_instead_of_
         .await
         .expect("query session")
         .expect("session");
+    assert_eq!(session.agent, "code-reviewer");
+    assert_eq!(session.active_agent.as_deref(), Some("code-reviewer"));
     assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
     assert_eq!(session.stage, RunnerStage::Running);
     assert_eq!(session.process_id, Some(4242));
     assert_eq!(session.subagent_count, 1);
     assert_eq!(
         session.lifecycle_marker.as_deref(),
-        Some("runner_archive_activity")
+        Some("continuation_prompted")
     );
     assert!(
         session
             .last_event
             .as_deref()
-            .is_some_and(|event| event.starts_with("runner_archive_updated")),
+            .is_some_and(|event| event.starts_with("continuation_prompted")),
         "last_event={:?}",
         session.last_event
     );

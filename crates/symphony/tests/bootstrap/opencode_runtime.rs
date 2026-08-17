@@ -1733,26 +1733,14 @@ async fn stdio_launcher_uses_acp_json_rpc_session_lifecycle() {
 }
 
 #[tokio::test]
-async fn stdio_launcher_rejects_advertised_unsupported_config_before_prompt() {
+async fn stdio_launcher_rejects_advertised_unsupported_model_or_effort_before_prompt() {
     for (config_id, unsupported_value) in [
-        ("mode", "build"),
         ("model", "openai/unsupported-model"),
         ("effort", "unsupported-effort"),
     ] {
         let dir = tempfile::tempdir().expect("tempdir");
         let transcript_path = dir.path().join(format!("acp-{config_id}-transcript.jsonl"));
         let script_path = write_fake_acp_script(dir.path(), &transcript_path);
-        if config_id == "mode" {
-            let script = fs::read_to_string(&script_path).expect("fake ACP script");
-            fs::write(
-                &script_path,
-                script.replace(
-                    r#""options": [{"value": "build", "name": "build"}]"#,
-                    r#""options": [{"value": "plan", "name": "plan"}]"#,
-                ),
-            )
-            .expect("unsupported mode script");
-        }
         let mut spec = runner::RunnerLaunchSpec {
             provider_mode: RuntimeProviderMode::Acp,
             provider_id: None,
@@ -1773,7 +1761,6 @@ async fn stdio_launcher_rejects_advertised_unsupported_config_before_prompt() {
             permission_policy: PermissionPolicy::Reject,
         };
         match config_id {
-            "mode" => {}
             "model" => spec.model = Some(unsupported_value.into()),
             "effort" => spec.effort = Some(unsupported_value.into()),
             _ => unreachable!("test config id is fixed"),
@@ -1794,6 +1781,69 @@ async fn stdio_launcher_rejects_advertised_unsupported_config_before_prompt() {
             "{transcript}"
         );
     }
+}
+
+#[tokio::test]
+async fn stdio_launcher_skips_advertised_unsupported_acp_mode() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transcript_path = dir.path().join("acp-mode-transcript.jsonl");
+    let script_path = write_fake_acp_script(dir.path(), &transcript_path);
+    let script = fs::read_to_string(&script_path).expect("fake ACP script");
+    fs::write(
+        &script_path,
+        script.replace(
+            r#""options": [{"value": "build", "name": "build"}]"#,
+            r#""options": [{"value": "plan", "name": "plan"}]"#,
+        ),
+    )
+    .expect("unsupported mode script");
+    let spec = runner::RunnerLaunchSpec {
+        provider_mode: RuntimeProviderMode::Acp,
+        provider_id: None,
+        command: script_path,
+        args: Vec::new(),
+        cwd: dir.path().join("worktree"),
+        env_allowlist: Vec::new(),
+        worktree_root: None,
+        issue_identifier: "SYM-unsupported-mode".into(),
+        branch_name: "feature/sym-unsupported-mode".into(),
+        repo_path: None,
+        recall_workspace_root: None,
+        base_ref: None,
+        agent: "code-reviewer".into(),
+        model: Some("openai/gpt-5.5".into()),
+        effort: Some("high".into()),
+        prompt: "Selected agent: code-reviewer".into(),
+        permission_policy: PermissionPolicy::Reject,
+    };
+
+    runner::StdioRunnerLauncher
+        .launch(&spec)
+        .await
+        .expect("unsupported ACP mode option is skipped");
+
+    for _ in 0..50 {
+        if let Ok(transcript) = fs::read_to_string(&transcript_path)
+            && transcript.contains(r#""method": "session/prompt""#)
+        {
+            assert!(transcript.contains(r#""agent": "build""#), "{transcript}");
+            assert!(
+                !transcript.contains(r#""configId": "mode""#),
+                "{transcript}"
+            );
+            assert!(
+                !transcript.contains(r#""value": "code-reviewer""#),
+                "{transcript}"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    panic!(
+        "ACP prompt was not observed after skipping unsupported mode; transcript={:?}",
+        fs::read_to_string(transcript_path)
+    );
 }
 
 #[tokio::test]

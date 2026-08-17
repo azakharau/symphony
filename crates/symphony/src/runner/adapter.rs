@@ -19,6 +19,7 @@ pub(super) enum AgentExecutionAdapter {
 pub(super) struct AcpConfigOption<'a> {
     pub id: &'static str,
     pub value: Option<&'a str>,
+    reject_unsupported: bool,
 }
 
 pub(super) enum AcpConfigOptionSupport<'a> {
@@ -54,8 +55,10 @@ impl<'a> AcpConfigOption<'a> {
             })
         {
             AcpConfigOptionSupport::Supported(value)
-        } else {
+        } else if self.reject_unsupported {
             AcpConfigOptionSupport::Unsupported(value)
+        } else {
+            AcpConfigOptionSupport::Skip
         }
     }
 }
@@ -120,14 +123,17 @@ impl AgentExecutionAdapter {
                 AcpConfigOption {
                     id: "mode",
                     value: Some(OPENCODE_ACP_MODE),
+                    reject_unsupported: false,
                 },
                 AcpConfigOption {
                     id: "model",
                     value: spec.model.as_deref(),
+                    reject_unsupported: true,
                 },
                 AcpConfigOption {
                     id: "effort",
                     value: spec.effort.as_deref(),
+                    reject_unsupported: true,
                 },
             ],
             Self::OmpAcp => Vec::new(),

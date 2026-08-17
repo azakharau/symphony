@@ -7,7 +7,7 @@ use crate::state::RuntimeProviderMode;
 use super::RunnerLaunchSpec;
 
 const OMP_PROMPT_STARTUP_PROBE: Duration = Duration::from_secs(5);
-const OPENCODE_ACP_MODE: &str = "build";
+const ACP_BUILD_MODE: &str = "build";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum AgentExecutionAdapter {
@@ -81,7 +81,7 @@ impl AgentExecutionAdapter {
         match self {
             Self::Acp => json!({
                 "protocolVersion": 1,
-                "agent": OPENCODE_ACP_MODE,
+                "agent": ACP_BUILD_MODE,
                 "model": spec.model,
             }),
             Self::OmpAcp => json!({
@@ -98,7 +98,7 @@ impl AgentExecutionAdapter {
             Self::Acp => json!({
                 "cwd": spec.cwd,
                 "title": title,
-                "agent": OPENCODE_ACP_MODE,
+                "agent": ACP_BUILD_MODE,
                 "mcpServers": [],
             }),
             Self::OmpAcp => json!({
@@ -124,7 +124,7 @@ impl AgentExecutionAdapter {
             Self::Acp => vec![
                 AcpConfigOption {
                     id: "mode",
-                    value: Some(OPENCODE_ACP_MODE),
+                    value: Some(ACP_BUILD_MODE),
                     reject_unsupported: false,
                 },
                 AcpConfigOption {

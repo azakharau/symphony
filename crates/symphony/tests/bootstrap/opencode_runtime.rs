@@ -1798,14 +1798,38 @@ async fn stdio_launcher_rejects_advertised_unsupported_config_before_prompt() {
 
 #[tokio::test]
 async fn stdio_launcher_uses_build_acp_mode_for_in_review_agent() {
+    assert_stdio_launcher_uses_build_acp_mode_for_code_reviewer(WorkflowStage::InReview).await;
+}
+
+#[tokio::test]
+async fn stdio_launcher_uses_build_acp_mode_for_in_progress_code_reviewer() {
+    assert_stdio_launcher_uses_build_acp_mode_for_code_reviewer(WorkflowStage::InProgress).await;
+}
+
+async fn assert_stdio_launcher_uses_build_acp_mode_for_code_reviewer(stage: WorkflowStage) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let transcript_path = dir.path().join("acp-review-transcript.jsonl");
+    let transcript_path = dir
+        .path()
+        .join(format!("acp-{}-review-transcript.jsonl", stage.as_str()));
     let script_path = write_fake_acp_script(dir.path(), &transcript_path);
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
-    let project = config.project("symphony").expect("project");
-    let issue = linear_issue("issue-201", "SYM-201", "In Review", Some(1));
-    let mut spec =
-        runner::build_acp_launch_spec_for_stage(project, &issue, WorkflowStage::InReview);
+    let mut project = config.project("symphony").expect("project").clone();
+    match stage {
+        WorkflowStage::InProgress => {
+            project.workflow.agents.default.in_progress = "code-reviewer".into();
+        }
+        WorkflowStage::InReview => {
+            project.workflow.agents.default.in_review = "code-reviewer".into();
+        }
+        _ => panic!("test only covers executable workflow stages"),
+    }
+    let issue = linear_issue(
+        "issue-201",
+        "SYM-201",
+        project.workflow.required_linear_state(stage),
+        Some(1),
+    );
+    let mut spec = runner::build_acp_launch_spec_for_stage(&project, &issue, stage);
     spec.command = script_path;
     spec.cwd = dir.path().join("worktree");
     spec.worktree_root = None;
@@ -1817,13 +1841,7 @@ async fn stdio_launcher_uses_build_acp_mode_for_in_review_agent() {
         .launch(&spec)
         .await
         .expect("review agent launches through build ACP mode");
-    let session = runner::new_session_record_for_stage(
-        project,
-        &issue,
-        started,
-        &spec,
-        WorkflowStage::InReview,
-    );
+    let session = runner::new_session_record_for_stage(&project, &issue, started, &spec, stage);
 
     assert_eq!(session.agent, "code-reviewer");
     assert_eq!(session.active_agent.as_deref(), Some("code-reviewer"));

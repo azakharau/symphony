@@ -2471,7 +2471,7 @@ async fn malformed_success_handoff_fails_fast_without_opencode_repair_or_owner_i
 }
 
 #[tokio::test]
-async fn malformed_handoff_sidecar_fails_fast_kills_process_tree_and_does_not_repair() {
+async fn malformed_handoff_sidecar_in_review_repairs_with_review_agent() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("runtime.sqlite3");
     let config = RootConfig::from_toml_str(valid_config_toml()).expect("config");
@@ -2501,7 +2501,7 @@ async fn malformed_handoff_sidecar_fails_fast_kills_process_tree_and_does_not_re
     let client = RecordingLinearClient::new(vec![linear_issue(
         "malformed-json",
         "SYM-86",
-        "In Progress",
+        "In Review",
         Some(1),
     )]);
     let opencode = MalformedHandoffRunnerLauncher::new(
@@ -2559,6 +2559,13 @@ async fn malformed_handoff_sidecar_fails_fast_kills_process_tree_and_does_not_re
         opencode.repairs(),
         vec![("oc-86".into(), "malformed_handoff_sidecar".into())]
     );
+    let repair_specs = opencode.repair_specs();
+    assert_eq!(repair_specs[0].0, "code-reviewer");
+    assert!(
+        repair_specs[0].1.contains("Selected agent: code-reviewer"),
+        "{}",
+        repair_specs[0].1
+    );
     let session = store
         .runner_session("symphony", "malformed-json", "oc-86")
         .await
@@ -2567,6 +2574,8 @@ async fn malformed_handoff_sidecar_fails_fast_kills_process_tree_and_does_not_re
     assert_eq!(session.lifecycle_stage, LifecycleStage::Running);
     assert_eq!(session.stage, RunnerStage::Running);
     assert_eq!(session.process_id, Some(stale_process_id));
+    assert_eq!(session.agent, "code-reviewer");
+    assert_eq!(session.active_agent.as_deref(), Some("code-reviewer"));
     assert_eq!(session.lifecycle_marker.as_deref(), Some("repair_prompted"));
     assert_eq!(
         session.last_event.as_deref(),

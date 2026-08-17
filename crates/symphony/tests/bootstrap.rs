@@ -1239,6 +1239,7 @@ impl RunnerLauncher for ResumeRecordingRunnerLauncher {
 struct MalformedHandoffRunnerLauncher {
     message: String,
     repairs: std::sync::Mutex<Vec<(String, String)>>,
+    repair_specs: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 impl MalformedHandoffRunnerLauncher {
@@ -1246,11 +1247,16 @@ impl MalformedHandoffRunnerLauncher {
         Self {
             message: message.into(),
             repairs: std::sync::Mutex::new(Vec::new()),
+            repair_specs: std::sync::Mutex::new(Vec::new()),
         }
     }
 
     fn repairs(&self) -> Vec<(String, String)> {
         self.repairs.lock().expect("repairs lock").clone()
+    }
+
+    fn repair_specs(&self) -> Vec<(String, String)> {
+        self.repair_specs.lock().expect("repair specs lock").clone()
     }
 }
 
@@ -1272,7 +1278,7 @@ impl RunnerLauncher for MalformedHandoffRunnerLauncher {
 
     async fn continue_repair(
         &self,
-        _spec: &runner::RunnerLaunchSpec,
+        spec: &runner::RunnerLaunchSpec,
         session: &RunnerSessionRecord,
         failure_fingerprint: &str,
         _repair_message: &str,
@@ -1281,6 +1287,10 @@ impl RunnerLauncher for MalformedHandoffRunnerLauncher {
             .lock()
             .expect("repairs lock")
             .push((session.session_id.clone(), failure_fingerprint.to_string()));
+        self.repair_specs
+            .lock()
+            .expect("repair specs lock")
+            .push((spec.agent.clone(), spec.prompt.clone()));
         Ok(runner::RunnerStartedSession {
             session_id: session.session_id.clone(),
             process_id: session.process_id,

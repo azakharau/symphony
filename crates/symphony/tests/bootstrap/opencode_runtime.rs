@@ -1784,7 +1784,7 @@ async fn stdio_launcher_rejects_advertised_unsupported_model_or_effort_before_pr
 }
 
 #[tokio::test]
-async fn stdio_launcher_skips_advertised_unsupported_acp_mode() {
+async fn stdio_launcher_only_skips_unadvertised_build_when_current_mode_is_build() {
     let dir = tempfile::tempdir().expect("tempdir");
     let transcript_path = dir.path().join("acp-mode-transcript.jsonl");
     let script_path = write_fake_acp_script(dir.path(), &transcript_path);
@@ -1797,7 +1797,7 @@ async fn stdio_launcher_skips_advertised_unsupported_acp_mode() {
         ),
     )
     .expect("unsupported mode script");
-    let spec = runner::RunnerLaunchSpec {
+    let mut spec = runner::RunnerLaunchSpec {
         provider_mode: RuntimeProviderMode::Acp,
         provider_id: None,
         command: script_path,
@@ -1820,8 +1820,9 @@ async fn stdio_launcher_skips_advertised_unsupported_acp_mode() {
     runner::StdioRunnerLauncher
         .launch(&spec)
         .await
-        .expect("unsupported ACP mode option is skipped");
+        .expect("current build mode is already effective");
 
+    let mut prompt_observed = false;
     for _ in 0..50 {
         if let Ok(transcript) = fs::read_to_string(&transcript_path)
             && transcript.contains(r#""method": "session/prompt""#)
@@ -1835,14 +1836,46 @@ async fn stdio_launcher_skips_advertised_unsupported_acp_mode() {
                 !transcript.contains(r#""value": "code-reviewer""#),
                 "{transcript}"
             );
-            return;
+            prompt_observed = true;
+            break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    assert!(
+        prompt_observed,
+        "ACP prompt was not observed: {transcript_path:?}"
+    );
 
-    panic!(
-        "ACP prompt was not observed after skipping unsupported mode; transcript={:?}",
-        fs::read_to_string(transcript_path)
+    let plan_dir = tempfile::tempdir().expect("plan tempdir");
+    let plan_transcript_path = plan_dir.path().join("acp-plan-mode-transcript.jsonl");
+    let plan_script_path = write_fake_acp_script(plan_dir.path(), &plan_transcript_path);
+    let plan_script = fs::read_to_string(&plan_script_path)
+        .expect("fake plan ACP script")
+        .replace(
+            r#"config = {"mode": "build""#,
+            r#"config = {"mode": "plan""#,
+        )
+        .replace(
+            r#""options": [{"value": "build", "name": "build"}]"#,
+            r#""options": [{"value": "plan", "name": "plan"}]"#,
+        );
+    fs::write(&plan_script_path, plan_script).expect("plan mode script");
+    spec.command = plan_script_path;
+    spec.cwd = plan_dir.path().join("worktree");
+
+    let runner::RunnerError::AcpSetupFailed { reason, .. } = runner::StdioRunnerLauncher
+        .launch(&spec)
+        .await
+        .expect_err("non-build current mode must fail setup")
+    else {
+        panic!("expected ACP setup failure");
+    };
+    assert!(reason.contains("mode"), "{reason}");
+    assert!(reason.contains("build"), "{reason}");
+    let transcript = fs::read_to_string(&plan_transcript_path).expect("plan ACP transcript");
+    assert!(
+        !transcript.contains(r#""method": "session/prompt""#),
+        "{transcript}"
     );
 }
 

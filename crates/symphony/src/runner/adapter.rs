@@ -55,10 +55,12 @@ impl<'a> AcpConfigOption<'a> {
             })
         {
             AcpConfigOptionSupport::Supported(value)
-        } else if self.reject_unsupported {
-            AcpConfigOptionSupport::Unsupported(value)
-        } else {
+        } else if !self.reject_unsupported
+            && option.get("currentValue").and_then(Value::as_str) == Some(value)
+        {
             AcpConfigOptionSupport::Skip
+        } else {
+            AcpConfigOptionSupport::Unsupported(value)
         }
     }
 }

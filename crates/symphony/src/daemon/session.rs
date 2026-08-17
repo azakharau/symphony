@@ -1,11 +1,10 @@
 use tracing::{info, warn};
 
 use crate::{
-    config::{ProjectConfig, WorkflowStage},
+    config::ProjectConfig,
     linear::LinearIssue,
     runner::{
-        OMP_CLEANUP_MARKER_ENV, RunnerLauncher, RunnerStartedSession, build_acp_launch_spec,
-        build_acp_launch_spec_for_stage, terminate_process_tree,
+        OMP_CLEANUP_MARKER_ENV, RunnerLauncher, RunnerStartedSession, terminate_process_tree,
     },
     state::{FailureRecord, LifecycleStage, RunnerSessionRecord, RunnerStage, RuntimeProviderMode},
     storage::SqliteStore,
@@ -13,7 +12,10 @@ use crate::{
 
 use std::path::Path;
 
-use super::policy::recoverable_runner_failure;
+use super::{
+    policy::recoverable_runner_failure,
+    runner_launch::{apply_acp_agent_metadata, stage_aware_launch_spec},
+};
 
 pub(super) async fn mark_historical_sessions_ignored(
     store: &SqliteStore,
@@ -246,15 +248,7 @@ pub(super) async fn resume_stale_runner_session(
     if !session_requires_resume(&session).await {
         return Ok(());
     }
-    let launch_spec = if project.runner.provider_mode == RuntimeProviderMode::Acp {
-        let stage = project
-            .workflow
-            .stage_for_linear_state(&issue.state)
-            .unwrap_or(WorkflowStage::InProgress);
-        build_acp_launch_spec_for_stage(project, issue, stage)
-    } else {
-        build_acp_launch_spec(project, issue)
-    };
+    let launch_spec = stage_aware_launch_spec(project, issue);
     let existing_issue = store.issue(&project.id, &issue.id).await?;
     terminate_current_session_process(project, issue, &mut session).await?;
     if let Some(failure) = existing_issue
@@ -269,10 +263,7 @@ pub(super) async fn resume_stale_runner_session(
         let started = continue_stale_session(runner, &launch_spec, &session).await?;
         apply_continued_process(&mut session, started);
     }
-    if project.runner.provider_mode == RuntimeProviderMode::Acp {
-        session.agent.clone_from(&launch_spec.agent);
-        session.active_agent = Some(launch_spec.agent.clone());
-    }
+    apply_acp_agent_metadata(&mut session, &launch_spec);
     info!(
         project_id = %project.id,
         issue = %issue.identifier,

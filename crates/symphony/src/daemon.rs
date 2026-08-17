@@ -6,6 +6,7 @@ mod http;
 mod liveness;
 mod policy;
 mod records;
+mod runner_launch;
 mod self_defects;
 mod session;
 mod stage_dispatch;

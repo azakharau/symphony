@@ -16,8 +16,7 @@ use crate::{
     runner::{
         RunnerError, RunnerHandoff, RunnerLauncher, RunnerSessionTreeActivity, RunnerStopReason,
         apply_session_tree_metrics_preserving_marker, build_acp_launch_spec,
-        build_acp_launch_spec_for_stage, read_session_tree_activity, read_session_tree_metrics,
-        worktree_path_allowed,
+        read_session_tree_activity, read_session_tree_metrics, worktree_path_allowed,
     },
     state::{
         BlockerRecord, CleanupStatus, FailureRecord, GitRefRecord, IssueStateRecord,
@@ -1099,15 +1098,7 @@ async fn request_runner_repair(
             },
         )
         .await?;
-    let spec = if project.runner.provider_mode == RuntimeProviderMode::Acp {
-        let stage = project
-            .workflow
-            .stage_for_linear_state(&issue.state)
-            .unwrap_or(WorkflowStage::InProgress);
-        build_acp_launch_spec_for_stage(project, issue, stage)
-    } else {
-        build_acp_launch_spec(project, issue)
-    };
+    let spec = super::runner_launch::stage_aware_launch_spec(project, issue);
     let mut terminating_session = session.clone();
     terminate_current_session_process(project, issue, &mut terminating_session).await?;
     let started = match runner
@@ -1147,11 +1138,7 @@ async fn request_runner_repair(
     store.upsert_issue(&record).await?;
 
     let mut repair_session = session.clone();
-    repair_session.process_id = started.process_id;
-    if spec.provider_mode == RuntimeProviderMode::Acp {
-        repair_session.agent.clone_from(&spec.agent);
-        repair_session.active_agent = Some(spec.agent.clone());
-    }
+    super::runner_launch::apply_started_session_metadata(&mut repair_session, &spec, &started);
     repair_session.lifecycle_stage = LifecycleStage::Running;
     repair_session.stage = crate::state::RunnerStage::Running;
     repair_session.lifecycle_marker = Some("repair_prompted".into());

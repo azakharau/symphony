@@ -2019,6 +2019,76 @@ async fn handoff_sidecar_normalizes_acp_shape() {
 }
 
 #[tokio::test]
+async fn handoff_sidecar_normalizes_all_passing_compact_command_evidence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let worktree = dir.path().join("worktree");
+    let sidecar_dir = worktree.join(".symphony");
+    fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
+    fs::write(
+        sidecar_dir.join("runner-handoff.json"),
+        r#"{
+  "session_id":"ses-command-pass",
+  "lifecycle_stages":["running","eval","handoff","completed"],
+  "subagents":[],
+  "eval_results":{"commands":[{"command":"git diff --check","status":"pass"},{"command":"cargo test -p symphony","status":"passed"}]},
+  "changed_files":[],
+  "git":null,
+  "risks":[],
+  "stop_reason":"accepted"
+}"#,
+    )
+    .expect("handoff fixture");
+
+    let handoff = runner::StdioRunnerLauncher
+        .latest_handoff(&test_session(
+            "symphony",
+            "issue-command-pass",
+            "ses-command-pass",
+            &worktree,
+        ))
+        .await
+        .expect("compact command evidence should parse")
+        .expect("handoff present");
+
+    assert!(handoff.eval_results[0].passed);
+}
+
+#[tokio::test]
+async fn handoff_sidecar_rejects_failing_compact_command_evidence() {
+    for status in ["fail", "failed", "error", "blocked"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let worktree = dir.path().join("worktree");
+        let sidecar_dir = worktree.join(".symphony");
+        fs::create_dir_all(&sidecar_dir).expect("sidecar dir");
+        let fixture = r#"{
+  "session_id":"ses-command-fail",
+  "lifecycle_stages":["running","eval","handoff","completed"],
+  "subagents":[],
+  "eval_results":{"outcome":"accept","commands":[{"command":"cargo test -p symphony","status":"$STATUS"}]},
+  "changed_files":[],
+  "git":null,
+  "risks":[],
+  "stop_reason":"accepted"
+}"#
+        .replace("$STATUS", status);
+        fs::write(sidecar_dir.join("runner-handoff.json"), fixture).expect("handoff fixture");
+
+        let handoff = runner::StdioRunnerLauncher
+            .latest_handoff(&test_session(
+                "symphony",
+                "issue-command-fail",
+                "ses-command-fail",
+                &worktree,
+            ))
+            .await
+            .expect("failing compact command evidence should parse")
+            .expect("handoff present");
+
+        assert!(!handoff.eval_results[0].passed, "status {status}");
+    }
+}
+
+#[tokio::test]
 async fn handoff_sidecar_normalizes_provider_neutral_blocker_reasons() {
     let dir = tempfile::tempdir().expect("tempdir");
     let worktree = dir.path().join("worktree");

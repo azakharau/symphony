@@ -15,7 +15,6 @@ archive_root = "/home/agent/recall-benchmark-runs/symphony-opencode-session-arch
 id = "symphony"
 name = "Symphony"
 enabled = true
-workflow_path = "symphony.workflow.toml"
 repo_path = "/home/agent/proj/symphony"
 
 
@@ -47,7 +46,6 @@ max_sessions = 1
 id = "agent-forge"
 name = "Neryva Agent Forge"
 enabled = true
-workflow_path = "symphony.workflow.toml"
 repo_path = "/home/agent/proj/neryva-agent-forge"
 
 
@@ -79,7 +77,6 @@ max_sessions = 1
 id = "recall"
 name = "Recall"
 enabled = true
-workflow_path = "symphony.workflow.toml"
 repo_path = "/home/agent/proj/recall"
 
 
@@ -111,7 +108,6 @@ max_sessions = 1
 id = "neryva"
 name = "Neryva"
 enabled = true
-workflow_path = "symphony.workflow.toml"
 repo_path = "/home/agent/proj/neryva"
 
 [projects.branch]
@@ -142,7 +138,6 @@ max_sessions = 1
 id = "nervure"
 name = "Nervure"
 enabled = true
-workflow_path = "symphony.workflow.toml"
 repo_path = "/home/agent/proj/nervure"
 
 

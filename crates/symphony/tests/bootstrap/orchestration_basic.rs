@@ -2692,7 +2692,7 @@ inverse_bridge_reference = true
     assert!(
         managed
             .iter()
-            .all(|issue| { issue.priority == 1 && issue.state == ManagedLinearIssueState::Todo })
+            .all(|issue| { issue.priority == 1 && issue.state_name == "Todo" })
     );
     assert!(managed.iter().any(|issue| {
         issue.source_issue_id == "launch-fails" && issue.fingerprint == "launch_failed"

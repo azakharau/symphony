@@ -456,7 +456,7 @@ impl WorkflowStage {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectWorkflow {
     pub states: WorkflowStates,
@@ -466,18 +466,6 @@ pub struct ProjectWorkflow {
     pub owner_input: OwnerInputPolicy,
     #[serde(default)]
     pub self_defects: WorkflowSelfDefectPolicy,
-}
-
-impl Default for ProjectWorkflow {
-    fn default() -> Self {
-        Self {
-            states: WorkflowStates::default(),
-            processed_states: Vec::new(),
-            agents: WorkflowAgents::default(),
-            owner_input: OwnerInputPolicy::default(),
-            self_defects: WorkflowSelfDefectPolicy::default(),
-        }
-    }
 }
 
 impl ProjectWorkflow {
@@ -1115,7 +1103,7 @@ fn load_workflow_override_file(
     toml::from_str::<ProjectWorkflowOverride>(&input).map_err(|source| ConfigError::WorkflowParse {
         project_id: project_id.to_owned(),
         path: path.to_path_buf(),
-        source,
+        source: Box::new(source),
     })
 }
 
@@ -1135,7 +1123,7 @@ pub enum ConfigError {
     WorkflowParse {
         project_id: String,
         path: PathBuf,
-        source: toml::de::Error,
+        source: Box<toml::de::Error>,
     },
     #[error("invalid root config: {0}")]
     Validation(String),

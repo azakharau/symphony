@@ -15,7 +15,7 @@ use queries::{
 pub use types::{
     LinearBlocker, LinearClientError, LinearIssue, LinearIssueEvidence, LinearMilestone,
     LinearProjectConfig, LinearTransition, LinearUpstreamContext, ManagedLinearIssueCreate,
-    ManagedLinearIssueState, ManagedLinearRelation,
+    ManagedLinearRelation,
 };
 
 #[async_trait::async_trait]
@@ -753,7 +753,7 @@ where
         .pointer("/id")
         .and_then(Value::as_str)
         .ok_or_else(|| LinearClientError::Message("missing Linear team id".into()))?;
-    let state_id = state_id_from_team(team, request.state.state_name())?;
+    let state_id = state_id_from_team(team, &request.state_name)?;
 
     let mut input = json!({
         "teamId": team_id,

@@ -334,16 +334,13 @@ impl OmpFileAccumulator {
             .unwrap_or_else(|| "tool".into());
         let summary = tool_result_summary(part)
             .unwrap_or_else(|| format!("{} completed", human_title(&tool)));
-        if tool == "todo" {
-            if let Some(text) = tool_result_text(part) {
-                let todos = todo_snapshot_from_tool_result(
-                    &self.effective_session_id(),
-                    &text,
-                    timestamp_ms,
-                );
-                if !todos.is_empty() {
-                    self.latest_todo_snapshot = todos;
-                }
+        if tool == "todo"
+            && let Some(text) = tool_result_text(part)
+        {
+            let todos =
+                todo_snapshot_from_tool_result(&self.effective_session_id(), &text, timestamp_ms);
+            if !todos.is_empty() {
+                self.latest_todo_snapshot = todos;
             }
         }
         if let Some(index) = json_string(part, "toolCallId")

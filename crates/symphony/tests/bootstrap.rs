@@ -16,8 +16,7 @@ use symphony::{
     linear::{
         LinearBlocker, LinearClient, LinearClientError, LinearGraphqlClient,
         LinearGraphqlTransport, LinearIssue, LinearIssueEvidence, LinearTransition,
-        LinearUpstreamContext, ManagedLinearIssueCreate, ManagedLinearIssueState,
-        ManagedLinearRelation,
+        LinearUpstreamContext, ManagedLinearIssueCreate, ManagedLinearRelation,
     },
     runner::{
         self, GitClosureEvidence, PermissionPolicy, RunnerEvalResult, RunnerHandoff,
@@ -837,7 +836,7 @@ impl LinearClient for RecordingLinearClient {
             identifier,
             title: request.title.clone(),
             description: Some(request.description.clone()),
-            state: request.state.state_name().into(),
+            state: request.state_name.clone(),
             state_id: None,
             priority: Some(request.priority),
             branch_name: None,

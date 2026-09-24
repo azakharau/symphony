@@ -53,8 +53,15 @@ Default validation does not start runner, mutate Linear, or restart systemd:
 ```bash
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+cargo test --locked
+
+cd apps/dashboard
+bun install --frozen-lockfile
+bun run lint && bun run typecheck && bun run test && bun run build
 ```
+
+The dashboard quota smoke reads real host quota through `ocu` and runs only with
+`SYMPHONY_LIVE_OCU_QUOTA=1`.
 
 Live cutover validation requires host credentials and operator control:
 

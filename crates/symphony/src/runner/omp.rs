@@ -140,16 +140,12 @@ impl StdioOmpAcpLauncher {
         };
         match prompt_response {
             Ok(Ok(_)) => {
-                let (process, stdin, stdout, stderr_drain) = child.into_parts();
                 spawn_stream_drain(
                     &spec.permission_policy,
                     "OMP ACP stream drain ended with error",
                     session_id.clone(),
                     spec.cwd.clone(),
-                    process,
-                    stdin,
-                    stdout,
-                    stderr_drain,
+                    child,
                 );
             }
             Ok(Err(error)) => {
@@ -158,17 +154,13 @@ impl StdioOmpAcpLauncher {
                     .await);
             }
             Err(_) => {
-                let (process, stdin, stdout, stderr_drain) = child.into_parts();
                 spawn_prompt_reader(
                     &spec.permission_policy,
                     next_id,
                     "OMP ACP prompt stream ended with error",
                     session_id.clone(),
                     spec.cwd.clone(),
-                    process,
-                    stdin,
-                    stdout,
-                    stderr_drain,
+                    child,
                 );
             }
         }

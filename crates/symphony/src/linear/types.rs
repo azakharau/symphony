@@ -98,25 +98,9 @@ pub struct ManagedLinearIssueCreate {
     pub title: String,
     pub description: String,
     pub priority: i64,
-    pub state: ManagedLinearIssueState,
+    pub state_name: String,
     pub project_milestone_id: Option<String>,
     pub label_ids: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ManagedLinearIssueState {
-    Backlog,
-    Todo,
-}
-
-impl ManagedLinearIssueState {
-    pub const fn state_name(self) -> &'static str {
-        match self {
-            Self::Backlog => "Backlog",
-            Self::Todo => "Todo",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

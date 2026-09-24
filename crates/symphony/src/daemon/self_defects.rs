@@ -1,10 +1,10 @@
 mod recommendation;
 
 use crate::{
-    config::ProjectConfig,
+    config::{ProjectConfig, WorkflowStage},
     linear::{
         LinearClient, LinearIssue, LinearIssueEvidence, ManagedLinearIssueCreate,
-        ManagedLinearIssueState, ManagedLinearRelation,
+        ManagedLinearRelation,
     },
     state::{
         FailureRecord, RunnerSessionRecord, SelfDefectOccurrenceRecord, SelfDefectRecord,
@@ -83,7 +83,8 @@ async fn record_self_defect(
         )
         .await;
     };
-    let summary = runtime_self_defect_summary(message, failure, session, policy);
+    let managed_state = managed_issue_state_name(managed_project, policy.stage);
+    let summary = runtime_self_defect_summary(message, failure, session, policy, managed_state);
     let managed_issue = match store.open_self_defect_by_fingerprint(fingerprint).await? {
         Some(record) => {
             open_registry_managed_issue(managed_project, linear, fingerprint, record, policy)
@@ -112,7 +113,7 @@ async fn record_self_defect(
                                 title: format!("Symphony self-defect: {fingerprint}"),
                                 description: summary.clone(),
                                 priority: policy.priority,
-                                state: policy.state,
+                                state_name: managed_state.to_owned(),
                                 project_milestone_id: managed_issue_milestone_id(
                                     project,
                                     managed_project,
@@ -226,7 +227,7 @@ async fn open_registry_managed_issue(
         identifier: record.managed_issue_identifier,
         title: format!("Symphony self-defect: {fingerprint}"),
         description: None,
-        state: "Todo".into(),
+        state: managed_issue_state_name(managed_project, policy.stage).to_owned(),
         state_id: None,
         priority: Some(policy.priority),
         branch_name: None,
@@ -270,6 +271,7 @@ fn runtime_self_defect_summary(
     failure: &FailureRecord,
     session: &RunnerSessionRecord,
     policy: ManagedSelfDefectPolicy,
+    managed_state: &str,
 ) -> String {
     let fingerprint = failure
         .fingerprint
@@ -280,7 +282,7 @@ fn runtime_self_defect_summary(
         "Symphony runtime self-defect\nkind: {kind}\nfingerprint: {fingerprint}\nmanaged_severity: {severity}\nmanaged_state: {state}\nsource_project: {source_project}\nsource_issue: {source_issue}\nsession_id: {session_id}\nprocess_id: {process_id}\noccurrence: {occurrence}\nsummary: {message}\nfailure_reason: {failure_reason}",
         kind = failure.kind,
         severity = policy.severity,
-        state = policy.state.state_name(),
+        state = managed_state,
         source_project = session.project_id,
         source_issue = session.issue_id,
         session_id = session.session_id,
@@ -327,7 +329,7 @@ struct ManagedSelfDefectPolicy {
     severity: &'static str,
     category: &'static str,
     priority: i64,
-    state: ManagedLinearIssueState,
+    stage: WorkflowStage,
 }
 
 impl ManagedSelfDefectPolicy {
@@ -361,7 +363,7 @@ impl ManagedSelfDefectPolicy {
             severity: "p0",
             category,
             priority: 1,
-            state: ManagedLinearIssueState::Todo,
+            stage: WorkflowStage::Todo,
         }
     }
 
@@ -370,7 +372,7 @@ impl ManagedSelfDefectPolicy {
             severity: "p1",
             category,
             priority: 2,
-            state: ManagedLinearIssueState::Backlog,
+            stage: WorkflowStage::Backlog,
         }
     }
 
@@ -379,9 +381,16 @@ impl ManagedSelfDefectPolicy {
             severity: "p2",
             category,
             priority: 3,
-            state: ManagedLinearIssueState::Backlog,
+            stage: WorkflowStage::Backlog,
         }
     }
+}
+
+fn managed_issue_state_name(project: &ProjectConfig, stage: WorkflowStage) -> &str {
+    project
+        .workflow
+        .linear_state(stage)
+        .unwrap_or_else(|| project.workflow.required_linear_state(WorkflowStage::Todo))
 }
 
 pub(super) fn failure_kind_category(failure: &FailureRecord) -> &'static str {
@@ -952,70 +961,70 @@ mod tests {
                 "missing_handoff_sidecar",
                 "malformed_handoff",
                 "p0",
-                ManagedLinearIssueState::Todo,
+                WorkflowStage::Todo,
                 1,
             ),
             (
                 "malformed_handoff_sidecar",
                 "malformed_handoff",
                 "p0",
-                ManagedLinearIssueState::Todo,
+                WorkflowStage::Todo,
                 1,
             ),
             (
                 "missing_git_closure",
                 "malformed_handoff",
                 "p0",
-                ManagedLinearIssueState::Todo,
+                WorkflowStage::Todo,
                 1,
             ),
             (
                 "git_closure_unverified",
                 "malformed_handoff",
                 "p0",
-                ManagedLinearIssueState::Todo,
+                WorkflowStage::Todo,
                 1,
             ),
             (
                 "launch_failed",
                 "runtime_defect",
                 "p0",
-                ManagedLinearIssueState::Todo,
+                WorkflowStage::Todo,
                 1,
             ),
             (
                 "stale_failed_session_reuse",
                 "runtime_defect",
                 "p1",
-                ManagedLinearIssueState::Backlog,
+                WorkflowStage::Backlog,
                 2,
             ),
             (
                 "runtime_db_linear_divergence",
                 "runtime_defect",
                 "p1",
-                ManagedLinearIssueState::Backlog,
+                WorkflowStage::Backlog,
                 2,
             ),
             (
                 "cleanup_failed_after_accepted_closure",
                 "cleanup",
                 "p1",
-                ManagedLinearIssueState::Backlog,
+                WorkflowStage::Backlog,
                 2,
             ),
             (
                 "live_acceptance_related_only",
                 "runtime_defect",
                 "p2",
-                ManagedLinearIssueState::Backlog,
+                WorkflowStage::Backlog,
                 3,
             ),
             (
                 "dashboard_projection_gap_hides_live_execution",
                 "projection_gap",
                 "p2",
-                ManagedLinearIssueState::Backlog,
+                WorkflowStage::Backlog,
                 3,
             ),
         ];
@@ -1029,9 +1038,74 @@ mod tests {
             })
             .expect("known deterministic self-defect policy");
             assert_eq!(policy.severity, severity, "{fingerprint}");
-            assert_eq!(policy.state, state, "{fingerprint}");
+            assert_eq!(policy.stage, state, "{fingerprint}");
             assert_eq!(policy.priority, priority, "{fingerprint}");
         }
+    }
+
+    #[tokio::test]
+    async fn managed_self_defect_is_created_in_managed_project_configured_states() {
+        let source_project = other_project("nervure");
+        let source = linear_issue("source-issue", "NRV-10");
+        let mut managed_project = test_project();
+        managed_project.workflow.states.todo = "Ready for Defect Work".into();
+        managed_project.workflow.states.backlog = Some("Defect Icebox".into());
+
+        for (fingerprint, expected_state) in [
+            ("launch_failed", "Ready for Defect Work"),
+            ("stale_failed_session_reuse", "Defect Icebox"),
+            ("live_acceptance_related_only", "Defect Icebox"),
+        ] {
+            let request =
+                create_self_defect(&source_project, &managed_project, &source, fingerprint).await;
+            assert_eq!(request.state_name, expected_state, "{fingerprint}");
+            assert!(
+                request
+                    .description
+                    .contains(&format!("managed_state: {expected_state}")),
+                "{fingerprint}"
+            );
+        }
+
+        managed_project.workflow.states.backlog = None;
+        let request = create_self_defect(
+            &source_project,
+            &managed_project,
+            &source,
+            "stale_failed_session_reuse",
+        )
+        .await;
+        assert_eq!(request.state_name, "Ready for Defect Work");
+    }
+
+    async fn create_self_defect(
+        source_project: &ProjectConfig,
+        managed_project: &ProjectConfig,
+        source: &LinearIssue,
+        fingerprint: &str,
+    ) -> ManagedLinearIssueCreate {
+        let store = test_store().await;
+        let linear = CreatingLinearClient::default();
+        let failure = failure_record(fingerprint);
+        let session = session_record(source_project, source);
+        record_runtime_self_defect(
+            source_project,
+            managed_project,
+            &store,
+            &linear,
+            RuntimeSelfDefectInput {
+                issue: source,
+                evidence_kind: "runtime_defect",
+                message: "configured workflow states route managed self-defects",
+                failure: &failure,
+                session: &session,
+            },
+        )
+        .await
+        .expect("record self-defect");
+        let mut created = linear.created.into_inner().expect("created lock");
+        assert_eq!(created.len(), 1, "{fingerprint}");
+        created.remove(0)
     }
 
     #[tokio::test]
@@ -1266,6 +1340,41 @@ mod tests {
             Err(LinearClientError::Message(
                 "terminal duplicate must not create Linear relation".into(),
             ))
+        }
+    }
+
+    #[derive(Default)]
+    struct CreatingLinearClient {
+        created: Mutex<Vec<ManagedLinearIssueCreate>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LinearClient for CreatingLinearClient {
+        async fn fetch_candidate_issues(
+            &self,
+            _project: &ProjectConfig,
+        ) -> Result<Vec<LinearIssue>, LinearClientError> {
+            Ok(Vec::new())
+        }
+
+        async fn transition_issue(
+            &self,
+            _issue_id: &str,
+            _transition: crate::linear::LinearTransition,
+        ) -> Result<(), LinearClientError> {
+            Err(LinearClientError::Message(
+                "self-defect creation must not transition Linear".into(),
+            ))
+        }
+
+        async fn create_managed_issue(
+            &self,
+            _project: &ProjectConfig,
+            request: ManagedLinearIssueCreate,
+        ) -> Result<LinearIssue, LinearClientError> {
+            let issue = linear_issue_with_state("managed-issue", "SYM-60", &request.state_name);
+            self.created.lock().expect("created lock").push(request);
+            Ok(issue)
         }
     }
 

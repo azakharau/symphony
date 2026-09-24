@@ -13,11 +13,7 @@ use std::{io::ErrorKind, path::Path, process::ExitStatus};
 
 use serde_json::{Value, json};
 use thiserror::Error;
-use tokio::{
-    io::{AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin, ChildStdout},
-    task::JoinHandle,
-};
+use tokio::{io::AsyncWriteExt, process::Child};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -240,12 +236,10 @@ fn spawn_prompt_reader(
     warning: &'static str,
     session_id: String,
     worktree_path: std::path::PathBuf,
-    mut child: Child,
-    mut stdin: ChildStdin,
-    mut stdout: BufReader<ChildStdout>,
-    stderr_drain: JoinHandle<()>,
+    child: AcpChildLifecycle,
 ) {
     let permission_policy = permission_policy.clone();
+    let (mut child, mut stdin, mut stdout, stderr_drain) = child.into_parts();
     tokio::spawn(async move {
         if let Err(error) = read_acp_response(
             &mut stdout,
@@ -279,12 +273,10 @@ fn spawn_stream_drain(
     warning: &'static str,
     session_id: String,
     worktree_path: std::path::PathBuf,
-    mut child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-    stderr_drain: JoinHandle<()>,
+    child: AcpChildLifecycle,
 ) {
     let permission_policy = permission_policy.clone();
+    let (mut child, stdin, stdout, stderr_drain) = child.into_parts();
     tokio::spawn(async move {
         if let Err(error) = drain_acp_stream(stdout, stdin, permission_policy).await {
             handle_reader_error(error, warning, &mut child).await;
@@ -509,17 +501,13 @@ impl RunnerLauncher for StdioRunnerLauncher {
             }),
         )
         .await?;
-        let (process, stdin, stdout, stderr_drain) = child.into_parts();
         spawn_prompt_reader(
             &spec.permission_policy,
             prompt_request_id,
             "runner ACP prompt stream ended with error",
             session_id.clone(),
             spec.cwd.clone(),
-            process,
-            stdin,
-            stdout,
-            stderr_drain,
+            child,
         );
 
         Ok(RunnerStartedSession {
@@ -565,16 +553,12 @@ impl RunnerLauncher for StdioRunnerLauncher {
                 )
                 .await);
         }
-        let (process, stdin, stdout, stderr_drain) = child.into_parts();
         spawn_stream_drain(
             &spec.permission_policy,
             "runner ACP resumed stream ended with error",
             session.session_id.clone(),
             spec.cwd.clone(),
-            process,
-            stdin,
-            stdout,
-            stderr_drain,
+            child,
         );
 
         Ok(RunnerStartedSession {
@@ -645,17 +629,13 @@ impl RunnerLauncher for StdioRunnerLauncher {
             }),
         )
         .await?;
-        let (process, stdin, stdout, stderr_drain) = child.into_parts();
         spawn_prompt_reader(
             &spec.permission_policy,
             prompt_request_id,
             "runner ACP repair prompt stream ended with error",
             session.session_id.clone(),
             spec.cwd.clone(),
-            process,
-            stdin,
-            stdout,
-            stderr_drain,
+            child,
         );
 
         Ok(RunnerStartedSession {
@@ -724,17 +704,13 @@ impl RunnerLauncher for StdioRunnerLauncher {
             }),
         )
         .await?;
-        let (process, stdin, stdout, stderr_drain) = child.into_parts();
         spawn_prompt_reader(
             &spec.permission_policy,
             prompt_request_id,
             "runner ACP continuation prompt stream ended with error",
             session.session_id.clone(),
             spec.cwd.clone(),
-            process,
-            stdin,
-            stdout,
-            stderr_drain,
+            child,
         );
 
         Ok(RunnerStartedSession {

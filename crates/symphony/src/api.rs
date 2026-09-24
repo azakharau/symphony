@@ -1383,6 +1383,168 @@ fn omp_metrics_duration_inputs(metrics: &RunnerSessionTreeMetrics) -> (Option<u6
     (metrics.started_at_ms, duration_ms)
 }
 
+fn session_activity_duration_ms(
+    session_id: &str,
+    activity: Option<&RunnerSessionTreeActivity>,
+) -> Option<u64> {
+    let activity = activity?;
+    let root = session_activity_root(session_id, activity)?;
+    let last_updated_ms = activity
+        .last_updated_ms
+        .or_else(|| {
+            activity
+                .sessions
+                .iter()
+                .chain(activity.subagents.iter())
+                .map(|session| session.time_updated_ms)
+                .max()
+        })
+        .unwrap_or(root.time_updated_ms);
+
+    Some(last_updated_ms.saturating_sub(root.time_created_ms))
+}
+
+fn session_activity_started_at_ms(
+    session_id: &str,
+    activity: Option<&RunnerSessionTreeActivity>,
+) -> Option<u64> {
+    session_activity_root(session_id, activity?).map(|session| session.time_created_ms)
+}
+
+fn session_activity_root<'a>(
+    session_id: &str,
+    activity: &'a RunnerSessionTreeActivity,
+) -> Option<&'a crate::runner::RunnerSessionActivity> {
+    activity
+        .sessions
+        .iter()
+        .find(|session| session.session_id == session_id)
+        .or_else(|| {
+            activity
+                .sessions
+                .iter()
+                .find(|session| session.session_id == activity.root_session_id)
+        })
+}
+
+fn issue_display_status(
+    issue: &IssueStateRecord,
+    latest_session: Option<&RunnerSessionDetail>,
+) -> String {
+    if runtime_defect_projection(issue).is_some() {
+        return match issue.lifecycle_stage {
+            LifecycleStage::Running => "runtime repair".into(),
+            LifecycleStage::Failed => "runtime defect".into(),
+            _ => "runtime defect".into(),
+        };
+    }
+
+    if let Some(blocker) = &issue.blocker {
+        return match blocker.kind.as_str() {
+            "owner_input" | "owner_question" => "owner input".into(),
+            "provider_blocker" => "provider/infra blocker".into(),
+            "linear_blocker" => "blocked".into(),
+            _ => blocker.kind.replace('_', " "),
+        };
+    }
+
+    if let Some(failure) = &issue.failure
+        && failure.kind == "eval_failure"
+        && issue.lifecycle_stage == LifecycleStage::Running
+    {
+        return "repair loop".into();
+    }
+
+    if let Some(session) = latest_session {
+        if session.silence_observed {
+            return "silence observed".into();
+        }
+        if session.current_stage == RunnerStage::Eval {
+            return "eval running".into();
+        }
+    }
+
+    match (issue.lifecycle_stage, issue.cleanup_status) {
+        (LifecycleStage::Running, _) => "running".into(),
+        (LifecycleStage::Blocked, _) => "blocked".into(),
+        (LifecycleStage::Completed, CleanupStatus::Pending) => "cleanup pending".into(),
+        (LifecycleStage::Completed, CleanupStatus::InProgress) => "cleanup pending".into(),
+        (LifecycleStage::Completed, CleanupStatus::Complete) => "completed cleanup".into(),
+        (LifecycleStage::Completed, _) => "done".into(),
+        (LifecycleStage::Canceled, _) => "canceled".into(),
+        (LifecycleStage::Failed, _) => "failed".into(),
+        (LifecycleStage::Queued, _) => "queued".into(),
+    }
+}
+
+fn project_runner_health(project: &ProjectDashboardResponse) -> String {
+    for issue in &project.active_issues {
+        if issue.display_status == "repair loop" {
+            return "repair loop".into();
+        }
+    }
+    for issue in &project.active_issues {
+        if issue.display_status == "provider/infra blocker" {
+            return "provider/infra blocker".into();
+        }
+    }
+    for issue in &project.active_issues {
+        if issue.display_status == "eval running" {
+            return "eval running".into();
+        }
+    }
+    if project
+        .active_issues
+        .iter()
+        .any(|issue| issue.lifecycle_stage == LifecycleStage::Running)
+    {
+        if project.capacity.available_sessions > 0 {
+            "active/capacity_available".into()
+        } else {
+            "active".into()
+        }
+    } else if project.active_issues.is_empty() {
+        "idle".into()
+    } else if project
+        .active_issues
+        .iter()
+        .any(issue_has_attention_blocker)
+    {
+        "blocked".into()
+    } else {
+        match project.liveness.primary_reason_code.as_str() {
+            "capacity_available" | "healthy_capacity_available" => "capacity_available".into(),
+            "no_runnable_candidate" => "no_runnable_candidate".into(),
+            "idle" => "idle".into(),
+            _ => "no_runnable_candidate".into(),
+        }
+    }
+}
+
+fn issue_has_attention_blocker(issue: &IssueDetailResponse) -> bool {
+    issue.blocker.is_some()
+        || issue.runtime_defect.is_some()
+        || issue.failure.as_ref().is_some_and(|failure| {
+            matches!(
+                failure.kind.as_str(),
+                "provider_blocker"
+                    | "malformed_handoff"
+                    | "handoff_git_closure_failed"
+                    | "runtime_launch_failed"
+            )
+        })
+}
+
+fn project_last_event(project: &ProjectDashboardResponse) -> String {
+    project
+        .active_issues
+        .iter()
+        .chain(project.history_issues.iter())
+        .rev()
+        .find_map(|issue| issue.last_runner_event.clone())
+        .unwrap_or_else(|| "none".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1681,166 +1843,4 @@ mod tests {
             activity_error: None,
         }
     }
-}
-
-fn session_activity_duration_ms(
-    session_id: &str,
-    activity: Option<&RunnerSessionTreeActivity>,
-) -> Option<u64> {
-    let activity = activity?;
-    let root = session_activity_root(session_id, activity)?;
-    let last_updated_ms = activity
-        .last_updated_ms
-        .or_else(|| {
-            activity
-                .sessions
-                .iter()
-                .chain(activity.subagents.iter())
-                .map(|session| session.time_updated_ms)
-                .max()
-        })
-        .unwrap_or(root.time_updated_ms);
-
-    Some(last_updated_ms.saturating_sub(root.time_created_ms))
-}
-
-fn session_activity_started_at_ms(
-    session_id: &str,
-    activity: Option<&RunnerSessionTreeActivity>,
-) -> Option<u64> {
-    session_activity_root(session_id, activity?).map(|session| session.time_created_ms)
-}
-
-fn session_activity_root<'a>(
-    session_id: &str,
-    activity: &'a RunnerSessionTreeActivity,
-) -> Option<&'a crate::runner::RunnerSessionActivity> {
-    activity
-        .sessions
-        .iter()
-        .find(|session| session.session_id == session_id)
-        .or_else(|| {
-            activity
-                .sessions
-                .iter()
-                .find(|session| session.session_id == activity.root_session_id)
-        })
-}
-
-fn issue_display_status(
-    issue: &IssueStateRecord,
-    latest_session: Option<&RunnerSessionDetail>,
-) -> String {
-    if runtime_defect_projection(issue).is_some() {
-        return match issue.lifecycle_stage {
-            LifecycleStage::Running => "runtime repair".into(),
-            LifecycleStage::Failed => "runtime defect".into(),
-            _ => "runtime defect".into(),
-        };
-    }
-
-    if let Some(blocker) = &issue.blocker {
-        return match blocker.kind.as_str() {
-            "owner_input" | "owner_question" => "owner input".into(),
-            "provider_blocker" => "provider/infra blocker".into(),
-            "linear_blocker" => "blocked".into(),
-            _ => blocker.kind.replace('_', " "),
-        };
-    }
-
-    if let Some(failure) = &issue.failure
-        && failure.kind == "eval_failure"
-        && issue.lifecycle_stage == LifecycleStage::Running
-    {
-        return "repair loop".into();
-    }
-
-    if let Some(session) = latest_session {
-        if session.silence_observed {
-            return "silence observed".into();
-        }
-        if session.current_stage == RunnerStage::Eval {
-            return "eval running".into();
-        }
-    }
-
-    match (issue.lifecycle_stage, issue.cleanup_status) {
-        (LifecycleStage::Running, _) => "running".into(),
-        (LifecycleStage::Blocked, _) => "blocked".into(),
-        (LifecycleStage::Completed, CleanupStatus::Pending) => "cleanup pending".into(),
-        (LifecycleStage::Completed, CleanupStatus::InProgress) => "cleanup pending".into(),
-        (LifecycleStage::Completed, CleanupStatus::Complete) => "completed cleanup".into(),
-        (LifecycleStage::Completed, _) => "done".into(),
-        (LifecycleStage::Canceled, _) => "canceled".into(),
-        (LifecycleStage::Failed, _) => "failed".into(),
-        (LifecycleStage::Queued, _) => "queued".into(),
-    }
-}
-
-fn project_runner_health(project: &ProjectDashboardResponse) -> String {
-    for issue in &project.active_issues {
-        if issue.display_status == "repair loop" {
-            return "repair loop".into();
-        }
-    }
-    for issue in &project.active_issues {
-        if issue.display_status == "provider/infra blocker" {
-            return "provider/infra blocker".into();
-        }
-    }
-    for issue in &project.active_issues {
-        if issue.display_status == "eval running" {
-            return "eval running".into();
-        }
-    }
-    if project
-        .active_issues
-        .iter()
-        .any(|issue| issue.lifecycle_stage == LifecycleStage::Running)
-    {
-        if project.capacity.available_sessions > 0 {
-            "active/capacity_available".into()
-        } else {
-            "active".into()
-        }
-    } else if project.active_issues.is_empty() {
-        "idle".into()
-    } else if project
-        .active_issues
-        .iter()
-        .any(issue_has_attention_blocker)
-    {
-        "blocked".into()
-    } else {
-        match project.liveness.primary_reason_code.as_str() {
-            "capacity_available" | "healthy_capacity_available" => "capacity_available".into(),
-            "no_runnable_candidate" => "no_runnable_candidate".into(),
-            "idle" => "idle".into(),
-            _ => "no_runnable_candidate".into(),
-        }
-    }
-}
-
-fn issue_has_attention_blocker(issue: &IssueDetailResponse) -> bool {
-    issue.blocker.is_some()
-        || issue.runtime_defect.is_some()
-        || issue.failure.as_ref().is_some_and(|failure| {
-            matches!(
-                failure.kind.as_str(),
-                "provider_blocker"
-                    | "malformed_handoff"
-                    | "handoff_git_closure_failed"
-                    | "runtime_launch_failed"
-            )
-        })
-}
-
-fn project_last_event(project: &ProjectDashboardResponse) -> String {
-    project
-        .active_issues
-        .iter()
-        .chain(project.history_issues.iter())
-        .rev()
-        .find_map(|issue| issue.last_runner_event.clone())
-        .unwrap_or_else(|| "none".into())
 }

@@ -81,8 +81,8 @@ Symphony uses this executable lifecycle:
 - Terminal states: `Done`, `Canceled`, `Cancelled`, `Closed`, and `Duplicate`.
 
 Legacy steward states such as `Preparing` and `RCA Required` are not executable runtime states in
-Symphony. If the Rust runtime sees them in the active queue, it parks the issue with typed evidence
-instead of preserving hidden compatibility aliases.
+Symphony. The Rust runtime never queries them as dispatch candidates and keeps no hidden
+compatibility aliases for them.
 
 Runtime triage keeps owner questions separate from system failures and self-reference bugs:
 
@@ -105,7 +105,11 @@ Runtime triage keeps owner questions separate from system failures and self-refe
   is actually required.
 - Auto-created P0 self-reference bugs may enter executable `Todo` when a bounded repair can run and
   the runtime cannot safely advance or close active work. P1 degraded project paths and P2 non-blocking
-  hardening or follow-up default to `Backlog` unless explicitly escalated by hard policy.
+  hardening or follow-up default to `Backlog` unless explicitly escalated by hard policy. Symphony
+  creates them in the managed project's configured `workflow.states.todo` / `workflow.states.backlog`
+  names; when `backlog` is disabled, P1/P2 bugs use the configured `todo` state. In `todo`, P1/P2
+  bugs are blocked from dispatch unless they carry the configured
+  `workflow.self_defects.executable_label` (default `self-defect-executable`).
 - If an active `SYM-*` issue exposes a Symphony defect that would make Symphony wait on or requeue the
   same active issue, Symphony must not create a self-deadlock; it parks the active issue with typed
   runtime-defect/provider evidence and creates or links a separate self-reference bug instead.

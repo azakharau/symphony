@@ -5,7 +5,7 @@ async fn daemon_once_entrypoint_validates_config_migrates_and_reconciles_project
     let dir = tempfile::tempdir().expect("tempdir");
     let config_path = dir.path().join("projects.toml");
     let db_path = dir.path().join("runtime.sqlite3");
-    let workflow_path = dir.path().join("symphony.workflow.toml");
+    let workflow_path = dir.path().join("workflow.toml");
     fs::write(&workflow_path, valid_workflow_toml()).expect("write workflow");
     let config = valid_config_toml().replace(
         "workflow_path = \"/home/agent/proj/symphony/WORKFLOW.md\"",
@@ -2279,11 +2279,33 @@ async fn orchestration_records_process_while_acp_session_new_is_still_pending() 
     let db_path = dir.path().join("runtime.sqlite3");
     let transcript_path = dir.path().join("acp-transcript.jsonl");
     let script_path = write_hanging_before_session_new_acp_script(dir.path(), &transcript_path);
-    let configured = valid_config_toml().replace(
-        "command = \"/usr/local/bin/opencode\"",
-        &format!("command = \"{}\"", script_path.display()),
-    );
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo dir");
+    run_git(&repo, ["init"]);
+    run_git(&repo, ["config", "user.email", "symphony@example.test"]);
+    run_git(&repo, ["config", "user.name", "Symphony Test"]);
+    fs::write(repo.join("README.md"), "base checkout").expect("readme");
+    run_git(&repo, ["add", "README.md"]);
+    run_git(&repo, ["commit", "-m", "base"]);
+    run_git(&repo, ["branch", "agent-server/opencode-runner-extension"]);
+    let configured = valid_config_toml()
+        .replace(
+            "command = \"/usr/local/bin/opencode\"",
+            &format!("command = \"{}\"", script_path.display()),
+        )
+        .replace(
+            "repo_path = \"/home/agent/proj/symphony\"",
+            &format!("repo_path = \"{}\"", repo.display()),
+        )
+        .replace(
+            "worktree_root = \"/home/agent/.symphony/workspaces/opencode/symphony\"",
+            &format!(
+                "worktree_root = \"{}\"",
+                dir.path().join("worktrees").display()
+            ),
+        );
     let config = RootConfig::from_toml_str(&configured).expect("config");
+    assert_eq!(config.project("symphony").expect("project").repo_path, repo);
     let store = SqliteStore::open(&db_path).await.expect("open sqlite");
     store.migrate().await.expect("migrate");
     store.reconcile_projects(&config).await.expect("projects");
@@ -2692,7 +2714,7 @@ inverse_bridge_reference = true
     assert!(
         managed
             .iter()
-            .all(|issue| { issue.priority == 1 && issue.state == ManagedLinearIssueState::Todo })
+            .all(|issue| { issue.priority == 1 && issue.state_name == "Todo" })
     );
     assert!(managed.iter().any(|issue| {
         issue.source_issue_id == "launch-fails" && issue.fingerprint == "launch_failed"

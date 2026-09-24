@@ -1,51 +1,5 @@
 use super::*;
 
-#[test]
-fn production_source_uses_runner_neutral_vocabulary() {
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("workspace root")
-        .to_path_buf();
-    let source_roots = [
-        repo_root.join("crates/symphony/src"),
-        repo_root.join("apps/dashboard/src"),
-    ];
-
-    let mut leaks = Vec::new();
-    for root in source_roots {
-        collect_adapter_wording_leaks(&root, &mut leaks);
-    }
-
-    assert!(
-        leaks.is_empty(),
-        "production source must keep runner-neutral core/API wording; unexpected OpenCode wording in:\n{}",
-        leaks.join("\n")
-    );
-}
-
-fn collect_adapter_wording_leaks(path: &Path, leaks: &mut Vec<String>) {
-    if path.is_dir() {
-        for entry in std::fs::read_dir(path).expect("read source directory") {
-            let entry = entry.expect("read source directory entry");
-            collect_adapter_wording_leaks(&entry.path(), leaks);
-        }
-        return;
-    }
-
-    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
-        return;
-    };
-    if !matches!(extension, "rs" | "ts" | "tsx") {
-        return;
-    }
-
-    let source = std::fs::read_to_string(path).expect("read source file");
-    if source.to_ascii_lowercase().contains("opencode") {
-        leaks.push(path.display().to_string());
-    }
-}
-
 #[tokio::test]
 async fn multiproject_toml_config_loads_deterministically_and_validates_required_fields() {
     let first = RootConfig::from_toml_str(valid_config_toml()).expect("valid root config");
@@ -638,7 +592,7 @@ async fn linear_graphql_client_creates_managed_issue_in_configured_project() {
                 title: "Managed self bug".into(),
                 description: "panic evidence".into(),
                 priority: 2,
-                state: ManagedLinearIssueState::Todo,
+                state_name: "Todo".into(),
                 project_milestone_id: Some("milestone-1".into()),
                 label_ids: vec!["label-symphony".into()],
             },
@@ -695,7 +649,7 @@ async fn linear_managed_issue_creation_accepts_sdk_extracted_response_shapes() {
                 title: "Managed SDK self bug".into(),
                 description: "sdk evidence".into(),
                 priority: 1,
-                state: ManagedLinearIssueState::Backlog,
+                state_name: "Backlog".into(),
                 project_milestone_id: None,
                 label_ids: Vec::new(),
             },

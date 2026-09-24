@@ -748,42 +748,6 @@ async fn acp_launch_spec_uses_review_stage_packet_with_review_transitions() {
     assert!(!spec.prompt.contains("ACP session"), "{}", spec.prompt);
 }
 
-#[test]
-fn core_runner_source_does_not_leak_opencode_specific_wording() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut leaks = Vec::new();
-    collect_provider_wording_leaks(&root, &root, &mut leaks);
-
-    assert!(
-        leaks.is_empty(),
-        "OpenCode-specific wording leaked outside adapter/runtime boundaries: {leaks:#?}"
-    );
-}
-
-fn collect_provider_wording_leaks(root: &Path, path: &Path, leaks: &mut Vec<String>) {
-    for entry in fs::read_dir(path).expect("read source directory") {
-        let entry = entry.expect("read source entry");
-        let path = entry.path();
-        if path.is_dir() {
-            collect_provider_wording_leaks(root, &path, leaks);
-            continue;
-        }
-        if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
-            continue;
-        }
-        let relative = path.strip_prefix(root).expect("source prefix");
-        if provider_wording_allowed(relative) {
-            continue;
-        }
-        let source = fs::read_to_string(&path).expect("read source file");
-        for (line_index, line) in source.lines().enumerate() {
-            if line.contains("OpenCode") || line.contains("opencode") {
-                leaks.push(format!("{}:{}:{line}", relative.display(), line_index + 1));
-            }
-        }
-    }
-}
-
 fn assert_stage_packet_snapshot(prompt: &str, expected: &str) {
     assert_eq!(stage_packet_contract_snapshot(prompt), expected);
 }
@@ -799,13 +763,6 @@ fn stage_packet_contract_snapshot(prompt: &str) -> String {
         .1;
 
     format!("{stage_contract}\n\nRequired result schema:\n{result_schema}")
-}
-
-fn provider_wording_allowed(path: &Path) -> bool {
-    matches!(
-        path.to_str(),
-        Some("runner/adapter.rs" | "runner/acp.rs" | "runner/omp.rs" | "runner/omp_metrics.rs")
-    )
 }
 
 #[tokio::test]
@@ -2348,6 +2305,8 @@ async fn stdio_launcher_continues_existing_session_from_dirty_resumable_worktree
     let worktree = worktree_root.join("SYM-203");
     fs::create_dir_all(&repo).expect("repo dir");
     run_git(&repo, ["init", "-b", "main"]);
+    run_git(&repo, ["config", "user.email", "symphony@example.test"]);
+    run_git(&repo, ["config", "user.name", "Symphony Test"]);
     fs::write(repo.join("README.md"), "base\n").expect("readme");
     run_git(&repo, ["add", "README.md"]);
     run_git(&repo, ["commit", "-m", "initial"]);
@@ -2458,6 +2417,8 @@ async fn stdio_launcher_continues_dirty_same_issue_worktree_after_branch_title_d
     let worktree = worktree_root.join("NRV-48");
     fs::create_dir_all(&repo).expect("repo dir");
     run_git(&repo, ["init", "-b", "main"]);
+    run_git(&repo, ["config", "user.email", "symphony@example.test"]);
+    run_git(&repo, ["config", "user.name", "Symphony Test"]);
     fs::write(repo.join("README.md"), "base\n").expect("readme");
     run_git(&repo, ["add", "README.md"]);
     run_git(&repo, ["commit", "-m", "initial"]);

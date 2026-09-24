@@ -350,7 +350,7 @@ fn eval_failed_handoff(session_id: &str, fingerprint: &str) -> RunnerHandoff {
 }
 
 fn run_git<const N: usize>(repo: &std::path::Path, args: [&str; N]) {
-    let output = Command::new("git")
+    let output = fixture_git()
         .args(args)
         .current_dir(repo)
         .output()
@@ -364,7 +364,7 @@ fn run_git<const N: usize>(repo: &std::path::Path, args: [&str; N]) {
 }
 
 fn git_output<const N: usize>(repo: &std::path::Path, args: [&str; N]) -> String {
-    let output = Command::new("git")
+    let output = fixture_git()
         .args(args)
         .current_dir(repo)
         .output()
@@ -376,6 +376,16 @@ fn git_output<const N: usize>(repo: &std::path::Path, args: [&str; N]) -> String
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).expect("git stdout utf8")
+}
+
+/// Fixture repositories must not depend on the host's global/system Git config (identity,
+/// default branch), so tests behave the same on a developer machine and a fresh CI runner.
+fn fixture_git() -> Command {
+    let mut command = Command::new("git");
+    command
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    command
 }
 
 fn write_fake_acp_script(dir: &Path, transcript_path: &Path) -> PathBuf {
